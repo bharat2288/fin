@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>fin — Personal Finance</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="app-header">
+        <span class="app-title">fin</span>
+        <span class="app-subtitle">Personal Finance Tracker</span>
+    </header>
+
+    <!-- Tab Bar -->
+    <nav class="tab-bar">
+        <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+        <button class="tab-btn" data-tab="import">Import</button>
+        <button class="tab-btn" data-tab="history">History</button>
+        <button class="tab-btn" data-tab="rules">Merchant Rules</button>
+    </nav>
+
+    <!-- ============================================================
+         DASHBOARD TAB
+         ============================================================ -->
+    <div id="tab-dashboard" class="tab-content active">
+        <div class="container">
+            <div class="section-label">/ Dashboard</div>
+
+            <!-- Stat Cards -->
+            <div class="stats-row" id="stats-row"></div>
+
+            <!-- Filter Bar -->
+            <div class="filter-bar">
+                <div class="filter-group">
+                    <label class="filter-label">Year</label>
+                    <select id="filter-year" onchange="onFilterPresetChange()">
+                        <option value="">All Years</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label class="filter-label">Month</label>
+                    <select id="filter-month" onchange="onFilterPresetChange()">
+                        <option value="">All Months</option>
+                        <option value="01">Jan</option><option value="02">Feb</option>
+                        <option value="03">Mar</option><option value="04">Apr</option>
+                        <option value="05">May</option><option value="06">Jun</option>
+                        <option value="07">Jul</option><option value="08">Aug</option>
+                        <option value="09">Sep</option><option value="10">Oct</option>
+                        <option value="11">Nov</option><option value="12">Dec</option>
+                    </select>
+                </div>
+                <div class="filter-group" style="gap:4px;">
+                    <button class="btn btn-toggle active" data-filter="all" onclick="setSpendFilter('all')">All</button>
+                    <button class="btn btn-toggle" data-filter="personal" onclick="setSpendFilter('personal')">Personal</button>
+                    <button class="btn btn-toggle" data-filter="moom" onclick="setSpendFilter('moom')">Moom</button>
+                </div>
+                <div class="filter-group">
+                    <label style="font-size:12px;color:var(--text-tertiary);display:flex;align-items:center;gap:6px;cursor:pointer;">
+                        <input type="checkbox" id="filter-anomaly" onchange="applyDashboardFilters()"> Exclude anomalies
+                    </label>
+                </div>
+                <div class="filter-group">
+                    <button class="btn btn-toggle" id="subcategory-toggle" onclick="toggleSubcategories()">Subcategories</button>
+                </div>
+            </div>
+
+            <!-- Charts Row -->
+            <div class="charts-row">
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title" id="chart-trend-title">Monthly Spending Trend</span>
+                    </div>
+                    <div class="chart-canvas-wrap">
+                        <canvas id="chart-monthly" height="320"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">By Category</span>
+                    </div>
+                    <div class="chart-canvas-wrap">
+                        <canvas id="chart-categories" height="320"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Transaction Table -->
+            <div class="card">
+                <div class="section-label">/ Transactions</div>
+                <div style="display:flex;gap:12px;margin-bottom:16px;">
+                    <input type="text" id="tx-search" placeholder="Search descriptions..." style="flex:1;">
+                    <select id="tx-category-filter">
+                        <option value="">All Categories</option>
+                    </select>
+                    <select id="tx-account-filter">
+                        <option value="">All Accounts</option>
+                    </select>
+                </div>
+                <div style="max-height:500px;overflow-y:auto;">
+                    <table class="data-table" id="tx-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="date" style="width:110px;" onclick="toggleSort('date')">Date <span class="sort-arrow">▼</span></th>
+                                <th class="sortable" data-sort="description" style="width:35%;" onclick="toggleSort('description')">Description <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="category" style="width:20%;" onclick="toggleSort('category')">Category <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="account" style="width:18%;" onclick="toggleSort('account')">Account <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="amount" style="text-align:right;width:110px;" onclick="toggleSort('amount')">Amount <span class="sort-arrow"></span></th>
+                            </tr>
+                        </thead>
+                        <tbody id="tx-body"></tbody>
+                    </table>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
+                    <span id="tx-page-info" class="text-secondary" style="font-size:12px;"></span>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-sm" id="tx-prev" onclick="txPage(-1)">Prev</button>
+                        <button class="btn btn-sm" id="tx-next" onclick="txPage(1)">Next</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         IMPORT TAB
+         ============================================================ -->
+    <div id="tab-import" class="tab-content">
+        <div class="container">
+            <div class="section-label">/ Import Statements</div>
+
+            <!-- Upload Zone -->
+            <div class="card" id="import-upload-card">
+                <div class="upload-zone" id="upload-zone">
+                    <div class="upload-zone-icon">📄</div>
+                    <div class="upload-zone-text">Drop statement files here or click to browse</div>
+                    <div class="upload-zone-hint">Accepts DBS (CSV, PDF), Citi (CSV), UOB (PDF) — multiple files OK</div>
+                    <input type="file" id="file-input" multiple accept=".csv,.pdf" style="display:none">
+                </div>
+                <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+                    <button class="btn-primary btn" id="upload-btn" onclick="uploadFiles()" style="display:none">Upload &amp; Parse</button>
+                </div>
+                <div id="file-list" style="margin-top:12px;"></div>
+            </div>
+
+            <!-- Preview (shown after upload) -->
+            <div id="import-preview" class="hidden">
+                <div class="preview-stats" id="preview-stats"></div>
+
+                <div id="preview-groups"></div>
+
+                <!-- Confirm Bar -->
+                <div class="confirm-bar" id="confirm-bar">
+                    <div class="confirm-bar-info" id="confirm-info"></div>
+                    <div class="confirm-bar-actions">
+                        <button class="btn" onclick="discardImport()">Discard</button>
+                        <button class="btn btn-primary" onclick="confirmImport()">Confirm &amp; Commit</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         HISTORY TAB
+         ============================================================ -->
+    <div id="tab-history" class="tab-content">
+        <div class="container">
+            <div class="section-label">/ Import History</div>
+            <div class="card">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Files</th>
+                            <th>Accounts</th>
+                            <th>Lines</th>
+                            <th>Status</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body"></tbody>
+                </table>
+                <div id="history-empty" class="empty-state hidden">
+                    <div class="empty-state-icon">📋</div>
+                    <div class="empty-state-text">No imports yet</div>
+                    <div class="empty-state-hint">Go to the Import tab to get started</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         MERCHANT RULES TAB
+         ============================================================ -->
+    <div id="tab-rules" class="tab-content">
+        <div class="container">
+            <!-- Category Master -->
+            <div class="section-label">/ Category Master</div>
+            <div class="card" style="margin-bottom:24px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <span class="text-secondary" id="cat-count" style="font-size:12px;"></span>
+                    <button class="btn btn-sm" id="cat-toggle-form" onclick="toggleCatForm()">+ Add Category</button>
+                </div>
+
+                <!-- Add Category Form (hidden by default) -->
+                <div id="cat-form" class="hidden" style="margin-bottom:16px;">
+                    <div class="rule-form" style="margin-bottom:0;">
+                        <div>
+                            <label>Name</label>
+                            <input type="text" id="cat-new-name" placeholder="e.g. Coffee" style="width:100%;">
+                        </div>
+                        <div>
+                            <label>Parent (optional)</label>
+                            <select id="cat-new-parent" style="width:100%;">
+                                <option value="">-- Top-level --</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Type</label>
+                            <select id="cat-new-personal" style="width:100%;">
+                                <option value="1">Personal</option>
+                                <option value="0">Business (Moom)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>&nbsp;</label>
+                            <button class="btn btn-primary btn-sm" onclick="addCategory()">Create</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Category Tree -->
+                <div id="cat-tree" style="max-height:400px;overflow-y:auto;"></div>
+            </div>
+
+            <div class="section-label">/ Merchant Rules</div>
+
+            <!-- Add Rule Form -->
+            <div class="rule-form" id="rule-form">
+                <div>
+                    <label>Pattern</label>
+                    <input type="text" id="rule-pattern" placeholder="e.g. GRAB*" style="width:100%;">
+                </div>
+                <div>
+                    <label>Category</label>
+                    <select id="rule-category" style="width:100%;"></select>
+                </div>
+                <div>
+                    <label>Match Type</label>
+                    <select id="rule-match-type" style="width:100%;">
+                        <option value="contains">Contains</option>
+                        <option value="startswith">Starts with</option>
+                        <option value="exact">Exact</option>
+                    </select>
+                </div>
+                <div>
+                    <label>&nbsp;</label>
+                    <button class="btn btn-primary btn-sm" onclick="addRule()">Add Rule</button>
+                </div>
+            </div>
+
+            <!-- Rules Accordion -->
+            <div class="card">
+                <div class="rules-toolbar">
+                    <input type="text" class="rules-search" id="rules-search" placeholder="Search rules..." oninput="filterRules()">
+                    <span id="rules-count" class="text-secondary" style="font-size:12px;"></span>
+                </div>
+                <div id="rules-accordion" class="rules-accordion" style="max-height:600px;overflow-y:auto;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/chart.min.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
