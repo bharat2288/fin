@@ -1,0 +1,41 @@
+# Data (personal financial records)
+*.db
+*.db-journal
+bulk_rules.sql
+migrate_subs.py
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment and secrets
+.env
+.env.*
+credentials.json
+*.pem
+*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code
+.claude/
+
+# Logs
+*.log
