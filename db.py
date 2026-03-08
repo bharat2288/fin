@@ -18,7 +18,6 @@ DEFAULT_CATEGORIES = [
     ("Entertainment", None, 1),
     ("Utilities", None, 1),
     ("Subscriptions", None, 1),
-    ("Insurance", None, 1),
     ("Loan/EMI", None, 1),
     ("Travel", None, 1),
     ("Pet", None, 1),
@@ -31,6 +30,12 @@ DEFAULT_CATEGORIES = [
     ("Moom", None, 0),  # Business - not personal
     ("Other", None, 1),
     ("Rent", None, 1),
+    ("Admin", None, 1),
+    # Subcategories
+    ("Tax", "Admin", 1),
+    ("Insurance", "Admin", 1),
+    ("Bank Fees", "Admin", 1),
+    ("Government", "Admin", 1),
 ]
 
 # Initial merchant → category rules based on known data
@@ -264,6 +269,218 @@ def init_db() -> None:
         conn.execute("ALTER TABLE categories ADD COLUMN parent_id INTEGER REFERENCES categories(id)")
         conn.commit()
 
+    # Migration: add priority, min_amount, max_amount to merchant_rules
+    rule_columns = [row[1] for row in conn.execute("PRAGMA table_info(merchant_rules)").fetchall()]
+    if "priority" not in rule_columns:
+        conn.execute("ALTER TABLE merchant_rules ADD COLUMN priority INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE merchant_rules ADD COLUMN min_amount REAL")
+        conn.execute("ALTER TABLE merchant_rules ADD COLUMN max_amount REAL")
+        conn.commit()
+
+    # Migration: add account_id FK to subscriptions (replaces card text)
+    sub_columns = [row[1] for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()]
+    if "account_id" not in sub_columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN account_id INTEGER REFERENCES accounts(id)")
+        # Populate from existing card text → account short_name match
+        conn.execute("""
+            UPDATE subscriptions SET account_id = (
+                SELECT a.id FROM accounts a WHERE a.short_name = subscriptions.card
+            ) WHERE card IS NOT NULL AND card != ''
+        """)
+        conn.commit()
+        migrated = conn.execute(
+            "SELECT COUNT(*) FROM subscriptions WHERE account_id IS NOT NULL"
+        ).fetchone()[0]
+        print(f"Migrated {migrated} subscription card values to account_id FK")
+
+    # Migration: add match_pattern to subscriptions
+    sub_columns = [row[1] for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()]
+    if "match_pattern" not in sub_columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN match_pattern TEXT")
+        # Pre-populate from service name (uppercased)
+        conn.execute("UPDATE subscriptions SET match_pattern = UPPER(service) WHERE match_pattern IS NULL")
+        conn.commit()
+
+    # Migration: remove UNIQUE constraint on pattern (allow duplicate patterns
+    # with different amount ranges / priorities for dual-purpose merchants)
+    # Check if pattern column still has UNIQUE constraint
+    index_info = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='merchant_rules'"
+    ).fetchall()
+    create_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='merchant_rules'"
+    ).fetchone()
+    if create_sql and "UNIQUE" in (create_sql[0] or ""):
+        # Recreate table without UNIQUE on pattern
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS merchant_rules_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern TEXT NOT NULL,
+                category_id INTEGER NOT NULL,
+                match_type TEXT DEFAULT 'contains',
+                confidence TEXT DEFAULT 'confirmed',
+                priority INTEGER DEFAULT 0,
+                min_amount REAL,
+                max_amount REAL,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (category_id) REFERENCES categories(id)
+            );
+            INSERT INTO merchant_rules_new (id, pattern, category_id, match_type, confidence, priority, min_amount, max_amount, created_at)
+                SELECT id, pattern, category_id, match_type, confidence,
+                       COALESCE(priority, 0), min_amount, max_amount, created_at
+                FROM merchant_rules;
+            DROP TABLE merchant_rules;
+            ALTER TABLE merchant_rules_new RENAME TO merchant_rules;
+            CREATE INDEX IF NOT EXISTS idx_merchant_rules_pattern ON merchant_rules(pattern);
+        """)
+
+    # Migration: add service_id FK to merchant_rules, subscriptions, transactions
+    rule_columns = [row[1] for row in conn.execute("PRAGMA table_info(merchant_rules)").fetchall()]
+    sub_columns = [row[1] for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()]
+    tx_columns = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+
+    if "service_id" not in rule_columns:
+        conn.execute("ALTER TABLE merchant_rules ADD COLUMN service_id INTEGER REFERENCES services(id)")
+        conn.commit()
+    if "service_id" not in sub_columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN service_id INTEGER REFERENCES services(id)")
+        conn.commit()
+    if "service_id" not in tx_columns:
+        conn.execute("ALTER TABLE transactions ADD COLUMN service_id INTEGER REFERENCES services(id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_service ON transactions(service_id)")
+        conn.commit()
+
+    # Migration: auto-create services from subscriptions + merchant rules
+    svc_count = conn.execute("SELECT COUNT(*) FROM services").fetchone()[0]
+    if svc_count == 0:
+        # Phase 1: create services from existing subscriptions
+        subs = conn.execute(
+            "SELECT id, service, category_id, match_pattern FROM subscriptions"
+        ).fetchall()
+        for sub in subs:
+            svc_name = sub["service"]
+            try:
+                conn.execute(
+                    "INSERT INTO services (name, category_id) VALUES (?, ?)",
+                    (svc_name, sub["category_id"]),
+                )
+                svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                conn.execute(
+                    "UPDATE subscriptions SET service_id = ? WHERE id = ?",
+                    (svc_id, sub["id"]),
+                )
+                # Link matching merchant rules to this service via match_pattern
+                pat = (sub["match_pattern"] or "").strip()
+                if pat:
+                    conn.execute(
+                        "UPDATE merchant_rules SET service_id = ? WHERE UPPER(pattern) = ? AND service_id IS NULL",
+                        (svc_id, pat.upper()),
+                    )
+            except Exception:
+                # Duplicate name — find existing and link
+                existing = conn.execute(
+                    "SELECT id FROM services WHERE name = ?", (svc_name,)
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE subscriptions SET service_id = ? WHERE id = ?",
+                        (existing["id"], sub["id"]),
+                    )
+        conn.commit()
+
+        # Phase 2: create services from unlinked merchant rules
+        unlinked_rules = conn.execute(
+            "SELECT id, pattern, category_id FROM merchant_rules WHERE service_id IS NULL"
+        ).fetchall()
+        for rule in unlinked_rules:
+            svc_name = rule["pattern"].title()
+            existing = conn.execute(
+                "SELECT id FROM services WHERE name = ?", (svc_name,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE merchant_rules SET service_id = ? WHERE id = ?",
+                    (existing["id"], rule["id"]),
+                )
+            else:
+                try:
+                    conn.execute(
+                        "INSERT INTO services (name, category_id) VALUES (?, ?)",
+                        (svc_name, rule["category_id"]),
+                    )
+                    svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    conn.execute(
+                        "UPDATE merchant_rules SET service_id = ? WHERE id = ?",
+                        (svc_id, rule["id"]),
+                    )
+                except Exception:
+                    pass  # skip if name collision
+        conn.commit()
+
+        # Phase 3: backfill transactions.service_id from linked merchant rules
+        conn.execute("""
+            UPDATE transactions SET service_id = (
+                SELECT mr.service_id FROM merchant_rules mr
+                WHERE mr.service_id IS NOT NULL
+                  AND (
+                    (mr.match_type = 'contains' AND UPPER(transactions.description) LIKE '%' || UPPER(mr.pattern) || '%')
+                    OR (mr.match_type = 'startswith' AND UPPER(transactions.description) LIKE UPPER(mr.pattern) || '%')
+                    OR (mr.match_type = 'exact' AND UPPER(transactions.description) = UPPER(mr.pattern))
+                  )
+                ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC
+                LIMIT 1
+            ) WHERE service_id IS NULL
+        """)
+        conn.commit()
+
+        total_svcs = conn.execute("SELECT COUNT(*) FROM services").fetchone()[0]
+        linked_subs = conn.execute("SELECT COUNT(*) FROM subscriptions WHERE service_id IS NOT NULL").fetchone()[0]
+        linked_rules = conn.execute("SELECT COUNT(*) FROM merchant_rules WHERE service_id IS NOT NULL").fetchone()[0]
+        linked_txs = conn.execute("SELECT COUNT(*) FROM transactions WHERE service_id IS NOT NULL").fetchone()[0]
+        print(f"Services migration: {total_svcs} services created, "
+              f"{linked_subs} subs linked, {linked_rules} rules linked, {linked_txs} txs linked")
+
+    # Migration: add is_one_off to services (anomaly flag)
+    svc_columns = [row[1] for row in conn.execute("PRAGMA table_info(services)").fetchall()]
+    if "is_one_off" not in svc_columns:
+        conn.execute("ALTER TABLE services ADD COLUMN is_one_off INTEGER DEFAULT 0")
+        conn.commit()
+        print("Added is_one_off column to services")
+
+    # Migration: billing model refactor — add amount + currency to subscriptions
+    sub_columns = [row[1] for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()]
+    if "currency" not in sub_columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN amount REAL")
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN currency TEXT DEFAULT 'SGD'")
+        conn.commit()
+        # Populate: if amount_usd > 0, this is USD-billed; otherwise SGD-billed
+        conn.execute("""
+            UPDATE subscriptions SET
+                amount = CASE
+                    WHEN amount_usd IS NOT NULL AND amount_usd > 0 THEN amount_usd
+                    ELSE amount_sgd
+                END,
+                currency = CASE
+                    WHEN amount_usd IS NOT NULL AND amount_usd > 0 THEN 'USD'
+                    ELSE 'SGD'
+                END
+        """)
+        conn.commit()
+        # Diagnostic: flag suspicious FX ratios for manual review
+        suspects = conn.execute("""
+            SELECT service, amount_sgd, amount_usd,
+                   ROUND(amount_sgd / amount_usd, 2) as implied_fx
+            FROM subscriptions
+            WHERE amount_usd > 0 AND amount_sgd > 0
+              AND (amount_sgd / amount_usd < 1.20 OR amount_sgd / amount_usd > 1.50)
+        """).fetchall()
+        if suspects:
+            print(f"WARNING: {len(suspects)} subs with unusual SGD/USD ratios (review manually):")
+            for s in suspects:
+                print(f"  {s['service']}: SGD={s['amount_sgd']}, USD={s['amount_usd']}, implied FX={s['implied_fx']}")
+        migrated = conn.execute("SELECT COUNT(*) FROM subscriptions WHERE amount IS NOT NULL").fetchone()[0]
+        print(f"Billing model migration: {migrated} subscriptions migrated to amount/currency")
+
     # Seed categories — INSERT OR IGNORE so new categories get added
     # First pass: insert all top-level (parent=None)
     for name, parent_name, is_personal in DEFAULT_CATEGORIES:
@@ -286,19 +503,55 @@ def init_db() -> None:
             )
     conn.commit()
 
-    # Seed merchant rules — INSERT OR IGNORE based on unique pattern
+    # Migration: move top-level Insurance under Admin (if Admin exists and Insurance
+    # is still top-level)
+    admin_row = conn.execute("SELECT id FROM categories WHERE name = 'Admin'").fetchone()
+    if admin_row:
+        old_insurance = conn.execute(
+            "SELECT id FROM categories WHERE name = 'Insurance' AND parent_id IS NULL"
+        ).fetchone()
+        if old_insurance:
+            # Check if an "Insurance" under Admin already exists (from DEFAULT_CATEGORIES seed)
+            admin_insurance = conn.execute(
+                "SELECT id FROM categories WHERE name = 'Insurance' AND parent_id = ?",
+                (admin_row[0],)
+            ).fetchone()
+            if admin_insurance:
+                # Move all references from old Insurance to the new one under Admin
+                conn.execute(
+                    "UPDATE merchant_rules SET category_id = ? WHERE category_id = ?",
+                    (admin_insurance[0], old_insurance[0]),
+                )
+                conn.execute(
+                    "UPDATE transactions SET category_id = ? WHERE category_id = ?",
+                    (admin_insurance[0], old_insurance[0]),
+                )
+                conn.execute("DELETE FROM categories WHERE id = ?", (old_insurance[0],))
+            else:
+                # Just move the existing Insurance under Admin
+                conn.execute(
+                    "UPDATE categories SET parent_id = ? WHERE id = ?",
+                    (admin_row[0], old_insurance[0]),
+                )
+            conn.commit()
+
+    # Seed merchant rules — skip if pattern already exists in any form
+    # (user may have reassigned to subcategories, we don't override)
     added = 0
     for pattern, cat_name, match_type in DEFAULT_MERCHANT_RULES:
         cat_id = conn.execute(
             "SELECT id FROM categories WHERE name = ?", (cat_name,)
         ).fetchone()
         if cat_id:
-            result = conn.execute(
-                "INSERT OR IGNORE INTO merchant_rules (pattern, category_id, match_type, confidence) "
-                "VALUES (?, ?, ?, 'auto')",
-                (pattern, cat_id[0], match_type),
-            )
-            if result.rowcount > 0:
+            existing = conn.execute(
+                "SELECT id FROM merchant_rules WHERE pattern = ?", (pattern,)
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO merchant_rules (pattern, category_id, match_type, confidence) "
+                    "VALUES (?, ?, ?, 'auto')",
+                    (pattern, cat_id[0], match_type),
+                )
                 added += 1
     conn.commit()
     if added > 0:
@@ -311,30 +564,65 @@ def init_db() -> None:
     conn.close()
 
 
-def categorize_transaction(description: str, conn: sqlite3.Connection) -> int | None:
+def categorize_transaction(
+    description: str,
+    conn: sqlite3.Connection,
+    amount: float | None = None,
+) -> tuple[int | None, int | None]:
     """Match a transaction description to a category using merchant rules.
 
-    Returns category_id or None if no match found.
+    Rules are sorted by priority DESC, then pattern length DESC (most specific first).
+    Amount-conditional rules (min_amount / max_amount) only match if the transaction
+    amount falls within the specified range.
+
+    Returns (category_id, service_id) tuple. Either or both may be None.
+    Category is resolved from the service if the rule has a service_id,
+    falling back to the rule's direct category_id.
     """
     desc_upper = description.upper()
 
     rules = conn.execute(
-        "SELECT mr.pattern, mr.match_type, mr.category_id "
-        "FROM merchant_rules mr ORDER BY LENGTH(mr.pattern) DESC"
+        "SELECT mr.pattern, mr.match_type, mr.category_id, "
+        "       mr.priority, mr.min_amount, mr.max_amount, "
+        "       mr.service_id, s.category_id as svc_category_id "
+        "FROM merchant_rules mr "
+        "LEFT JOIN services s ON mr.service_id = s.id "
+        "ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC"
     ).fetchall()
 
     for rule in rules:
         pattern = rule["pattern"].upper()
         match_type = rule["match_type"]
 
+        # Check pattern match
+        matched = False
         if match_type == "exact" and desc_upper == pattern:
-            return rule["category_id"]
+            matched = True
         elif match_type == "startswith" and desc_upper.startswith(pattern):
-            return rule["category_id"]
+            matched = True
         elif match_type == "contains" and pattern in desc_upper:
-            return rule["category_id"]
+            matched = True
 
-    return None
+        if not matched:
+            continue
+
+        # Check amount conditions (if set on the rule)
+        if amount is not None:
+            if rule["min_amount"] is not None and amount < rule["min_amount"]:
+                continue
+            if rule["max_amount"] is not None and amount > rule["max_amount"]:
+                continue
+        else:
+            # No amount provided — skip amount-conditional rules
+            if rule["min_amount"] is not None or rule["max_amount"] is not None:
+                continue
+
+        # Resolve category: service's category takes precedence over rule's direct category
+        service_id = rule["service_id"]
+        category_id = rule["svc_category_id"] or rule["category_id"]
+        return (category_id, service_id)
+
+    return (None, None)
 
 
 if __name__ == "__main__":

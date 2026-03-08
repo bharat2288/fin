@@ -16,10 +16,27 @@
 
     <!-- Tab Bar -->
     <nav class="tab-bar">
-        <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-        <button class="tab-btn" data-tab="import">Import</button>
-        <button class="tab-btn" data-tab="history">History</button>
-        <button class="tab-btn" data-tab="rules">Merchant Rules</button>
+        <div class="tab-bar-main">
+            <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+            <button class="tab-btn" data-tab="subs">Subscriptions</button>
+            <button class="tab-btn" data-tab="services">Services</button>
+        </div>
+        <div class="tab-bar-actions">
+            <button class="tab-icon-btn" data-tab="import" title="Import Statements">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </button>
+            <div class="masters-dropdown">
+                <button class="tab-icon-btn" id="masters-toggle" title="Masters">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                </button>
+                <div class="masters-menu" id="masters-menu">
+                    <button class="masters-item" data-tab="categories">Categories</button>
+                    <button class="masters-item" data-tab="services-master">Services</button>
+                    <button class="masters-item" data-tab="rules">Rules</button>
+                    <button class="masters-item" data-tab="accounts">Accounts</button>
+                </div>
+            </div>
+        </div>
     </nav>
 
     <!-- ============================================================
@@ -34,36 +51,50 @@
 
             <!-- Filter Bar -->
             <div class="filter-bar">
-                <div class="filter-group">
-                    <label class="filter-label">Year</label>
-                    <select id="filter-year" onchange="onFilterPresetChange()">
-                        <option value="">All Years</option>
-                    </select>
+                <div class="filter-section">
+                    <span class="filter-section-label">Period</span>
+                    <div class="filter-controls">
+                        <select id="filter-year" onchange="applyDashboardFilters()">
+                            <option value="">All Years</option>
+                        </select>
+                        <select id="filter-month" onchange="applyDashboardFilters()">
+                            <option value="">All Months</option>
+                            <option value="01">Jan</option><option value="02">Feb</option>
+                            <option value="03">Mar</option><option value="04">Apr</option>
+                            <option value="05">May</option><option value="06">Jun</option>
+                            <option value="07">Jul</option><option value="08">Aug</option>
+                            <option value="09">Sep</option><option value="10">Oct</option>
+                            <option value="11">Nov</option><option value="12">Dec</option>
+                        </select>
+                    </div>
                 </div>
-                <div class="filter-group">
-                    <label class="filter-label">Month</label>
-                    <select id="filter-month" onchange="onFilterPresetChange()">
-                        <option value="">All Months</option>
-                        <option value="01">Jan</option><option value="02">Feb</option>
-                        <option value="03">Mar</option><option value="04">Apr</option>
-                        <option value="05">May</option><option value="06">Jun</option>
-                        <option value="07">Jul</option><option value="08">Aug</option>
-                        <option value="09">Sep</option><option value="10">Oct</option>
-                        <option value="11">Nov</option><option value="12">Dec</option>
-                    </select>
+                <div class="filter-section">
+                    <span class="filter-section-label">View</span>
+                    <div class="filter-controls">
+                        <button class="btn btn-toggle" data-filter="all" onclick="setSpendFilter('all')">All</button>
+                        <button class="btn btn-toggle active" data-filter="personal" onclick="setSpendFilter('personal')">Personal</button>
+                        <button class="btn btn-toggle" data-filter="moom" onclick="setSpendFilter('moom')">Moom</button>
+                    </div>
                 </div>
-                <div class="filter-group" style="gap:4px;">
-                    <button class="btn btn-toggle active" data-filter="all" onclick="setSpendFilter('all')">All</button>
-                    <button class="btn btn-toggle" data-filter="personal" onclick="setSpendFilter('personal')">Personal</button>
-                    <button class="btn btn-toggle" data-filter="moom" onclick="setSpendFilter('moom')">Moom</button>
+                <div class="filter-section">
+                    <span class="filter-section-label">Account</span>
+                    <div class="filter-controls">
+                        <select id="filter-account" onchange="applyDashboardFilters()">
+                            <option value="">All Accounts</option>
+                        </select>
+                    </div>
                 </div>
-                <div class="filter-group">
-                    <label style="font-size:12px;color:var(--text-tertiary);display:flex;align-items:center;gap:6px;cursor:pointer;">
-                        <input type="checkbox" id="filter-anomaly" onchange="applyDashboardFilters()"> Exclude anomalies
-                    </label>
-                </div>
-                <div class="filter-group">
-                    <button class="btn btn-toggle" id="subcategory-toggle" onclick="toggleSubcategories()">Subcategories</button>
+                <div class="filter-section">
+                    <span class="filter-section-label">Options</span>
+                    <div class="filter-controls">
+                        <label class="filter-check">
+                            <input type="checkbox" id="filter-anomaly" onchange="applyDashboardFilters()"> Excl. anomalies
+                        </label>
+                        <label class="filter-check">
+                            <input type="checkbox" id="filter-one-off" onchange="applyDashboardFilters()"> Excl. one-offs
+                        </label>
+                        <button class="btn btn-toggle" id="subcategory-toggle" onclick="toggleSubcategories()">Subcategories</button>
+                    </div>
                 </div>
             </div>
 
@@ -72,6 +103,10 @@
                 <div class="chart-card">
                     <div class="chart-header">
                         <span class="chart-title" id="chart-trend-title">Monthly Spending Trend</span>
+                        <div class="chart-mode-toggle">
+                            <button class="btn btn-sm btn-toggle active" data-chart-mode="bar" onclick="setChartMode('bar')">Bar</button>
+                            <button class="btn btn-sm btn-toggle" data-chart-mode="trend" onclick="setChartMode('trend')">Trend</button>
+                        </div>
                     </div>
                     <div class="chart-canvas-wrap">
                         <canvas id="chart-monthly" height="320"></canvas>
@@ -87,26 +122,38 @@
                 </div>
             </div>
 
+            <!-- Chart Filter Chip (shown when chart segment is clicked) -->
+            <div id="chart-filter-chip" class="chart-filter-chip hidden"></div>
+
             <!-- Transaction Table -->
             <div class="card">
                 <div class="section-label">/ Transactions</div>
-                <div style="display:flex;gap:12px;margin-bottom:16px;">
+                <div style="display:flex;gap:12px;margin-bottom:16px;align-items:flex-start;">
                     <input type="text" id="tx-search" placeholder="Search descriptions..." style="flex:1;">
-                    <select id="tx-category-filter">
-                        <option value="">All Categories</option>
-                    </select>
-                    <select id="tx-account-filter">
-                        <option value="">All Accounts</option>
-                    </select>
+                    <div class="ms-wrap" id="cat-filter-wrap">
+                        <div class="ms-trigger" id="cat-filter-trigger" onclick="toggleCatFilterPanel()">
+                            <span class="ms-display" id="cat-filter-display">All Categories</span>
+                            <span class="ms-arrow">&#9662;</span>
+                        </div>
+                        <div class="ms-panel hidden" id="cat-filter-panel">
+                            <input type="text" class="ms-search" id="cat-filter-search" placeholder="Search categories..." oninput="filterCatOptions()">
+                            <div class="ms-options" id="cat-filter-options"></div>
+                            <div class="ms-footer">
+                                <button class="btn btn-sm" onclick="clearCatFilter()">Clear</button>
+                                <button class="btn btn-sm btn-primary" onclick="applyCatFilter()">Apply</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <div style="max-height:500px;overflow-y:auto;">
                     <table class="data-table" id="tx-table">
                         <thead>
                             <tr>
                                 <th class="sortable" data-sort="date" style="width:110px;" onclick="toggleSort('date')">Date <span class="sort-arrow">▼</span></th>
-                                <th class="sortable" data-sort="description" style="width:35%;" onclick="toggleSort('description')">Description <span class="sort-arrow"></span></th>
-                                <th class="sortable" data-sort="category" style="width:20%;" onclick="toggleSort('category')">Category <span class="sort-arrow"></span></th>
-                                <th class="sortable" data-sort="account" style="width:18%;" onclick="toggleSort('account')">Account <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="description" style="width:30%;" onclick="toggleSort('description')">Description <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="service" style="width:12%;" onclick="toggleSort('service')">Service <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="category" style="width:15%;" onclick="toggleSort('category')">Category <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="account" style="width:15%;" onclick="toggleSort('account')">Account <span class="sort-arrow"></span></th>
                                 <th class="sortable" data-sort="amount" style="text-align:right;width:110px;" onclick="toggleSort('amount')">Amount <span class="sort-arrow"></span></th>
                             </tr>
                         </thead>
@@ -160,15 +207,9 @@
                     </div>
                 </div>
             </div>
-        </div>
-    </div>
 
-    <!-- ============================================================
-         HISTORY TAB
-         ============================================================ -->
-    <div id="tab-history" class="tab-content">
-        <div class="container">
-            <div class="section-label">/ Import History</div>
+            <!-- Import History (merged from former History tab) -->
+            <div class="section-label" style="margin-top:var(--space-8);">/ Import History</div>
             <div class="card">
                 <table class="data-table">
                     <thead>
@@ -184,21 +225,123 @@
                     <tbody id="history-body"></tbody>
                 </table>
                 <div id="history-empty" class="empty-state hidden">
-                    <div class="empty-state-icon">📋</div>
+                    <div class="empty-state-icon">-</div>
                     <div class="empty-state-text">No imports yet</div>
-                    <div class="empty-state-hint">Go to the Import tab to get started</div>
+                    <div class="empty-state-hint">Upload statement files above to get started</div>
                 </div>
             </div>
         </div>
     </div>
 
     <!-- ============================================================
-         MERCHANT RULES TAB
+         SUBSCRIPTIONS TAB
          ============================================================ -->
-    <div id="tab-rules" class="tab-content">
+    <div id="tab-subs" class="tab-content">
         <div class="container">
-            <!-- Category Master -->
-            <div class="section-label">/ Category Master</div>
+            <div class="section-label">/ Subscriptions</div>
+
+            <!-- Stat Cards -->
+            <div class="stats-row" id="subs-stats-row"></div>
+
+            <!-- Toolbar -->
+            <div class="card" style="margin-bottom:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button class="btn btn-toggle active" data-subs-filter="active" onclick="setSubsFilter('active')">Active</button>
+                        <button class="btn btn-toggle" data-subs-filter="all" onclick="setSubsFilter('all')">All</button>
+                        <button class="btn btn-toggle" data-subs-filter="deactivated" onclick="setSubsFilter('deactivated')">Deactivated</button>
+                        <span style="width:1px;height:20px;background:var(--border-primary);margin:0 4px;"></span>
+                        <button class="btn btn-toggle active" data-subs-spend="personal" onclick="setSubsSpend('personal')">Personal</button>
+                        <button class="btn btn-toggle" data-subs-spend="all" onclick="setSubsSpend('all')">All</button>
+                        <button class="btn btn-toggle" data-subs-spend="moom" onclick="setSubsSpend('moom')">Moom</button>
+                    </div>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-sm" onclick="enrichSubscriptions()">Refresh from Txns</button>
+                        <button class="btn btn-sm btn-primary" id="subs-add-toggle" onclick="toggleSubsForm()">+ Add</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add Subscription Form removed — now uses Add Sub Modal (below) -->
+
+            <!-- Subscriptions Table -->
+            <div class="card">
+                <div class="subs-table-wrap">
+                    <table class="data-table" id="subs-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="service">Service</th>
+                                <th class="sortable subs-col-hide-sm" data-sort="category">Category</th>
+                                <th class="sortable" data-sort="billed" style="text-align:right;">Billed</th>
+                                <th class="sortable" data-sort="monthly" style="text-align:right;">Monthly</th>
+                                <th class="sortable subs-col-hide-sm" data-sort="frequency">Freq</th>
+                                <th class="sortable subs-col-hide-md" data-sort="card">Card</th>
+                                <th class="sortable" data-sort="last_paid">Last Paid</th>
+                                <th class="sortable subs-col-hide-sm" data-sort="renewal">Renewal</th>
+                                <th style="text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="subs-body"></tbody>
+                    </table>
+                </div>
+                <div id="subs-empty" class="empty-state hidden">
+                    <div class="empty-state-icon">-</div>
+                    <div class="empty-state-text">No subscriptions</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         SERVICES TAB (accordion view of transactions by service)
+         ============================================================ -->
+    <div id="tab-services" class="tab-content">
+        <div class="container">
+            <div class="section-label">/ Services</div>
+            <!-- View toggle -->
+            <div class="svc-view-toggle" style="margin-bottom: var(--space-3);">
+                <button class="svc-view-btn active" data-view="service" onclick="switchServiceView('service')">By Service</button>
+                <button class="svc-view-btn" data-view="category" onclick="switchServiceView('category')">By Category</button>
+            </div>
+            <!-- By Service view (existing) -->
+            <div id="svc-view-service">
+                <div class="filter-bar" style="margin-bottom: var(--space-4);">
+                    <input type="text" id="services-search" placeholder="Search services..." style="flex:1; max-width:300px;">
+                    <select id="services-category-filter" onchange="renderServicesTab()">
+                        <option value="">All Categories</option>
+                    </select>
+                    <select id="services-sort" onchange="renderServicesTab()" style="min-width:120px;">
+                        <option value="name">Sort: Name</option>
+                        <option value="category">Sort: Category</option>
+                        <option value="txn_count">Sort: Txn Count</option>
+                    </select>
+                </div>
+                <div id="services-accordion" class="card"></div>
+            </div>
+            <!-- By Category view (nested: category → subcategory → service) -->
+            <div id="svc-view-category" style="display:none;">
+                <div class="filter-bar" style="margin-bottom: var(--space-4);">
+                    <input type="text" id="services-cat-search" placeholder="Search categories or services..." style="flex:1; max-width:300px;">
+                    <select id="services-cat-category-filter" onchange="renderServicesCategoryView()" style="min-width:150px;">
+                        <option value="">All Categories</option>
+                    </select>
+                    <select id="services-cat-spend-filter" onchange="renderServicesCategoryView()" style="min-width:120px;">
+                        <option value="">All Spend</option>
+                        <option value="personal">Personal</option>
+                        <option value="moom">Moom</option>
+                    </select>
+                </div>
+                <div id="services-cat-accordion" class="card"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         CATEGORIES MASTER TAB
+         ============================================================ -->
+    <div id="tab-categories" class="tab-content">
+        <div class="container">
+            <div class="section-label">/ Categories</div>
             <div class="card" style="margin-bottom:24px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
                     <span class="text-secondary" id="cat-count" style="font-size:12px;"></span>
@@ -235,7 +378,63 @@
                 <!-- Category Tree -->
                 <div id="cat-tree" style="max-height:400px;overflow-y:auto;"></div>
             </div>
+        </div>
+    </div>
 
+    <!-- ============================================================
+         SERVICES MASTER TAB (CRUD for service entities)
+         ============================================================ -->
+    <div id="tab-services-master" class="tab-content">
+        <div class="container">
+            <div class="section-label">/ Services Master</div>
+            <!-- View toggle -->
+            <div class="svc-view-toggle" style="margin-bottom: var(--space-3);">
+                <button class="svc-view-btn active" data-view="table" onclick="switchMasterView('table')">Table</button>
+                <button class="svc-view-btn" data-view="cleanup" onclick="switchMasterView('cleanup')">Cleanup</button>
+            </div>
+            <!-- Table view (existing) -->
+            <div id="svc-master-table-view">
+                <div class="toolbar" style="display:flex;justify-content:space-between;align-items:center;margin-bottom: var(--space-4);">
+                    <input type="text" id="svc-master-search" placeholder="Search services..." style="flex:1; max-width:300px;">
+                    <button class="btn btn-sm btn-primary" onclick="openAddServiceModal()">+ Add</button>
+                </div>
+                <div class="card">
+                    <table class="data-table" id="services-master-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="name">Service</th>
+                                <th class="sortable" data-sort="category">Category</th>
+                                <th class="sortable" data-sort="notes">Notes</th>
+                                <th style="text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="services-master-body"></tbody>
+                    </table>
+                </div>
+            </div>
+            <!-- Cleanup view -->
+            <div id="svc-master-cleanup-view" style="display:none;">
+                <div class="toolbar" style="display:flex;justify-content:space-between;align-items:center;margin-bottom: var(--space-4);flex-wrap:wrap;gap:var(--space-2);">
+                    <input type="text" id="svc-cleanup-search" placeholder="Search..." style="flex:1; max-width:240px;">
+                    <select id="svc-cleanup-filter" onchange="renderCleanupView()" style="min-width:160px;">
+                        <option value="all">All Services</option>
+                        <option value="needs-rename" selected>Likely needs rename</option>
+                        <option value="no-txns">No transactions</option>
+                        <option value="no-rules">No rules linked</option>
+                    </select>
+                    <span id="svc-cleanup-count" class="text-secondary" style="font-size:12px;"></span>
+                    <button class="btn btn-sm btn-primary" id="svc-cleanup-save" onclick="saveCleanupRenames()" disabled>Save All Renames</button>
+                </div>
+                <div class="card" id="svc-cleanup-list" style="max-height:70vh;overflow-y:auto;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         MERCHANT RULES TAB
+         ============================================================ -->
+    <div id="tab-rules" class="tab-content">
+        <div class="container">
             <div class="section-label">/ Merchant Rules</div>
 
             <!-- Add Rule Form -->
@@ -257,6 +456,18 @@
                     </select>
                 </div>
                 <div>
+                    <label>Priority</label>
+                    <input type="number" id="rule-priority" value="0" min="0" max="99" style="width:100%;">
+                </div>
+                <div>
+                    <label>Min $</label>
+                    <input type="number" id="rule-min-amount" placeholder="—" step="0.01" style="width:100%;">
+                </div>
+                <div>
+                    <label>Max $</label>
+                    <input type="number" id="rule-max-amount" placeholder="—" step="0.01" style="width:100%;">
+                </div>
+                <div>
                     <label>&nbsp;</label>
                     <button class="btn btn-primary btn-sm" onclick="addRule()">Add Rule</button>
                 </div>
@@ -267,8 +478,422 @@
                 <div class="rules-toolbar">
                     <input type="text" class="rules-search" id="rules-search" placeholder="Search rules..." oninput="filterRules()">
                     <span id="rules-count" class="text-secondary" style="font-size:12px;"></span>
+                    <button class="btn btn-sm" id="recategorize-btn" onclick="recategorizeAll()" title="Re-run all rules against existing transactions">Re-categorize All</button>
                 </div>
                 <div id="rules-accordion" class="rules-accordion" style="max-height:600px;overflow-y:auto;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         ACCOUNTS TAB
+         ============================================================ -->
+    <div id="tab-accounts" class="tab-content">
+        <div class="container">
+            <div class="section-label">/ Account Master</div>
+
+            <div class="card">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <span class="text-secondary" id="acct-count" style="font-size:12px;"></span>
+                    <button class="btn btn-sm btn-primary" onclick="toggleAcctForm()">+ Add Account</button>
+                </div>
+
+                <!-- Add Account Form (hidden) -->
+                <div id="acct-form" class="hidden" style="margin-bottom:16px;">
+                    <div class="rule-form">
+                        <div>
+                            <label>Name</label>
+                            <input type="text" id="acct-name" placeholder="e.g. DBS Altitude Visa" style="width:100%;">
+                        </div>
+                        <div>
+                            <label>Short Name</label>
+                            <input type="text" id="acct-short" placeholder="e.g. DBS-Altitude-1229" style="width:100%;">
+                        </div>
+                        <div>
+                            <label>Type</label>
+                            <select id="acct-type" style="width:100%;">
+                                <option value="credit_card">Credit Card</option>
+                                <option value="debit">Debit Card</option>
+                                <option value="bank">Bank Account</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Last Four</label>
+                            <input type="text" id="acct-last4" maxlength="4" placeholder="1229" style="width:100%;">
+                        </div>
+                        <div>
+                            <label>Currency</label>
+                            <input type="text" id="acct-currency" value="SGD" style="width:100%;">
+                        </div>
+                        <div>
+                            <label>&nbsp;</label>
+                            <button class="btn btn-primary btn-sm" onclick="addAccount()">Save</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Accounts Table -->
+                <table class="data-table" id="acct-table">
+                    <thead>
+                        <tr>
+                            <th style="width:30%;">Name</th>
+                            <th style="width:20%;">Short Name</th>
+                            <th style="width:14%;">Type</th>
+                            <th style="width:8%;">Last 4</th>
+                            <th style="width:8%;">Currency</th>
+                            <th style="width:20%;text-align:right;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="acct-body"></tbody>
+                </table>
+                <div id="acct-empty" class="empty-state hidden">
+                    <div class="empty-state-icon">-</div>
+                    <div class="empty-state-text">No accounts</div>
+                    <div class="empty-state-hint">Add your cards and bank accounts</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notes Modal -->
+    <div class="modal-overlay" id="note-modal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ Transaction Note</span>
+                <button class="modal-close" onclick="closeNoteModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-desc" id="note-modal-desc"></p>
+                <textarea id="note-text" rows="3" placeholder="Add a note about this transaction..."></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="clearNote()">Clear Note</button>
+                <div style="flex:1;"></div>
+                <button class="btn" onclick="closeNoteModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveNote()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rule Create Modal -->
+    <div class="modal-overlay" id="rule-modal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ Create Merchant Rule</span>
+                <button class="modal-close" onclick="closeRuleModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-desc" id="rule-modal-desc"></p>
+                <div class="modal-field-row">
+                    <div class="modal-field">
+                        <label>Pattern</label>
+                        <input type="text" id="rule-modal-pattern" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:0 0 140px;">
+                        <label>Match Type</label>
+                        <select id="rule-modal-match" style="width:100%;">
+                            <option value="contains">Contains</option>
+                            <option value="startswith">Starts with</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeRuleModal()">Skip</button>
+                <button class="btn btn-primary" onclick="saveRuleFromModal()">Create Rule</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Rule Modal -->
+    <div class="modal-overlay" id="edit-rule-modal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ Edit Merchant Rule</span>
+                <button class="modal-close" onclick="closeEditRuleModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-rule-id">
+                <div class="modal-field-row">
+                    <div class="modal-field" style="flex:2;">
+                        <label>Pattern</label>
+                        <input type="text" id="edit-rule-pattern" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:0 0 140px;">
+                        <label>Match Type</label>
+                        <select id="edit-rule-match" style="width:100%;">
+                            <option value="contains">Contains</option>
+                            <option value="startswith">Starts with</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-field-row" style="margin-top:8px;">
+                    <div class="modal-field" style="flex:2;">
+                        <label>Category</label>
+                        <select id="edit-rule-category" style="width:100%;"></select>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 80px;">
+                        <label>Priority</label>
+                        <input type="number" id="edit-rule-priority" value="0" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:0 0 100px;">
+                        <label>Min $</label>
+                        <input type="number" id="edit-rule-min" step="0.01" placeholder="—" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:0 0 100px;">
+                        <label>Max $</label>
+                        <input type="number" id="edit-rule-max" step="0.01" placeholder="—" style="width:100%;">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeEditRuleModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveEditRule()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Subscription Modal -->
+    <!-- Add Subscription Modal -->
+    <div class="modal-overlay" id="add-sub-modal" style="display:none;">
+        <div class="modal" style="max-width:560px;">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ New Subscription</span>
+                <button class="modal-close" onclick="closeAddSubModal()">&times;</button>
+            </div>
+            <div class="modal-body sub-modal-grid">
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-service">
+                        <label>Service</label>
+                        <select id="sub-service" style="width:100%;"></select>
+                    </div>
+                    <div class="modal-field sub-col-category">
+                        <label>Category</label>
+                        <select id="sub-category"></select>
+                    </div>
+                </div>
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-amount">
+                        <label>Amount <span class="field-hint fx-rate-hint"></span></label>
+                        <input type="number" id="sub-amount" step="0.01">
+                    </div>
+                    <div class="modal-field sub-col-currency">
+                        <label>Currency</label>
+                        <select id="sub-currency">
+                            <option value="SGD">SGD</option>
+                            <option value="USD">USD</option>
+                        </select>
+                    </div>
+                    <div class="modal-field sub-col-freq">
+                        <label>Frequency</label>
+                        <select id="sub-frequency">
+                            <option value="monthly">Monthly</option>
+                            <option value="yearly">Yearly</option>
+                            <option value="quarterly">Quarterly</option>
+                        </select>
+                    </div>
+                    <div class="modal-field sub-col-periods">
+                        <label>Periods</label>
+                        <input type="number" id="sub-periods" value="1" min="1">
+                    </div>
+                </div>
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-card">
+                        <label>Card</label>
+                        <select id="sub-card">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="modal-field sub-col-renewal">
+                        <label>Renewal Date</label>
+                        <input type="date" id="sub-renewal">
+                    </div>
+                    <div class="modal-field sub-col-status">
+                        <label>Status</label>
+                        <select id="sub-status">
+                            <option value="active">Active</option>
+                            <option value="deactivated">Deactivated</option>
+                            <option value="paused">Paused</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-link">
+                        <label>Link</label>
+                        <input type="text" id="sub-link" placeholder="https://...">
+                    </div>
+                </div>
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-full">
+                        <label>Notes</label>
+                        <textarea id="sub-notes" rows="2"></textarea>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div style="flex:1;"></div>
+                <button class="btn" onclick="closeAddSubModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="addSubscription()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Subscription Modal -->
+    <div class="modal-overlay" id="edit-sub-modal" style="display:none;">
+        <div class="modal" style="max-width:560px;">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ Edit Subscription</span>
+                <button class="modal-close" onclick="closeEditSubModal()">&times;</button>
+            </div>
+            <div class="modal-body sub-modal-grid">
+                <input type="hidden" id="edit-sub-id">
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-service">
+                        <label>Service</label>
+                        <select id="edit-sub-service" style="width:100%;"></select>
+                    </div>
+                    <div class="modal-field sub-col-category">
+                        <label>Category</label>
+                        <select id="edit-sub-category"></select>
+                    </div>
+                </div>
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-amount">
+                        <label>Amount <span class="field-hint fx-rate-hint"></span></label>
+                        <input type="number" id="edit-sub-amount" step="0.01">
+                    </div>
+                    <div class="modal-field sub-col-currency">
+                        <label>Currency</label>
+                        <select id="edit-sub-currency">
+                            <option value="SGD">SGD</option>
+                            <option value="USD">USD</option>
+                        </select>
+                    </div>
+                    <div class="modal-field sub-col-freq">
+                        <label>Frequency</label>
+                        <select id="edit-sub-freq">
+                            <option value="monthly">Monthly</option>
+                            <option value="yearly">Yearly</option>
+                            <option value="quarterly">Quarterly</option>
+                        </select>
+                    </div>
+                    <div class="modal-field sub-col-periods">
+                        <label>Periods</label>
+                        <input type="number" id="edit-sub-periods" value="1" min="1">
+                    </div>
+                </div>
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-card">
+                        <label>Card</label>
+                        <select id="edit-sub-card">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="modal-field sub-col-renewal">
+                        <label>Renewal Date</label>
+                        <input type="date" id="edit-sub-renewal">
+                    </div>
+                    <div class="modal-field sub-col-status">
+                        <label>Status</label>
+                        <select id="edit-sub-status">
+                            <option value="active">Active</option>
+                            <option value="deactivated">Deactivated</option>
+                            <option value="paused">Paused</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-link">
+                        <label>Link</label>
+                        <input type="text" id="edit-sub-link" placeholder="https://...">
+                    </div>
+                </div>
+                <div class="sub-modal-row">
+                    <div class="modal-field sub-col-full">
+                        <label>Notes</label>
+                        <textarea id="edit-sub-notes" rows="2"></textarea>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" style="color:var(--accent-red,#c97a7a);" onclick="deleteSubFromModal()">Delete</button>
+                <div style="flex:1;"></div>
+                <button class="btn" onclick="closeEditSubModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveEditSub()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Service Modal -->
+    <div class="modal-overlay" id="add-service-modal" style="display:none;">
+        <div class="modal" style="max-width:440px;">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ New Service</span>
+                <button class="modal-close" onclick="closeAddServiceModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-field">
+                    <label>Name</label>
+                    <input type="text" id="add-svc-name" placeholder="e.g. Netflix" style="width:100%;">
+                </div>
+                <div class="modal-field">
+                    <label>Category</label>
+                    <select id="add-svc-category" style="width:100%;"></select>
+                </div>
+                <div class="modal-field">
+                    <label>Notes</label>
+                    <textarea id="add-svc-notes" rows="2" style="width:100%;"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeAddServiceModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveNewService()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Service Modal -->
+    <div class="modal-overlay" id="edit-service-modal" style="display:none;">
+        <div class="modal" style="max-width:440px;">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ Edit Service</span>
+                <button class="modal-close" onclick="closeEditServiceModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-svc-id">
+                <div class="modal-field">
+                    <label>Name</label>
+                    <input type="text" id="edit-svc-name" style="width:100%;">
+                </div>
+                <div class="modal-field">
+                    <label>Category</label>
+                    <select id="edit-svc-category" style="width:100%;"></select>
+                </div>
+                <div class="modal-field">
+                    <label>Notes</label>
+                    <textarea id="edit-svc-notes" rows="2" style="width:100%;"></textarea>
+                </div>
+                <div class="modal-field" style="display:flex;align-items:center;gap:var(--space-2);margin-top:var(--space-2);">
+                    <input type="checkbox" id="edit-svc-one-off">
+                    <label for="edit-svc-one-off" style="margin:0;font-size:12px;color:var(--text-secondary);">One-off / exclude from averages</label>
+                </div>
+                <!-- Merge section -->
+                <div class="modal-field" style="margin-top:var(--space-4);padding-top:var(--space-3);border-top:1px solid var(--border-subtle);">
+                    <label style="color:var(--text-tertiary);font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Merge into another service</label>
+                    <div style="display:flex;gap:var(--space-2);align-items:center;">
+                        <select id="edit-svc-merge-target" style="flex:1;">
+                            <option value="">— Select target —</option>
+                        </select>
+                        <button class="btn btn-sm" onclick="mergeService()" id="edit-svc-merge-btn" disabled>Merge</button>
+                    </div>
+                    <div id="edit-svc-merge-info" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" style="color:var(--semantic-error);" onclick="deleteServiceFromModal()">Delete</button>
+                <div style="flex:1;"></div>
+                <button class="btn" onclick="closeEditServiceModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveEditService()">Save</button>
             </div>
         </div>
     </div>

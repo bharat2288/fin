@@ -130,7 +130,7 @@ def categorize_all(
             continue
 
         # Try merchant rules first
-        cat_id = categorize_transaction(tx.description, conn)
+        cat_id, svc_id = categorize_transaction(tx.description, conn, amount=tx.amount_sgd)
 
         # For bank statements, try PayNow rules if merchant rules didn't match
         if cat_id is None and "PAYNOW" in tx.description.upper():
@@ -145,6 +145,7 @@ def categorize_all(
             "amount_foreign": tx.amount_foreign,
             "currency_foreign": tx.currency_foreign,
             "category_id": cat_id,
+            "service_id": svc_id,
             "category_name": cats.get(cat_id, "???") if cat_id else None,
             "card_info": tx.card_info,
             "is_payment": tx.is_payment,
