@@ -110,6 +110,12 @@ created_by: architect
 - ~~**Responsive subs table**~~ — Column hiding + horizontal scroll
 - ~~**Subscription links**~~ — 25 links updated from Excel hyperlinks
 - ~~**Account Master**~~ — 6th tab: CRUD for cards/bank accounts, inline edit, FK-protected delete
+- ~~**Billing model refactor**~~ — Single `amount` + `currency` replaces split SGD/USD; Billed vs Last Paid separation
+- ~~**Service dropdown in sub modals**~~ — Searchable service select, auto-fill category, auto-derive match_pattern
+- ~~**Dashboard one-off filtering**~~ — "Excl. one-offs" checkbox, services JOIN on all 4 dashboard endpoints
+- ~~**SP Group reorganization**~~ — BGV, OGR, EV, Moom split from generic SP services
+- ~~**Billed deep-link + Last Paid indicator**~~ — Billed amount clickable, ●/○ dot for tx vs manual data
+- ~~**Modal field visibility**~~ — Better label contrast, input borders, grid layout
 
 ---
 

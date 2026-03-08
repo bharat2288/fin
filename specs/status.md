@@ -19,19 +19,51 @@ date: 2026-03-08
 - SQLite database: 58 categories, 335+ merchant rules, 334 services, 46 subscriptions
 - 1009 categorized transactions across DBS, Citi, UOB (Sep 2025 - Feb 2026), 100% service-linked
 - Service-centric data model: `description → rule → service → category` chain
-- Services tab: dual view toggle — "By Service" accordion + "By Category" 3-level accordion (category → subcategory → service)
-- Deep linking: clickable service names in Dashboard txn table + Subs table → Services tab; clickable category in Subs table → By Category view
+- Billing model: `amount` + `currency` (SGD|USD) + `frequency` + `periods` per subscription; Billed (expected) vs Last Paid (actual) separation
+- Subscription modals: searchable service dropdown, auto-fill category, auto-derive match_pattern from service rules
+- Account FK: subscriptions use `account_id` FK → accounts table (not text card field)
+- Anomaly system: `is_one_off` flag on services, `1x` badge in accordion, dashboard "Excl. one-offs" checkbox
+- Services tab: dual view toggle — "By Service" accordion + "By Category" 3-level accordion
+- Deep linking: service names + billed amounts clickable → Services/Dashboard; Last Paid shows ●/○ indicator
 - Browser history: back button works across tab/deep-link navigation (pushState + popstate)
-- Services Master: CRUD + merge service feature + bulk cleanup view (heuristic-based rename + batch save)
-- Re-categorize All: syncs rule categories to service categories, then re-runs all rules
-- Subscription names resolve from services JOIN (rename/merge automatically propagates)
-- Dashboard txn table: Service column with deep-link, sortable
-- Account filter uses short names
-- PayNow Transfer catch-all service (priority -10) for unidentified personal transfers
+- Dashboard: anomaly + one-off exclusion filters, all 4 endpoints support services JOIN filtering
+- USD↔SGD auto-calc in subscription add/edit forms; renewal date auto-advance for past dates
+- Responsive subs table with column hiding + horizontal scroll
 
 ### Known Issues
 - Feb 2026 data incomplete (only 31 transactions — more statements needed)
-- app.py ~1600+ lines, app.js ~3100+ lines — code review needed (pipeline #33)
+- 16 subs with suspicious SGD/USD FX ratios need manual review (pipeline #37)
+- app.py ~1700+ lines, app.js ~3400+ lines — code review needed (pipeline #33)
+
+---
+
+## Session: 2026-03-08d — Billing Model, Account FK, Anomaly System, Dashboard Filters
+
+### Accomplished
+- **Billing model refactor**: Single `amount` + `currency` replaces split `amount_sgd`/`amount_usd`; clear Billed (configured) vs Last Paid (actual tx) separation in table columns
+- **Account FK migration**: `card` text field → `account_id` FK to accounts table; 39 subs auto-migrated in db.py; all API endpoints updated
+- **Service dropdown in modals**: Subscription add/edit use searchable service select (not text input); auto-fills category, auto-derives match_pattern from service's first merchant rule
+- **Anomaly / frequency system**: `is_one_off` flag on services table; checkbox in Edit Service modal; `1x` badge in accordion headers; dashboard "Excl. one-offs" checkbox wired to all 4 endpoints
+- **SP Group reorganization**: Renamed/split SP services into SP Group (BGV), SP Group (OGR), SP Group (EV), SP Group (Moom)
+- **Deep-link moved to Billed column**: Billed amount clickable → navigates to matching transactions; Last Paid shows ●/○ dot indicator (tx-based vs manual)
+- **Modal field visibility**: Better label contrast (`font-weight: 700`, `color: var(--text-secondary)`), explicit input borders/backgrounds, grid layout for amount/currency/freq/periods
+- **USD↔SGD auto-calc** in both add/edit subscription forms
+- **Renewal date auto-advance**: `_advance_renewal()` helper pushes past renewal dates forward
+- **Responsive subs table**: Column hiding + horizontal scroll at breakpoints
+- **25 subscription links updated** from Excel hyperlinks
+- **Date picker dark theme fix**
+- **Dashboard one-off filtering**: `LEFT JOIN services` on all 4 dashboard query endpoints; `_build_filters()` supports `exclude_one_off` param; JS `buildFilterParams`, `buildChartParams`, stat cards all wired
+
+### Decisions Made
+- Single `amount` + `currency` is source of truth per billing cycle (not split SGD/USD fields)
+- `_monthly_equivalent()` is currency-aware: converts USD→SGD at live FX rate before dividing by cycle length
+- `match_pattern` auto-derived from service's first merchant rule — not user-editable in subscription modals
+- Anomaly ownership at service level (`is_one_off`) not transaction level for one-off purchases
+- USD subscription enrichment skips amount update (keeps configured price, only updates last_paid_date)
+
+### Key Fixes
+- Deep-link accordion race condition: `switchServiceView()` async fetch overwrote immediate `renderServicesTab(true)`. Fixed by manually setting view state (button classes, container display) without calling the async function.
+- `billed_display` always None in API response despite correct Python code. Moved computation to frontend.
 
 ---
 

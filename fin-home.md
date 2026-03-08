@@ -7,7 +7,7 @@ cssclasses:
 ---
 # fin
 *[[dev-hub|Hub]] · [[README|GitHub]]*
-<span class="hub-status">Subs migrated, dashboard in progress (Chart.js fix pending)</span>
+<span class="hub-status">Full-stack SPA — billing model, anomaly system, dashboard filters complete. Verify FX ratios next.</span>
 
 Personal finance tracker. Statement parsing, expense categorization, subscription tracking, monthly spending breakdown. Claude is the interface.
 
