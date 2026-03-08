@@ -1,14 +1,14 @@
 ---
 type: pipeline
 project: fin
-date: 2026-03-07
+date: 2026-03-08
 created_by: architect
 ---
 # [[fin-home|fin]] — Pipeline
 *[[dev-hub|Hub]]*
 
 > Living document. Tracks all remaining feature work, bugs, evaluations, and vision items.
-> Last updated: 2026-03-07
+> Last updated: 2026-03-08
 >
 > **Convention:** Strikethrough (`~~item~~`) when DONE, keep in section for context.
 > Sweep to Completed section when tiers get crowded.
@@ -25,16 +25,10 @@ created_by: architect
 
 | # | Item | Type | Status | Notes |
 |---|------|------|--------|-------|
-| 3 | ~~**Subscription migration from Excel**~~ | Feature | DONE | 43 subs migrated, `subs.py` CLI viewer with --renewals |
-| 7 | ~~**Visualization: monthly spending charts**~~ | Feature | DONE | Full-stack Flask SPA with Chart.js (monthly bar + category donut) |
-| 14 | ~~**Other bank support (Citi, UOB, OCBC)**~~ | Feature | DONE | Parsers built: `parse_citi_csv.py`, `parse_uob.py` (bank + CC PDF) |
-| 16 | ~~**Web dashboard**~~ | Feature | DONE | 4-tab SPA: Dashboard, Import, History, Merchant Rules on port 8450 |
-| 22 | **Ingest new statement data** | Feature | Not started | DBS Woman's World, Citi Prestige/Rewards, UOB bank/CC, new Vantage MK+BS — parsers ready, need to import via UI |
-| 24 | ~~**Category Master with subcategories**~~ | Feature | DONE | `parent_id` FK on categories, POST /api/categories, hierarchical dropdowns |
-| 25 | ~~**Sortable transaction table**~~ | Feature | DONE | Click column headers, sort arrows, backend whitelist sort params |
-| 26 | ~~**Unified filter system**~~ | Feature | DONE | `buildFilterParams()` shared by charts + transactions, year/month dropdowns replace date inputs |
-| 27 | ~~**Filter presets: year & month dropdowns**~~ | Feature | DONE | Year/month selects, auto-weekly granularity when month selected, chart title updates |
-| 28 | ~~**Fix Personal/Moom filter toggle**~~ | Bug | DONE | Added `moom_only` param to `_build_filters()`, frontend passes it correctly |
+| 30 | ~~**Anomaly / frequency system**~~ | Feature | Done | `is_one_off` flag on services, checkbox in Edit Service modal, `1x` badge in accordion. Dashboard exclusion filter added. |
+| 32 | **Import remaining Feb statements** | Data | Not started | Only 31 Feb txs — Allpress, SP Gas, etc. missing. Need DBS/UOB/Citi Feb exports. |
+| 33 | **Code review** | Maintenance | Not started | app.py ~1700+ lines, app.js ~3400+ lines — growing, needs modularization review. |
+| 37 | **Verify subscription figures** | Data | Not started | 16 subs with suspicious SGD/USD FX ratios after billing model migration. Review amount + currency via Edit modal. |
 
 ---
 
@@ -42,10 +36,12 @@ created_by: architect
 
 | # | Item | Type | Status | Notes |
 |---|------|------|--------|-------|
-| 8 | ~~**Subscription renewal tracking**~~ | Feature | DONE | `subs.py --renewals` shows upcoming + overdue |
-| 9 | **Anomaly detection suggestions** | Feature | Not started | Flag transactions above a threshold as potential anomalies for user confirmation |
-| 10 | **Duplicate detection** | Feature | Not started | Prevent re-importing same statement; warn on overlapping date ranges |
-| 23 | **Mark anomaly transactions** | Feature | Not started | Flag Mount Alvernia childbirth, IRAS tax payment, etc. as is_anomaly=1 |
+| 31 | **Learn merchant rules priority/amount system** | Learning | Not started | Understand priority, min_amount, max_amount. Study the Shopee dual-purpose example. |
+| 9 | **Anomaly detection suggestions** | Feature | Not started | Flag transactions above threshold as potential anomalies |
+| 23 | **Mark anomaly transactions** | Feature | Not started | Flag Mount Alvernia childbirth, IRAS tax, etc. as is_anomaly=1 |
+| 34 | **Recurring payment detection (Phase 2)** | Feature | Not started | Scan transactions for untracked subscriptions automatically |
+| 35 | ~~**Subscription inline editing**~~ | Feature | Done | Edit modal: all fields, category/card dropdowns from masters |
+| 36 | ~~**Card→account_id FK migration**~~ | Refactor | Done | Subs use account_id FK instead of text card field; JOIN for display |
 
 ---
 
@@ -68,22 +64,52 @@ created_by: architect
 ## Completed
 
 - ~~**PDF parser (DBS CC)**~~ — Working, tested on Jun 2024 statement
-- ~~**CSV parser (DBS CC + bank)**~~ — Working, tested on 6 files (Oct 2025 - Feb 2026)
-- ~~**SQLite schema + DB init**~~ — 21 categories, 172 merchant rules, is_anomaly column
+- ~~**CSV parser (DBS CC + bank)**~~ — Working, tested on 6 files
+- ~~**SQLite schema + DB init**~~ — 58 categories, 170+ merchant rules
 - ~~**Kickoff design doc**~~ — Design, status, pipeline written
-- ~~**#1 Schema update**~~ — Added is_anomaly, Medical, Loan/EMI, Kids categories
-- ~~**#2 Merchant rule expansion**~~ — 172 rules, 338 transactions fully categorized (0 uncategorized)
-- ~~**#4 Monthly category breakdown**~~ — `summary.py` with month range, --personal, --no-anomaly flags
-- ~~**#5 Statement commit workflow**~~ — `ingest.py --commit` pipeline: parse → categorize → store
-- ~~**#6 Bank PayNow/transfer handling**~~ — PayNow rules, MEP/SI/bank-to-bank classified as transfers
-- ~~**#3 Subscription migration**~~ — 43 subs from Excel, `migrate_subs.py` + `subs.py` CLI
-- ~~**#8 Subscription renewal tracking**~~ — `subs.py --renewals` with overdue/upcoming views
-- ~~**#7 Full-stack web app**~~ — Flask SPA on port 8450: Dashboard, Import, History, Merchant Rules
-- ~~**#14 Multi-bank parsers**~~ — Citi CSV (`parse_citi_csv.py`), UOB bank+CC PDF (`parse_uob.py`)
-- ~~**#16 Web dashboard**~~ — Chart.js monthly bar + category donut, stat cards, paginated tx table
-- ~~**Batch Import UI**~~ — Drag-drop upload, auto-detect format, preview with category overrides, confirm flow
-- ~~**Rent category**~~ — Added for Citi Prestige rental payments
-- ~~**Registered in DSM**~~ — Port 8450, "Personal Finance"
+- ~~**#1 Schema update**~~ — is_anomaly, Medical, Loan/EMI, Kids categories
+- ~~**#2 Merchant rule expansion**~~ — 170+ rules, 1000+ transactions categorized
+- ~~**#4 Monthly category breakdown**~~ — `summary.py` with filters
+- ~~**#5 Statement commit workflow**~~ — `ingest.py --commit` pipeline
+- ~~**#6 Bank PayNow/transfer handling**~~ — PayNow rules, transfers classified
+- ~~**#3 Subscription migration**~~ — 43 subs from Excel
+- ~~**#8 Subscription renewal tracking**~~ — Renewals view
+- ~~**#7 Full-stack web app**~~ — Flask SPA on port 8450
+- ~~**#14 Multi-bank parsers**~~ — Citi CSV, UOB bank+CC PDF
+- ~~**#16 Web dashboard**~~ — Chart.js monthly bar + category donut, stat cards
+- ~~**Batch Import UI**~~ — Drag-drop upload, auto-detect, preview, confirm
+- ~~**Rent category**~~ — Citi Prestige rental payments
+- ~~**Interactive chart-table linking**~~ — Click chart segments to filter tx table
+- ~~**Searchable multi-select category dropdown**~~ — Custom component
+- ~~**Stat cards redesign**~~ — Single month (15th cutoff) + % vs 3-month avg
+- ~~**Category trend chart**~~ — Bar | Trend toggle, top 8 categories, MMM-YY labels
+- ~~**Merchant rule priority + amount thresholds**~~ — Dual-purpose merchant support (Shopee)
+- ~~**Admin category**~~ — Admin > Tax, Insurance, Bank Fees, Government
+- ~~**Moom subcategories**~~ — 17 vendor-level subcats
+- ~~**#22 Ingest all statement data**~~ — All bank statements imported
+- ~~**#10 Duplicate detection**~~ — Implemented
+- ~~**#29 Subscription management tab**~~ — 5th tab: view/filter/sort subs, stat cards, transaction enrichment, variable detection, FX rate, Last Paid linking
+- ~~**Card number masking**~~ — All API responses mask 16-digit card numbers
+- ~~**Edit Rule modal**~~ — Proper modal replacing browser prompt(), all fields editable
+- ~~**Re-categorize All**~~ — Propagate rule changes to existing transactions
+- ~~**Account Master**~~ — 6th tab: CRUD for cards/bank accounts, feeds dashboard filter + sub card dropdowns
+- ~~**Subscription editing**~~ — Edit modal with all fields, category/card dropdowns from masters, delete
+- ~~**Service Master + Nav Restructure**~~ — Services table, 3 main tabs + Import icon + Masters dropdown, accordion transaction view, anchor-based renewal dates, rule→service→category chain
+- ~~**Deep linking**~~ — Service names clickable in txn table + subs table → Services tab accordion; category clickable in subs → By Category view
+- ~~**Services dual view**~~ — By Service (flat accordion) + By Category (3-level: parent → subcategory → service) with filter dropdowns
+- ~~**Service merge**~~ — Reassign txns/rules/subs from source→target, delete source. UI in Edit Service modal
+- ~~**Bulk cleanup view**~~ — Heuristic filter for pattern-like names, inline rename, batch save
+- ~~**Browser history**~~ — pushState/popstate for tab navigation, back button works across deep-links
+- ~~**Re-categorize syncs rules**~~ — Syncs stale rule category_ids to service categories before re-running
+- ~~**Unlinked transaction fix**~~ — 10 new services for identifiable merchants, PayNow Transfer catch-all (priority -10)
+- ~~**Sub names from services JOIN**~~ — Subscription display names resolved live from services table
+- ~~**Dashboard service column**~~ — Service name with deep-link in txn table, sortable
+- ~~**Account filter short names**~~ — Dashboard dropdown uses short_name
+- ~~**USD↔SGD auto-calc**~~ — Both add/edit subscription forms
+- ~~**Renewal auto-advance**~~ — _advance_renewal helper for past dates
+- ~~**Responsive subs table**~~ — Column hiding + horizontal scroll
+- ~~**Subscription links**~~ — 25 links updated from Excel hyperlinks
+- ~~**Account Master**~~ — 6th tab: CRUD for cards/bank accounts, inline edit, FK-protected delete
 
 ---
 

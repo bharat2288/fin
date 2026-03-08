@@ -12,10 +12,13 @@ CREATE TABLE IF NOT EXISTS categories (
 
 CREATE TABLE IF NOT EXISTS merchant_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern TEXT NOT NULL UNIQUE,   -- merchant name pattern (case-insensitive match)
+    pattern TEXT NOT NULL,          -- merchant name pattern (case-insensitive match)
     category_id INTEGER NOT NULL,
     match_type TEXT DEFAULT 'contains',  -- 'contains', 'startswith', 'exact'
     confidence TEXT DEFAULT 'confirmed', -- 'auto', 'confirmed' (user-verified)
+    priority INTEGER DEFAULT 0,    -- higher priority wins (for overlapping patterns)
+    min_amount REAL,               -- if set, rule only matches when amount >= this
+    max_amount REAL,               -- if set, rule only matches when amount <= this
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (category_id) REFERENCES categories(id)
 );
@@ -66,11 +69,23 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     amount_usd REAL,
     frequency TEXT NOT NULL,        -- 'monthly', 'yearly', 'quarterly'
     periods INTEGER DEFAULT 1,      -- number of periods per billing
-    card TEXT,                      -- which card, e.g., "DBS-Woman's 4777"
+    card TEXT,                      -- legacy text field (deprecated)
+    account_id INTEGER,            -- FK to accounts table (single source of truth)
     last_paid TEXT,                 -- YYYY-MM-DD
     renewal_date TEXT,             -- YYYY-MM-DD
     status TEXT DEFAULT 'active',   -- 'active', 'deactivated', 'paused'
     link TEXT,                     -- URL to manage subscription
+    notes TEXT,
+    match_pattern TEXT,            -- pattern to match against transaction descriptions
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (category_id) REFERENCES categories(id),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+
+CREATE TABLE IF NOT EXISTS services (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,          -- e.g., "Netflix", "SP Gas BGV", "Grab"
+    category_id INTEGER,                -- default category for this service
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (category_id) REFERENCES categories(id)
@@ -93,3 +108,4 @@ CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id
 CREATE INDEX IF NOT EXISTS idx_transactions_statement ON transactions(statement_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_rules_pattern ON merchant_rules(pattern);
 CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
+CREATE INDEX IF NOT EXISTS idx_services_category ON services(category_id);

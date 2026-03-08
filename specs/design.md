@@ -20,14 +20,17 @@ Personal finance tracker that gives visibility into monthly spending by category
 
 ## Current Scope
 
-- **Full-stack web app**: Flask backend (port 8450) + vanilla JS frontend. 4-tab SPA: Dashboard, Import, History, Merchant Rules. Registered in Dev Server Manager. Replaces CLI-only workflow with visual, interactive experience. Claude remains available for suggesting bulk categorizations.
+- **Full-stack web app**: Flask backend (port 8450) + vanilla JS frontend. 3-tab SPA (Dashboard, Subscriptions, Services) + Import icon + Masters dropdown (Categories, Services, Rules, Accounts). Registered in Dev Server Manager. Replaces CLI-only workflow with visual, interactive experience. Claude remains available for suggesting bulk categorizations.
 - **Statement ingestion (Import tab)**: Multi-file drag-drop. Auto-detect bank/format per file (DBS CSV, DBS PDF, Citi CSV, UOB PDF). Parse, group by account, auto-categorize via merchant rules. Interactive preview table with editable categories, skip checkboxes, status badges. Confirm to commit.
 - **Dashboard tab**: Stat cards (total spend, personal, Moom, # transactions), filter bar (date range, personal/Moom/all, anomaly toggle, by category/by account), monthly stacked bar chart, category donut, filterable transaction table. Chart.js for visualization. Inspired by moom Sales Dashboard patterns.
 - **Import History tab**: Past imports with status, drill into line-level detail.
 - **Merchant Rules tab**: Browse/search/edit/add pattern→category mappings. The persistent knowledge base that makes future imports smarter.
 - **Expense categorization**: Match merchant descriptions to categories using a rules engine (pattern matching: contains, startswith, exact). Unknown merchants flagged for user review in Import preview. Once categorized, the rule is remembered permanently.
 - **Multi-bank support**: DBS (CSV + PDF), Citi (CSV), UOB (PDF). Parser auto-detection from file contents.
-- **Subscription tracker**: Migrated from existing Excel "Subs" sheet. Tracks service name, category, amount (SGD/USD), billing frequency, card, renewal date, status (active/deactivated). CLI interface (`subs.py`).
+- **Service-centric data model**: Services are the central entity — what you pay for (Netflix, SP Gas, Grab). Merchant rules resolve descriptions to services, services carry the default category. Chain: `description → rule → service → category`. Transactions, subscriptions, and rules all link to services via `service_id` FK.
+- **Subscription tracker**: Subscriptions are services with recurring billing details. Tracks amount (SGD/USD), frequency, card, renewal date (anchor-based — advances by frequency until future, independent of payment timing), status. Full edit modal with category/card dropdowns from masters.
+- **Services tab**: Accordion view — expand any service to see its full transaction history. Search and filter by category.
+- **Masters dropdown**: Admin CRUD for Categories (taxonomy tree), Services (entity management), Rules (pattern→service→category mappings), and Accounts (cards/bank accounts).
 
 ---
 
@@ -38,10 +41,11 @@ Personal finance tracker that gives visibility into monthly spending by category
         │
         ↓
 [Frontend SPA — localhost:8450]
-├── Dashboard tab    ← Chart.js charts, stat cards, filters
-├── Import tab       ← Drag-drop, preview table, confirm
-├── History tab      ← Past imports, drill-down
-└── Merchant Rules   ← CRUD for pattern→category mappings
+├── Dashboard tab      ← Chart.js charts, stat cards, filters
+├── Subscriptions tab  ← Sub table, edit modal, renewal tracking
+├── Services tab       ← Accordion: expand service → transaction history
+├── Import (icon)      ← Drag-drop upload + import history
+└── Masters (dropdown) ← Categories, Services, Rules, Accounts CRUD
         │
         ↓
 [Flask Backend — app.py]
@@ -49,7 +53,9 @@ Personal finance tracker that gives visibility into monthly spending by category
 ├── /api/dashboard/*     ← Summary, monthly, categories
 ├── /api/transactions    ← Paginated list
 ├── /api/rules/*         ← Merchant rules CRUD
-└── /api/categories      ← Reference data
+├── /api/categories      ← Reference data
+├── /api/services/*      ← Services CRUD + /services/:id/transactions
+└── /api/accounts        ← Account CRUD (GET/POST/PUT/DELETE)
         │
         ↓
 [Parser Layer]
@@ -60,17 +66,17 @@ Personal finance tracker that gives visibility into monthly spending by category
         │
         ↓
 [Categorization — db.py]
-merchant_rules table, pattern matching
+rule → service → category chain
         │
         ↓
 [Storage — fin.db (SQLite)]
-transactions, batch_imports, subscriptions,
+transactions, services, subscriptions, batch_imports,
 categories, merchant_rules, accounts, statements
 ```
 
 **Key files:**
 - `app.py` — Flask application, all API routes
-- `static/index.html` — SPA shell (4-tab structure)
+- `static/index.html` — SPA shell (6-tab structure)
 - `static/app.js` — All frontend JS (tabs, upload, charts, CRUD)
 - `static/styles.css` — Design system styles
 - `static/chart.min.js` — Chart.js local bundle
@@ -136,7 +142,7 @@ Transactions can be flagged as `is_anomaly = 1` for one-time or exceptional expe
 
 ### Merchant Rules
 
-Rules map merchant description patterns to categories. Three match types:
+Rules map merchant description patterns to services (and through services to categories). Three match types:
 - `contains` — pattern appears anywhere in description (most common)
 - `startswith` — description starts with pattern
 - `exact` — exact match
