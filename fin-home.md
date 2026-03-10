@@ -13,12 +13,40 @@ Personal finance tracker. Statement parsing, expense categorization, subscriptio
 
 ## Specs
 
-```dataview
-TABLE rows.file.link as Specs
-FROM "fin/specs"
-WHERE type AND type != "spec-prompts"
-GROUP BY type
-SORT type ASC
+```base
+filters:
+  and:
+    - file.folder.contains("fin/specs")
+    - type != "spec-prompts"
+properties:
+  "0":
+    name: file.link
+    label: Spec
+  "1":
+    name: type
+    label: Type
+  "2":
+    name: date
+    label: Date
+  "3":
+    name: created_by
+    label: Created By
+  "4":
+    name: file.mtime
+    label: Modified
+views:
+  - type: table
+    name: All Specs
+    order:
+      - type
+      - file.name
+      - file.mtime
+      - file.backlinks
+    sort:
+      - property: file.mtime
+        direction: DESC
+      - property: type
+        direction: ASC
 ```
 > [!warning]- Open Errors (`$= dv.pages('"knowledge/exports/errors"').where(p => p.project == "fin" && !p.resolved).length`)
 > ```dataview
