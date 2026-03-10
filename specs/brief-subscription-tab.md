@@ -6,6 +6,7 @@ created_by: brainstorm
 ---
 # [[fin-home|fin]] — Subscription Management Tab
 *[[dev-hub|Hub]]*
+> Related: [[design|Design]] · [[decision-service-master-nav-restructure|ADR: Service Nav]] · [[pipeline|Backlog]] · [[brief-statement-import-dashboard|Brief: Import]] · [[status|Status]]
 
 > Output of brainstorm session (2026-03-07).
 

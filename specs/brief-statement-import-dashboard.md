@@ -6,6 +6,7 @@ created_by: brainstorm
 ---
 # [[fin-home|fin]] — Statement Import & Dashboard
 *[[dev-hub|Hub]]*
+> Related: [[design|Design]] · [[decision-frontend-architecture|ADR: Frontend]] · [[pipeline|Backlog]] · [[brief-subscription-tab|Brief: Subs]] · [[status|Status]]
 
 > Output of brainstorm session (2026-03-07).
 

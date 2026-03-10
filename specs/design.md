@@ -6,6 +6,7 @@ created_by: architect
 ---
 # [[fin-home|fin]] — Design
 *[[dev-hub|Hub]]*
+> Related: [[brief-statement-import-dashboard|Brief: Import]] · [[brief-subscription-tab|Brief: Subs]] · [[decision-frontend-architecture|ADR: Frontend]] · [[decision-service-master-nav-restructure|ADR: Service Nav]] · [[pipeline|Backlog]] · [[status|Status]]
 
 > Living document: what we're building and why.
 > Update when scope changes, architecture evolves, or constraints are discovered.

@@ -6,6 +6,7 @@ created_by: architect
 ---
 # [[fin-home|fin]] — Pipeline
 *[[dev-hub|Hub]]*
+> Related: [[status|Status]] · [[design|Design]] · [[decision-service-master-nav-restructure|ADR: Service Nav]] · [[decision-frontend-architecture|ADR: Frontend]] · [[brief-statement-import-dashboard|Brief: Import]] · [[brief-subscription-tab|Brief: Subs]]
 
 > Living document. Tracks all remaining feature work, bugs, evaluations, and vision items.
 > Last updated: 2026-03-08

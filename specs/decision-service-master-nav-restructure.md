@@ -6,6 +6,7 @@ created_by: architect
 ---
 # [[fin-home|fin]] — ADR: Service Master + Navigation Restructure
 *[[dev-hub|Hub]]*
+> Related: [[design|Design]] · [[brief-subscription-tab|Brief: Subs]] · [[decision-frontend-architecture|ADR: Frontend]] · [[pipeline|Backlog]] · [[status|Status]]
 
 ## Status
 Accepted

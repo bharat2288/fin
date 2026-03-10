@@ -6,6 +6,7 @@ created_by: architect
 ---
 # [[fin-home|fin]] — Frontend Architecture Decisions
 *[[dev-hub|Hub]]*
+> Related: [[design|Design]] · [[brief-statement-import-dashboard|Brief: Import]] · [[decision-service-master-nav-restructure|ADR: Service Nav]] · [[pipeline|Backlog]] · [[status|Status]]
 
 > ADRs from architect session (2026-03-07). Covers the full-stack Statement Import & Dashboard feature.
 

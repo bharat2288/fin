@@ -5,6 +5,7 @@ date: 2026-03-08
 ---
 # [[fin-home|fin]] — Status
 *[[dev-hub|Hub]]*
+> Related: [[pipeline|Backlog]] · [[design|Design]] · [[decision-service-master-nav-restructure|ADR: Service Nav]] · [[decision-frontend-architecture|ADR: Frontend]] · [[brief-statement-import-dashboard|Brief: Import]] · [[brief-subscription-tab|Brief: Subs]]
 
 > Session continuity document. Claude Code updates this at end of each session.
 > Keeps current state + last ~5 sessions. Older sessions archived to [[archive-sessions]].
