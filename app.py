@@ -276,7 +276,7 @@ def api_services_create():
 
 @app.route("/api/services/<int:svc_id>", methods=["PUT"])
 def api_services_update(svc_id):
-    """Update a service."""
+    """Update a service. Auto re-categorizes affected transactions on category change."""
     data = request.get_json()
     conn = get_connection()
     allowed = ["name", "category_id", "notes", "is_one_off"]
@@ -292,9 +292,26 @@ def api_services_update(svc_id):
     params.append(svc_id)
     try:
         conn.execute(f"UPDATE services SET {', '.join(sets)} WHERE id = ?", params)
+
+        # Auto re-categorize: if category changed, update all linked transactions + rules
+        recategorized = 0
+        if "category_id" in data:
+            new_cat_id = data["category_id"]
+            # Sync rules that point to this service
+            conn.execute(
+                "UPDATE merchant_rules SET category_id = ? WHERE service_id = ?",
+                (new_cat_id, svc_id),
+            )
+            # Update transactions linked to this service
+            cur = conn.execute(
+                "UPDATE transactions SET category_id = ? WHERE service_id = ? AND category_id != ?",
+                (new_cat_id, svc_id, new_cat_id),
+            )
+            recategorized = cur.rowcount
+
         conn.commit()
         conn.close()
-        return jsonify({"success": True})
+        return jsonify({"success": True, "recategorized": recategorized})
     except Exception as e:
         conn.close()
         return jsonify({"error": str(e)}), 400
@@ -827,6 +844,134 @@ def api_update_transaction(tx_id: int):
     return jsonify({"ok": True, "id": tx_id})
 
 
+@app.route("/api/transactions/resolve", methods=["POST"])
+def api_resolve_transaction():
+    """Resolve an uncategorized transaction: find-or-create service, create rule, update tx.
+
+    Accepts:
+        tx_id: transaction ID to resolve
+        service_name: existing or new service name
+        service_id: existing service ID (optional — if provided, service_name ignored for lookup)
+        category_id: category for the service (used only when creating new service)
+        pattern: merchant rule pattern (auto-suggested from description)
+        match_type: 'contains' (default) or 'startswith'
+
+    Flow:
+        1. Find existing service by service_id or name, or create new one
+        2. Create merchant rule linking pattern → service → category
+        3. Update the transaction with service_id + category_id
+        4. Backfill any other NULL-service transactions matching the new rule
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    tx_id = data.get("tx_id")
+    service_name = (data.get("service_name") or "").strip()
+    service_id = data.get("service_id")
+    category_id = data.get("category_id")
+    pattern = (data.get("pattern") or "").strip()
+    match_type = data.get("match_type", "contains")
+
+    if not tx_id:
+        return jsonify({"error": "tx_id required"}), 400
+    if not service_name and not service_id:
+        return jsonify({"error": "service_name or service_id required"}), 400
+    if not pattern:
+        return jsonify({"error": "pattern required"}), 400
+
+    conn = get_connection()
+    try:
+        # Step 1: Resolve service — find existing or create new
+        if service_id:
+            # Verify it exists and get its category
+            svc = conn.execute(
+                "SELECT id, category_id FROM services WHERE id = ?", (service_id,)
+            ).fetchone()
+            if not svc:
+                conn.close()
+                return jsonify({"error": f"Service ID {service_id} not found"}), 404
+            service_id = svc["id"]
+            # Use the service's category as source of truth
+            category_id = svc["category_id"]
+        else:
+            # Look up by name (case-insensitive)
+            existing = conn.execute(
+                "SELECT id, category_id FROM services WHERE UPPER(name) = ?",
+                (service_name.upper(),),
+            ).fetchone()
+            if existing:
+                service_id = existing["id"]
+                category_id = existing["category_id"]
+            else:
+                # Create new service — category_id is required
+                if not category_id:
+                    conn.close()
+                    return jsonify({"error": "category_id required for new service"}), 400
+                conn.execute(
+                    "INSERT INTO services (name, category_id) VALUES (?, ?)",
+                    (service_name, category_id),
+                )
+                service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # Step 2: Create merchant rule (skip if duplicate pattern exists)
+        rule_exists = conn.execute(
+            "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
+            (pattern.upper(),),
+        ).fetchone()
+        rule_id = None
+        if not rule_exists:
+            conn.execute(
+                "INSERT INTO merchant_rules (pattern, category_id, match_type, confidence, service_id) "
+                "VALUES (?, ?, ?, 'confirmed', ?)",
+                (pattern, category_id, match_type, service_id),
+            )
+            rule_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        else:
+            rule_id = rule_exists["id"]
+            # Update existing rule to link to service if it wasn't linked
+            conn.execute(
+                "UPDATE merchant_rules SET service_id = ?, category_id = ? WHERE id = ? AND service_id IS NULL",
+                (service_id, category_id, rule_id),
+            )
+
+        # Step 3: Update the target transaction
+        conn.execute(
+            "UPDATE transactions SET category_id = ?, service_id = ? WHERE id = ?",
+            (category_id, service_id, tx_id),
+        )
+
+        # Step 4: Backfill other transactions matching this pattern with NULL service
+        backfilled = 0
+        if match_type == "contains":
+            cur = conn.execute(
+                "UPDATE transactions SET service_id = ?, category_id = ? "
+                "WHERE service_id IS NULL AND UPPER(description) LIKE '%' || ? || '%'",
+                (service_id, category_id, pattern.upper()),
+            )
+            backfilled = cur.rowcount
+        elif match_type == "startswith":
+            cur = conn.execute(
+                "UPDATE transactions SET service_id = ?, category_id = ? "
+                "WHERE service_id IS NULL AND UPPER(description) LIKE ? || '%'",
+                (service_id, category_id, pattern.upper()),
+            )
+            backfilled = cur.rowcount
+
+        conn.commit()
+        conn.close()
+        return jsonify({
+            "success": True,
+            "service_id": service_id,
+            "rule_id": rule_id,
+            "category_id": category_id,
+            "backfilled": backfilled,
+        })
+    except Exception as e:
+        conn.close()
+        return jsonify({"error": str(e)}), 400
+
+
 def _build_filters(args) -> tuple[str, list]:
     """Build SQL WHERE clause fragments from common query params."""
     filters = ""
@@ -903,18 +1048,18 @@ def api_import_upload():
             saved_paths.append((save_path, safe_name))
             filenames.append(safe_name)
 
-        # Detect and parse each file
-        # _auto_detect_and_parse returns a list (multi-card CSVs produce multiple statements)
+        # Detect and parse each file via parser registry
+        from parsers import auto_detect_and_parse, handle_vantage_split
         parsed_statements = []
         for save_path, filename in saved_paths:
             try:
-                stmts = _auto_detect_and_parse(save_path)
+                stmts = auto_detect_and_parse(save_path)
                 parsed_statements.extend(stmts)
             except Exception as e:
                 errors.append({"file": filename, "error": str(e)})
 
         # Handle Vantage MK/BS split if both exports present
-        parsed_statements = _handle_vantage_split(parsed_statements)
+        parsed_statements = handle_vantage_split(parsed_statements)
 
         # Group transactions by account and categorize
         cats = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM categories").fetchall()}
@@ -1472,9 +1617,35 @@ def api_rules_update(rule_id):
 
     params.append(rule_id)
     conn.execute(f"UPDATE merchant_rules SET {', '.join(sets)} WHERE id = ?", params)
+
+    # Auto re-categorize: re-run this specific rule against transactions
+    # Fetch the updated rule to get its current state
+    rule = conn.execute(
+        "SELECT pattern, match_type, category_id, service_id, min_amount, max_amount "
+        "FROM merchant_rules WHERE id = ?", (rule_id,)
+    ).fetchone()
+    recategorized = 0
+    if rule:
+        pattern_upper = rule["pattern"].upper()
+        # Build the match condition based on match_type
+        if rule["match_type"] == "contains":
+            match_cond = "UPPER(description) LIKE '%' || ? || '%'"
+        elif rule["match_type"] == "startswith":
+            match_cond = "UPPER(description) LIKE ? || '%'"
+        else:  # exact
+            match_cond = "UPPER(description) = ?"
+
+        # Update matching transactions with the rule's current category + service
+        cur = conn.execute(
+            f"UPDATE transactions SET category_id = ?, service_id = ? "
+            f"WHERE {match_cond} AND is_payment = 0 AND is_transfer = 0",
+            (rule["category_id"], rule["service_id"], pattern_upper),
+        )
+        recategorized = cur.rowcount
+
     conn.commit()
     conn.close()
-    return jsonify({"success": True})
+    return jsonify({"success": True, "recategorized": recategorized})
 
 
 @app.route("/api/rules/<int:rule_id>", methods=["DELETE"])
@@ -1646,7 +1817,7 @@ def api_subscriptions():
             d["tx_amount"] = round(monthly_sums[0]["month_total"], 2)
 
         # Billed = configured amount per cycle (source of truth)
-        amt = d.get("amount") or d.get("amount_sgd") or 0
+        amt = d.get("amount") or 0
         cur = d.get("currency") or "SGD"
 
         # Monthly equivalent from configured amount
@@ -1665,9 +1836,6 @@ def api_subscriptions():
             d["monthly_sgd"] = round(_monthly_equivalent(amt, d["frequency"], d["periods"], cur, fx_rate), 2)
 
         d["display_category"] = f"{d['parent_name']} > {d['category_name']}" if d["parent_name"] else (d["category_name"] or "")
-        # Use live service name from JOIN, fall back to stale text field
-        if d.get("service_name"):
-            d["service"] = d["service_name"]
         d["fx_rate"] = fx_rate
 
         # Anchor-based renewal: advance from renewal_date anchor until future
@@ -1686,31 +1854,30 @@ def api_subscriptions():
 def api_subscriptions_create():
     """Add a new subscription."""
     data = request.get_json()
-    if not data or not data.get("service"):
-        return jsonify({"error": "Service name is required"}), 400
+    if not data or not data.get("service_id"):
+        return jsonify({"error": "service_id is required"}), 400
 
     conn = get_connection()
     try:
         amount = data.get("amount", 0)
         currency = data.get("currency", "SGD")
-        # Legacy columns still NOT NULL — populate them from amount/currency
-        amount_sgd = amount if currency == "SGD" else 0
-        amount_usd = amount if currency == "USD" else None
+        # Derive match_pattern from service name if not provided
+        match_pattern = data.get("match_pattern")
+        if not match_pattern:
+            svc = conn.execute("SELECT name FROM services WHERE id = ?", (data["service_id"],)).fetchone()
+            match_pattern = svc["name"].upper() if svc else ""
 
         conn.execute("""
             INSERT INTO subscriptions
-                (service, service_id, category_id, amount, currency, amount_sgd, amount_usd,
+                (service_id, category_id, amount, currency,
                  frequency, periods, account_id, last_paid, renewal_date, status,
                  link, notes, match_pattern)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            data["service"],
-            data.get("service_id"),
+            data["service_id"],
             data.get("category_id"),
             amount,
             currency,
-            amount_sgd,
-            amount_usd,
             data.get("frequency", "monthly"),
             data.get("periods", 1),
             data.get("account_id"),
@@ -1719,7 +1886,7 @@ def api_subscriptions_create():
             data.get("status", "active"),
             data.get("link"),
             data.get("notes"),
-            data.get("match_pattern", data["service"].upper()),
+            match_pattern,
         ))
         conn.commit()
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -1737,7 +1904,7 @@ def api_subscriptions_update(sub_id):
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
-    allowed = ["service", "service_id", "category_id", "amount", "currency", "frequency",
+    allowed = ["service_id", "category_id", "amount", "currency", "frequency",
                "periods", "account_id", "last_paid", "renewal_date", "status",
                "link", "notes", "match_pattern"]
     sets = []
@@ -1866,141 +2033,6 @@ def _add_billing_period(d: date, frequency: str, periods: int) -> date:
 def api_fx_rate():
     """Get current USD→SGD exchange rate."""
     return jsonify({"usd_sgd": _get_usd_sgd_rate()})
-
-
-# ---------------------------------------------------------------------------
-# Parser helpers
-# ---------------------------------------------------------------------------
-
-def _auto_detect_and_parse(filepath: str) -> list:
-    """Auto-detect file format and parse.
-
-    Always returns a list of ParsedStatement objects (may be 1 or more,
-    e.g. multi-card DBS CSVs produce one statement per card).
-    """
-    path = Path(filepath)
-    ext = path.suffix.lower()
-
-    if ext == ".pdf":
-        # Try UOB first, then DBS
-        from parse_uob import detect_uob_pdf, parse_uob_pdf
-        if detect_uob_pdf(filepath):
-            return [parse_uob_pdf(filepath)]
-        # DBS PDF
-        from parse_dbs import parse_statement
-        return [parse_statement(filepath)]
-
-    elif ext == ".csv":
-        # Check if Citi format (no header, starts with date)
-        from parse_citi_csv import detect_citi_csv
-        if detect_citi_csv(filepath):
-            from parse_citi_csv import parse_citi_csv
-            return [parse_citi_csv(filepath)]
-        # DBS CSV — returns a list (may contain multiple cards)
-        from parse_dbs_csv import parse_csv
-        return parse_csv(filepath)
-
-    else:
-        raise ValueError(f"Unsupported file format: {ext}")
-
-
-def _handle_vantage_split(statements: list) -> list:
-    """Handle DBS Vantage MK/BS cardholder split.
-
-    If both a BS-only export and MK+BS combined export are detected,
-    cross-reference to tag each transaction as MK or BS.
-    """
-    # Find Vantage statements by account name
-    vantage_bs = []  # BS-only (supplementary, typically card 3696)
-    vantage_combined = []  # MK+BS (primary, typically card 7436)
-    other = []
-
-    for stmt in statements:
-        if not stmt.accounts:
-            other.append(stmt)
-            continue
-
-        acct = stmt.accounts[0].upper()
-        if "VANTAGE" in acct:
-            # Heuristic: the BS-only export has fewer transactions
-            # OR we detect from the original folder name (not available here)
-            # For now: if we see two Vantage statements with different card numbers,
-            # the one with fewer transactions is BS-only
-            vantage_combined.append(stmt)
-        else:
-            other.append(stmt)
-
-    # If we have exactly 2 Vantage groups with different card numbers, split
-    if len(vantage_combined) >= 2:
-        # Group by card number
-        by_card = {}
-        for stmt in vantage_combined:
-            card = stmt.accounts[0] if stmt.accounts else "unknown"
-            if card not in by_card:
-                by_card[card] = []
-            by_card[card].append(stmt)
-
-        if len(by_card) == 2:
-            cards = list(by_card.keys())
-            # The card with fewer total transactions is BS-only
-            count0 = sum(len(s.transactions) for s in by_card[cards[0]])
-            count1 = sum(len(s.transactions) for s in by_card[cards[1]])
-
-            if count0 < count1:
-                bs_card, combined_card = cards[0], cards[1]
-            else:
-                bs_card, combined_card = cards[1], cards[0]
-
-            # Build BS fingerprint set
-            bs_fingerprints = set()
-            for stmt in by_card[bs_card]:
-                for tx in stmt.transactions:
-                    bs_fingerprints.add((tx.date, tx.description, tx.amount_sgd))
-
-            # Tag combined transactions
-            from parse_dbs import ParsedTransaction, ParsedStatement
-            mk_txns = []
-            bs_txns = []
-
-            for stmt in by_card[combined_card]:
-                for tx in stmt.transactions:
-                    fp = (tx.date, tx.description, tx.amount_sgd)
-                    if fp in bs_fingerprints:
-                        bs_txns.append(tx)
-                        bs_fingerprints.discard(fp)  # match once
-                    else:
-                        mk_txns.append(tx)
-
-            # Create split statements
-            combined_name = by_card[combined_card][0].accounts[0]
-            mk_name = combined_name.replace(combined_name.split()[-1], combined_name.split()[-1] + " (MK)")
-            bs_name = combined_name.replace(combined_name.split()[-1], combined_name.split()[-1] + " (BS)")
-
-            # Update card_info on each transaction
-            for tx in mk_txns:
-                tx.card_info = mk_name
-            for tx in bs_txns:
-                tx.card_info = bs_name
-
-            mk_stmt = ParsedStatement(
-                statement_type="credit_card",
-                statement_date=by_card[combined_card][0].statement_date,
-                accounts=[mk_name],
-                filename="vantage_mk_split",
-                transactions=mk_txns,
-            )
-            bs_stmt = ParsedStatement(
-                statement_type="credit_card",
-                statement_date=by_card[combined_card][0].statement_date,
-                accounts=[bs_name],
-                filename="vantage_bs_split",
-                transactions=bs_txns,
-            )
-
-            return other + [mk_stmt, bs_stmt]
-
-    # No split needed — return as-is
-    return other + vantage_combined
 
 
 # ---------------------------------------------------------------------------

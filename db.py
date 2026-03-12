@@ -487,20 +487,18 @@ def init_db() -> None:
                 END
         """)
         conn.commit()
-        # Diagnostic: flag suspicious FX ratios for manual review
-        suspects = conn.execute("""
-            SELECT service, amount_sgd, amount_usd,
-                   ROUND(amount_sgd / amount_usd, 2) as implied_fx
-            FROM subscriptions
-            WHERE amount_usd > 0 AND amount_sgd > 0
-              AND (amount_sgd / amount_usd < 1.20 OR amount_sgd / amount_usd > 1.50)
-        """).fetchall()
-        if suspects:
-            print(f"WARNING: {len(suspects)} subs with unusual SGD/USD ratios (review manually):")
-            for s in suspects:
-                print(f"  {s['service']}: SGD={s['amount_sgd']}, USD={s['amount_usd']}, implied FX={s['implied_fx']}")
+        # (Diagnostic for FX ratios removed — legacy columns being dropped)
         migrated = conn.execute("SELECT COUNT(*) FROM subscriptions WHERE amount IS NOT NULL").fetchone()[0]
         print(f"Billing model migration: {migrated} subscriptions migrated to amount/currency")
+
+    # Migration: drop legacy subscription columns (service text, amount_sgd, amount_usd, card)
+    # These have been replaced by service_id FK, amount+currency, and account_id FK
+    if "amount_sgd" in sub_columns:
+        for col in ["amount_sgd", "amount_usd", "card", "service"]:
+            if col in sub_columns:
+                conn.execute(f"ALTER TABLE subscriptions DROP COLUMN {col}")
+        conn.commit()
+        print("Legacy subscription columns dropped: service, amount_sgd, amount_usd, card")
 
     # Seed categories — INSERT OR IGNORE so new categories get added
     # First pass: insert all top-level (parent=None)

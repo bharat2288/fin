@@ -597,23 +597,37 @@
         </div>
     </div>
 
-    <!-- Rule Create Modal -->
-    <div class="modal-overlay" id="rule-modal" style="display:none;">
+    <!-- Resolve Transaction Modal (unified: service + rule + category) -->
+    <div class="modal-overlay" id="resolve-modal" style="display:none;">
         <div class="modal">
             <div class="modal-header">
-                <span class="section-label" style="margin-bottom:0;">/ Create Merchant Rule</span>
-                <button class="modal-close" onclick="closeRuleModal()">&times;</button>
+                <span class="section-label" style="margin-bottom:0;">/ Resolve Transaction</span>
+                <button class="modal-close" onclick="closeResolveModal()">&times;</button>
             </div>
             <div class="modal-body">
-                <p class="modal-desc" id="rule-modal-desc"></p>
+                <p class="modal-desc" id="resolve-modal-desc"></p>
                 <div class="modal-field-row">
                     <div class="modal-field">
-                        <label>Pattern</label>
-                        <input type="text" id="rule-modal-pattern" style="width:100%;">
+                        <label>Service</label>
+                        <input type="text" id="resolve-modal-service" list="resolve-svc-datalist" placeholder="Type to search or create new..." style="width:100%;" autocomplete="off">
+                        <datalist id="resolve-svc-datalist"></datalist>
+                    </div>
+                </div>
+                <div class="modal-field-row">
+                    <div class="modal-field">
+                        <label>Category</label>
+                        <select id="resolve-modal-category" style="width:100%;"></select>
+                        <small id="resolve-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
+                    </div>
+                </div>
+                <div class="modal-field-row">
+                    <div class="modal-field">
+                        <label>Rule Pattern</label>
+                        <input type="text" id="resolve-modal-pattern" style="width:100%;">
                     </div>
                     <div class="modal-field" style="flex:0 0 140px;">
                         <label>Match Type</label>
-                        <select id="rule-modal-match" style="width:100%;">
+                        <select id="resolve-modal-match" style="width:100%;">
                             <option value="contains">Contains</option>
                             <option value="startswith">Starts with</option>
                         </select>
@@ -621,8 +635,8 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn" onclick="closeRuleModal()">Skip</button>
-                <button class="btn btn-primary" onclick="saveRuleFromModal()">Create Rule</button>
+                <button class="btn" onclick="closeResolveModal()">Cancel</button>
+                <button class="btn btn-primary" id="resolve-modal-save" onclick="saveResolveModal()">Resolve</button>
             </div>
         </div>
     </div>

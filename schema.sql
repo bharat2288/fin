@@ -64,14 +64,13 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE TABLE IF NOT EXISTS subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service TEXT NOT NULL,
+    service_id INTEGER,             -- FK to services table (source of truth for name)
     category_id INTEGER,
-    amount_sgd REAL NOT NULL,       -- current billed amount in SGD
-    amount_usd REAL,
+    amount REAL NOT NULL,           -- billed amount per cycle
+    currency TEXT DEFAULT 'SGD',    -- 'SGD' or 'USD'
     frequency TEXT NOT NULL,        -- 'monthly', 'yearly', 'quarterly'
     periods INTEGER DEFAULT 1,      -- number of periods per billing
-    card TEXT,                      -- legacy text field (deprecated)
-    account_id INTEGER,            -- FK to accounts table (single source of truth)
+    account_id INTEGER,            -- FK to accounts table
     last_paid TEXT,                 -- YYYY-MM-DD
     renewal_date TEXT,             -- YYYY-MM-DD
     status TEXT DEFAULT 'active',   -- 'active', 'deactivated', 'paused'
@@ -79,6 +78,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     notes TEXT,
     match_pattern TEXT,            -- pattern to match against transaction descriptions
     created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (service_id) REFERENCES services(id),
     FOREIGN KEY (category_id) REFERENCES categories(id),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );

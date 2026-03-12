@@ -29,7 +29,7 @@ let subsSortAsc = true;        // Sort direction
 let subsFxRate = 1.35;         // USD→SGD rate from subscriptions API
 let noteModalTxId = null;      // Transaction ID being edited in note modal
 let noteModalIconEl = null;    // Icon element to update after save
-let ruleModalCatId = null;     // Category ID for rule creation modal
+// (ruleModalCatId removed — replaced by resolve modal)
 
 // Chart-table linking state
 let chartFilter = { categories: [], period: null, source: null };
@@ -867,56 +867,10 @@ async function clearNote() {
 }
 
 function showCategoryPicker(txId, containerEl) {
-    // Don't open a second picker if one is already showing
-    if (containerEl.querySelector('select')) return;
-
-    // Build hierarchical dropdown
-    let options = '<option value="">-- Select --</option>';
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-    parents.forEach(p => {
-        options += `<option value="${p.id}">${p.name}</option>`;
-        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-        children.forEach(c => {
-            options += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
-        });
-    });
-
-    const select = document.createElement('select');
-    select.className = 'cat-picker-inline';
-    select.innerHTML = options;
-
-    // Replace badges with dropdown
-    containerEl.innerHTML = '';
-    containerEl.appendChild(select);
-    select.focus();
-
-    // On selection, save and offer rule creation
-    select.addEventListener('change', async () => {
-        const catId = parseInt(select.value);
-        if (!catId) return;
-
-        const row = containerEl.closest('tr');
-        const desc = row?.dataset.description || '';
-
-        await fetch(`/api/transactions/${txId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ category_id: catId }),
-        });
-
-        txPage(0); // reload current page to show updated category
-
-        // Offer to create a merchant rule
-        const cat = categories.find(c => c.id === catId);
-        if (desc) {
-            openRuleModal(desc, catId, cat ? cat.display_name : '');
-        }
-    });
-
-    // On blur (click away), cancel
-    select.addEventListener('blur', () => {
-        txPage(0); // reload to restore badges
-    });
+    // Open the unified resolve modal instead of inline category picker
+    const row = containerEl.closest('tr');
+    const desc = row?.dataset.description || '';
+    openResolveModal(txId, desc);
 }
 
 // Wire up search/filter inputs
@@ -956,7 +910,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape') {
             if (document.getElementById('note-modal').style.display !== 'none') closeNoteModal();
-            if (document.getElementById('rule-modal').style.display !== 'none') closeRuleModal();
+            if (document.getElementById('resolve-modal').style.display !== 'none') closeResolveModal();
             if (document.getElementById('edit-rule-modal').style.display !== 'none') closeEditRuleModal();
             if (document.getElementById('add-service-modal').style.display !== 'none') closeAddServiceModal();
             if (document.getElementById('edit-service-modal').style.display !== 'none') closeEditServiceModal();
@@ -964,11 +918,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Close modals on overlay click
-    ['note-modal', 'rule-modal', 'edit-rule-modal', 'add-service-modal', 'edit-service-modal'].forEach(id => {
+    ['note-modal', 'resolve-modal', 'edit-rule-modal', 'add-service-modal', 'edit-service-modal'].forEach(id => {
         document.getElementById(id)?.addEventListener('click', e => {
             if (e.target.classList.contains('modal-overlay')) {
                 if (id === 'note-modal') closeNoteModal();
-                if (id === 'rule-modal') closeRuleModal();
+                if (id === 'resolve-modal') closeResolveModal();
                 if (id === 'edit-rule-modal') closeEditRuleModal();
                 if (id === 'add-service-modal') closeAddServiceModal();
                 if (id === 'edit-service-modal') closeEditServiceModal();
@@ -1001,48 +955,193 @@ function suggestPattern(description) {
     return parts.slice(0, Math.max(cutoff, 2)).join(' ');
 }
 
-function openRuleModal(description, categoryId, categoryName) {
-    ruleModalCatId = categoryId;
-    document.getElementById('rule-modal-desc').textContent =
-        `Create a rule to auto-categorize similar transactions as "${categoryName}"`;
-    document.getElementById('rule-modal-pattern').value = suggestPattern(description);
-    document.getElementById('rule-modal-match').value = 'contains';
-    document.getElementById('rule-modal').style.display = 'flex';
-    document.getElementById('rule-modal-pattern').focus();
-    document.getElementById('rule-modal-pattern').select();
+// ---- Resolve Transaction Modal ----
+// Unified flow: pick/create service → category auto-fills → rule pattern → one save
+
+let resolveModalTxId = null;
+let resolveServicesCache = []; // services list for the datalist
+
+async function openResolveModal(txId, description) {
+    resolveModalTxId = txId;
+
+    // Show the description being resolved
+    document.getElementById('resolve-modal-desc').textContent =
+        `Resolve: "${description}"`;
+
+    // Auto-suggest rule pattern from description
+    document.getElementById('resolve-modal-pattern').value = suggestPattern(description);
+    document.getElementById('resolve-modal-match').value = 'contains';
+
+    // Clear service input
+    document.getElementById('resolve-modal-service').value = '';
+    document.getElementById('resolve-cat-hint').style.display = 'none';
+
+    // Load services for datalist
+    await loadResolveServices();
+
+    // Populate category dropdown (for new services or manual override)
+    populateResolveCategoryDropdown();
+
+    // Try to auto-match service from description
+    autoMatchService(description);
+
+    // Show modal and focus service input
+    document.getElementById('resolve-modal').style.display = 'flex';
+    document.getElementById('resolve-modal-service').focus();
 }
 
-function closeRuleModal() {
-    document.getElementById('rule-modal').style.display = 'none';
-    ruleModalCatId = null;
+async function loadResolveServices() {
+    // Reuse allServicesList if available, otherwise fetch
+    if (!allServicesList || !allServicesList.length) {
+        const res = await fetch('/api/services');
+        allServicesList = await res.json();
+    }
+    resolveServicesCache = allServicesList;
+
+    // Populate datalist
+    const datalist = document.getElementById('resolve-svc-datalist');
+    datalist.innerHTML = '';
+    const sorted = [...resolveServicesCache].sort((a, b) => a.name.localeCompare(b.name));
+    sorted.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.name;
+        opt.label = s.display_category || '';
+        datalist.appendChild(opt);
+    });
 }
 
-async function saveRuleFromModal() {
-    const pattern = document.getElementById('rule-modal-pattern').value.trim();
-    if (!pattern || !ruleModalCatId) return;
+function populateResolveCategoryDropdown() {
+    const select = document.getElementById('resolve-modal-category');
+    let options = '<option value="">-- Select category --</option>';
+    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
+    parents.forEach(p => {
+        options += `<option value="${p.id}">${p.name}</option>`;
+        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
+        children.forEach(c => {
+            options += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
+        });
+    });
+    select.innerHTML = options;
+}
 
-    const matchType = document.getElementById('rule-modal-match').value;
-    const btn = document.querySelector('#rule-modal .btn-primary');
+function autoMatchService(description) {
+    // Try to find an existing service whose name appears in the description
+    const descUpper = description.toUpperCase();
+    // Sort by name length descending — prefer more specific matches
+    const sorted = [...resolveServicesCache].sort((a, b) => b.name.length - a.name.length);
+    for (const svc of sorted) {
+        if (descUpper.includes(svc.name.toUpperCase())) {
+            document.getElementById('resolve-modal-service').value = svc.name;
+            onResolveServiceChange(svc.name);
+            return;
+        }
+    }
+}
+
+function onResolveServiceChange(value) {
+    // When service input changes, auto-fill category if it's an existing service
+    const trimmed = (value || '').trim();
+    const match = resolveServicesCache.find(
+        s => s.name.toLowerCase() === trimmed.toLowerCase()
+    );
+    const catSelect = document.getElementById('resolve-modal-category');
+    const catHint = document.getElementById('resolve-cat-hint');
+
+    if (match && match.category_id) {
+        catSelect.value = String(match.category_id);
+        catHint.style.display = 'block';
+    } else {
+        catHint.style.display = 'none';
+    }
+}
+
+// Wire service input change event
+document.addEventListener('DOMContentLoaded', () => {
+    const svcInput = document.getElementById('resolve-modal-service');
+    if (svcInput) {
+        svcInput.addEventListener('input', () => onResolveServiceChange(svcInput.value));
+        svcInput.addEventListener('change', () => onResolveServiceChange(svcInput.value));
+    }
+});
+
+function closeResolveModal() {
+    document.getElementById('resolve-modal').style.display = 'none';
+    resolveModalTxId = null;
+}
+
+async function saveResolveModal() {
+    const serviceName = document.getElementById('resolve-modal-service').value.trim();
+    const categoryId = parseInt(document.getElementById('resolve-modal-category').value);
+    const pattern = document.getElementById('resolve-modal-pattern').value.trim();
+    const matchType = document.getElementById('resolve-modal-match').value;
+
+    if (!serviceName) { alert('Please enter a service name.'); return; }
+    if (!pattern) { alert('Please enter a rule pattern.'); return; }
+
+    // Find service_id if it's an existing service
+    const existingService = resolveServicesCache.find(
+        s => s.name.toLowerCase() === serviceName.toLowerCase()
+    );
+
+    // For new services, category is required
+    if (!existingService && !categoryId) {
+        alert('Please select a category for the new service.');
+        return;
+    }
+
+    const btn = document.getElementById('resolve-modal-save');
     btn.disabled = true;
-    btn.textContent = 'Creating...';
+    btn.textContent = 'Resolving...';
 
     try {
-        const res = await fetch('/api/rules', {
+        const payload = {
+            tx_id: resolveModalTxId,
+            service_name: serviceName,
+            pattern: pattern,
+            match_type: matchType,
+        };
+        // If existing service, pass its ID for reliable lookup
+        if (existingService) {
+            payload.service_id = existingService.id;
+        } else {
+            payload.category_id = categoryId;
+        }
+
+        const res = await fetch('/api/transactions/resolve', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pattern, category_id: ruleModalCatId, match_type: matchType }),
+            body: JSON.stringify(payload),
         });
         const data = await res.json();
         if (data.error) {
             alert('Error: ' + data.error);
             return;
         }
-        closeRuleModal();
+
+        // Invalidate services cache so new services show up
+        allServicesList = null;
+        allServicesCache = [];
+
+        closeResolveModal();
+        txPage(0); // reload transaction table
+
+        // Show feedback if transactions were backfilled
+        if (data.backfilled > 0) {
+            console.log(`Resolved: service_id=${data.service_id}, rule_id=${data.rule_id}, backfilled=${data.backfilled} transactions`);
+        }
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Create Rule';
+        btn.textContent = 'Resolve';
     }
 }
+
+// Legacy aliases — keep for any remaining references
+function openRuleModal(description, categoryId, categoryName) {
+    // Redirect to resolve modal (no txId context — skip)
+    console.warn('openRuleModal called without resolve context — use openResolveModal instead');
+}
+function closeRuleModal() { closeResolveModal(); }
+function saveRuleFromModal() { saveResolveModal(); }
 
 // ============================================================
 // IMPORT
@@ -3120,15 +3219,15 @@ function renderSubscriptions(subs) {
     filtered = [...filtered].sort((a, b) => {
         let va, vb;
         switch (subsSortCol) {
-            case 'service':   va = a.service.toLowerCase(); vb = b.service.toLowerCase(); break;
+            case 'service':   va = (a.service_name || '').toLowerCase(); vb = (b.service_name || '').toLowerCase(); break;
             case 'category':  va = (a.display_category || '').toLowerCase(); vb = (b.display_category || '').toLowerCase(); break;
             case 'billed':    va = a.amount || 0; vb = b.amount || 0; break;
             case 'monthly':   va = a.monthly_sgd || 0; vb = b.monthly_sgd || 0; break;
             case 'frequency': va = a.frequency; vb = b.frequency; break;
-            case 'card':      va = (a.account_short_name || a.card || '').toLowerCase(); vb = (b.account_short_name || b.card || '').toLowerCase(); break;
+            case 'card':      va = (a.account_short_name || '').toLowerCase(); vb = (b.account_short_name || '').toLowerCase(); break;
             case 'last_paid': va = a.tx_last_paid || a.last_paid || ''; vb = b.tx_last_paid || b.last_paid || ''; break;
             case 'renewal':   va = a.computed_renewal || a.renewal_date || ''; vb = b.computed_renewal || b.renewal_date || ''; break;
-            default:          va = a.service.toLowerCase(); vb = b.service.toLowerCase();
+            default:          va = (a.service_name || '').toLowerCase(); vb = (b.service_name || '').toLowerCase();
         }
         if (va < vb) return subsSortAsc ? -1 : 1;
         if (va > vb) return subsSortAsc ? 1 : -1;
@@ -3162,7 +3261,7 @@ function renderSubscriptions(subs) {
         const statusClass = s.status === 'active' ? '' : 'subs-row-inactive';
 
         // Billed = configured amount per cycle (source of truth)
-        const amt = s.amount || s.amount_sgd || 0;
+        const amt = s.amount || 0;
         const cur = s.currency || 'SGD';
         const currPrefix = cur === 'USD' ? 'US$' : 'S$';
         const billedHtml = `${currPrefix}${formatAmount(amt)}`;
@@ -3192,7 +3291,7 @@ function renderSubscriptions(subs) {
 
         return `<tr class="${statusClass}">
             <td>
-                <div style="font-weight:600;font-size:13px;">${s.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${s.service_id});return false;">${escapeHtml(s.service)}</a>` : escapeHtml(s.service)}</div>
+                <div style="font-weight:600;font-size:13px;">${s.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${s.service_id});return false;">${escapeHtml(s.service_name || '')}</a>` : escapeHtml(s.service_name || '')}</div>
             </td>
             <td class="subs-col-hide-sm"><a href="#" class="cat-link" onclick="navigateToCategory('${escapeHtml(s.parent_name || s.category_name || '')}'${s.parent_name ? `,'${escapeHtml(s.category_name)}'` : ''});return false;">${escapeHtml(s.display_category)}</a></td>
             <td style="text-align:right;font-size:13px;">${billedHtml}</td>
@@ -3200,7 +3299,7 @@ function renderSubscriptions(subs) {
                 ${monthlyLabel}
             </td>
             <td class="subs-col-hide-sm" style="font-size:11px;color:var(--text-tertiary);white-space:nowrap;">${freqLabel}</td>
-            <td class="subs-card-cell subs-col-hide-md" title="${escapeHtml(s.account_short_name || s.card || '')}">${escapeHtml(s.account_short_name || s.card || '')}</td>
+            <td class="subs-card-cell subs-col-hide-md" title="${escapeHtml(s.account_short_name || '')}">${escapeHtml(s.account_short_name || '')}</td>
             <td style="font-size:12px;white-space:nowrap;">${lastPaidHtml}</td>
             <td class="subs-col-hide-sm" style="font-size:12px;color:var(--text-tertiary);white-space:nowrap;">${formatDateDMY(s.computed_renewal || s.renewal_date)}</td>
             <td style="text-align:right;white-space:nowrap;">
@@ -3322,7 +3421,6 @@ async function addSubscription() {
     if (!serviceId) { alert('Please select a service'); return; }
 
     const body = {
-        service: serviceName,
         service_id: serviceId,
         category_id: document.getElementById('sub-category').value ? parseInt(document.getElementById('sub-category').value) : null,
         amount: parseFloat(document.getElementById('sub-amount').value) || 0,
@@ -3473,7 +3571,6 @@ async function saveEditSub() {
     const serviceId = svcSel.value ? parseInt(svcSel.value) : null;
     const serviceName = svcSel.selectedOptions[0]?.textContent?.split(' (')[0] || '';
     const body = {
-        service: serviceName,
         service_id: serviceId,
         category_id: document.getElementById('edit-sub-category').value ? parseInt(document.getElementById('edit-sub-category').value) : null,
         amount: parseFloat(document.getElementById('edit-sub-amount').value) || 0,
