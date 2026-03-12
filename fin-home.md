@@ -7,7 +7,7 @@ cssclasses:
 ---
 # fin
 *[[dev-hub|Hub]] · [[README|GitHub]]*
-<span class="hub-status">Full-stack SPA — billing model, anomaly system, dashboard filters complete. Verify FX ratios next.</span>
+<span class="hub-status">Statement coverage matrix + import service assignment built. 9 active accounts, 7/9 Feb covered. Critical eval next.</span>
 
 Personal finance tracker. Statement parsing, expense categorization, subscription tracking, monthly spending breakdown. Claude is the interface.
 
