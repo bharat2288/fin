@@ -7,7 +7,7 @@ cssclasses:
 ---
 # fin
 *[[dev-hub|Hub]] · [[README|GitHub]]*
-<span class="hub-status">Architectural deep-study complete — 8-item optimization roadmap in review artifact. Next: act on top priorities, then code review (#33).</span>
+<span class="hub-status">5/8 roadmap items done (service-first modal, auto-recat, sub cleanup, parser registry, vantage move). Next: performance fixes (N+1, caching), statement split, then code review #33.</span>
 
 Personal finance tracker. Statement parsing, expense categorization, subscription tracking, monthly spending breakdown. Claude is the interface.
 
