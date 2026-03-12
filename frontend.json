@@ -1,0 +1,46 @@
+{
+  "mode": "dark-neutral",
+  "primaryTemplate": "financial-analytics",
+  "components": [
+    "ds-button",
+    "ds-card",
+    "ds-stat-card",
+    "ds-input",
+    "ds-search",
+    "ds-select",
+    "ds-toggle",
+    "ds-table",
+    "ds-filter-bar",
+    "ds-tabs",
+    "ds-pagination",
+    "ds-badge",
+    "ds-modal",
+    "ds-chart-card",
+    "ds-toast"
+  ],
+  "charts": {
+    "palette": "chart-1 through chart-8 tokens from mode CSS",
+    "stackedBar": "column-reverse flex, gap token, overflow:hidden + border-radius on container, flat segments",
+    "donut": "SVG arc paths (M,A,L,A,Z) with gapAngle 0.02 radians"
+  },
+  "handDrawn": {
+    "enabled": true,
+    "elements": ["loop"]
+  },
+  "favicon": {
+    "style": "geometric",
+    "description": "Abstract bar chart silhouette, warm cream on dark",
+    "generated": true
+  },
+  "designSystemPath": "C:\\Users\\bhara\\dev\\design",
+  "pages": [
+    {
+      "name": "dashboard",
+      "file": "mockup-dashboard.html",
+      "template": "financial-analytics",
+      "created": "2026-03-12",
+      "status": "mockup-approved"
+    }
+  ],
+  "created": "2026-03-12"
+}

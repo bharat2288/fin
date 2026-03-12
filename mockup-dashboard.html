@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark-neutral">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>fin — Personal Finance</title>
+
+  <!-- Favicon: abstract bar chart in warm cream -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23111111'/><rect x='5' y='18' width='5' height='10' rx='1.5' fill='%23e8e0d8' opacity='0.6'/><rect x='13' y='12' width='5' height='16' rx='1.5' fill='%23e8e0d8' opacity='0.8'/><rect x='21' y='6' width='5' height='22' rx='1.5' fill='%23e8e0d8'/></svg>">
+
+  <!-- Manrope (Dark Neutral's single-family font) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    /* ══════════════════════════════════════════
+       DARK NEUTRAL — PAPER ASH TOKENS
+       ══════════════════════════════════════════ */
+    :root {
+      --font-display: 'Manrope', sans-serif;
+      --font-base: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
+
+      /* Elevation — pure gray, no tint */
+      --bg-base: #111111;
+      --bg-surface: #1a1a1a;
+      --bg-raised: #252525;
+      --bg-elevated: #303030;
+
+      /* Borders — pure gray */
+      --border-subtle: #222222;
+      --border-default: #333333;
+      --border-emphasis: #444444;
+
+      /* Text — pure grayscale */
+      --text-primary: #ededed;
+      --text-secondary: #a0a0a0;
+      --text-tertiary: #707070;
+      --text-muted: #505050;
+
+      /* Accent — Warm cream */
+      --accent-camel: #e8e0d8;
+      --accent-camel-hover: #d8d0c8;
+      --accent-camel-subtle: #1e1c1a;
+
+      /* Accent — Taupe */
+      --accent-terra: #a09890;
+      --accent-terra-hover: #908880;
+      --accent-terra-subtle: #1c1a18;
+
+      /* Pop — vivid coral (semantics only) */
+      --accent-pop: #ff6b6b;
+      --accent-pop-subtle: #2a1616;
+
+      /* Semantic */
+      --semantic-success: #4aba6a;
+      --semantic-warning: #d4a85c;
+      --semantic-error: #e05555;
+
+      /* ── Chart Palette (--chart-1 through --chart-8) ── */
+      --chart-1: #e8e0d8;  /* Cream */
+      --chart-2: #ff6b6b;  /* Coral */
+      --chart-3: #a09890;  /* Taupe */
+      --chart-4: #4aba6a;  /* Green */
+      --chart-5: #d4a85c;  /* Golden */
+      --chart-6: #7090c0;  /* Muted blue */
+      --chart-7: #c090b0;  /* Mauve */
+      --chart-8: #80b8a8;  /* Sage */
+
+      /* ── Chart Styling Tokens ── */
+      --chart-segment-gap: 2px;
+      --chart-segment-border: none;
+      --chart-bar-radius: var(--radius-sm);
+      --chart-donut-gap: 2px;
+      --chart-grid-color: var(--border-subtle);
+      --chart-label-color: var(--text-tertiary);
+      --chart-legend-color: var(--text-secondary);
+
+      /* Shadows — flattened */
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+      --shadow-md: 0 2px 6px rgba(0,0,0,0.25);
+      --shadow-lg: 0 8px 20px rgba(0,0,0,0.3);
+      --shadow-glow-camel: 0 0 20px rgba(232, 224, 216, 0.1);
+      --shadow-glow-success: 0 0 10px rgba(74, 186, 106, 0.4);
+
+      /* Scale */
+      --text-xs: 10px;
+      --text-sm: 12px;
+      --text-base: 14px;
+      --text-md: 16px;
+      --text-lg: 18px;
+      --text-xl: 22px;
+      --text-2xl: 28px;
+      --text-3xl: 36px;
+      --text-4xl: 48px;
+
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 20px;
+      --space-6: 24px;
+      --space-8: 32px;
+      --space-10: 40px;
+      --space-12: 48px;
+
+      --radius-sm: 4px;
+      --radius-md: 6px;
+      --radius-lg: 8px;
+      --radius-xl: 12px;
+    }
+
+    /* ══════════════════════════════════════════
+       RESET
+       ══════════════════════════════════════════ */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font-base);
+      font-size: var(--text-base);
+      line-height: 1.5;
+      color: var(--text-primary);
+      background: var(--bg-base);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ══════════════════════════════════════════
+       HEADER
+       ══════════════════════════════════════════ */
+    .app-header {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-5) var(--space-8);
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    /* CHARACTER MOMENT — Manrope 48px, cream accent */
+    .app-title {
+      font-family: var(--font-display);
+      font-size: var(--text-4xl);
+      font-weight: 800;
+      color: var(--accent-camel);
+      line-height: 1;
+      letter-spacing: -0.03em;
+      position: relative;
+      display: inline-block;
+    }
+
+    .app-subtitle {
+      font-size: var(--text-sm);
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-left: var(--space-2);
+      align-self: flex-end;
+      margin-bottom: 6px;
+    }
+
+    /* Hand-drawn Loop — near title, 35% opacity */
+    .hand-drawn-loop {
+      position: absolute;
+      top: -6px;
+      right: -38px;
+      opacity: 0.35;
+    }
+
+    .header-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+    }
+
+    .header-period {
+      font-size: var(--text-sm);
+      color: var(--text-tertiary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ══════════════════════════════════════════
+       NAV TAB BAR
+       ══════════════════════════════════════════ */
+    .tab-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 var(--space-8);
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .tab-bar-main { display: flex; gap: var(--space-1); }
+
+    .tab-btn {
+      padding: var(--space-3) var(--space-5);
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--text-tertiary);
+      font-family: var(--font-base);
+      font-size: var(--text-base);
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .tab-btn:hover { color: var(--text-secondary); }
+
+    .tab-btn.active {
+      color: var(--accent-camel);
+      border-bottom-color: var(--accent-camel);
+      font-weight: 600;
+    }
+
+    .tab-bar-actions {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+
+    .tab-icon-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: var(--radius-md);
+      background: transparent;
+      border: 1px solid var(--border-subtle);
+      color: var(--text-tertiary);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .tab-icon-btn:hover {
+      background: var(--bg-raised);
+      color: var(--accent-camel);
+    }
+
+    .masters-btn {
+      display: flex;
+      align-items: center;
+      gap: var(--space-1);
+      padding: 6px var(--space-3);
+      border-radius: var(--radius-md);
+      background: transparent;
+      border: 1px solid var(--border-subtle);
+      color: var(--text-tertiary);
+      font-family: var(--font-base);
+      font-size: var(--text-sm);
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .masters-btn:hover {
+      background: var(--bg-raised);
+      color: var(--text-secondary);
+    }
+
+    /* ══════════════════════════════════════════
+       DASHBOARD — PAGE CONTAINER
+       ══════════════════════════════════════════ */
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: var(--space-8) var(--space-8) var(--space-12);
+    }
+
+    /* ══════════════════════════════════════════
+       FILTER BAR
+       ══════════════════════════════════════════ */
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      padding: var(--space-3) var(--space-4);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xl);
+      margin-bottom: var(--space-6);
+    }
+
+    .filter-group {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+
+    .filter-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .filter-select {
+      padding: 6px var(--space-3);
+      background: var(--bg-base);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      color: var(--text-secondary);
+      font-family: var(--font-base);
+      font-size: var(--text-sm);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.15);
+      cursor: pointer;
+    }
+
+    .filter-select:focus {
+      border-color: var(--accent-camel);
+      outline: none;
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.15), 0 0 0 2px var(--accent-camel-subtle);
+    }
+
+    .filter-separator {
+      width: 1px;
+      height: 24px;
+      background: var(--border-subtle);
+    }
+
+    /* Toggle group (Personal / All / Moom) */
+    .toggle-group {
+      display: flex;
+      gap: 2px;
+      padding: 3px;
+      background: var(--bg-base);
+      border-radius: var(--radius-lg);
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.2);
+    }
+
+    .toggle-btn {
+      padding: 5px var(--space-3);
+      background: transparent;
+      border: none;
+      border-radius: var(--radius-md);
+      color: var(--text-muted);
+      font-family: var(--font-base);
+      font-size: var(--text-sm);
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .toggle-btn:hover { color: var(--text-secondary); }
+
+    .toggle-btn.active {
+      background: linear-gradient(135deg, var(--accent-camel), var(--accent-camel-hover));
+      color: var(--bg-base);
+      font-weight: 600;
+      box-shadow: var(--shadow-sm), var(--shadow-glow-camel);
+    }
+
+    .filter-check {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      font-size: var(--text-sm);
+      color: var(--text-tertiary);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    /* ds-toggle — replaces raw checkboxes */
+    .ds-toggle {
+      position: relative;
+      width: 32px;
+      height: 18px;
+      flex-shrink: 0;
+    }
+
+    .ds-toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+      position: absolute;
+    }
+
+    .ds-toggle__track {
+      position: absolute;
+      inset: 0;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-default);
+      border-radius: 9px;
+      transition: all 0.2s;
+      cursor: pointer;
+    }
+
+    .ds-toggle__track::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 12px;
+      height: 12px;
+      background: var(--text-tertiary);
+      border-radius: 50%;
+      transition: all 0.2s;
+    }
+
+    .ds-toggle input:checked + .ds-toggle__track {
+      background: var(--accent-camel-subtle);
+      border-color: var(--accent-camel);
+    }
+
+    .ds-toggle input:checked + .ds-toggle__track::after {
+      transform: translateX(14px);
+      background: var(--accent-camel);
+    }
+
+    /* ══════════════════════════════════════════
+       STAT CARDS
+       ══════════════════════════════════════════ */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: var(--space-4);
+      margin-bottom: var(--space-6);
+    }
+
+    .stat-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xl);
+      padding: var(--space-5) var(--space-6);
+      position: relative;
+    }
+
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.04), transparent);
+      border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    }
+
+    .stat-card__value {
+      font-size: var(--text-2xl);
+      font-weight: 700;
+      font-family: var(--font-display);
+      line-height: 1.2;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stat-card__value--accent { color: var(--accent-camel); }
+
+    .stat-card__label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-top: var(--space-1);
+    }
+
+    .stat-card__delta {
+      font-size: var(--text-sm);
+      font-weight: 500;
+      margin-top: var(--space-1);
+    }
+
+    .stat-card__delta--up { color: var(--accent-pop); }
+    .stat-card__delta--down { color: var(--semantic-success); }
+
+    /* ══════════════════════════════════════════
+       SECTION LABEL (/ HEADING pattern)
+       ══════════════════════════════════════════ */
+    .section-label {
+      font-size: var(--text-sm);
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--accent-camel);
+      margin-bottom: var(--space-4);
+    }
+
+    /* ══════════════════════════════════════════
+       CHART CARDS
+       ══════════════════════════════════════════ */
+    .chart-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xl);
+      padding: var(--space-6);
+      position: relative;
+      margin-bottom: var(--space-6);
+    }
+
+    .chart-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.04), transparent);
+      border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: var(--space-4);
+    }
+
+    .chart-toggles { display: flex; gap: var(--space-2); }
+
+    .chart-toggle-btn {
+      padding: 4px var(--space-3);
+      background: var(--bg-base);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      color: var(--text-tertiary);
+      font-family: var(--font-base);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .chart-toggle-btn:hover {
+      background: var(--bg-raised);
+      color: var(--text-secondary);
+    }
+
+    .chart-toggle-btn.active {
+      background: var(--accent-camel-subtle);
+      color: var(--accent-camel);
+      border-color: var(--accent-camel-subtle);
+    }
+
+    /* ══════════════════════════════════════════
+       CHART: STACKED BAR
+       Matches design-system-preview.html pattern:
+       - overflow:hidden on stack container clips top corners
+       - Individual segments are flat rectangles (no radius)
+       - Gap via margin-top on segments
+       ══════════════════════════════════════════ */
+    .bar-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: var(--space-4);
+      height: 260px;
+      background: var(--bg-base);
+      border-radius: var(--radius-lg);
+      padding: var(--space-6) var(--space-4) var(--space-10);
+      position: relative;
+    }
+
+    /* Dashed grid lines at 50% opacity */
+    .bar-chart::before {
+      content: '';
+      position: absolute;
+      top: var(--space-6);
+      left: var(--space-4);
+      right: var(--space-4);
+      bottom: var(--space-10);
+      background-image: repeating-linear-gradient(
+        to bottom,
+        transparent,
+        transparent calc(25% - 1px),
+        color-mix(in srgb, var(--chart-grid-color) 50%, transparent) calc(25% - 1px),
+        color-mix(in srgb, var(--chart-grid-color) 50%, transparent) 25%
+      );
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .bar-group {
+      width: 48px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      height: 100%;
+      justify-content: flex-end;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Stack container: radius on wrapper, overflow clips segments */
+    .bar-stack {
+      width: 100%;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: var(--chart-segment-gap);
+      border-radius: var(--chart-bar-radius) var(--chart-bar-radius) 0 0;
+      overflow: hidden;
+    }
+
+    /* Individual segments: flat rectangles, NO border-radius */
+    .bar-segment {
+      width: 100%;
+      transition: opacity 0.15s;
+    }
+
+    .bar-group:hover .bar-segment { opacity: 0.75; }
+
+    .bar-label {
+      font-size: var(--text-xs);
+      color: var(--chart-label-color);
+      font-family: var(--font-mono);
+      margin-top: 6px;
+      flex-shrink: 0;
+    }
+
+    /* ── Chart Legend ── */
+    .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-4);
+      margin-top: var(--space-4);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      font-size: var(--text-sm);
+      color: var(--chart-legend-color);
+    }
+
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* Two-column chart layout */
+    .charts-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-6);
+      margin-bottom: var(--space-6);
+    }
+
+    .charts-row .chart-card { margin-bottom: 0; }
+
+    /* ══════════════════════════════════════════
+       CHART: DONUT (SVG)
+       Proper arc paths with gapAngle, not circles
+       ══════════════════════════════════════════ */
+    .donut-layout {
+      display: flex;
+      gap: var(--space-6);
+      align-items: flex-start;
+    }
+
+    .donut-svg { width: 160px; height: 160px; flex-shrink: 0; }
+
+    .donut-legend {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex: 1;
+    }
+
+    .donut-legend-item {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      font-size: var(--text-sm);
+    }
+
+    .donut-legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .donut-legend-name { color: var(--chart-legend-color); }
+
+    .donut-legend-val {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      color: var(--chart-label-color);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Subscription list (right column) ── */
+    .sub-list-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .sub-list-item:last-child { border-bottom: none; }
+
+    .sub-list-left {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+
+    .sub-list-name {
+      font-size: var(--text-sm);
+      color: var(--text-secondary);
+    }
+
+    .sub-list-right {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+
+    .sub-list-amount {
+      font-size: var(--text-sm);
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .cat-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      background: var(--bg-raised);
+      border-radius: var(--radius-sm);
+      font-size: 11px;
+      color: var(--text-tertiary);
+      white-space: nowrap;
+    }
+
+    /* ══════════════════════════════════════════
+       TRANSACTION TABLE
+       ══════════════════════════════════════════ */
+    .table-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xl);
+      padding: var(--space-6);
+      position: relative;
+    }
+
+    .table-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.04), transparent);
+      border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    }
+
+    .table-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: var(--space-4);
+    }
+
+    .search-input {
+      padding: 8px var(--space-4);
+      background: var(--bg-base);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      color: var(--text-primary);
+      font-family: var(--font-base);
+      font-size: var(--text-sm);
+      width: 260px;
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.15);
+    }
+
+    .search-input::placeholder { color: var(--text-muted); }
+
+    .search-input:focus {
+      outline: none;
+      border-color: var(--accent-camel);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.15), 0 0 0 2px var(--accent-camel-subtle);
+    }
+
+    .table-count {
+      font-size: var(--text-sm);
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .data-table th {
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      padding: 8px var(--space-3);
+      border-bottom: 2px solid var(--border-default);
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+      transition: color 0.15s;
+    }
+
+    .data-table th:hover { color: var(--text-tertiary); }
+
+    .data-table th .sort-arrow {
+      font-size: 10px;
+      margin-left: 4px;
+      opacity: 0.3;
+    }
+
+    .data-table th.sorted .sort-arrow {
+      opacity: 1;
+      color: var(--accent-camel);
+    }
+
+    .data-table td {
+      padding: 10px var(--space-3);
+      font-size: var(--text-sm);
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .data-table tr:hover td { background: rgba(255,255,255,0.015); }
+
+    .data-table td:first-child {
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .col-amount {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-weight: 500;
+    }
+
+    .col-date {
+      font-variant-numeric: tabular-nums;
+      color: var(--text-tertiary);
+      font-size: 11px;
+      font-family: var(--font-mono);
+    }
+
+    .service-link {
+      color: var(--text-secondary);
+      text-decoration: none;
+      cursor: pointer;
+      transition: color 0.15s;
+    }
+
+    .service-link:hover { color: var(--accent-camel); }
+
+    .account-badge {
+      font-size: var(--text-xs);
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    .anomaly-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      background: var(--accent-pop-subtle);
+      color: var(--accent-pop);
+      border-radius: var(--radius-sm);
+      font-size: var(--text-xs);
+      font-weight: 600;
+    }
+
+    .table-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: var(--space-4);
+      padding-top: var(--space-3);
+      border-top: 1px solid var(--border-subtle);
+    }
+
+    .pagination { display: flex; gap: var(--space-1); }
+
+    .page-btn {
+      padding: 4px 10px;
+      background: var(--bg-base);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      color: var(--text-tertiary);
+      font-family: var(--font-base);
+      font-size: var(--text-sm);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .page-btn:hover {
+      background: var(--bg-raised);
+      color: var(--text-secondary);
+    }
+
+    .page-btn.active {
+      background: var(--accent-camel-subtle);
+      color: var(--accent-camel);
+      border-color: var(--accent-camel-subtle);
+    }
+
+    /* ══════════════════════════════════════════
+       RESPONSIVE
+       ══════════════════════════════════════════ */
+    @media (max-width: 900px) {
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .charts-row { grid-template-columns: 1fr; }
+      .donut-layout { flex-direction: column; align-items: center; }
+    }
+
+    @media (max-width: 640px) {
+      .stats-grid { grid-template-columns: 1fr; }
+      .filter-bar { flex-wrap: wrap; }
+      .page { padding: var(--space-4); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ════════════════════════════════════════════
+       HEADER
+       ════════════════════════════════════════════ -->
+  <header class="app-header">
+    <span class="app-title">
+      fin
+      <!-- Hand-drawn Loop — cycles, recurring spending rhythm -->
+      <svg class="hand-drawn-loop" width="28" height="28" viewBox="0 0 32 32" fill="none">
+        <path d="M16 4 C24 4, 28 10, 28 16 C28 22, 24 28, 16 28 C8 28, 4 22, 4 16 C4 10, 8 4, 14 4"
+              stroke="var(--accent-camel)" stroke-width="2" stroke-linecap="round" fill="none"/>
+      </svg>
+    </span>
+    <span class="app-subtitle">Personal Finance</span>
+    <div class="header-right">
+      <span class="header-period">Sep 2025 — Feb 2026</span>
+    </div>
+  </header>
+
+  <!-- ════════════════════════════════════════════
+       TAB BAR
+       ════════════════════════════════════════════ -->
+  <nav class="tab-bar">
+    <div class="tab-bar-main">
+      <button class="tab-btn active">Dashboard</button>
+      <button class="tab-btn">Subscriptions</button>
+      <button class="tab-btn">Services</button>
+    </div>
+    <div class="tab-bar-actions">
+      <button class="tab-icon-btn" title="Import Statements">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      </button>
+      <button class="masters-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        Masters
+      </button>
+    </div>
+  </nav>
+
+  <!-- ════════════════════════════════════════════
+       DASHBOARD PAGE
+       ════════════════════════════════════════════ -->
+  <main class="page">
+
+    <!-- FILTER BAR -->
+    <div class="filter-bar">
+      <div class="filter-group">
+        <span class="filter-label">Period</span>
+        <select class="filter-select">
+          <option>Feb 2026</option>
+          <option>Jan 2026</option>
+          <option>Dec 2025</option>
+          <option>Nov 2025</option>
+          <option>Oct 2025</option>
+          <option>Sep 2025</option>
+        </select>
+      </div>
+      <div class="filter-separator"></div>
+      <div class="filter-group">
+        <div class="toggle-group">
+          <button class="toggle-btn active">Personal</button>
+          <button class="toggle-btn">All</button>
+          <button class="toggle-btn">Moom</button>
+        </div>
+      </div>
+      <div class="filter-separator"></div>
+      <div class="filter-group">
+        <span class="filter-label">Account</span>
+        <select class="filter-select">
+          <option>All Accounts</option>
+          <option>DBS ****4821</option>
+          <option>DBS ****7392</option>
+          <option>Citi ****5516</option>
+          <option>UOB ****8834</option>
+        </select>
+      </div>
+      <div class="filter-separator"></div>
+      <label class="filter-check">
+        <span class="ds-toggle"><input type="checkbox"><span class="ds-toggle__track"></span></span>
+        Excl. one-offs
+      </label>
+      <label class="filter-check">
+        <span class="ds-toggle"><input type="checkbox"><span class="ds-toggle__track"></span></span>
+        Excl. anomalies
+      </label>
+    </div>
+
+    <!-- STATS GRID -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-card__value stat-card__value--accent">$10,719</div>
+        <div class="stat-card__label">Feb 2026 Spend</div>
+        <div class="stat-card__delta stat-card__delta--down">-24% vs 3-mo avg</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__value">$8,126</div>
+        <div class="stat-card__label">Personal</div>
+        <div class="stat-card__delta" style="color: var(--text-muted);">76% of total</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__value">$2,593</div>
+        <div class="stat-card__label">Moom (Business)</div>
+        <div class="stat-card__delta" style="color: var(--text-muted);">24% of total</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__value">168</div>
+        <div class="stat-card__label">Transactions</div>
+        <div class="stat-card__delta" style="color: var(--text-muted);">6 accounts</div>
+      </div>
+    </div>
+
+    <!-- MONTHLY SPENDING CHART — Full width -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="section-label" style="margin-bottom: 0;">/ Monthly Spending</div>
+        <div class="chart-toggles">
+          <button class="chart-toggle-btn active">Bar</button>
+          <button class="chart-toggle-btn">Trend</button>
+          <button class="chart-toggle-btn">Subcategories</button>
+        </div>
+      </div>
+
+      <!-- Stacked bar: overflow:hidden on stack, flat segments, margin-top gap -->
+      <div class="bar-chart" id="barChart"></div>
+      <script>
+      (function() {
+        // Data: 6 months x 6 categories (Groceries, Shopping, Transport, Dining, Utilities, Other)
+        const data = [
+          [25, 18, 22, 15, 10, 18],  // Sep
+          [28, 20, 24, 17, 12, 20],  // Oct
+          [30, 16, 28, 12, 10, 22],  // Nov
+          [34, 24, 22, 18, 14, 25],  // Dec
+          [30, 22, 26, 14, 12, 24],  // Jan
+          [24, 14, 18, 10, 8, 16],   // Feb
+        ];
+        const months = ['Sep','Oct','Nov','Dec','Jan','Feb'];
+        const style = getComputedStyle(document.documentElement);
+        const colors = [1,2,3,4,5,6].map(i => style.getPropertyValue('--chart-'+i).trim());
+        const gap = style.getPropertyValue('--chart-segment-gap').trim() || '2px';
+        const maxTotal = Math.max(...data.map(d => d.reduce((a,b)=>a+b,0)));
+
+        let html = '';
+        data.forEach((values, mi) => {
+          const total = values.reduce((a,b)=>a+b,0);
+          const stackH = (total / maxTotal) * 100;
+          let segs = '';
+          values.forEach((v, si) => {
+            const pct = (v / maxTotal) * 100;
+            segs += '<div class="bar-segment" style="height:'+pct+'%;background:'+colors[si]+';"></div>';
+          });
+          html += '<div class="bar-group"><div class="bar-stack" style="height:'+stackH+'%">'+segs+'</div><div class="bar-label">'+months[mi]+'</div></div>';
+        });
+        document.getElementById('barChart').innerHTML = html;
+      })();
+      </script>
+
+      <!-- Chart legend — 10px dots, secondary text -->
+      <div class="chart-legend">
+        <span class="legend-item"><span class="legend-dot" style="background: var(--chart-1);"></span>Groceries</span>
+        <span class="legend-item"><span class="legend-dot" style="background: var(--chart-2);"></span>Shopping</span>
+        <span class="legend-item"><span class="legend-dot" style="background: var(--chart-3);"></span>Dining</span>
+        <span class="legend-item"><span class="legend-dot" style="background: var(--chart-4);"></span>Transport</span>
+        <span class="legend-item"><span class="legend-dot" style="background: var(--chart-5);"></span>Utilities</span>
+        <span class="legend-item"><span class="legend-dot" style="background: var(--chart-6);"></span>Other</span>
+      </div>
+    </div>
+
+    <!-- TWO-COLUMN CHART ROW -->
+    <div class="charts-row">
+      <!-- Category Donut -->
+      <div class="chart-card">
+        <div class="section-label">/ Category Breakdown</div>
+        <div class="donut-layout">
+          <!-- SVG donut: proper arc paths with gap angle (matches preview) -->
+          <svg class="donut-svg" viewBox="0 0 160 160" id="categoryDonut"></svg>
+          <script>
+          (function() {
+            const cx = 80, cy = 80, r = 65, innerR = 40;
+            const values = [26, 20, 15, 13, 9, 17]; // Groceries, Shopping, Transport, Dining, Utilities, Other
+            const total = values.reduce((a,b) => a+b, 0);
+            const style = getComputedStyle(document.documentElement);
+            const chartVars = ['--chart-1','--chart-2','--chart-4','--chart-3','--chart-5','--chart-6'];
+            const colors = chartVars.map(v => style.getPropertyValue(v).trim());
+            let cumulative = 0;
+            let paths = '';
+            values.forEach((v, i) => {
+              const startAngle = (cumulative / total) * 2 * Math.PI - Math.PI / 2;
+              cumulative += v;
+              const endAngle = (cumulative / total) * 2 * Math.PI - Math.PI / 2;
+              const gapAngle = 0.02;
+              const s = startAngle + gapAngle, e = endAngle - gapAngle;
+              const x1 = cx + r * Math.cos(s), y1 = cy + r * Math.sin(s);
+              const x2 = cx + r * Math.cos(e), y2 = cy + r * Math.sin(e);
+              const ix1 = cx + innerR * Math.cos(e), iy1 = cy + innerR * Math.sin(e);
+              const ix2 = cx + innerR * Math.cos(s), iy2 = cy + innerR * Math.sin(s);
+              const largeArc = (e - s) > Math.PI ? 1 : 0;
+              paths += '<path d="M'+x1+','+y1+' A'+r+','+r+' 0 '+largeArc+' 1 '+x2+','+y2+' L'+ix1+','+iy1+' A'+innerR+','+innerR+' 0 '+largeArc+' 0 '+ix2+','+iy2+' Z" fill="'+colors[i]+'" />';
+            });
+            document.getElementById('categoryDonut').innerHTML = paths;
+          })();
+          </script>
+          <div class="donut-legend">
+            <div class="donut-legend-item">
+              <span class="donut-legend-dot" style="background: var(--chart-1);"></span>
+              <span class="donut-legend-name">Groceries</span>
+              <span class="donut-legend-val">$2,847</span>
+            </div>
+            <div class="donut-legend-item">
+              <span class="donut-legend-dot" style="background: var(--chart-2);"></span>
+              <span class="donut-legend-name">Shopping</span>
+              <span class="donut-legend-val">$2,134</span>
+            </div>
+            <div class="donut-legend-item">
+              <span class="donut-legend-dot" style="background: var(--chart-4);"></span>
+              <span class="donut-legend-name">Transport</span>
+              <span class="donut-legend-val">$1,651</span>
+            </div>
+            <div class="donut-legend-item">
+              <span class="donut-legend-dot" style="background: var(--chart-3);"></span>
+              <span class="donut-legend-name">Dining</span>
+              <span class="donut-legend-val">$1,429</span>
+            </div>
+            <div class="donut-legend-item">
+              <span class="donut-legend-dot" style="background: var(--chart-5);"></span>
+              <span class="donut-legend-name">Utilities</span>
+              <span class="donut-legend-val">$960</span>
+            </div>
+            <div class="donut-legend-item">
+              <span class="donut-legend-dot" style="background: var(--chart-6);"></span>
+              <span class="donut-legend-name">Other</span>
+              <span class="donut-legend-val">$1,698</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Subscription Burn -->
+      <div class="chart-card">
+        <div class="section-label">/ Subscription Burn &middot; $1,376/mo</div>
+        <div>
+          <div class="sub-list-item">
+            <div class="sub-list-left">
+              <span class="donut-legend-dot" style="background: var(--chart-1);"></span>
+              <span class="sub-list-name">Claude (Anthropic)</span>
+            </div>
+            <div class="sub-list-right">
+              <span class="sub-list-amount">$300</span>
+              <span class="cat-tag">Subscriptions</span>
+            </div>
+          </div>
+          <div class="sub-list-item">
+            <div class="sub-list-left">
+              <span class="donut-legend-dot" style="background: var(--chart-3);"></span>
+              <span class="sub-list-name">Singtel</span>
+            </div>
+            <div class="sub-list-right">
+              <span class="sub-list-amount">$165</span>
+              <span class="cat-tag">Utilities</span>
+            </div>
+          </div>
+          <div class="sub-list-item">
+            <div class="sub-list-left">
+              <span class="donut-legend-dot" style="background: var(--chart-5);"></span>
+              <span class="sub-list-name">Goodwoof</span>
+            </div>
+            <div class="sub-list-right">
+              <span class="sub-list-amount">$150</span>
+              <span class="cat-tag">Pet</span>
+            </div>
+          </div>
+          <div class="sub-list-item">
+            <div class="sub-list-left">
+              <span class="donut-legend-dot" style="background: var(--chart-4);"></span>
+              <span class="sub-list-name">SICC Membership</span>
+            </div>
+            <div class="sub-list-right">
+              <span class="sub-list-amount">$143</span>
+              <span class="cat-tag">Fitness</span>
+            </div>
+          </div>
+          <div class="sub-list-item">
+            <div class="sub-list-left">
+              <span class="donut-legend-dot" style="background: var(--chart-2);"></span>
+              <span class="sub-list-name">Barry's Bootcamp</span>
+            </div>
+            <div class="sub-list-right">
+              <span class="sub-list-amount">$130</span>
+              <span class="cat-tag">Fitness</span>
+            </div>
+          </div>
+          <div class="sub-list-item">
+            <div class="sub-list-left">
+              <span class="donut-legend-dot" style="background: var(--chart-6);"></span>
+              <span class="sub-list-name">TradingView</span>
+            </div>
+            <div class="sub-list-right">
+              <span class="sub-list-amount">$73</span>
+              <span class="cat-tag">Subscriptions</span>
+            </div>
+          </div>
+          <div class="sub-list-item">
+            <div class="sub-list-left">
+              <span class="donut-legend-dot" style="background: var(--chart-8);"></span>
+              <span class="sub-list-name" style="color: var(--text-tertiary);">+40 more</span>
+            </div>
+            <span class="sub-list-amount" style="color: var(--text-tertiary);">$415</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TRANSACTION TABLE -->
+    <div class="table-card">
+      <div class="table-toolbar">
+        <div class="section-label" style="margin-bottom: 0;">/ Recent Transactions</div>
+        <div style="display: flex; align-items: center; gap: var(--space-4);">
+          <input type="text" class="search-input" placeholder="Search transactions...">
+          <span class="table-count">168 transactions</span>
+        </div>
+      </div>
+      <div style="overflow-x: auto;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th class="sorted">Date <span class="sort-arrow">&#9660;</span></th>
+              <th>Description <span class="sort-arrow">&#9650;</span></th>
+              <th>Service <span class="sort-arrow">&#9650;</span></th>
+              <th>Category <span class="sort-arrow">&#9650;</span></th>
+              <th>Account <span class="sort-arrow">&#9650;</span></th>
+              <th style="text-align: right;">Amount <span class="sort-arrow">&#9650;</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="col-date">14-Feb-26</td>
+              <td>COLD STORAGE JELITA</td>
+              <td><a class="service-link">Cold Storage</a></td>
+              <td><span class="cat-tag">Groceries</span></td>
+              <td class="account-badge">DBS ****4821</td>
+              <td class="col-amount">$142.85</td>
+            </tr>
+            <tr>
+              <td class="col-date">13-Feb-26</td>
+              <td>GRAB* A-8HE2K4M92</td>
+              <td><a class="service-link">Grab</a></td>
+              <td><span class="cat-tag">Transport</span></td>
+              <td class="account-badge">DBS ****4821</td>
+              <td class="col-amount">$18.40</td>
+            </tr>
+            <tr>
+              <td class="col-date">13-Feb-26</td>
+              <td>SHOPEE SINGAPORE</td>
+              <td><a class="service-link">Shopee</a></td>
+              <td><span class="cat-tag">Shopping</span></td>
+              <td class="account-badge">DBS ****7392</td>
+              <td class="col-amount">$67.90</td>
+            </tr>
+            <tr>
+              <td class="col-date">12-Feb-26</td>
+              <td>BACHA COFFEE SINGAPORE</td>
+              <td><a class="service-link">Bacha Coffee</a></td>
+              <td><span class="cat-tag">Dining</span></td>
+              <td class="account-badge">Citi ****5516</td>
+              <td class="col-amount">$24.50</td>
+            </tr>
+            <tr>
+              <td class="col-date">12-Feb-26</td>
+              <td>SP DIGITAL PL-UTILITIE</td>
+              <td><a class="service-link">SP Group (BGV)</a></td>
+              <td><span class="cat-tag">Utilities</span></td>
+              <td class="account-badge">DBS ****4821</td>
+              <td class="col-amount">$287.30</td>
+            </tr>
+            <tr>
+              <td class="col-date">11-Feb-26</td>
+              <td>GUARDIAN HEALTH BEAUTY</td>
+              <td><a class="service-link">Guardian</a></td>
+              <td><span class="cat-tag">Health &amp; Beauty</span></td>
+              <td class="account-badge">DBS ****7392</td>
+              <td class="col-amount">$45.60</td>
+            </tr>
+            <tr>
+              <td class="col-date">10-Feb-26</td>
+              <td>TESLA MOTORS SG</td>
+              <td><a class="service-link">Tesla</a></td>
+              <td><span class="cat-tag">Loan/EMI</span></td>
+              <td class="account-badge">UOB ****8834</td>
+              <td class="col-amount">$1,847.00</td>
+            </tr>
+            <tr>
+              <td class="col-date">10-Feb-26</td>
+              <td>MOUNT ALVERNIA HOSPITAL</td>
+              <td><a class="service-link">Mount Alvernia</a></td>
+              <td><span class="cat-tag">Medical</span></td>
+              <td class="account-badge">DBS ****4821</td>
+              <td class="col-amount">$3,200.00 <span class="anomaly-badge">1x</span></td>
+            </tr>
+            <tr>
+              <td class="col-date">09-Feb-26</td>
+              <td>FOODPANDA SINGAPORE</td>
+              <td><a class="service-link">FoodPanda</a></td>
+              <td><span class="cat-tag">Groceries</span></td>
+              <td class="account-badge">DBS ****4821</td>
+              <td class="col-amount">$38.90</td>
+            </tr>
+            <tr>
+              <td class="col-date">08-Feb-26</td>
+              <td>AMAZON SG MARKETPLACE</td>
+              <td><a class="service-link">Amazon</a></td>
+              <td><span class="cat-tag">Shopping</span></td>
+              <td class="account-badge">Citi ****5516</td>
+              <td class="col-amount">$89.00</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-footer">
+        <span class="table-count">Showing 1-10 of 168</span>
+        <div class="pagination">
+          <button class="page-btn active">1</button>
+          <button class="page-btn">2</button>
+          <button class="page-btn">3</button>
+          <button class="page-btn">...</button>
+          <button class="page-btn">17</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+</body>
+</html>
