@@ -7,7 +7,7 @@ cssclasses:
 ---
 # fin
 *[[dev-hub|Hub]] · [[README|GitHub]]*
-<span class="hub-status">Statement coverage matrix + import service assignment built. 9 active accounts, 7/9 Feb covered. Critical eval next.</span>
+<span class="hub-status">Architectural deep-study complete — 8-item optimization roadmap in review artifact. Next: act on top priorities, then code review (#33).</span>
 
 Personal finance tracker. Statement parsing, expense categorization, subscription tracking, monthly spending breakdown. Claude is the interface.
 
