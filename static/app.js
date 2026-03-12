@@ -9,6 +9,7 @@ let categories = [];          // [{id, name, parent_id, parent_name, display_nam
 let accounts = [];            // [{id, name, ...}, ...]
 let currentImportId = null;   // Active import preview
 let currentImportData = null; // Preview data from upload
+let importServices = [];      // [{id, name, category_id}, ...] from upload response
 let monthlyChart = null;      // Chart.js instance
 let categoryChart = null;     // Chart.js instance
 let txCurrentPage = 1;
@@ -35,13 +36,13 @@ let chartFilter = { categories: [], period: null, source: null };
 let monthlyPeriods = [];       // Raw period strings for chart click lookup
 let catFilterSelections = [];  // Multi-select category filter selections
 
-// Category color palette (warm neutrals matching design system)
+// Category color palette (Dark Neutral chart tokens)
 const CAT_COLORS = [
-    '#d4a574', '#cd8264', '#7ab07a', '#6b9bd2', '#c97a7a',
-    '#9b8ec4', '#d4c074', '#74b8b8', '#c48fb0', '#8bc474',
-    '#b89474', '#7a8fc9', '#c9b67a', '#74a0c4', '#c47a9b',
-    '#787878', '#a8a8a8', '#585858', '#4a4f4c', '#323832',
-    '#d4a574', '#cd8264',
+    '#e8e0d8', '#ff6b6b', '#a09890', '#4aba6a', '#d4a85c',
+    '#7090c0', '#c090b0', '#80b8a8', '#e8e0d8', '#ff6b6b',
+    '#a09890', '#4aba6a', '#d4a85c', '#7090c0', '#c090b0',
+    '#80b8a8', '#707070', '#a0a0a0', '#505050', '#333333',
+    '#e8e0d8', '#ff6b6b',
 ];
 
 const MONTH_NAMES = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -218,7 +219,7 @@ function switchTab(tabName, {pushHistory = true} = {}) {
 
     // Load tab data on switch
     if (tabName === 'dashboard') loadDashboard();
-    if (tabName === 'import') loadHistory();
+    if (tabName === 'import') { loadCoverage(); loadHistory(); }
     if (tabName === 'subs') loadSubscriptions();
     if (tabName === 'services') renderServicesTab();
     if (tabName === 'accounts') renderAccountsTab();
@@ -485,14 +486,14 @@ function renderBarChart(catList, periods, labels, data) {
                 legend: {
                     display: true,
                     position: 'bottom',
-                    labels: { color: '#a8a8a8', font: { size: 11 }, boxWidth: 12, padding: 12 },
+                    labels: { color: '#a0a0a0', font: { size: 11 }, boxWidth: 12, padding: 12 },
                 },
                 tooltip: {
-                    backgroundColor: '#1a1d1b',
-                    borderColor: '#323832',
+                    backgroundColor: '#1a1a1a',
+                    borderColor: '#333333',
                     borderWidth: 1,
-                    titleColor: '#fafafa',
-                    bodyColor: '#a8a8a8',
+                    titleColor: '#ededed',
+                    bodyColor: '#a0a0a0',
                     callbacks: {
                         label: ctx => `${ctx.dataset.label}: S$${formatAmount(ctx.raw)}`,
                     },
@@ -505,17 +506,17 @@ function renderBarChart(catList, periods, labels, data) {
             scales: {
                 x: {
                     stacked: true,
-                    ticks: { color: '#787878', font: { size: 11 } },
+                    ticks: { color: '#707070', font: { size: 11 } },
                     grid: { display: false },
                 },
                 y: {
                     stacked: true,
                     ticks: {
-                        color: '#787878',
+                        color: '#707070',
                         font: { size: 11 },
                         callback: v => '$' + (v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v),
                     },
-                    grid: { color: '#2a2f2c', drawBorder: false },
+                    grid: { color: '#222222', drawBorder: false },
                 },
             },
         },
@@ -550,14 +551,14 @@ function renderTrendChart(catList, periods, labels, data) {
         datasets.push({
             label: 'Rest',
             data: periods.map(p => restCats.reduce((s, c) => s + (data[p][c] || 0), 0)),
-            borderColor: '#585858',
+            borderColor: '#505050',
             backgroundColor: 'transparent',
             borderWidth: 1.5,
             borderDash: [4, 3],
             tension: 0.3,
             pointRadius: 2,
             pointHoverRadius: 5,
-            pointBackgroundColor: '#585858',
+            pointBackgroundColor: '#505050',
         });
     }
 
@@ -586,7 +587,7 @@ function renderTrendChart(catList, periods, labels, data) {
                     display: true,
                     position: 'bottom',
                     labels: {
-                        color: '#a8a8a8',
+                        color: '#a0a0a0',
                         font: { size: 11 },
                         boxWidth: 12,
                         padding: 12,
@@ -595,11 +596,11 @@ function renderTrendChart(catList, periods, labels, data) {
                     },
                 },
                 tooltip: {
-                    backgroundColor: '#1a1d1b',
-                    borderColor: '#323832',
+                    backgroundColor: '#1a1a1a',
+                    borderColor: '#333333',
                     borderWidth: 1,
-                    titleColor: '#fafafa',
-                    bodyColor: '#a8a8a8',
+                    titleColor: '#ededed',
+                    bodyColor: '#a0a0a0',
                     mode: 'index',
                     intersect: false,
                     itemSort: (a, b) => b.raw - a.raw,
@@ -615,16 +616,16 @@ function renderTrendChart(catList, periods, labels, data) {
             },
             scales: {
                 x: {
-                    ticks: { color: '#787878', font: { size: 11 } },
+                    ticks: { color: '#707070', font: { size: 11 } },
                     grid: { display: false },
                 },
                 y: {
                     ticks: {
-                        color: '#787878',
+                        color: '#707070',
                         font: { size: 11 },
                         callback: v => '$' + (v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v),
                     },
-                    grid: { color: '#2a2f2c', drawBorder: false },
+                    grid: { color: '#222222', drawBorder: false },
                 },
             },
         },
@@ -677,14 +678,14 @@ function renderCategoryChart(data) {
             plugins: {
                 legend: {
                     position: 'right',
-                    labels: { color: '#a8a8a8', font: { size: 11 }, boxWidth: 10, padding: 8 },
+                    labels: { color: '#a0a0a0', font: { size: 11 }, boxWidth: 10, padding: 8 },
                 },
                 tooltip: {
-                    backgroundColor: '#1a1d1b',
-                    borderColor: '#323832',
+                    backgroundColor: '#1a1a1a',
+                    borderColor: '#333333',
                     borderWidth: 1,
-                    titleColor: '#fafafa',
-                    bodyColor: '#a8a8a8',
+                    titleColor: '#ededed',
+                    bodyColor: '#a0a0a0',
                     callbacks: {
                         label: ctx => `S$${formatAmount(ctx.raw)} (${ctx.dataset.data.length ? ((ctx.raw / ctx.dataset.data.reduce((a, b) => a + b, 0)) * 100).toFixed(1) : 0}%)`,
                     },
@@ -1093,6 +1094,7 @@ async function uploadFiles() {
 
         currentImportId = data.import_id;
         currentImportData = data;
+        importServices = data.services || [];
         renderImportPreview(data);
     } catch (err) {
         alert('Upload failed: ' + err.message);
@@ -1139,6 +1141,7 @@ function renderImportPreview(data) {
                             <th>Date</th>
                             <th>Description</th>
                             <th style="text-align:right">Amount</th>
+                            <th>Service</th>
                             <th>Category</th>
                             <th>Status</th>
                         </tr>
@@ -1158,6 +1161,14 @@ function renderImportPreview(data) {
                 <td class="col-date">${tx.date}</td>
                 <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
                 <td class="col-amount">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+                <td class="col-service">
+                    <input type="text" class="svc-input" list="svc-datalist"
+                        value="${escapeHtml(tx.service_name || '')}"
+                        placeholder="Type to search..."
+                        data-gi="${gi}" data-ti="${ti}"
+                        onchange="setServiceOverride(${gi}, ${ti}, this.value)"
+                        oninput="setServiceOverride(${gi}, ${ti}, this.value)">
+                </td>
                 <td>
                     <select class="cat-select ${tx.status === 'uncategorized' ? 'unresolved' : ''}" data-gi="${gi}" data-ti="${ti}" onchange="setCategoryOverride(${gi}, ${ti}, this.value)">
                         <option value="">-- Select --</option>
@@ -1170,7 +1181,61 @@ function renderImportPreview(data) {
         });
     });
 
+    // Add shared datalist for service input autocomplete
+    let datalist = document.getElementById('svc-datalist');
+    if (datalist) datalist.remove();
+    datalist = document.createElement('datalist');
+    datalist.id = 'svc-datalist';
+    importServices.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.name;
+        opt.label = s.category_name || '';
+        datalist.appendChild(opt);
+    });
+    document.body.appendChild(datalist);
+
     updateConfirmBar();
+}
+
+// Service picker: when user types/selects a service, auto-fill category
+function setServiceOverride(gi, ti, value) {
+    const tx = currentImportData.groups[gi].transactions[ti];
+    const trimmed = value.trim();
+
+    // Look up in existing services (case-insensitive)
+    const match = importServices.find(s => s.name.toLowerCase() === trimmed.toLowerCase());
+    if (match) {
+        tx.service_id = match.id;
+        tx.service_name = match.name;
+        tx._new_service = null;
+        // Auto-fill category from service
+        if (match.category_id) {
+            tx.category_id = match.category_id;
+            const catSelect = document.querySelector(`select.cat-select[data-gi="${gi}"][data-ti="${ti}"]`);
+            if (catSelect) catSelect.value = match.category_id;
+            tx.status = 'categorized';
+            updateStatusBadge(gi, ti, 'categorized');
+        }
+    } else if (trimmed) {
+        // New service — will be created on commit
+        tx.service_id = null;
+        tx.service_name = trimmed;
+        tx._new_service = trimmed;
+    } else {
+        tx.service_id = null;
+        tx.service_name = null;
+        tx._new_service = null;
+    }
+}
+
+function updateStatusBadge(gi, ti, status) {
+    const row = document.querySelectorAll(`#preview-group-${gi} tr`)[ti];
+    if (!row) return;
+    const badge = row.querySelector('.badge');
+    if (badge) {
+        badge.className = `badge badge-${status === 'categorized' ? 'success' : status === 'transfer' ? 'muted' : 'warning'}`;
+        badge.textContent = status;
+    }
 }
 
 function toggleGroupSkip(gi, checked) {
@@ -1235,6 +1300,24 @@ function discardImport() {
 async function confirmImport() {
     if (!currentImportData) return;
 
+    // Collect new services to create (deduped by name)
+    const newServicesMap = {};
+    for (const g of currentImportData.groups) {
+        for (const tx of g.transactions) {
+            if (tx._skip) continue;
+            if (tx._new_service && tx.category_id) {
+                const key = tx._new_service.toLowerCase();
+                if (!newServicesMap[key]) {
+                    newServicesMap[key] = {
+                        name: tx._new_service,
+                        category_id: tx.category_id,
+                        description: tx.description,
+                    };
+                }
+            }
+        }
+    }
+
     const body = {
         import_id: currentImportId,
         groups: currentImportData.groups.map(g => ({
@@ -1242,6 +1325,7 @@ async function confirmImport() {
             transactions: g.transactions,
         })),
         new_rules: [],
+        new_services: Object.values(newServicesMap),
     };
 
     const confirmBtn = document.querySelector('.confirm-bar .btn-primary');
@@ -1262,7 +1346,8 @@ async function confirmImport() {
         }
 
         const dupMsg = result.duplicates_skipped ? ` (${result.duplicates_skipped} duplicates skipped)` : '';
-        alert(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}`);
+        const svcMsg = result.services_created ? ` ${result.services_created} new services created.` : '';
+        alert(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${svcMsg}`);
         discardImport();
         await loadReferenceData();
     } catch (err) {
@@ -1271,6 +1356,77 @@ async function confirmImport() {
         confirmBtn.textContent = 'Confirm & Commit';
         confirmBtn.disabled = false;
     }
+}
+
+// ============================================================
+// STATEMENT COVERAGE
+// ============================================================
+
+async function loadCoverage() {
+    const container = document.getElementById('coverage-matrix');
+    const summary = document.getElementById('coverage-summary');
+
+    try {
+        const res = await fetch('/api/statements/coverage?months=6');
+        const data = await res.json();
+
+        // Summary line — targets previous month (last closed billing cycle)
+        const { target_month, covered, total } = data.summary;
+        const monthLabel = formatMonthLabel(target_month);
+        const missing = total - covered;
+        if (missing > 0) {
+            summary.innerHTML = `<strong>${covered}</strong> of <strong>${total}</strong> accounts covered for ${monthLabel} — <span class="coverage-gap">${missing} missing</span>`;
+        } else {
+            summary.innerHTML = `<strong>${covered}</strong> of <strong>${total}</strong> accounts covered for ${monthLabel} — all clear`;
+        }
+
+        // Build table
+        const monthHeaders = data.months.map(m => {
+            const cls = m === target_month ? ' class="coverage-target-month"' : '';
+            return `<th${cls}>${formatMonthLabel(m)}</th>`;
+        }).join('');
+        let rows = '';
+        for (const acct of data.accounts) {
+            const typeLabel = acct.type === 'bank' ? 'bank' : 'cc';
+            let cells = '';
+            for (const m of data.months) {
+                const cell = data.matrix[acct.id]?.[m];
+                const isTarget = m === target_month;
+                if (cell && cell.imported) {
+                    const tooltip = [cell.filename, cell.date ? formatCoverageDate(cell.date) : ''].filter(Boolean).join(' — ');
+                    cells += `<td><span class="coverage-cell-ok" title="${escapeHtml(tooltip)}">&#10003;</span></td>`;
+                } else {
+                    cells += `<td><span class="coverage-cell-missing${isTarget ? ' coverage-target' : ''}">&#9675;</span></td>`;
+                }
+            }
+            rows += `<tr><td>${escapeHtml(acct.short_name)}<span class="coverage-acct-type">${typeLabel}</span></td>${cells}</tr>`;
+        }
+
+        container.innerHTML = `
+            <table class="coverage-table">
+                <thead><tr><th>Account</th>${monthHeaders}</tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `;
+    } catch (err) {
+        container.innerHTML = '<div class="text-muted">Failed to load coverage data</div>';
+    }
+}
+
+function formatMonthLabel(ym) {
+    // "2026-03" → "Mar 26"
+    const [y, m] = ym.split('-');
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return months[parseInt(m) - 1] + ' ' + y.slice(2);
+}
+
+function formatCoverageDate(dateStr) {
+    // "2026-03-07 11:38:40" → "7 Mar"
+    if (!dateStr) return '';
+    const d = new Date(dateStr);
+    if (isNaN(d)) return '';
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return d.getDate() + ' ' + months[d.getMonth()];
 }
 
 // ============================================================
@@ -1687,7 +1843,7 @@ function updateChartHighlights() {
                 ds.borderWidth = 0;
             } else if (chartFilter.categories.includes(ds.label)) {
                 ds.backgroundColor = baseColor;
-                ds.borderColor = '#fafafa';
+                ds.borderColor = '#ededed';
                 ds.borderWidth = 1.5;
             } else {
                 ds.backgroundColor = hexToRgba(baseColor, 0.15);
@@ -3378,27 +3534,37 @@ function renderAccountsTab() {
     const empty = document.getElementById('acct-empty');
     const count = document.getElementById('acct-count');
 
-    count.textContent = `${accounts.length} account${accounts.length !== 1 ? 's' : ''}`;
+    const activeAccts = accounts.filter(a => a.status !== 'archived');
+    const archivedAccts = accounts.filter(a => a.status === 'archived');
+    const showArchived = document.getElementById('acct-show-archived')?.checked;
+    const visible = showArchived ? accounts : activeAccts;
 
-    if (!accounts.length) {
+    count.textContent = `${activeAccts.length} active${archivedAccts.length ? `, ${archivedAccts.length} archived` : ''}`;
+
+    if (!visible.length) {
         body.innerHTML = '';
         empty.classList.remove('hidden');
         return;
     }
     empty.classList.add('hidden');
 
-    body.innerHTML = accounts.map(a => {
+    body.innerHTML = visible.map(a => {
         if (a.id === editingAcctId) {
             return renderAcctEditRow(a);
         }
-        return `<tr>
-            <td style="font-size:13px;">${escapeHtml(a.name)}</td>
+        const isArchived = a.status === 'archived';
+        const archiveBtn = isArchived
+            ? `<button class="btn btn-sm" onclick="toggleArchiveAcct(${a.id}, 'active')" title="Restore">Restore</button>`
+            : `<button class="btn btn-sm" onclick="toggleArchiveAcct(${a.id}, 'archived')" title="Archive">Archive</button>`;
+        return `<tr${isArchived ? ' style="opacity:0.5;"' : ''}>
+            <td style="font-size:13px;">${escapeHtml(a.name)}${isArchived ? ' <span class="badge badge-muted" style="font-size:10px;margin-left:6px;">archived</span>' : ''}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.short_name)}</td>
             <td><span class="acct-type-badge acct-type-${a.type}">${ACCT_TYPE_LABELS[a.type] || a.type}</span></td>
             <td style="font-size:12px;color:var(--text-tertiary);">${a.last_four || '—'}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${a.currency || 'SGD'}</td>
             <td style="text-align:right;white-space:nowrap;">
                 <button class="btn btn-sm" onclick="startEditAcct(${a.id})">Edit</button>
+                ${archiveBtn}
                 <button class="btn btn-sm" onclick="deleteAccount(${a.id})" title="Delete">Del</button>
             </td>
         </tr>`;
@@ -3490,6 +3656,22 @@ async function saveEditAcct(id) {
     if (data.error) { alert('Error: ' + data.error); return; }
 
     editingAcctId = null;
+    await reloadAccounts();
+}
+
+async function toggleArchiveAcct(id, newStatus) {
+    const acct = accounts.find(a => a.id === id);
+    const action = newStatus === 'archived' ? 'Archive' : 'Restore';
+    if (!confirm(`${action} account "${acct ? acct.short_name : id}"?`)) return;
+
+    const res = await fetch(`/api/accounts/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+    });
+    const data = await res.json();
+    if (data.error) { alert('Error: ' + data.error); return; }
+
     await reloadAccounts();
 }
 

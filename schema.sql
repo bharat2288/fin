@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     type TEXT NOT NULL,          -- 'credit_card', 'bank', 'debit'
     last_four TEXT,              -- last 4 digits
     currency TEXT DEFAULT 'SGD',
+    status TEXT DEFAULT 'active', -- 'active', 'archived'
     created_at TEXT DEFAULT (datetime('now'))
 );
 

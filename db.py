@@ -447,6 +447,27 @@ def init_db() -> None:
         conn.commit()
         print("Added is_one_off column to services")
 
+    # Migration: add status column to accounts (active/archived)
+    acct_columns = [row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()]
+    if "status" not in acct_columns:
+        conn.execute("ALTER TABLE accounts ADD COLUMN status TEXT DEFAULT 'active'")
+        # Archive inactive accounts
+        conn.execute("UPDATE accounts SET status = 'archived' WHERE short_name IN ('DBS-Altitude-5054', 'DBS-Debit-6088')")
+        conn.commit()
+        print("Added status column to accounts (archived: DBS-Altitude-5054, DBS-Debit-6088)")
+
+    # Seed: Kalesh bank account (business)
+    kalesh_bank = conn.execute(
+        "SELECT id FROM accounts WHERE short_name = 'DBS-Kalesh-Bank'"
+    ).fetchone()
+    if not kalesh_bank:
+        conn.execute(
+            "INSERT INTO accounts (name, short_name, type, last_four, currency, status) "
+            "VALUES ('DBS Kalesh Bank Account', 'DBS-Kalesh-Bank', 'bank', NULL, 'SGD', 'active')"
+        )
+        conn.commit()
+        print("Added Kalesh bank account")
+
     # Migration: billing model refactor — add amount + currency to subscriptions
     sub_columns = [row[1] for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()]
     if "currency" not in sub_columns:

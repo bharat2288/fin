@@ -102,7 +102,7 @@ def api_accounts():
     """List all accounts."""
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, name, short_name, type, last_four, currency FROM accounts ORDER BY name"
+        "SELECT id, name, short_name, type, last_four, currency, status FROM accounts ORDER BY name"
     ).fetchall()
     conn.close()
     result = []
@@ -150,7 +150,7 @@ def api_accounts_update(acct_id):
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
-    allowed = ["name", "short_name", "type", "last_four", "currency"]
+    allowed = ["name", "short_name", "type", "last_four", "currency", "status"]
     sets = []
     params = []
     for field in allowed:
@@ -919,6 +919,7 @@ def api_import_upload():
         # Group transactions by account and categorize
         cats = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM categories").fetchall()}
         cats_by_name = {v: k for k, v in cats.items()}
+        svcs = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM services").fetchall()}
 
         for stmt in parsed_statements:
             for tx in stmt.transactions:
@@ -945,6 +946,7 @@ def api_import_upload():
                     "category_id": cat_id,
                     "service_id": svc_id,
                     "category_name": cats.get(cat_id) if cat_id else None,
+                    "service_name": svcs.get(svc_id) if svc_id else None,
                     "is_payment": tx.is_payment,
                     "is_transfer": tx.is_transfer,
                     "account": account,
@@ -999,6 +1001,19 @@ def api_import_upload():
     import_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.close()
 
+    # Include services list for the service picker in preview
+    conn = get_connection()
+    services_rows = conn.execute(
+        "SELECT s.id, s.name, s.category_id, COALESCE(c.name, '') as category_name "
+        "FROM services s LEFT JOIN categories c ON s.category_id = c.id "
+        "ORDER BY s.name"
+    ).fetchall()
+    conn.close()
+    services_list = [
+        {"id": r["id"], "name": r["name"], "category_id": r["category_id"], "category_name": r["category_name"]}
+        for r in services_rows
+    ]
+
     return jsonify({
         "import_id": import_id,
         "groups": groups,
@@ -1010,6 +1025,7 @@ def api_import_upload():
         },
         "errors": errors,
         "filenames": filenames,
+        "services": services_list,
     })
 
 
@@ -1149,6 +1165,49 @@ def api_import_confirm():
             total_duplicates += duplicates_skipped
             conn.commit()
 
+        # Create new services submitted from the preview
+        # Each entry: {name, category_id, description} — description becomes the merchant rule
+        new_services = data.get("new_services", [])
+        services_created = 0
+        for ns in new_services:
+            svc_name = (ns.get("name") or "").strip()
+            cat_id = ns.get("category_id")
+            desc = (ns.get("description") or "").strip()
+            if not svc_name:
+                continue
+            # Dedup: skip if service already exists
+            existing = conn.execute(
+                "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
+            ).fetchone()
+            if existing:
+                svc_id = existing["id"]
+            else:
+                conn.execute(
+                    "INSERT INTO services (name, category_id) VALUES (?, ?)",
+                    (svc_name, cat_id),
+                )
+                svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                services_created += 1
+            # Create merchant rule from description → service
+            if desc:
+                # Use a cleaned pattern: uppercase, trimmed
+                pattern = desc.upper().strip()
+                rule_exists = conn.execute(
+                    "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?", (pattern,)
+                ).fetchone()
+                if not rule_exists:
+                    conn.execute(
+                        "INSERT INTO merchant_rules (pattern, category_id, match_type, confidence, service_id) "
+                        "VALUES (?, ?, 'contains', 'confirmed', ?)",
+                        (pattern, cat_id, svc_id),
+                    )
+            # Backfill service_id on transactions in this import that match this description
+            conn.execute(
+                "UPDATE transactions SET service_id = ? WHERE UPPER(description) = ? AND service_id IS NULL",
+                (svc_id, desc.upper()),
+            )
+        conn.commit()
+
         # Save new merchant rules
         rules_added = 0
         for rule in new_rules:
@@ -1169,6 +1228,7 @@ def api_import_confirm():
             "duplicates_skipped": total_duplicates,
             "accounts": accounts_created,
             "rules_added": rules_added,
+            "services_created": services_created,
         }
         conn.execute(
             "UPDATE batch_imports SET status = 'committed', result_json = ? WHERE id = ?",
@@ -1218,6 +1278,96 @@ def api_import_history():
             "created_at": r["created_at"],
         })
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Statement Coverage
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/statements/coverage")
+def api_statements_coverage():
+    """Return 6-month coverage matrix: active accounts × recent months.
+
+    Shows which accounts have statements imported for each month,
+    and which are missing. Uses statement_date month as the key.
+    """
+    months_count = int(request.args.get("months", 6))
+
+    # Build list of last N months (YYYY-MM format)
+    today = datetime.now()
+    months = []
+    y, m = today.year, today.month
+    for _ in range(months_count):
+        months.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    months.reverse()  # oldest first
+
+    conn = get_connection()
+
+    # Get active accounts
+    accounts = conn.execute(
+        "SELECT id, short_name, type FROM accounts "
+        "WHERE status = 'active' OR status IS NULL "
+        "ORDER BY type, short_name"
+    ).fetchall()
+    accounts = [dict(a) for a in accounts]
+
+    # Get all statements for active accounts in the date range
+    min_month = months[0] + "-01"
+    statements = conn.execute(
+        "SELECT s.account_id, s.statement_date, s.filename, s.imported_at "
+        "FROM statements s "
+        "JOIN accounts a ON s.account_id = a.id "
+        "WHERE (a.status = 'active' OR a.status IS NULL) "
+        "  AND s.statement_date >= ? "
+        "ORDER BY s.statement_date",
+        (min_month,),
+    ).fetchall()
+    conn.close()
+
+    # Build matrix: {account_id: {month: {imported, date, filename}}}
+    matrix = {}
+    for acct in accounts:
+        matrix[acct["id"]] = {}
+        for m in months:
+            matrix[acct["id"]][m] = {"imported": False}
+
+    for stmt in statements:
+        acct_id = stmt["account_id"]
+        # Extract YYYY-MM from statement_date
+        stmt_month = stmt["statement_date"][:7]
+        if acct_id in matrix and stmt_month in matrix[acct_id]:
+            matrix[acct_id][stmt_month] = {
+                "imported": True,
+                "date": stmt["imported_at"],
+                "filename": stmt["filename"],
+            }
+
+    # Summary targets the previous month (most recent closed billing cycle)
+    # On March 12th, you want to know if Feb is fully covered, not March
+    pm_y, pm_m = today.year, today.month - 1
+    if pm_m == 0:
+        pm_m = 12
+        pm_y -= 1
+    target_month = f"{pm_y:04d}-{pm_m:02d}"
+    covered = sum(
+        1 for acct in accounts if matrix[acct["id"]].get(target_month, {}).get("imported")
+    )
+
+    return jsonify({
+        "months": months,
+        "accounts": accounts,
+        "matrix": matrix,
+        "summary": {
+            "target_month": target_month,
+            "covered": covered,
+            "total": len(accounts),
+        },
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1541,17 +1691,26 @@ def api_subscriptions_create():
 
     conn = get_connection()
     try:
+        amount = data.get("amount", 0)
+        currency = data.get("currency", "SGD")
+        # Legacy columns still NOT NULL — populate them from amount/currency
+        amount_sgd = amount if currency == "SGD" else 0
+        amount_usd = amount if currency == "USD" else None
+
         conn.execute("""
             INSERT INTO subscriptions
-                (service, service_id, category_id, amount, currency, frequency, periods,
-                 account_id, last_paid, renewal_date, status, link, notes, match_pattern)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (service, service_id, category_id, amount, currency, amount_sgd, amount_usd,
+                 frequency, periods, account_id, last_paid, renewal_date, status,
+                 link, notes, match_pattern)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data["service"],
             data.get("service_id"),
             data.get("category_id"),
-            data.get("amount", 0),
-            data.get("currency", "SGD"),
+            amount,
+            currency,
+            amount_sgd,
+            amount_usd,
             data.get("frequency", "monthly"),
             data.get("periods", 1),
             data.get("account_id"),

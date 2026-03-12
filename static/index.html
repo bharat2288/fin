@@ -4,14 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>fin — Personal Finance</title>
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23111111'/><rect x='5' y='18' width='5' height='10' rx='1.5' fill='%23e8e0d8' opacity='0.6'/><rect x='13' y='12' width='5' height='16' rx='1.5' fill='%23e8e0d8' opacity='0.8'/><rect x='21' y='6' width='5' height='22' rx='1.5' fill='%23e8e0d8'/></svg>">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
     <!-- Header -->
     <header class="app-header">
-        <span class="app-title">fin</span>
-        <span class="app-subtitle">Personal Finance Tracker</span>
+        <span class="app-title">
+            fin
+            <!-- Hand-drawn Loop — cycles, recurring spending rhythm -->
+            <svg class="hand-drawn-loop" width="28" height="28" viewBox="0 0 32 32" fill="none">
+                <path d="M16 4 C24 4, 28 10, 28 16 C28 22, 24 28, 16 28 C8 28, 4 22, 4 16 C4 10, 8 4, 14 4"
+                      stroke="var(--accent-camel)" stroke-width="2" stroke-linecap="round" fill="none"/>
+            </svg>
+        </span>
+        <span class="app-subtitle">Personal Finance</span>
     </header>
 
     <!-- Tab Bar -->
@@ -88,10 +95,12 @@
                     <span class="filter-section-label">Options</span>
                     <div class="filter-controls">
                         <label class="filter-check">
-                            <input type="checkbox" id="filter-anomaly" onchange="applyDashboardFilters()"> Excl. anomalies
+                            <span class="ds-toggle"><input type="checkbox" id="filter-anomaly" onchange="applyDashboardFilters()"><span class="ds-toggle__track"></span></span>
+                            Excl. anomalies
                         </label>
                         <label class="filter-check">
-                            <input type="checkbox" id="filter-one-off" onchange="applyDashboardFilters()"> Excl. one-offs
+                            <span class="ds-toggle"><input type="checkbox" id="filter-one-off" onchange="applyDashboardFilters()"><span class="ds-toggle__track"></span></span>
+                            Excl. one-offs
                         </label>
                         <button class="btn btn-toggle" id="subcategory-toggle" onclick="toggleSubcategories()">Subcategories</button>
                     </div>
@@ -177,6 +186,14 @@
     <div id="tab-import" class="tab-content">
         <div class="container">
             <div class="section-label">/ Import Statements</div>
+
+            <!-- Statement Coverage Matrix -->
+            <div class="card" id="coverage-card">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <div class="coverage-summary" id="coverage-summary"></div>
+                </div>
+                <div id="coverage-matrix"></div>
+            </div>
 
             <!-- Upload Zone -->
             <div class="card" id="import-upload-card">
@@ -494,7 +511,12 @@
 
             <div class="card">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-                    <span class="text-secondary" id="acct-count" style="font-size:12px;"></span>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <span class="text-secondary" id="acct-count" style="font-size:12px;"></span>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-tertiary);cursor:pointer;">
+                            <input type="checkbox" id="acct-show-archived" onchange="renderAccountsTab()"> Show archived
+                        </label>
+                    </div>
                     <button class="btn btn-sm btn-primary" onclick="toggleAcctForm()">+ Add Account</button>
                 </div>
 

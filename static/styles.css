@@ -1,47 +1,72 @@
 /* fin — Personal Finance Tracker
-   Design system tokens from C:\Users\bhara\dev\design\design-system.md */
+   Dark Neutral (Paper Ash) — design system tokens */
 
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Geist:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
 
 /* ================================================================
-   TOKENS
+   TOKENS — DARK NEUTRAL (PAPER ASH)
    ================================================================ */
 
 :root {
-    /* Elevation */
-    --bg-base: #0c0f0d;
-    --bg-surface: #1a1d1b;
-    --bg-raised: #252a27;
-    --bg-elevated: #323832;
+    /* Elevation — pure gray, no tint */
+    --bg-base: #111111;
+    --bg-surface: #1a1a1a;
+    --bg-raised: #252525;
+    --bg-elevated: #303030;
 
-    /* Border */
-    --border-subtle: #2a2f2c;
-    --border-default: #3a3f3c;
-    --border-emphasis: #4a4f4c;
+    /* Border — pure gray */
+    --border-subtle: #222222;
+    --border-default: #333333;
+    --border-emphasis: #444444;
 
-    /* Text */
-    --text-primary: #fafafa;
-    --text-secondary: #a8a8a8;
-    --text-tertiary: #787878;
-    --text-muted: #585858;
+    /* Text — pure grayscale */
+    --text-primary: #ededed;
+    --text-secondary: #a0a0a0;
+    --text-tertiary: #707070;
+    --text-muted: #505050;
 
-    /* Accent */
-    --accent-camel: #d4a574;
-    --accent-camel-hover: #c9956c;
-    --accent-camel-subtle: #2d251f;
-    --accent-terra: #cd8264;
-    --accent-terra-hover: #b87254;
-    --accent-terra-subtle: #2d211d;
+    /* Accent — Warm cream */
+    --accent-camel: #e8e0d8;
+    --accent-camel-hover: #d8d0c8;
+    --accent-camel-subtle: #1e1c1a;
+
+    /* Accent — Taupe */
+    --accent-terra: #a09890;
+    --accent-terra-hover: #908880;
+    --accent-terra-subtle: #1c1a18;
+
+    /* Pop — vivid coral (semantics only) */
+    --accent-pop: #ff6b6b;
+    --accent-pop-subtle: #2a1616;
 
     /* Semantic */
-    --semantic-success: #7ab07a;
-    --semantic-warning: #d4a574;
-    --semantic-error: #cd6464;
+    --semantic-success: #4aba6a;
+    --semantic-warning: #d4a85c;
+    --semantic-error: #e05555;
 
-    /* Typography */
-    --font-base: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
+    /* Typography — Manrope single-family */
+    --font-base: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
-    --font-display: 'Fraunces', Georgia, serif;
+    --font-display: 'Manrope', sans-serif;
+
+    /* Chart Palette */
+    --chart-1: #e8e0d8;
+    --chart-2: #ff6b6b;
+    --chart-3: #a09890;
+    --chart-4: #4aba6a;
+    --chart-5: #d4a85c;
+    --chart-6: #7090c0;
+    --chart-7: #c090b0;
+    --chart-8: #80b8a8;
+
+    /* Chart Styling */
+    --chart-segment-gap: 2px;
+    --chart-segment-border: none;
+    --chart-bar-radius: var(--radius-sm);
+    --chart-donut-gap: 2px;
+    --chart-grid-color: var(--border-subtle);
+    --chart-label-color: var(--text-tertiary);
+    --chart-legend-color: var(--text-secondary);
 
     /* Spacing */
     --space-1: 4px;
@@ -59,12 +84,13 @@
     --radius-lg: 8px;
     --radius-xl: 12px;
 
-    /* Shadows */
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2);
-    --shadow-md: 0 4px 8px rgba(0,0,0,0.35), 0 2px 4px rgba(0,0,0,0.25);
-    --shadow-lg: 0 12px 28px rgba(0,0,0,0.45), 0 8px 12px rgba(0,0,0,0.35);
-    --shadow-glow-camel: 0 0 24px rgba(212, 165, 116, 0.2);
-    --shadow-inset: inset 0 2px 4px rgba(0,0,0,0.2);
+    /* Shadows — flattened for Paper Ash */
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+    --shadow-md: 0 2px 6px rgba(0,0,0,0.25);
+    --shadow-lg: 0 8px 20px rgba(0,0,0,0.3);
+    --shadow-glow-camel: 0 0 20px rgba(232, 224, 216, 0.1);
+    --shadow-glow-success: 0 0 10px rgba(74, 186, 106, 0.4);
+    --shadow-inset: inset 0 1px 2px rgba(0,0,0,0.15);
 }
 
 /* ================================================================
@@ -94,13 +120,24 @@ body {
     background: var(--bg-surface);
 }
 
-/* CHARACTER MOMENT — Fraunces display at 36px */
+/* CHARACTER MOMENT — Manrope 48px, cream accent */
 .app-title {
     font-family: var(--font-display);
-    font-size: 36px;
-    font-weight: 700;
+    font-size: 48px;
+    font-weight: 800;
     color: var(--accent-camel);
-    line-height: 1.1;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    position: relative;
+    display: inline-block;
+}
+
+/* Hand-drawn Loop — near title, 35% opacity */
+.hand-drawn-loop {
+    position: absolute;
+    top: -6px;
+    right: -38px;
+    opacity: 0.35;
 }
 
 .app-subtitle {
@@ -331,8 +368,8 @@ body {
     background: rgba(205, 130, 100, 0.12);
 }
 .stat-delta.delta-down {
-    color: #7ab07a;
-    background: rgba(122, 176, 122, 0.12);
+    color: var(--semantic-success);
+    background: rgba(74, 186, 106, 0.12);
 }
 .stat-delta.delta-flat {
     color: var(--text-tertiary);
@@ -390,14 +427,57 @@ body {
     color: var(--text-tertiary);
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-2);
     cursor: pointer;
     white-space: nowrap;
 }
 
-.filter-check input[type="checkbox"] {
-    width: 14px;
-    height: 14px;
+/* ds-toggle — replaces raw checkboxes */
+.ds-toggle {
+    position: relative;
+    width: 32px;
+    height: 18px;
+    flex-shrink: 0;
+    display: inline-block;
+}
+
+.ds-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.ds-toggle__track {
+    position: absolute;
+    inset: 0;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: 9px;
+    transition: all 0.2s;
+    cursor: pointer;
+}
+
+.ds-toggle__track::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    background: var(--text-tertiary);
+    border-radius: 50%;
+    transition: all 0.2s;
+}
+
+.ds-toggle input:checked + .ds-toggle__track {
+    background: var(--accent-camel-subtle);
+    border-color: var(--accent-camel);
+}
+
+.ds-toggle input:checked + .ds-toggle__track::after {
+    transform: translateX(14px);
+    background: var(--accent-camel);
 }
 
 .filter-label {
@@ -1568,8 +1648,8 @@ input[type="checkbox"]:focus-visible {
     color: var(--text-secondary);
 }
 .acct-type-credit_card { color: var(--accent-camel); }
-.acct-type-debit { color: #7ab07a; }
-.acct-type-bank { color: #6b9bd2; }
+.acct-type-debit { color: var(--semantic-success); }
+.acct-type-bank { color: var(--chart-6); }
 
 /* Field hints (? tooltip + FX rate) */
 .field-hint {
@@ -1979,4 +2059,113 @@ input[type="checkbox"]:focus-visible {
 .svc-tx-table td {
     padding: var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
+}
+
+/* ================================================================
+   STATEMENT COVERAGE MATRIX
+   ================================================================ */
+
+/* Service input in import preview */
+.svc-input {
+    width: 130px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-family: var(--font-primary);
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    color: var(--text-secondary);
+}
+
+.svc-input:focus {
+    outline: none;
+    border-color: var(--accent-camel);
+    color: var(--text-primary);
+}
+
+.svc-input::placeholder {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.coverage-summary {
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.coverage-summary strong {
+    color: var(--text-primary);
+    font-weight: 700;
+}
+
+.coverage-summary .coverage-gap {
+    color: var(--accent-pop);
+}
+
+.coverage-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.coverage-table th {
+    padding: var(--space-2) var(--space-3);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-tertiary);
+    border-bottom: 1px solid var(--border-default);
+    text-align: center;
+    white-space: nowrap;
+}
+
+.coverage-table th:first-child {
+    text-align: left;
+}
+
+.coverage-table td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+    text-align: center;
+    vertical-align: middle;
+}
+
+.coverage-table td:first-child {
+    text-align: left;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.coverage-table tr:hover td {
+    background: var(--bg-raised);
+}
+
+.coverage-cell-ok {
+    color: var(--accent-camel);
+    font-size: 15px;
+    line-height: 1;
+}
+
+.coverage-cell-missing {
+    color: var(--text-muted);
+    font-size: 15px;
+    line-height: 1;
+}
+
+.coverage-cell-missing.coverage-target {
+    color: var(--accent-pop);
+}
+
+.coverage-target-month {
+    color: var(--accent-camel) !important;
+}
+
+.coverage-acct-type {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
