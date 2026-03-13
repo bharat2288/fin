@@ -93,21 +93,25 @@ def ensure_statement(
     account_id: int,
     statement_date: str,
     filename: str,
-) -> int | None:
-    """Create a statement record. Returns None if already imported."""
+) -> tuple[int, bool]:
+    """Get or create a statement record.
+
+    Returns (statement_id, is_new). If a record already exists for this
+    account + date, returns the existing ID with is_new=False.
+    """
     existing = conn.execute(
         "SELECT id FROM statements WHERE account_id = ? AND statement_date = ?",
         (account_id, statement_date),
     ).fetchone()
     if existing:
-        return None
+        return (existing["id"], False)
 
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, ?)",
         (account_id, statement_date, filename),
     )
     conn.commit()
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return (cur.lastrowid, True)
 
 
 def categorize_all(
@@ -305,9 +309,9 @@ def commit_statements(filepaths: list[str]) -> None:
         # Create account + statement records
         for acct_name in stmt.accounts:
             account_id = ensure_account(conn, acct_name, stmt.statement_type)
-            statement_id = ensure_statement(conn, account_id, stmt.statement_date, stmt.filename)
+            statement_id, is_new = ensure_statement(conn, account_id, stmt.statement_date, stmt.filename)
 
-            if statement_id is None:
+            if not is_new:
                 print(f"  SKIPPED: already imported (account={acct_name}, date={stmt.statement_date})")
                 continue
 

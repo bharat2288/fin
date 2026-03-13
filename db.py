@@ -583,6 +583,121 @@ def init_db() -> None:
     conn.close()
 
 
+def migrate_split_multimonth_statements() -> None:
+    """Split multi-month statements into per-month records.
+
+    Finds statements whose transactions span multiple months, creates
+    per-month statement records (YYYY-MM-01), re-links transactions to
+    the correct month's statement, and deletes the original if empty.
+    Idempotent — safe to run multiple times.
+    """
+    conn = get_connection()
+
+    # Find statements with transactions spanning multiple months
+    multi = conn.execute("""
+        SELECT s.id, s.account_id, s.filename,
+               COUNT(DISTINCT SUBSTR(t.date, 1, 7)) as month_count
+        FROM statements s
+        JOIN transactions t ON t.statement_id = s.id
+        GROUP BY s.id
+        HAVING month_count > 1
+    """).fetchall()
+
+    if not multi:
+        conn.close()
+        return
+
+    total_moved = 0
+    stmts_created = 0
+    stmts_deleted = 0
+
+    for stmt in multi:
+        stmt_id = stmt["id"]
+        account_id = stmt["account_id"]
+        filename = stmt["filename"] or ""
+
+        # Get distinct months for this statement's transactions
+        months = conn.execute(
+            "SELECT DISTINCT SUBSTR(date, 1, 7) as ym FROM transactions WHERE statement_id = ?",
+            (stmt_id,),
+        ).fetchall()
+
+        for row in months:
+            ym = row["ym"]
+            target_date = f"{ym}-01"
+
+            # Get or create the per-month statement
+            existing = conn.execute(
+                "SELECT id FROM statements WHERE account_id = ? AND statement_date = ?",
+                (account_id, target_date),
+            ).fetchone()
+
+            if existing:
+                target_stmt_id = existing["id"]
+                # Don't re-link if the source IS the target (shouldn't happen but safety)
+                if target_stmt_id == stmt_id:
+                    continue
+            else:
+                conn.execute(
+                    "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, ?)",
+                    (account_id, target_date, filename),
+                )
+                target_stmt_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                stmts_created += 1
+
+            # Re-link transactions from old statement to per-month statement
+            cur = conn.execute(
+                "UPDATE transactions SET statement_id = ? "
+                "WHERE statement_id = ? AND SUBSTR(date, 1, 7) = ?",
+                (target_stmt_id, stmt_id, ym),
+            )
+            total_moved += cur.rowcount
+
+        # Delete the original multi-month statement if it has no remaining transactions
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE statement_id = ?", (stmt_id,)
+        ).fetchone()[0]
+        if remaining == 0:
+            conn.execute("DELETE FROM statements WHERE id = ?", (stmt_id,))
+            stmts_deleted += 1
+
+    conn.commit()
+    conn.close()
+    if total_moved > 0:
+        print(
+            f"Statement split migration: {total_moved} txns moved, "
+            f"{stmts_created} statements created, {stmts_deleted} old statements deleted"
+        )
+
+
+# --- Rule engine cache ---
+# In-memory cache of merchant rules, invalidated on any rule CRUD.
+# Single-process Flask app, so module-level state is safe.
+_rules_cache: list[dict] | None = None
+
+
+def invalidate_rules_cache() -> None:
+    """Clear the cached rules. Call after any merchant_rules INSERT/UPDATE/DELETE."""
+    global _rules_cache
+    _rules_cache = None
+
+
+def _get_rules(conn: sqlite3.Connection) -> list[dict]:
+    """Return cached rules list, loading from DB on first call or after invalidation."""
+    global _rules_cache
+    if _rules_cache is None:
+        rows = conn.execute(
+            "SELECT mr.pattern, mr.match_type, mr.category_id, "
+            "       mr.priority, mr.min_amount, mr.max_amount, "
+            "       mr.service_id, s.category_id as svc_category_id "
+            "FROM merchant_rules mr "
+            "LEFT JOIN services s ON mr.service_id = s.id "
+            "ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC"
+        ).fetchall()
+        _rules_cache = [dict(r) for r in rows]
+    return _rules_cache
+
+
 def categorize_transaction(
     description: str,
     conn: sqlite3.Connection,
@@ -599,15 +714,7 @@ def categorize_transaction(
     falling back to the rule's direct category_id.
     """
     desc_upper = description.upper()
-
-    rules = conn.execute(
-        "SELECT mr.pattern, mr.match_type, mr.category_id, "
-        "       mr.priority, mr.min_amount, mr.max_amount, "
-        "       mr.service_id, s.category_id as svc_category_id "
-        "FROM merchant_rules mr "
-        "LEFT JOIN services s ON mr.service_id = s.id "
-        "ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC"
-    ).fetchall()
+    rules = _get_rules(conn)
 
     for rule in rules:
         pattern = rule["pattern"].upper()

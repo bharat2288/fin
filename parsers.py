@@ -7,11 +7,6 @@ Adding a new bank/format is a single `register()` call.
 from pathlib import Path
 
 
-class ParsedStatementWrapper:
-    """Wrapper to normalize parser output to always return a list."""
-    pass
-
-
 # Registry: list of {ext, detect_fn, parse_fn, name}
 # detect_fn(filepath) -> bool (or truthy)
 # parse_fn(filepath) -> ParsedStatement | list[ParsedStatement]

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from db import get_connection, init_db, categorize_transaction
+from db import get_connection, init_db, categorize_transaction, invalidate_rules_cache, migrate_split_multimonth_statements
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
@@ -310,6 +310,7 @@ def api_services_update(svc_id):
             recategorized = cur.rowcount
 
         conn.commit()
+        invalidate_rules_cache()  # service category change affects cached svc_category_id
         conn.close()
         return jsonify({"success": True, "recategorized": recategorized})
     except Exception as e:
@@ -351,6 +352,7 @@ def api_services_merge(svc_id):
     # Delete the now-orphaned source service
     conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
     conn.commit()
+    invalidate_rules_cache()  # merge reassigns rule service_ids
     conn.close()
 
     return jsonify({
@@ -959,6 +961,7 @@ def api_resolve_transaction():
             backfilled = cur.rowcount
 
         conn.commit()
+        invalidate_rules_cache()
         conn.close()
         return jsonify({
             "success": True,
@@ -1234,23 +1237,16 @@ def api_import_confirm():
             account_id = ensure_account(conn, account_name, stmt_type)
             accounts_created.append(account_name)
 
-            # Determine statement date from transactions
-            dates = [t["date"] for t in active_txns if t.get("date")]
-            stmt_date = max(dates) if dates else datetime.now().strftime("%Y-%m-%d")
-
-            # Create statement record
+            # Create per-month statement records so coverage matrix reflects each month.
+            # A multi-month CSV (e.g. Citi Oct-Dec) creates 3 statement records.
             filename = f"import_{import_id}_{account_name[:30]}"
-            statement_id = ensure_statement(conn, account_id, stmt_date, filename)
-
-            if statement_id is None:
-                # Already imported — try with a unique date
-                stmt_date_unique = stmt_date + f"_import{import_id}"
-                conn.execute(
-                    "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, ?)",
-                    (account_id, stmt_date_unique, filename),
-                )
-                conn.commit()
-                statement_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            month_stmt_ids: dict[str, int] = {}
+            for tx in active_txns:
+                ym = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
+                if ym not in month_stmt_ids:
+                    stmt_date = f"{ym}-01"
+                    sid, _ = ensure_statement(conn, account_id, stmt_date, filename)
+                    month_stmt_ids[ym] = sid
 
             # --- Deduplication ---
             # Group import transactions by (date, description, amount) to handle
@@ -1284,8 +1280,10 @@ def api_import_confirm():
                 skipped = import_count - to_insert
                 duplicates_skipped += skipped
 
-                # Insert from the end of the list (order doesn't matter)
+                # Link each transaction to its month's statement record
                 for tx in import_by_key[key][:to_insert]:
+                    tx_month = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
+                    statement_id = month_stmt_ids[tx_month]
                     conn.execute(
                         "INSERT INTO transactions "
                         "(statement_id, date, description, amount_sgd, amount_foreign, "
@@ -1363,9 +1361,10 @@ def api_import_confirm():
                     (rule["pattern"], rule["category_id"], rule.get("match_type", "contains")),
                 )
                 rules_added += 1
-            except Exception:
-                pass
+            except Exception as e:
+                app.logger.warning("Failed to insert rule '%s': %s", rule.get("pattern"), e)
         conn.commit()
+        invalidate_rules_cache()
 
         # Update batch_imports record
         result_summary = {
@@ -1560,8 +1559,8 @@ def api_rules_create():
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO merchant_rules (pattern, category_id, match_type, confidence, priority, min_amount, max_amount) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO merchant_rules (pattern, category_id, match_type, confidence, priority, min_amount, max_amount, service_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 data["pattern"],
                 data["category_id"],
@@ -1570,9 +1569,11 @@ def api_rules_create():
                 data.get("priority", 0),
                 data.get("min_amount"),
                 data.get("max_amount"),
+                data.get("service_id"),
             ),
         )
         conn.commit()
+        invalidate_rules_cache()
         rule_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.close()
         return jsonify({"id": rule_id, "success": True})
@@ -1644,6 +1645,7 @@ def api_rules_update(rule_id):
         recategorized = cur.rowcount
 
     conn.commit()
+    invalidate_rules_cache()
     conn.close()
     return jsonify({"success": True, "recategorized": recategorized})
 
@@ -1654,6 +1656,7 @@ def api_rules_delete(rule_id):
     conn = get_connection()
     conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
     conn.commit()
+    invalidate_rules_cache()
     conn.close()
     return jsonify({"success": True})
 
@@ -1763,45 +1766,66 @@ def api_subscriptions():
     # Compute 90-day cutoff for rolling averages
     cutoff_90d = (date.today() - timedelta(days=90)).isoformat()
 
+    # Batch enrichment: latest tx per subscription (replaces 2 queries per sub)
+    latest_tx_rows = conn.execute("""
+        WITH matched AS (
+            SELECT s.id as sub_id,
+                   t.id as tx_id, t.date as tx_date, t.amount_sgd,
+                   ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY t.date DESC) as rn
+            FROM subscriptions s
+            JOIN transactions t
+                ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
+            WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
+              AND t.is_payment = 0 AND t.is_transfer = 0 AND t.amount_sgd > 0
+        )
+        SELECT sub_id, tx_id, tx_date, amount_sgd
+        FROM matched WHERE rn = 1
+    """).fetchall()
+    latest_tx = {r["sub_id"]: dict(r) for r in latest_tx_rows}
+
+    # Batch enrichment: monthly sums per subscription for 90-day rolling avg
+    monthly_rows = conn.execute("""
+        SELECT s.id as sub_id,
+               SUBSTR(t.date, 1, 7) as ym,
+               SUM(t.amount_sgd) as month_total
+        FROM subscriptions s
+        JOIN transactions t
+            ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
+        WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
+          AND t.is_payment = 0 AND t.is_transfer = 0 AND t.amount_sgd > 0
+          AND t.date >= ?
+        GROUP BY s.id, SUBSTR(t.date, 1, 7)
+        ORDER BY s.id, ym DESC
+    """, (cutoff_90d,)).fetchall()
+    # Build lookup: sub_id → [{ym, month_total}, ...] ordered by ym DESC
+    monthly_by_sub: dict[int, list[dict]] = {}
+    for r in monthly_rows:
+        monthly_by_sub.setdefault(r["sub_id"], []).append(
+            {"ym": r["ym"], "month_total": r["month_total"]}
+        )
+
     result = []
     for r in rows:
         d = dict(r)
+        sub_id = d["id"]
         pat = (d["match_pattern"] or "").upper()
+        monthly_sums = monthly_by_sub.get(sub_id, []) if pat else []
 
-        # Enrich from transactions if match_pattern exists
+        # Enrich from batch lookups (no per-row queries)
         if pat:
-            # Most recent transaction match (with ID for linking)
-            tx = conn.execute("""
-                SELECT t.id, t.date, t.amount_sgd
-                FROM transactions t
-                WHERE UPPER(t.description) LIKE '%' || ? || '%'
-                  AND t.is_payment = 0 AND t.is_transfer = 0
-                  AND t.amount_sgd > 0
-                ORDER BY t.date DESC LIMIT 1
-            """, (pat,)).fetchone()
+            tx = latest_tx.get(sub_id)
             if tx:
-                d["tx_last_paid"] = tx["date"]
+                d["tx_last_paid"] = tx["tx_date"]
                 d["tx_amount"] = round(tx["amount_sgd"], 2)
-                d["tx_id"] = tx["id"]
+                d["tx_id"] = tx["tx_id"]
             else:
                 d["tx_last_paid"] = None
                 d["tx_amount"] = None
                 d["tx_id"] = None
 
-            # Rolling average from monthly sums (handles split payments)
-            monthly_sums = conn.execute("""
-                SELECT SUBSTR(t.date, 1, 7) as ym, SUM(t.amount_sgd) as month_total
-                FROM transactions t
-                WHERE UPPER(t.description) LIKE '%' || ? || '%'
-                  AND t.is_payment = 0 AND t.is_transfer = 0
-                  AND t.amount_sgd > 0
-                  AND t.date >= ?
-                GROUP BY SUBSTR(t.date, 1, 7)
-                ORDER BY ym DESC
-            """, (pat, cutoff_90d)).fetchall()
             d["tx_months_90d"] = len(monthly_sums)
             if monthly_sums:
-                totals = [r["month_total"] for r in monthly_sums]
+                totals = [m["month_total"] for m in monthly_sums]
                 d["tx_avg_90d"] = round(sum(totals) / len(totals), 2)
             else:
                 d["tx_avg_90d"] = None
@@ -1812,7 +1836,7 @@ def api_subscriptions():
             d["tx_avg_90d"] = None
             d["tx_months_90d"] = 0
 
-        # Last paid amount from transactions: latest month's sum (handles split payments)
+        # Last paid amount: latest month's sum (handles split payments)
         if pat and d.get("tx_months_90d"):
             d["tx_amount"] = round(monthly_sums[0]["month_total"], 2)
 
@@ -1820,10 +1844,9 @@ def api_subscriptions():
         amt = d.get("amount") or 0
         cur = d.get("currency") or "SGD"
 
-        # Monthly equivalent from configured amount
-        # Use 90d avg if variable (monthly sums vary >10%), otherwise from configured amount
+        # Monthly equivalent: use 90d avg if variable (>10% variance), else configured
         if d["tx_avg_90d"] and d["tx_months_90d"] >= 2:
-            totals = [r["month_total"] for r in monthly_sums]
+            totals = [m["month_total"] for m in monthly_sums]
             mn, mx = min(totals), max(totals)
             if mx > mn * 1.10:
                 d["is_variable"] = True
@@ -2047,5 +2070,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     init_db()
+    # migrate_split_multimonth_statements()  # One-time migration, already run 2026-03-13
     print(f"fin running at http://localhost:{args.port}")
     app.run(host="0.0.0.0", port=args.port, debug=args.debug)

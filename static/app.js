@@ -1125,10 +1125,6 @@ async function saveResolveModal() {
         closeResolveModal();
         txPage(0); // reload transaction table
 
-        // Show feedback if transactions were backfilled
-        if (data.backfilled > 0) {
-            console.log(`Resolved: service_id=${data.service_id}, rule_id=${data.rule_id}, backfilled=${data.backfilled} transactions`);
-        }
     } finally {
         btn.disabled = false;
         btn.textContent = 'Resolve';
