@@ -13,14 +13,14 @@ CREATE TABLE IF NOT EXISTS categories (
 CREATE TABLE IF NOT EXISTS merchant_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern TEXT NOT NULL,          -- merchant name pattern (case-insensitive match)
-    category_id INTEGER NOT NULL,
+    service_id INTEGER NOT NULL,   -- FK to services (category derived from service)
     match_type TEXT DEFAULT 'contains',  -- 'contains', 'startswith', 'exact'
     confidence TEXT DEFAULT 'confirmed', -- 'auto', 'confirmed' (user-verified)
     priority INTEGER DEFAULT 0,    -- higher priority wins (for overlapping patterns)
     min_amount REAL,               -- if set, rule only matches when amount >= this
     max_amount REAL,               -- if set, rule only matches when amount <= this
     created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (category_id) REFERENCES categories(id)
+    FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
 CREATE TABLE IF NOT EXISTS accounts (
@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     category_id INTEGER,
     is_payment INTEGER DEFAULT 0,  -- 1 = payment/credit, not an expense
     is_transfer INTEGER DEFAULT 0, -- 1 = internal transfer (bank statements)
-    is_anomaly INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in views)
+    is_one_off INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in table)
+    cat_source TEXT DEFAULT 'auto',  -- 'auto' = rule engine, 'manual' = user resolved
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (statement_id) REFERENCES statements(id),

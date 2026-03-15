@@ -252,7 +252,7 @@ def save_transactions(
         conn.execute(
             "INSERT INTO transactions "
             "(statement_id, date, description, amount_sgd, amount_foreign, "
-            "currency_foreign, category_id, is_payment, is_transfer, is_anomaly) "
+            "currency_foreign, category_id, is_payment, is_transfer, is_one_off) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 statement_id,
@@ -264,7 +264,7 @@ def save_transactions(
                 tx.get("category_id"),
                 1 if tx.get("is_payment") else 0,
                 1 if tx.get("is_transfer") else 0,
-                1 if tx.get("is_anomaly") else 0,
+                1 if tx.get("is_one_off") else 0,
             ),
         )
         count += 1
@@ -278,17 +278,29 @@ def add_merchant_rule(
     category_name: str,
     match_type: str = "contains",
 ) -> None:
-    """Add a new merchant rule."""
+    """Add a new merchant rule. Requires a service — find-or-create from category."""
     cat = conn.execute(
         "SELECT id FROM categories WHERE name = ?", (category_name,)
     ).fetchone()
     if not cat:
         raise ValueError(f"Unknown category: {category_name}")
 
+    # Find or create service from pattern name
+    svc_name = pattern.title()
+    svc = conn.execute(
+        "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
+    ).fetchone()
+    if not svc:
+        conn.execute("INSERT INTO services (name, category_id) VALUES (?, ?)",
+                     (svc_name, cat[0]))
+        svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    else:
+        svc_id = svc[0]
+
     conn.execute(
-        "INSERT OR REPLACE INTO merchant_rules (pattern, category_id, match_type, confidence) "
+        "INSERT OR REPLACE INTO merchant_rules (pattern, service_id, match_type, confidence) "
         "VALUES (?, ?, ?, 'confirmed')",
-        (pattern, cat[0], match_type),
+        (pattern, svc_id, match_type),
     )
     conn.commit()
 

@@ -60,7 +60,7 @@ def query_monthly_data(conn, personal_only: bool = False) -> dict:
             c.is_personal,
             SUM(t.amount_sgd) as total,
             COUNT(*) as txn_count,
-            SUM(CASE WHEN t.is_anomaly = 1 THEN t.amount_sgd ELSE 0 END) as anomaly_total
+            SUM(CASE WHEN t.is_one_off = 1 THEN t.amount_sgd ELSE 0 END) as one_off_total
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE {' AND '.join(where)}

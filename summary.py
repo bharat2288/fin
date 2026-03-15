@@ -5,7 +5,7 @@ Usage:
     py summary.py 2025-12              # specific month
     py summary.py 2025-10 2026-02      # date range
     py summary.py --all                # all months
-    py summary.py --no-anomaly         # exclude anomaly transactions
+    py summary.py --no-one-off         # exclude one-off transactions
     py summary.py --personal           # exclude Moom (business)
 """
 
@@ -19,7 +19,7 @@ def monthly_breakdown(
     conn,
     start_month: str | None = None,
     end_month: str | None = None,
-    exclude_anomaly: bool = False,
+    exclude_one_off: bool = False,
     personal_only: bool = False,
 ) -> dict:
     """Query monthly spending by category.
@@ -27,7 +27,7 @@ def monthly_breakdown(
     Args:
         start_month: YYYY-MM (inclusive). None = earliest.
         end_month: YYYY-MM (inclusive). None = latest.
-        exclude_anomaly: If True, exclude is_anomaly=1 transactions.
+        exclude_one_off: If True, exclude is_one_off=1 transactions.
         personal_only: If True, exclude Moom (business) category.
 
     Returns dict of {month: {category: total}}.
@@ -50,8 +50,8 @@ def monthly_breakdown(
             params.append(f"{year + 1}-01-01")
         else:
             params.append(f"{year}-{month + 1:02d}-01")
-    if exclude_anomaly:
-        where_clauses.append("t.is_anomaly = 0")
+    if exclude_one_off:
+        where_clauses.append("t.is_one_off = 0")
     if personal_only:
         where_clauses.append("c.is_personal = 1")
 
@@ -141,7 +141,7 @@ if __name__ == "__main__":
     conn = get_connection()
 
     args = sys.argv[1:]
-    exclude_anomaly = "--no-anomaly" in args
+    exclude_one_off = "--no-one-off" in args
     personal_only = "--personal" in args
     show_all = "--all" in args
     args = [a for a in args if not a.startswith("--")]
@@ -158,6 +158,6 @@ if __name__ == "__main__":
         today = date.today()
         start_month = end_month = f"{today.year}-{today.month:02d}"
 
-    data = monthly_breakdown(conn, start_month, end_month, exclude_anomaly, personal_only)
+    data = monthly_breakdown(conn, start_month, end_month, exclude_one_off, personal_only)
     print_monthly_summary(data, personal_only)
     conn.close()

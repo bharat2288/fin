@@ -257,10 +257,14 @@ def init_db() -> None:
     schema_sql = SCHEMA_PATH.read_text()
     conn.executescript(schema_sql)
 
-    # Migration: add is_anomaly column if missing
+    # Migration: rename is_anomaly → is_one_off on transactions
     tx_columns = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
-    if "is_anomaly" not in tx_columns:
-        conn.execute("ALTER TABLE transactions ADD COLUMN is_anomaly INTEGER DEFAULT 0")
+    if "is_anomaly" in tx_columns and "is_one_off" not in tx_columns:
+        conn.execute("ALTER TABLE transactions RENAME COLUMN is_anomaly TO is_one_off")
+        conn.commit()
+        print("Renamed transactions.is_anomaly -> is_one_off")
+    elif "is_one_off" not in tx_columns and "is_anomaly" not in tx_columns:
+        conn.execute("ALTER TABLE transactions ADD COLUMN is_one_off INTEGER DEFAULT 0")
         conn.commit()
 
     # Migration: add parent_id column if missing (replace old text `parent`)
@@ -447,6 +451,13 @@ def init_db() -> None:
         conn.commit()
         print("Added is_one_off column to services")
 
+    # Migration: add cat_source to transactions (auto/manual)
+    tx_columns = [row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    if "cat_source" not in tx_columns:
+        conn.execute("ALTER TABLE transactions ADD COLUMN cat_source TEXT DEFAULT 'auto'")
+        conn.commit()
+        print("Added cat_source column to transactions")
+
     # Migration: add status column to accounts (active/archived)
     acct_columns = [row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()]
     if "status" not in acct_columns:
@@ -500,6 +511,61 @@ def init_db() -> None:
         conn.commit()
         print("Legacy subscription columns dropped: service, amount_sgd, amount_usd, card")
 
+    # Migration: drop category_id from merchant_rules (service-centric model)
+    # Rules now map pattern → service_id only. Category derived from service.
+    rule_columns = [row[1] for row in conn.execute("PRAGMA table_info(merchant_rules)").fetchall()]
+    if "category_id" in rule_columns:
+        # Backfill any orphaned rules (service_id IS NULL) before dropping
+        orphans = conn.execute(
+            "SELECT id, category_id FROM merchant_rules WHERE service_id IS NULL"
+        ).fetchall()
+        for orphan in orphans:
+            # Find or create a service with matching category
+            svc = conn.execute(
+                "SELECT id FROM services WHERE category_id = ? LIMIT 1",
+                (orphan["category_id"],)
+            ).fetchone()
+            if svc:
+                conn.execute("UPDATE merchant_rules SET service_id = ? WHERE id = ?",
+                             (svc["id"], orphan["id"]))
+            else:
+                # Create a generic service for this category
+                cat = conn.execute("SELECT name FROM categories WHERE id = ?",
+                                   (orphan["category_id"],)).fetchone()
+                svc_name = f"Unknown ({cat['name']})" if cat else "Unknown"
+                conn.execute("INSERT INTO services (name, category_id) VALUES (?, ?)",
+                             (svc_name, orphan["category_id"]))
+                new_svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                conn.execute("UPDATE merchant_rules SET service_id = ? WHERE id = ?",
+                             (new_svc_id, orphan["id"]))
+        if orphans:
+            conn.commit()
+            print(f"Backfilled {len(orphans)} orphaned rules with service_id")
+
+        # Recreate table without category_id (can't ALTER DROP with FK constraint)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS merchant_rules_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern TEXT NOT NULL,
+                service_id INTEGER NOT NULL,
+                match_type TEXT DEFAULT 'contains',
+                confidence TEXT DEFAULT 'confirmed',
+                priority INTEGER DEFAULT 0,
+                min_amount REAL,
+                max_amount REAL,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (service_id) REFERENCES services(id)
+            );
+            INSERT INTO merchant_rules_new (id, pattern, service_id, match_type, confidence, priority, min_amount, max_amount, created_at)
+                SELECT id, pattern, service_id, match_type, confidence,
+                       COALESCE(priority, 0), min_amount, max_amount, created_at
+                FROM merchant_rules;
+            DROP TABLE merchant_rules;
+            ALTER TABLE merchant_rules_new RENAME TO merchant_rules;
+            CREATE INDEX IF NOT EXISTS idx_merchant_rules_pattern ON merchant_rules(pattern);
+        """)
+        print("Dropped category_id from merchant_rules (service-centric model)")
+
     # Seed categories — INSERT OR IGNORE so new categories get added
     # First pass: insert all top-level (parent=None)
     for name, parent_name, is_personal in DEFAULT_CATEGORIES:
@@ -537,8 +603,9 @@ def init_db() -> None:
             ).fetchone()
             if admin_insurance:
                 # Move all references from old Insurance to the new one under Admin
+                # Update services (not rules — rules no longer have category_id)
                 conn.execute(
-                    "UPDATE merchant_rules SET category_id = ? WHERE category_id = ?",
+                    "UPDATE services SET category_id = ? WHERE category_id = ?",
                     (admin_insurance[0], old_insurance[0]),
                 )
                 conn.execute(
@@ -555,21 +622,32 @@ def init_db() -> None:
             conn.commit()
 
     # Seed merchant rules — skip if pattern already exists in any form
-    # (user may have reassigned to subcategories, we don't override)
+    # Rules now require service_id (service-centric model)
     added = 0
     for pattern, cat_name, match_type in DEFAULT_MERCHANT_RULES:
-        cat_id = conn.execute(
+        cat_row = conn.execute(
             "SELECT id FROM categories WHERE name = ?", (cat_name,)
         ).fetchone()
-        if cat_id:
+        if cat_row:
             existing = conn.execute(
                 "SELECT id FROM merchant_rules WHERE pattern = ?", (pattern,)
             ).fetchone()
             if not existing:
+                # Find or create a service for this pattern
+                svc_name = pattern.title()  # e.g., "GRAB" → "Grab"
+                svc = conn.execute(
+                    "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
+                ).fetchone()
+                if not svc:
+                    conn.execute("INSERT INTO services (name, category_id) VALUES (?, ?)",
+                                 (svc_name, cat_row[0]))
+                    svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                else:
+                    svc_id = svc[0]
                 conn.execute(
-                    "INSERT INTO merchant_rules (pattern, category_id, match_type, confidence) "
+                    "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
                     "VALUES (?, ?, ?, 'auto')",
-                    (pattern, cat_id[0], match_type),
+                    (pattern, svc_id, match_type),
                 )
                 added += 1
     conn.commit()
@@ -687,11 +765,11 @@ def _get_rules(conn: sqlite3.Connection) -> list[dict]:
     global _rules_cache
     if _rules_cache is None:
         rows = conn.execute(
-            "SELECT mr.pattern, mr.match_type, mr.category_id, "
+            "SELECT mr.pattern, mr.match_type, "
             "       mr.priority, mr.min_amount, mr.max_amount, "
-            "       mr.service_id, s.category_id as svc_category_id "
+            "       mr.service_id, s.category_id "
             "FROM merchant_rules mr "
-            "LEFT JOIN services s ON mr.service_id = s.id "
+            "JOIN services s ON mr.service_id = s.id "
             "ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC"
         ).fetchall()
         _rules_cache = [dict(r) for r in rows]
@@ -710,8 +788,7 @@ def categorize_transaction(
     amount falls within the specified range.
 
     Returns (category_id, service_id) tuple. Either or both may be None.
-    Category is resolved from the service if the rule has a service_id,
-    falling back to the rule's direct category_id.
+    Category is resolved from the service (service.category_id).
     """
     desc_upper = description.upper()
     rules = _get_rules(conn)
@@ -743,9 +820,9 @@ def categorize_transaction(
             if rule["min_amount"] is not None or rule["max_amount"] is not None:
                 continue
 
-        # Resolve category: service's category takes precedence over rule's direct category
+        # Category derived from service (single source of truth)
         service_id = rule["service_id"]
-        category_id = rule["svc_category_id"] or rule["category_id"]
+        category_id = rule["category_id"]
         return (category_id, service_id)
 
     return (None, None)
