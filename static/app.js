@@ -29,8 +29,6 @@ let subsSortAsc = true;        // Sort direction
 let subsFxRate = 1.35;         // USD→SGD rate from subscriptions API
 let noteModalTxId = null;      // Transaction ID being edited in note modal
 let noteModalIconEl = null;    // Icon element to update after save
-// (ruleModalCatId removed — replaced by resolve modal)
-
 // Chart-table linking state — selections[] model (any combo of category + period)
 // Each entry: { category: string, period: string|null }
 // period=null means "all periods" (from donut click)
@@ -81,58 +79,52 @@ async function loadReferenceData() {
     categories = catRes;
     accounts = acctRes;
 
-    populateCategoryDropdowns();
+    populateCatMultiSelect();
     populateAccountFilter();
     populateYearDropdown();
 }
 
-function populateCategoryDropdowns() {
-    // Populate multi-select category filter (dashboard)
-    populateCatMultiSelect();
-}
-
 function populateAccountFilter() {
     // Dashboard account filter
-    ['filter-account'].forEach(id => {
-        const sel = document.getElementById(id);
-        if (!sel) return;
-        const current = sel.value;
-        sel.innerHTML = '<option value="">All Accounts</option>';
+    const dashSel = document.getElementById('filter-account');
+    if (dashSel) {
+        const current = dashSel.value;
+        dashSel.innerHTML = '<option value="">All Accounts</option>';
         accounts.forEach(a => {
-            sel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
+            dashSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         });
-        if (current) sel.value = current;
-    });
+        if (current) dashSel.value = current;
+    }
 
-    // Subscription card dropdowns (add form + edit modal) — use account_id as value
+    // Subscription card dropdowns (add form + edit modal)
+    const activeAccounts = accounts.filter(a => a.status !== 'archived');
     ['sub-card', 'edit-sub-card'].forEach(id => {
         const sel = document.getElementById(id);
         if (!sel) return;
         const current = sel.value;
         sel.innerHTML = '<option value="">All Accounts</option>';
-        accounts.filter(a => a.status !== 'archived').forEach(a => {
+        activeAccounts.forEach(a => {
             sel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         });
         if (current) sel.value = current;
     });
 }
 
-function populateYearDropdown() {
-    // Fetch date range from transactions to populate year dropdown
-    fetch('/api/transactions?per_page=1&sort=date&sort_dir=asc').then(r => r.json()).then(oldest => {
-        fetch('/api/transactions?per_page=1&sort=date&sort_dir=desc').then(r => r.json()).then(newest => {
-            const sel = document.getElementById('filter-year');
-            sel.innerHTML = '<option value="">All Years</option>';
+async function populateYearDropdown() {
+    const [oldest, newest] = await Promise.all([
+        fetch('/api/transactions?per_page=1&sort=date&sort_dir=asc').then(r => r.json()),
+        fetch('/api/transactions?per_page=1&sort=date&sort_dir=desc').then(r => r.json()),
+    ]);
+    const sel = document.getElementById('filter-year');
+    sel.innerHTML = '<option value="">All Years</option>';
 
-            if (oldest.transactions.length && newest.transactions.length) {
-                const startYear = parseInt(oldest.transactions[0].date.substring(0, 4));
-                const endYear = parseInt(newest.transactions[0].date.substring(0, 4));
-                for (let y = endYear; y >= startYear; y--) {
-                    sel.innerHTML += `<option value="${y}">${y}</option>`;
-                }
-            }
-        });
-    });
+    if (oldest.transactions.length && newest.transactions.length) {
+        const startYear = parseInt(oldest.transactions[0].date.substring(0, 4));
+        const endYear = parseInt(newest.transactions[0].date.substring(0, 4));
+        for (let y = endYear; y >= startYear; y--) {
+            sel.innerHTML += `<option value="${y}">${y}</option>`;
+        }
+    }
 }
 
 // ============================================================
@@ -236,7 +228,7 @@ async function loadDashboard(preserveChartFilter) {
 
     const params = buildFilterParams();           // full filter (includes month narrowing)
     const chartFilterParams = buildChartParams();  // year-level only (no month narrowing)
-    const granularity = getGranularity();
+    const granularity = 'monthly';
     const groupParent = showSubcategories ? 'false' : 'true';
     const chartParams = chartFilterParams + (chartFilterParams ? '&' : '') + 'granularity=' + granularity + '&group_parent=' + groupParent;
     const catChartParams = params + (params ? '&' : '') + 'group_parent=' + groupParent;
@@ -312,10 +304,6 @@ function buildChartParams() {
     if (spendFilter === 'moom') p.set('moom_only', 'true');
     if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
     return p.toString();
-}
-
-function getGranularity() {
-    return 'monthly';
 }
 
 function applyDashboardFilters() { loadDashboard(); }
@@ -887,8 +875,8 @@ async function toggleTxOneOff(txId, el) {
         el.title = newVal
             ? 'Marked as one-off (click to unmark)'
             : 'Mark as one-off (excludes from burn rate)';
-    } catch (e) {
-        console.error('Failed to toggle one-off:', e);
+    } catch (_) {
+        // Silently fail — UI state unchanged
     }
 }
 
@@ -974,8 +962,6 @@ function suggestPattern(description) {
 // Unified flow: pick/create service → category auto-fills → rule pattern → one save
 
 let resolveModalTxId = null;
-// resolveServicesCache removed — using allServicesList directly
-
 async function openResolveModal(txId, description) {
     resolveModalTxId = txId;
 
@@ -1002,8 +988,6 @@ async function openResolveModal(txId, description) {
     document.getElementById('resolve-modal').style.display = 'flex';
     picker.input.focus();
 }
-
-// loadResolveServices removed — ServicePicker handles lazy loading
 
 function populateResolveCategoryDropdown() {
     const select = document.getElementById('resolve-modal-category');
@@ -1110,8 +1094,6 @@ function onResolveServiceChange(value) {
     document.getElementById('resolve-new-cat-row').classList.add('hidden');
     updateResolveCascade();
 }
-
-// Service input change wired via ServicePicker.onSelect callback
 
 function closeResolveModal() {
     document.getElementById('resolve-modal').style.display = 'none';
@@ -1250,8 +1232,6 @@ async function saveResolveModal() {
         btn.textContent = 'Resolve';
     }
 }
-
-// Legacy aliases removed — use openResolveModal/closeResolveModal directly
 
 // ============================================================
 // IMPORT
@@ -1625,8 +1605,7 @@ async function loadCoverage() {
 function formatMonthLabel(ym) {
     // "2026-03" → "Mar 26"
     const [y, m] = ym.split('-');
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    return months[parseInt(m) - 1] + ' ' + y.slice(2);
+    return MONTH_NAMES[parseInt(m)] + ' ' + y.slice(2);
 }
 
 function formatCoverageDate(dateStr) {
@@ -1634,8 +1613,7 @@ function formatCoverageDate(dateStr) {
     if (!dateStr) return '';
     const d = new Date(dateStr);
     if (isNaN(d)) return '';
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    return d.getDate() + ' ' + months[d.getMonth()];
+    return d.getDate() + ' ' + MONTH_NAMES[d.getMonth() + 1];
 }
 
 // ============================================================
@@ -2203,20 +2181,6 @@ function removeChartSelection(category, period) {
     }
 }
 
-// Legacy compat — removeSingleChartCat removes all selections for a category
-function removeSingleChartCat(category) {
-    chartFilter.selections = chartFilter.selections.filter(s => s.category !== category);
-    if (chartFilter.selections.length === 0) {
-        clearChartFilter();
-    } else {
-        updateChartHighlights();
-        renderFilterChip();
-        updateCatFilterDisplay();
-        txCurrentPage = 1;
-        txPage(0);
-    }
-}
-
 function scrollToTable() {
     const chip = document.getElementById('chart-filter-chip');
     const target = chip && !chip.classList.contains('hidden') ? chip : document.getElementById('tx-table');
@@ -2679,15 +2643,6 @@ document.addEventListener('click', e => {
         document.getElementById('cat-filter-trigger')?.classList.remove('ms-active');
     }
 });
-
-// ============================================================
-// SERVICES TAB (REMOVED — absorbed into Dashboard 3-view toggle)
-// Old code: renderServicesTab, switchServiceView, renderServicesCategoryView, etc.
-// Now handled by loadServiceAccordion() and loadCategoryAccordion() in Dashboard section
-// ============================================================
-
-// (Old Services tab code removed — ~460 lines)
-// Accordion views now in Dashboard 3-view toggle section above
 
 // ============================================================
 // CATEGORIES MASTER TAB
@@ -3415,11 +3370,10 @@ function renderSubsStats(subs) {
 
 function formatDateDMY(dateStr) {
     if (!dateStr) return '—';
-    const MMM = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const d = new Date(dateStr + 'T00:00:00');
     if (isNaN(d)) return dateStr;
     const dd = String(d.getDate()).padStart(2, '0');
-    return `${dd}-${MMM[d.getMonth()]}-${String(d.getFullYear()).slice(2)}`;
+    return `${dd}-${MONTH_NAMES[d.getMonth() + 1]}-${String(d.getFullYear()).slice(2)}`;
 }
 
 function sortSubs(col) {
@@ -3741,8 +3695,6 @@ function closeAddSubModal() {
     document.getElementById('add-sub-modal').style.display = 'none';
     document.removeEventListener('keydown', addSubEscHandler);
 }
-
-// populateSubsCategoryDropdown removed — handled by populateSubCategoryDropdown()
 
 async function addSubscription() {
     const picker = getAddSubServicePicker();

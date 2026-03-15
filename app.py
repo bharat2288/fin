@@ -8,20 +8,15 @@ Usage:
     py app.py --port 8450      # Explicit port
 """
 
-import csv
-import hashlib
-import io
 import json
 import os
 import re
-import sys
 import tempfile
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from db import get_connection, init_db, categorize_transaction, invalidate_rules_cache, migrate_split_multimonth_statements
+from db import get_connection, init_db, categorize_transaction, invalidate_rules_cache
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
@@ -406,40 +401,6 @@ def api_service_transactions(svc_id):
 # Dashboard API
 # ---------------------------------------------------------------------------
 
-@app.route("/api/dashboard/summary")
-def api_dashboard_summary():
-    """Stat card data with optional filters.
-
-    Query params: start, end, personal_only, exclude_one_off
-    """
-    conn = get_connection()
-    filters, params = _build_filters(request.args)
-
-    base = f"""
-        SELECT
-            COUNT(*) as total_transactions,
-            SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0 THEN amount_sgd ELSE 0 END) as total_spend,
-            SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0 AND c.is_personal = 1 THEN amount_sgd ELSE 0 END) as personal_spend,
-            SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0 AND c.is_personal = 0 THEN amount_sgd ELSE 0 END) as moom_spend,
-            COUNT(CASE WHEN t.category_id IS NULL AND is_payment = 0 AND is_transfer = 0 THEN 1 END) as uncategorized
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        LEFT JOIN services svc ON t.service_id = svc.id
-        JOIN statements s ON t.statement_id = s.id
-        WHERE is_payment = 0 AND is_transfer = 0 {filters}
-    """
-    row = conn.execute(base, params).fetchone()
-    conn.close()
-
-    return jsonify({
-        "total_transactions": row["total_transactions"] or 0,
-        "total_spend": round(row["total_spend"] or 0, 2),
-        "personal_spend": round(row["personal_spend"] or 0, 2),
-        "moom_spend": round(row["moom_spend"] or 0, 2),
-        "uncategorized": row["uncategorized"] or 0,
-    })
-
-
 @app.route("/api/dashboard/stat-cards")
 def api_dashboard_stat_cards():
     """Stat cards: single month spend + delta vs 3-month rolling average.
@@ -466,15 +427,6 @@ def api_dashboard_stat_cards():
             ref_m -= 2
             if ref_m <= 0:
                 ref_m, ref_y = ref_m + 12, ref_y - 1
-
-    # Build date ranges
-    ref_start = f"{ref_y:04d}-{ref_m:02d}-01"
-    # Last day of ref month
-    if ref_m == 12:
-        ref_end_date = date(ref_y + 1, 1, 1) - timedelta(days=1)
-    else:
-        ref_end_date = date(ref_y, ref_m + 1, 1) - timedelta(days=1)
-    ref_end = ref_end_date.strftime("%Y-%m-%d")
 
     # 3-month avg: the 3 months before ref_month
     avg_months = []
@@ -742,10 +694,8 @@ def api_transactions():
     search = request.args.get("search")
     if search:
         filters += " AND (t.description LIKE ? OR svc.name LIKE ? OR c.name LIKE ? OR p.name LIKE ?)"
-        params.append(f"%{search}%")
-        params.append(f"%{search}%")
-        params.append(f"%{search}%")
-        params.append(f"%{search}%")
+        search_param = f"%{search}%"
+        params.extend([search_param] * 4)
 
     page = int(request.args.get("page", 1))
     per_page = int(request.args.get("per_page", 50))
@@ -1145,7 +1095,7 @@ def api_import_upload():
         uncategorized += group_uncat
         skipped += group_skip
 
-    # Save preview to batch_imports
+    # Save preview to batch_imports and fetch services list in one connection
     conn = get_connection()
     conn.execute(
         "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines) VALUES (?, ?, 'preview', ?, ?)",
@@ -1158,10 +1108,7 @@ def api_import_upload():
     )
     conn.commit()
     import_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.close()
 
-    # Include services list for the service picker in preview
-    conn = get_connection()
     services_rows = conn.execute(
         "SELECT s.id, s.name, s.category_id, COALESCE(c.name, '') as category_name "
         "FROM services s LEFT JOIN categories c ON s.category_id = c.id "
@@ -1611,27 +1558,13 @@ def api_rules_update(rule_id):
         return jsonify({"error": "No data provided"}), 400
 
     conn = get_connection()
+    allowed = ["pattern", "service_id", "match_type", "priority", "min_amount", "max_amount"]
     sets = []
     params = []
-
-    if "pattern" in data:
-        sets.append("pattern = ?")
-        params.append(data["pattern"])
-    if "service_id" in data:
-        sets.append("service_id = ?")
-        params.append(data["service_id"])
-    if "match_type" in data:
-        sets.append("match_type = ?")
-        params.append(data["match_type"])
-    if "priority" in data:
-        sets.append("priority = ?")
-        params.append(data["priority"])
-    if "min_amount" in data:
-        sets.append("min_amount = ?")
-        params.append(data["min_amount"])
-    if "max_amount" in data:
-        sets.append("max_amount = ?")
-        params.append(data["max_amount"])
+    for field in allowed:
+        if field in data:
+            sets.append(f"{field} = ?")
+            params.append(data[field])
 
     if not sets:
         conn.close()
@@ -2112,6 +2045,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     init_db()
-    # migrate_split_multimonth_statements()  # One-time migration, already run 2026-03-13
     print(f"fin running at http://localhost:{args.port}")
     app.run(host="0.0.0.0", port=args.port, debug=args.debug)

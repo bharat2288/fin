@@ -307,10 +307,6 @@ def init_db() -> None:
 
     # Migration: remove UNIQUE constraint on pattern (allow duplicate patterns
     # with different amount ranges / priorities for dual-purpose merchants)
-    # Check if pattern column still has UNIQUE constraint
-    index_info = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='merchant_rules'"
-    ).fetchall()
     create_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='merchant_rules'"
     ).fetchone()
