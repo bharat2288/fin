@@ -34,6 +34,9 @@ credentials.json
 Thumbs.db
 desktop.ini
 
+# Specs (synced via session workflow, not git)
+specs/
+
 # Claude Code
 .claude/
 
