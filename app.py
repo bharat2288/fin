@@ -93,8 +93,9 @@ def api_categories_create():
         conn.close()
         return jsonify({"success": True, "id": new_id})
     except Exception as e:
+        app.logger.warning("Category create failed: %s", e)
         conn.close()
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": "Failed to create category"}), 400
 
 
 @app.route("/api/accounts")
@@ -140,7 +141,8 @@ def api_accounts_create():
         return jsonify({"id": new_id, "success": True})
     except Exception as e:
         conn.close()
-        return jsonify({"error": str(e)}), 400
+        app.logger.warning("Failed to create account: %s", e)
+        return jsonify({"error": "Failed to create account"}), 400
 
 
 @app.route("/api/accounts/<int:acct_id>", methods=["PUT"])
@@ -271,7 +273,8 @@ def api_services_create():
         return jsonify({"id": new_id, "success": True})
     except Exception as e:
         conn.close()
-        return jsonify({"error": str(e)}), 400
+        app.logger.warning("Failed to create service: %s", e)
+        return jsonify({"error": "Failed to create service"}), 400
 
 
 @app.route("/api/services/<int:svc_id>", methods=["PUT"])
@@ -309,7 +312,8 @@ def api_services_update(svc_id):
         return jsonify({"success": True, "recategorized": recategorized})
     except Exception as e:
         conn.close()
-        return jsonify({"error": str(e)}), 400
+        app.logger.warning("Failed to update service: %s", e)
+        return jsonify({"error": "Failed to update service"}), 400
 
 
 @app.route("/api/services/<int:svc_id>/merge", methods=["POST"])
@@ -495,8 +499,11 @@ def api_dashboard_stat_cards():
         # Exclude both transaction-level and service-level one-offs
         extra_filters += " AND t.is_one_off = 0 AND (svc.is_one_off IS NULL OR svc.is_one_off = 0)"
     if account_id:
-        extra_filters += " AND s.account_id = ?"
-        extra_params.append(int(account_id))
+        try:
+            extra_filters += " AND s.account_id = ?"
+            extra_params.append(int(account_id))
+        except (ValueError, TypeError):
+            pass
 
     def query_month(y: int, m: int) -> dict:
         """Query spend totals for a single month."""
@@ -976,7 +983,8 @@ def api_resolve_transaction():
         })
     except Exception as e:
         conn.close()
-        return jsonify({"error": str(e)}), 400
+        app.logger.warning("Failed to resolve transaction: %s", e)
+        return jsonify({"error": "Failed to resolve transaction"}), 400
 
 
 def _build_filters(args) -> tuple[str, list]:
@@ -1009,8 +1017,11 @@ def _build_filters(args) -> tuple[str, list]:
 
     account_id = args.get("account_id")
     if account_id:
-        filters += " AND s.account_id = ?"
-        params.append(int(account_id))
+        try:
+            filters += " AND s.account_id = ?"
+            params.append(int(account_id))
+        except (ValueError, TypeError):
+            pass
 
     return filters, params
 
@@ -1034,7 +1045,6 @@ def api_import_upload():
         return jsonify({"error": "No files uploaded"}), 400
 
     conn = get_connection()
-    init_db()
 
     all_groups = {}  # account_name -> list of transaction dicts
     errors = []
@@ -1400,7 +1410,8 @@ def api_import_confirm():
         )
         conn.commit()
         conn.close()
-        return jsonify({"error": str(e)}), 500
+        app.logger.warning("Import failed: %s", e)
+        return jsonify({"error": "Import failed"}), 500
 
 
 @app.route("/api/import/history")
@@ -1588,7 +1599,8 @@ def api_rules_create():
         return jsonify({"id": rule_id, "success": True})
     except Exception as e:
         conn.close()
-        return jsonify({"error": str(e)}), 400
+        app.logger.warning("Failed to create rule: %s", e)
+        return jsonify({"error": "Failed to create rule"}), 400
 
 
 @app.route("/api/rules/<int:rule_id>", methods=["PUT"])
@@ -1936,7 +1948,8 @@ def api_subscriptions_create():
         return jsonify({"id": new_id, "success": True})
     except Exception as e:
         conn.close()
-        return jsonify({"error": str(e)}), 400
+        app.logger.warning("Failed to create subscription: %s", e)
+        return jsonify({"error": "Failed to create subscription"}), 400
 
 
 @app.route("/api/subscriptions/<int:sub_id>", methods=["PUT"])

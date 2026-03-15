@@ -1251,13 +1251,7 @@ async function saveResolveModal() {
     }
 }
 
-// Legacy aliases — keep for any remaining references
-function openRuleModal(description, categoryId, categoryName) {
-    // Redirect to resolve modal (no txId context — skip)
-    console.warn('openRuleModal called without resolve context — use openResolveModal instead');
-}
-function closeRuleModal() { closeResolveModal(); }
-function saveRuleFromModal() { saveResolveModal(); }
+// Legacy aliases removed — use openResolveModal/closeResolveModal directly
 
 // ============================================================
 // IMPORT
@@ -1671,7 +1665,7 @@ async function loadHistory() {
             <td><span class="badge badge-${imp.status}">${imp.status}</span></td>
             <td class="col-date">${imp.created_at || ''}</td>
         </tr>
-        ${imp.result ? `<tr><td colspan="6"><div class="history-detail">${JSON.stringify(imp.result)}</div></td></tr>` : ''}
+        ${imp.result ? `<tr><td colspan="6"><div class="history-detail">${escapeHtml(JSON.stringify(imp.result))}</div></td></tr>` : ''}
     `).join('');
 }
 
@@ -3360,7 +3354,6 @@ async function loadSubscriptions() {
     if (allSubs.length && allSubs[0].fx_rate) subsFxRate = allSubs[0].fx_rate;
     renderSubsStats(allSubs);
     renderSubscriptions(allSubs);
-    populateSubsCategoryDropdown();
     // Bind sortable headers (idempotent — uses onclick)
     document.querySelectorAll('#subs-table th.sortable').forEach(th => {
         th.onclick = () => sortSubs(th.dataset.sort);
@@ -3749,10 +3742,7 @@ function closeAddSubModal() {
     document.removeEventListener('keydown', addSubEscHandler);
 }
 
-function populateSubsCategoryDropdown() {
-    // Category dropdown is now populated when the Add modal opens (openAddSubModal)
-    // This function is kept for any callers that still reference it
-}
+// populateSubsCategoryDropdown removed — handled by populateSubCategoryDropdown()
 
 async function addSubscription() {
     const picker = getAddSubServicePicker();
@@ -4042,8 +4032,8 @@ async function saveEditSub() {
 
 async function deleteSubFromModal() {
     const subId = parseInt(document.getElementById('edit-sub-id').value);
-    const svcSel = document.getElementById('edit-sub-service');
-    const service = svcSel.selectedOptions[0]?.textContent?.split(' (')[0] || '';
+    const picker = getEditSubServicePicker();
+    const { name: service } = picker.getValue();
     if (!confirm(`Delete subscription "${service}"?`)) return;
 
     const res = await fetch(`/api/subscriptions/${subId}`, { method: 'DELETE' });

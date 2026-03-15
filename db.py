@@ -380,7 +380,7 @@ def init_db() -> None:
                         "UPDATE merchant_rules SET service_id = ? WHERE UPPER(pattern) = ? AND service_id IS NULL",
                         (svc_id, pat.upper()),
                     )
-            except Exception:
+            except sqlite3.IntegrityError:
                 # Duplicate name — find existing and link
                 existing = conn.execute(
                     "SELECT id FROM services WHERE name = ?", (svc_name,)
@@ -417,7 +417,7 @@ def init_db() -> None:
                         "UPDATE merchant_rules SET service_id = ? WHERE id = ?",
                         (svc_id, rule["id"]),
                     )
-                except Exception:
+                except sqlite3.IntegrityError:
                     pass  # skip if name collision
         conn.commit()
 
