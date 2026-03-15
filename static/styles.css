@@ -351,7 +351,7 @@ body {
 
 .stat-sub {
     font-size: 12px;
-    color: var(--text-tertiary);
+    color: var(--accent-terra);
     margin-top: var(--space-1);
 }
 
@@ -633,6 +633,97 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 
 .tx-cat-editable { cursor: pointer; }
 .tx-cat-editable:hover { opacity: 0.8; }
+.tx-cat-link { text-decoration: none; color: inherit; cursor: pointer; }
+.tx-cat-link:hover { opacity: 0.8; }
+/* Service Picker (custom searchable dropdown) */
+.svc-picker {
+    position: relative;
+}
+.svc-picker-input {
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: var(--font-base);
+    background: var(--bg-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-inset);
+    transition: border-color 0.15s;
+}
+.svc-picker-input:focus {
+    outline: none;
+    border-color: var(--accent-camel);
+}
+.svc-picker-input.has-value {
+    font-weight: 500;
+}
+.svc-picker-dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 200;
+    margin-top: 4px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    max-height: 240px;
+    overflow-y: auto;
+}
+.svc-picker-dropdown.open {
+    display: block;
+}
+.svc-picker-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-primary);
+    transition: background 0.1s;
+}
+.svc-picker-item:hover,
+.svc-picker-item.highlighted {
+    background: var(--accent-camel-subtle);
+}
+.svc-picker-item-name {
+    font-weight: 500;
+}
+.svc-picker-item-cat {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: 8px;
+    white-space: nowrap;
+}
+.svc-picker-item.create-new {
+    border-top: 1px solid var(--border-subtle);
+    color: var(--accent-camel);
+    font-weight: 500;
+}
+.svc-picker-empty {
+    padding: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
+}
+.svc-picker-item-match {
+    font-weight: 700;
+}
+
+/* Transaction edit icon (resolve/edit) */
+.tx-edit-icon {
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0;
+    color: var(--text-muted);
+    transition: opacity 0.15s;
+}
+.data-table tbody tr:hover .tx-edit-icon { opacity: 0.5; }
+.data-table tbody tr:hover .tx-edit-icon:hover { opacity: 1; color: var(--accent-camel); }
 
 .cat-picker-inline {
     font-size: 12px;
@@ -657,6 +748,30 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 .data-table tbody tr:hover .tx-note-icon:hover { opacity: 1; color: var(--accent-camel); }
 .tx-note-icon.has-note { opacity: 0.7; color: var(--accent-camel); }
 .data-table tbody tr:hover .tx-note-icon.has-note { opacity: 1; }
+
+/* One-off toggle badge */
+.tx-one-off {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+    transition: opacity 0.15s, background 0.15s;
+    user-select: none;
+}
+.data-table tbody tr:hover .tx-one-off { opacity: 0.5; }
+.data-table tbody tr:hover .tx-one-off:hover { opacity: 1; border-color: var(--accent-pop); color: var(--accent-pop); }
+.tx-one-off.active {
+    opacity: 0.85;
+    background: var(--accent-pop);
+    color: var(--bg-base);
+    border-color: var(--accent-pop);
+}
+.data-table tbody tr:hover .tx-one-off.active { opacity: 1; }
 
 /* Sortable headers */
 .data-table thead th.sortable {
@@ -1277,6 +1392,63 @@ input[type="checkbox"]:focus-visible {
     margin-bottom: var(--space-3);
 }
 
+/* Resolve modal: cascade option */
+.resolve-cascade {
+    margin: var(--space-3) 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius);
+    background: rgba(255, 255, 255, 0.03);
+}
+.resolve-cascade-warning {
+    font-size: 12px;
+    color: var(--accent-pop);
+    margin-bottom: var(--space-2);
+}
+.resolve-cascade-option {
+    display: block;
+    font-size: 13px;
+    color: var(--text-secondary);
+    padding: 4px 0;
+    cursor: pointer;
+}
+.resolve-cascade-option input[type="radio"] {
+    margin-right: 6px;
+    accent-color: var(--accent-camel);
+}
+.resolve-cascade-count {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* Toast notifications */
+#toast-container {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.toast {
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    color: var(--text-primary);
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    animation: toast-in 0.25s ease-out;
+    max-width: 360px;
+}
+.toast.toast-info { border-left: 3px solid var(--accent-camel); }
+.toast.toast-warn { border-left: 3px solid var(--accent-pop); }
+@keyframes toast-in {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 .modal-field label {
     display: block;
     font-size: 11px;
@@ -1301,63 +1473,58 @@ input[type="checkbox"]:focus-visible {
    Subscription modal grid — consistent 6-column layout
    ---------------------------------------------------------------- */
 .sub-modal-grid {
-    /* override default margin on .modal-field inside grid rows */
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
 }
 
 .sub-modal-row {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: var(--space-3);
-    margin-bottom: var(--space-3);
 }
 
-.sub-modal-row:last-child {
-    margin-bottom: 0;
-}
+.sub-modal-row .modal-field { margin-bottom: 0; }
 
-/* Row 1: Service (4 cols) | Category (2 cols) */
-.sub-col-service   { grid-column: span 4; }
-.sub-col-category  { grid-column: span 2; }
-
-/* Row 2: Amount (2) | Currency (1) | Freq (1.5) | Periods (1.5) */
-.sub-col-amount    { grid-column: span 2; }
+/* Grid spans */
+.sub-col-service   { grid-column: span 3; }
+.sub-col-category  { grid-column: span 1; }
+.sub-col-amount    { grid-column: span 1; }
 .sub-col-currency  { grid-column: span 1; }
-.sub-col-freq      { grid-column: span 2; }
+.sub-col-freq      { grid-column: span 1; }
 .sub-col-periods   { grid-column: span 1; }
-
-/* Row 3: Card (2) | Renewal (2) | Status (2) */
-.sub-col-card      { grid-column: span 2; }
-.sub-col-renewal   { grid-column: span 2; }
-.sub-col-status    { grid-column: span 2; }
-
-/* Row 4: Link (full width, match pattern removed) */
+.sub-col-card      { grid-column: span 1; }
+.sub-col-renewal   { grid-column: span 1; }
+.sub-col-status    { grid-column: span 1; }
 .sub-col-link      { grid-column: 1 / -1; }
-
-/* Row 5: Notes — full width */
 .sub-col-full      { grid-column: 1 / -1; }
 
-/* Remove per-field bottom margin inside grid rows (row gap handles spacing) */
-.sub-modal-row .modal-field {
-    margin-bottom: 0;
-}
-
-/* Inputs fill their grid cell with better visibility */
-.sub-modal-row input,
-.sub-modal-row select,
-.sub-modal-row textarea {
+/* Inputs consistent sizing */
+.sub-modal-grid input,
+.sub-modal-grid select,
+.sub-modal-grid textarea {
     width: 100%;
     box-sizing: border-box;
     background: var(--bg-base);
     border: 1px solid var(--border-primary);
     color: var(--text-primary);
     font-size: 13px;
-    padding: 8px 10px;
+    padding: 7px 10px;
+    border-radius: var(--radius);
 }
-
-.sub-modal-row input:focus,
-.sub-modal-row select:focus {
+.sub-modal-grid input:focus,
+.sub-modal-grid select:focus {
     border-color: var(--accent-camel);
     background: var(--bg-surface);
+}
+.sub-modal-grid label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    display: block;
 }
 
 /* ================================================================
@@ -1446,20 +1613,20 @@ input[type="checkbox"]:focus-visible {
 
 .ms-wrap {
     position: relative;
-    min-width: 180px;
+    min-width: 140px;
 }
 
 .ms-trigger {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 12px;
+    padding: 4px 8px;
     background: var(--bg-base);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-md);
     color: var(--text-primary);
     font-family: var(--font-base);
-    font-size: 13px;
+    font-size: 12px;
     cursor: pointer;
     transition: border-color 0.15s;
     box-shadow: var(--shadow-inset);
@@ -1606,6 +1773,9 @@ input[type="checkbox"]:focus-visible {
 
 .subs-row-inactive td {
     opacity: 0.45;
+}
+.subs-row-renewal-soon {
+    background: var(--accent-pop-subtle);
 }
 .subs-card-cell {
     font-size: 11px;

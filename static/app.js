@@ -31,10 +31,14 @@ let noteModalTxId = null;      // Transaction ID being edited in note modal
 let noteModalIconEl = null;    // Icon element to update after save
 // (ruleModalCatId removed — replaced by resolve modal)
 
-// Chart-table linking state
-let chartFilter = { categories: [], period: null, source: null };
+// Chart-table linking state — selections[] model (any combo of category + period)
+// Each entry: { category: string, period: string|null }
+// period=null means "all periods" (from donut click)
+let chartFilter = { selections: [] };
 let monthlyPeriods = [];       // Raw period strings for chart click lookup
 let catFilterSelections = [];  // Multi-select category filter selections
+let allServicesList = [];      // Cached services list (shared by resolve modal, services master, subs)
+let categoryColorMap = {};     // category name → hex color (shared between bar + donut)
 
 // Category color palette (Dark Neutral chart tokens)
 const CAT_COLORS = [
@@ -63,6 +67,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (startTab !== 'dashboard') {
         switchTab(startTab, { pushHistory: false });
     } else {
+        // Restore saved view mode
+        if (txViewMode !== 'flat') setTxView(txViewMode);
         await loadDashboard();
     }
 });
@@ -81,23 +87,7 @@ async function loadReferenceData() {
 }
 
 function populateCategoryDropdowns() {
-    // Populate rule-category select (standard dropdown)
-    const ruleSel = document.getElementById('rule-category');
-    if (ruleSel) {
-        const current = ruleSel.value;
-        ruleSel.innerHTML = '';
-        const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-        parents.forEach(p => {
-            ruleSel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
-            const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-            children.forEach(c => {
-                ruleSel.innerHTML += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
-            });
-        });
-        if (current) ruleSel.value = current;
-    }
-
-    // Populate multi-select category filter
+    // Populate multi-select category filter (dashboard)
     populateCatMultiSelect();
 }
 
@@ -119,8 +109,8 @@ function populateAccountFilter() {
         const sel = document.getElementById(id);
         if (!sel) return;
         const current = sel.value;
-        sel.innerHTML = '<option value="">—</option>';
-        accounts.forEach(a => {
+        sel.innerHTML = '<option value="">All Accounts</option>';
+        accounts.filter(a => a.status !== 'archived').forEach(a => {
             sel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         });
         if (current) sel.value = current;
@@ -218,10 +208,9 @@ function switchTab(tabName, {pushHistory = true} = {}) {
     }
 
     // Load tab data on switch
-    if (tabName === 'dashboard') loadDashboard();
+    if (tabName === 'dashboard') loadDashboard(true);
     if (tabName === 'import') { loadCoverage(); loadHistory(); }
     if (tabName === 'subs') loadSubscriptions();
-    if (tabName === 'services') renderServicesTab();
     if (tabName === 'accounts') renderAccountsTab();
     if (tabName === 'rules') loadRules();
     if (tabName === 'categories') renderCategoriesMaster();
@@ -238,10 +227,10 @@ window.addEventListener('popstate', (e) => {
 // DASHBOARD
 // ============================================================
 
-async function loadDashboard() {
-    // Clear chart selection when dashboard filters change
-    if (chartFilter.categories.length) {
-        chartFilter = { categories: [], period: null, source: null };
+async function loadDashboard(preserveChartFilter) {
+    // Clear chart selection when dashboard filters change (not when navigating back)
+    if (!preserveChartFilter && chartFilter.selections.length) {
+        chartFilter = { selections: [] };
         renderFilterChip();
     }
 
@@ -261,22 +250,23 @@ async function loadDashboard() {
     }
     if (spendFilter === 'personal') statParams += (statParams ? '&' : '') + 'personal_only=true';
     if (spendFilter === 'moom') statParams += (statParams ? '&' : '') + 'moom_only=true';
-    if (document.getElementById('filter-anomaly').checked) statParams += (statParams ? '&' : '') + 'exclude_anomaly=true';
     if (document.getElementById('filter-one-off').checked) statParams += (statParams ? '&' : '') + 'exclude_one_off=true';
     const accountId = document.getElementById('filter-account')?.value;
     if (accountId) statParams += (statParams ? '&' : '') + 'account_id=' + accountId;
 
-    const [statCards, monthly, catData, txData] = await Promise.all([
+    const [statCards, monthly, catData] = await Promise.all([
         fetch('/api/dashboard/stat-cards?' + statParams).then(r => r.json()),
         fetch('/api/dashboard/monthly?' + chartParams).then(r => r.json()),
         fetch('/api/dashboard/categories?' + catChartParams).then(r => r.json()),
-        fetch('/api/transactions?' + params + '&per_page=50&page=1&sort=' + txSortCol + '&sort_dir=' + txSortDir).then(r => r.json()),
     ]);
 
     renderStatCards(statCards);
     renderMonthlyChart(monthly, granularity);
     renderCategoryChart(catData);
-    renderTransactions(txData);
+
+    // Load transaction area via txPage (includes search, chart filter, category filter)
+    txCurrentPage = 1;
+    txPage(0);
 }
 
 function buildFilterParams() {
@@ -303,7 +293,6 @@ function buildFilterParams() {
 
     if (spendFilter === 'personal') p.set('personal_only', 'true');
     if (spendFilter === 'moom') p.set('moom_only', 'true');
-    if (document.getElementById('filter-anomaly').checked) p.set('exclude_anomaly', 'true');
     if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
     return p.toString();
 }
@@ -321,7 +310,6 @@ function buildChartParams() {
     if (accountId) p.set('account_id', accountId);
     if (spendFilter === 'personal') p.set('personal_only', 'true');
     if (spendFilter === 'moom') p.set('moom_only', 'true');
-    if (document.getElementById('filter-anomaly').checked) p.set('exclude_anomaly', 'true');
     if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
     return p.toString();
 }
@@ -363,25 +351,30 @@ function renderStatCards(d) {
         const pct = ((val - avg) / avg) * 100;
         const sign = pct >= 0 ? '+' : '';
         const cls = pct > 5 ? 'delta-up' : pct < -5 ? 'delta-down' : 'delta-flat';
-        return `<span class="stat-delta ${cls}">${sign}${pct.toFixed(0)}% vs 3mo avg</span>`;
+        return `<span class="stat-delta ${cls}">${sign}${pct.toFixed(0)}%</span>`;
+    }
+
+    function avgLine(avg) {
+        if (!avg || avg === 0) return '';
+        return `<div class="stat-sub">3mo avg: S$${formatAmount(avg)}</div>`;
     }
 
     document.getElementById('stats-row').innerHTML = `
         <div class="stat-card">
             <div class="stat-label">${d.ref_label} Spend</div>
-            <div class="stat-value">S$${formatAmount(d.spend)}</div>
+            <div class="stat-value">S$${formatAmount(d.spend)} ${delta(d.spend, d.avg_spend)}</div>
             <div class="stat-sub">${d.tx_count} transactions</div>
-            ${delta(d.spend, d.avg_spend)}
+            ${avgLine(d.avg_spend)}
         </div>
         <div class="stat-card">
             <div class="stat-label">Personal</div>
-            <div class="stat-value accent">S$${formatAmount(d.personal)}</div>
-            ${delta(d.personal, d.avg_personal)}
+            <div class="stat-value accent">S$${formatAmount(d.personal)} ${delta(d.personal, d.avg_personal)}</div>
+            ${avgLine(d.avg_personal)}
         </div>
         <div class="stat-card">
-            <div class="stat-label">Moom (Business)</div>
-            <div class="stat-value moom">S$${formatAmount(d.moom)}</div>
-            ${delta(d.moom, d.avg_moom)}
+            <div class="stat-label">Business</div>
+            <div class="stat-value moom">S$${formatAmount(d.moom)} ${delta(d.moom, d.avg_moom)}</div>
+            ${avgLine(d.avg_moom)}
         </div>
         <div class="stat-card">
             <div class="stat-label">Uncategorized</div>
@@ -420,6 +413,12 @@ function renderMonthlyChart(data, granularity) {
 
     // Backend already filters by personal_only / moom_only — just sort
     let catList = [...allCats].sort();
+
+    // Build shared color map so donut uses same colors as bar chart
+    categoryColorMap = {};
+    catList.forEach((cat, i) => {
+        categoryColorMap[cat] = CAT_COLORS[i % CAT_COLORS.length];
+    });
 
     // Format labels: "2025-09" → "Sep-25"
     const labels = periods.map(p => {
@@ -575,7 +574,7 @@ function renderTrendChart(catList, periods, labels, data) {
                 if (!elements.length) return;
                 const el = elements[0];
                 const category = monthlyChart.data.datasets[el.datasetIndex].label;
-                if (category === 'Other') return; // can't filter on aggregate
+                if (category === 'Others') return; // can't filter on aggregate rollup
                 const period = monthlyPeriods[el.index];
                 toggleChartFilter(category, period, 'bar');
             },
@@ -642,7 +641,7 @@ function renderCategoryChart(data) {
     const rest = filtered.slice(10);
     if (rest.length) {
         top.push({
-            category: 'Other',
+            category: 'Others',
             total: rest.reduce((s, d) => s + d.total, 0),
             count: rest.reduce((s, d) => s + d.count, 0),
         });
@@ -657,7 +656,7 @@ function renderCategoryChart(data) {
             labels: top.map(d => d.category),
             datasets: [{
                 data: top.map(d => d.total),
-                backgroundColor: top.map((_, i) => CAT_COLORS[i % CAT_COLORS.length]),
+                backgroundColor: top.map(d => categoryColorMap[d.category] || CAT_COLORS[0]),
                 borderWidth: 0,
                 offset: 0,
             }],
@@ -700,7 +699,7 @@ function renderCategoryChart(data) {
 // ============================================================
 
 function renderCategoryBadges(tx) {
-    // Wrap in a clickable container to allow reassignment
+    const catName = tx.parent_category || tx.category;
     const badges = (() => {
         if (!tx.category) return '<span class="badge badge-warning">Uncategorized</span>';
         if (tx.parent_category) {
@@ -708,7 +707,11 @@ function renderCategoryBadges(tx) {
         }
         return `<span class="badge badge-success">${escapeHtml(tx.category)}</span>`;
     })();
-    return `<span class="tx-cat-editable" onclick="showCategoryPicker(${tx.id}, this)" title="Click to change category">${badges}</span>`;
+    // Category text navigates to By Category view; uncategorized opens Resolve Modal directly
+    if (!catName) {
+        return `<span class="tx-cat-editable" onclick="showCategoryPicker(${tx.id}, this)" title="Click to categorize">${badges}</span>`;
+    }
+    return `<a href="#" class="tx-cat-link" onclick="navigateToCategory('${escapeHtml(catName)}');return false;" title="View in By Category">${badges}</a>`;
 }
 
 function renderTransactions(data) {
@@ -723,13 +726,17 @@ function renderTransactions(data) {
         const noteIcon = tx.notes
             ? `<span class="tx-note-icon has-note" title="${escapeHtml(tx.notes)}" onclick="editNote(${tx.id}, this)">&#9998;</span>`
             : `<span class="tx-note-icon" title="Add note" onclick="editNote(${tx.id}, this)">&#9998;</span>`;
+        const oneOffClass = tx.is_one_off ? 'tx-one-off active' : 'tx-one-off';
+        const oneOffTitle = tx.is_one_off ? 'Marked as one-off (click to unmark)' : 'Mark as one-off (excludes from burn rate)';
         tr.innerHTML = `
             <td class="col-date">${formatDate(tx.date)}</td>
-            <td class="col-desc">${escapeHtml(tx.description)}${noteIcon}</td>
-            <td style="font-size:12px;">${tx.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${tx.service_id});return false;">${escapeHtml(tx.service_name)}</a>` : ''}</td>
+            <td>${tx.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${tx.service_id});return false;">${escapeHtml(tx.service_name)}</a>` : `<span class="text-tertiary" style="font-size:12px;">${escapeHtml(tx.description).substring(0, 30)}</span>`}</td>
             <td>${renderCategoryBadges(tx)}</td>
+            <td class="text-secondary" style="font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}${noteIcon}</td>
             <td class="text-secondary" style="font-size:12px;">${tx.account_name || ''}</td>
             <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+            <td style="text-align:center;"><span class="${oneOffClass}" title="${oneOffTitle}" onclick="toggleTxOneOff(${tx.id}, this)">1x</span></td>
+            <td style="text-align:center;"><span class="tx-edit-icon" title="Resolve / edit transaction" onclick="showCategoryPicker(${tx.id}, this)">&#9998;</span></td>
         `;
         tbody.appendChild(tr);
     });
@@ -766,6 +773,10 @@ function toggleSort(col) {
 }
 
 function txPage(delta) {
+    // If not in flat view, delegate to accordion loaders
+    if (txViewMode === 'service') { loadServiceAccordion(); return; }
+    if (txViewMode === 'category') { loadCategoryAccordion(); return; }
+
     txCurrentPage += delta;
     if (txCurrentPage < 1) txCurrentPage = 1;
     const params = buildFilterParams();
@@ -774,20 +785,17 @@ function txPage(delta) {
     let url = `/api/transactions?${params}&per_page=50&page=${txCurrentPage}&sort=${txSortCol}&sort_dir=${txSortDir}`;
     if (search) url += '&search=' + encodeURIComponent(search);
 
-    // Category filter: chart filter takes precedence over multi-select
-    const activeCats = chartFilter.categories.length > 0
-        ? chartFilter.categories
-        : catFilterSelections;
+    // Category filter: chart selections take precedence over multi-select dropdown
+    const chartCats = getChartFilterCategories();
+    const activeCats = chartCats.length > 0 ? chartCats : catFilterSelections;
     if (activeCats.length) {
         url += '&categories=' + encodeURIComponent(activeCats.join(','));
     }
 
-    // Chart-driven date narrowing
-    if (chartFilter.period) {
-        const range = periodToDateRange(chartFilter.period);
-        if (range.start) url += '&chart_start=' + range.start;
-        if (range.end) url += '&chart_end=' + range.end;
-    }
+    // Chart-driven date narrowing from selections with specific periods
+    const chartDateRange = getChartFilterDateRange();
+    if (chartDateRange.start) url += '&chart_start=' + chartDateRange.start;
+    if (chartDateRange.end) url += '&chart_end=' + chartDateRange.end;
 
     fetch(url).then(r => r.json()).then(renderTransactions);
 }
@@ -866,6 +874,24 @@ async function clearNote() {
     }
 }
 
+async function toggleTxOneOff(txId, el) {
+    const isActive = el.classList.contains('active');
+    const newVal = isActive ? 0 : 1;
+    try {
+        await fetch(`/api/transactions/${txId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_one_off: newVal }),
+        });
+        el.classList.toggle('active');
+        el.title = newVal
+            ? 'Marked as one-off (click to unmark)'
+            : 'Mark as one-off (excludes from burn rate)';
+    } catch (e) {
+        console.error('Failed to toggle one-off:', e);
+    }
+}
+
 function showCategoryPicker(txId, containerEl) {
     // Open the unified resolve modal instead of inline category picker
     const row = containerEl.closest('tr');
@@ -888,22 +914,10 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Services search debounce
-    const svcSearchEl = document.getElementById('services-search');
-    if (svcSearchEl) {
-        svcSearchEl.addEventListener('input', debounce(renderServicesTab, 300));
-    }
-
     // Services master search debounce
     const svcMasterSearchEl = document.getElementById('svc-master-search');
     if (svcMasterSearchEl) {
         svcMasterSearchEl.addEventListener('input', debounce(renderServicesMaster, 300));
-    }
-
-    // Services category-view search debounce
-    const svcCatSearchEl = document.getElementById('services-cat-search');
-    if (svcCatSearchEl) {
-        svcCatSearchEl.addEventListener('input', debounce(renderServicesCategoryView, 300));
     }
 
     // Close modals on Escape
@@ -917,10 +931,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Close modals on overlay click
+    // Close modals on overlay click (only when clicking the overlay itself, not modal content)
     ['note-modal', 'resolve-modal', 'edit-rule-modal', 'add-service-modal', 'edit-service-modal'].forEach(id => {
-        document.getElementById(id)?.addEventListener('click', e => {
-            if (e.target.classList.contains('modal-overlay')) {
+        document.getElementById(id)?.addEventListener('mousedown', e => {
+            // Only close if clicking directly on the overlay background
+            if (e.target === e.currentTarget) {
                 if (id === 'note-modal') closeNoteModal();
                 if (id === 'resolve-modal') closeResolveModal();
                 if (id === 'edit-rule-modal') closeEditRuleModal();
@@ -959,7 +974,7 @@ function suggestPattern(description) {
 // Unified flow: pick/create service → category auto-fills → rule pattern → one save
 
 let resolveModalTxId = null;
-let resolveServicesCache = []; // services list for the datalist
+// resolveServicesCache removed — using allServicesList directly
 
 async function openResolveModal(txId, description) {
     resolveModalTxId = txId;
@@ -972,43 +987,23 @@ async function openResolveModal(txId, description) {
     document.getElementById('resolve-modal-pattern').value = suggestPattern(description);
     document.getElementById('resolve-modal-match').value = 'contains';
 
-    // Clear service input
-    document.getElementById('resolve-modal-service').value = '';
+    // Initialize picker and clear
+    const picker = getResolveServicePicker();
+    picker.clear();
     document.getElementById('resolve-cat-hint').style.display = 'none';
-
-    // Load services for datalist
-    await loadResolveServices();
 
     // Populate category dropdown (for new services or manual override)
     populateResolveCategoryDropdown();
 
     // Try to auto-match service from description
-    autoMatchService(description);
+    await autoMatchService(description);
 
     // Show modal and focus service input
     document.getElementById('resolve-modal').style.display = 'flex';
-    document.getElementById('resolve-modal-service').focus();
+    picker.input.focus();
 }
 
-async function loadResolveServices() {
-    // Reuse allServicesList if available, otherwise fetch
-    if (!allServicesList || !allServicesList.length) {
-        const res = await fetch('/api/services');
-        allServicesList = await res.json();
-    }
-    resolveServicesCache = allServicesList;
-
-    // Populate datalist
-    const datalist = document.getElementById('resolve-svc-datalist');
-    datalist.innerHTML = '';
-    const sorted = [...resolveServicesCache].sort((a, b) => a.name.localeCompare(b.name));
-    sorted.forEach(s => {
-        const opt = document.createElement('option');
-        opt.value = s.name;
-        opt.label = s.display_category || '';
-        datalist.appendChild(opt);
-    });
-}
+// loadResolveServices removed — ServicePicker handles lazy loading
 
 function populateResolveCategoryDropdown() {
     const select = document.getElementById('resolve-modal-category');
@@ -1021,17 +1016,76 @@ function populateResolveCategoryDropdown() {
             options += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
         });
     });
+    options += '<option value="__new__">+ New category...</option>';
     select.innerHTML = options;
+
+    // Populate parent dropdown for new category creation
+    const parentSelect = document.getElementById('resolve-new-cat-parent');
+    let parentOpts = '<option value="">-- Top-level --</option>';
+    parents.forEach(p => { parentOpts += `<option value="${p.id}">${p.name}</option>`; });
+    parentSelect.innerHTML = parentOpts;
 }
 
-function autoMatchService(description) {
+function onResolveCategoryChange() {
+    const val = document.getElementById('resolve-modal-category').value;
+    const newCatRow = document.getElementById('resolve-new-cat-row');
+    if (val === '__new__') {
+        newCatRow.classList.remove('hidden');
+        document.getElementById('resolve-new-cat-name').focus();
+    } else {
+        newCatRow.classList.add('hidden');
+    }
+    updateResolveCascade();
+}
+
+function updateResolveCascade() {
+    const cascadeEl = document.getElementById('resolve-cascade');
+    const picker = getResolveServicePicker();
+    const { id: serviceId, name: serviceName } = picker.getValue();
+    const categoryId = parseInt(document.getElementById('resolve-modal-category').value);
+
+    // Find existing service
+    const existingService = serviceId
+        ? allServicesList.find(s => s.id === serviceId)
+        : allServicesList.find(s => s.name.toLowerCase() === serviceName.toLowerCase());
+
+    if (existingService && categoryId && existingService.category_id !== categoryId) {
+        // Category mismatch — show cascade option
+        const currentCat = categories.find(c => c.id === existingService.category_id);
+        const newCat = categories.find(c => c.id === categoryId);
+        const currentName = currentCat ? currentCat.name : 'unknown';
+        const newName = newCat ? newCat.name : 'unknown';
+        document.getElementById('resolve-cascade-warning').textContent =
+            `Service "${existingService.name}" is currently "${currentName}". You selected "${newName}".`;
+        document.getElementById('resolve-cascade-count').textContent = '';
+        cascadeEl.classList.remove('hidden');
+
+        // Fetch count of affected transactions
+        fetch(`/api/services/${existingService.id}/transactions`)
+            .then(r => r.json())
+            .then(data => {
+                const count = Array.isArray(data) ? data.length : 0;
+                document.getElementById('resolve-cascade-count').textContent = ` (${count} transactions)`;
+            }).catch(() => {});
+    } else {
+        cascadeEl.classList.add('hidden');
+    }
+}
+
+async function autoMatchService(description) {
     // Try to find an existing service whose name appears in the description
+    if (!allServicesList || !allServicesList.length) {
+        const res = await fetch('/api/services');
+        allServicesList = await res.json();
+    }
+    // Services cache populated for picker
+
     const descUpper = description.toUpperCase();
-    // Sort by name length descending — prefer more specific matches
-    const sorted = [...resolveServicesCache].sort((a, b) => b.name.length - a.name.length);
+    const sorted = [...allServicesList].sort((a, b) => b.name.length - a.name.length);
     for (const svc of sorted) {
         if (descUpper.includes(svc.name.toUpperCase())) {
-            document.getElementById('resolve-modal-service').value = svc.name;
+            const picker = getResolveServicePicker();
+            picker.setValue(svc.name, svc.id);
             onResolveServiceChange(svc.name);
             return;
         }
@@ -1039,9 +1093,8 @@ function autoMatchService(description) {
 }
 
 function onResolveServiceChange(value) {
-    // When service input changes, auto-fill category if it's an existing service
     const trimmed = (value || '').trim();
-    const match = resolveServicesCache.find(
+    const match = allServicesList.find(
         s => s.name.toLowerCase() === trimmed.toLowerCase()
     );
     const catSelect = document.getElementById('resolve-modal-category');
@@ -1053,58 +1106,107 @@ function onResolveServiceChange(value) {
     } else {
         catHint.style.display = 'none';
     }
+    // Hide new-cat row when service changes (might not need new cat anymore)
+    document.getElementById('resolve-new-cat-row').classList.add('hidden');
+    updateResolveCascade();
 }
 
-// Wire service input change event
-document.addEventListener('DOMContentLoaded', () => {
-    const svcInput = document.getElementById('resolve-modal-service');
-    if (svcInput) {
-        svcInput.addEventListener('input', () => onResolveServiceChange(svcInput.value));
-        svcInput.addEventListener('change', () => onResolveServiceChange(svcInput.value));
-    }
-});
+// Service input change wired via ServicePicker.onSelect callback
 
 function closeResolveModal() {
     document.getElementById('resolve-modal').style.display = 'none';
     resolveModalTxId = null;
+    document.getElementById('resolve-new-cat-row').classList.add('hidden');
+    document.getElementById('resolve-cascade').classList.add('hidden');
+    document.getElementById('resolve-new-cat-name').value = '';
+}
+
+function showToast(message, type = 'info', duration = 4000) {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.3s';
+        setTimeout(() => toast.remove(), 300);
+    }, duration);
 }
 
 async function saveResolveModal() {
-    const serviceName = document.getElementById('resolve-modal-service').value.trim();
-    const categoryId = parseInt(document.getElementById('resolve-modal-category').value);
+    const picker = getResolveServicePicker();
+    const { id: pickedServiceId, name: serviceName } = picker.getValue();
+    let categoryId = parseInt(document.getElementById('resolve-modal-category').value);
     const pattern = document.getElementById('resolve-modal-pattern').value.trim();
     const matchType = document.getElementById('resolve-modal-match').value;
 
     if (!serviceName) { alert('Please enter a service name.'); return; }
-    if (!pattern) { alert('Please enter a rule pattern.'); return; }
-
-    // Find service_id if it's an existing service
-    const existingService = resolveServicesCache.find(
-        s => s.name.toLowerCase() === serviceName.toLowerCase()
-    );
-
-    // For new services, category is required
-    if (!existingService && !categoryId) {
-        alert('Please select a category for the new service.');
-        return;
-    }
+    // Pattern is optional (PayNow/bank transfers have no matchable pattern)
 
     const btn = document.getElementById('resolve-modal-save');
     btn.disabled = true;
     btn.textContent = 'Resolving...';
 
     try {
+        // Step 0: Create new category if needed
+        const catVal = document.getElementById('resolve-modal-category').value;
+        if (catVal === '__new__') {
+            const newCatName = document.getElementById('resolve-new-cat-name').value.trim();
+            if (!newCatName) { alert('Please enter a category name.'); return; }
+            const parentId = document.getElementById('resolve-new-cat-parent').value || null;
+            const isPersonal = parseInt(document.getElementById('resolve-new-cat-type').value);
+            const catRes = await fetch('/api/categories', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newCatName, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }),
+            });
+            const catData = await catRes.json();
+            if (catData.error) { alert('Category error: ' + catData.error); return; }
+            categoryId = catData.id;
+            // Refresh categories cache
+            await loadReferenceData();
+            showToast(`Created category "${newCatName}"`, 'info');
+        }
+
+        if (!categoryId) {
+            alert('Please select a category.');
+            return;
+        }
+
+        // Find service_id from picker selection
+        const existingService = pickedServiceId
+            ? allServicesList.find(s => s.id === pickedServiceId)
+            : allServicesList.find(s => s.name.toLowerCase() === serviceName.toLowerCase());
+
+        // Check cascade scope
+        const cascadeEl = document.getElementById('resolve-cascade');
+        const wantsCascade = !cascadeEl.classList.contains('hidden') &&
+            document.querySelector('input[name="resolve-scope"][value="service"]')?.checked;
+
+        // Step 1: If cascade requested, update service category first
+        if (wantsCascade && existingService) {
+            const svcRes = await fetch(`/api/services/${existingService.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category_id: categoryId }),
+            });
+            const svcData = await svcRes.json();
+            const recat = svcData.recategorized || 0;
+            showToast(`Re-categorized "${serviceName}" + ${recat} transactions`, 'info');
+        }
+
+        // Step 2: Resolve the transaction (create service/rule if needed)
         const payload = {
             tx_id: resolveModalTxId,
             service_name: serviceName,
             pattern: pattern,
             match_type: matchType,
+            category_id: categoryId,
         };
-        // If existing service, pass its ID for reliable lookup
         if (existingService) {
             payload.service_id = existingService.id;
-        } else {
-            payload.category_id = categoryId;
         }
 
         const res = await fetch('/api/transactions/resolve', {
@@ -1117,6 +1219,24 @@ async function saveResolveModal() {
             alert('Error: ' + data.error);
             return;
         }
+
+        // Toast feedback
+        const parts = [];
+        if (!existingService) parts.push(`Created service "${serviceName}"`);
+        if (data.backfilled > 0) parts.push(`${data.backfilled} matching transactions updated`);
+
+        // Check if transaction will vanish from current view
+        const cat = categories.find(c => c.id === categoryId);
+        if (cat) {
+            const isPersonalCat = cat.is_personal === 1;
+            if (spendFilter === 'personal' && !isPersonalCat) {
+                parts.push('Moved to Moom — switch to "All" to see it');
+            } else if (spendFilter === 'moom' && isPersonalCat) {
+                parts.push('Moved to Personal — switch to "All" to see it');
+            }
+        }
+
+        if (parts.length) showToast(parts.join('. '), 'info', 5000);
 
         // Invalidate services cache so new services show up
         allServicesList = null;
@@ -1565,6 +1685,8 @@ async function loadRules() {
     const res = await fetch('/api/rules');
     allRules = await res.json();
     renderRules(allRules);
+
+    // Service picker datalist populated lazily on focus
 }
 
 function filterRules() {
@@ -1575,7 +1697,8 @@ function filterRules() {
     }
     const filtered = allRules.filter(r =>
         r.pattern.toLowerCase().includes(q) ||
-        r.category_name.toLowerCase().includes(q)
+        (r.service_name || '').toLowerCase().includes(q) ||
+        (r.category_name || '').toLowerCase().includes(q)
     );
     renderRules(filtered);
 }
@@ -1619,12 +1742,13 @@ function renderRules(rules) {
                 <table class="data-table rules-table">
                     <thead>
                         <tr>
-                            <th style="width:32%;">Pattern</th>
-                            <th style="width:12%;">Match</th>
-                            <th style="width:6%;">Pri</th>
-                            <th style="width:18%;">Amount</th>
-                            <th style="width:10%;">Conf</th>
-                            <th style="width:22%;text-align:right;">Actions</th>
+                            <th style="width:28%;">Pattern</th>
+                            <th style="width:18%;">Service</th>
+                            <th style="width:10%;">Match</th>
+                            <th style="width:5%;">Pri</th>
+                            <th style="width:14%;">Amount</th>
+                            <th style="width:8%;">Conf</th>
+                            <th style="width:17%;text-align:right;">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1640,6 +1764,7 @@ function renderRules(rules) {
                             return `
                             <tr>
                                 <td class="text-mono" style="font-size:12px;">${escapeHtml(r.pattern)}</td>
+                                <td style="font-size:12px;">${escapeHtml(r.service_name || '')}</td>
                                 <td style="font-size:12px;color:var(--text-tertiary);">${r.match_type}</td>
                                 <td style="font-size:12px;color:${r.priority > 0 ? 'var(--camel)' : 'var(--text-tertiary)'};">${r.priority || ''}</td>
                                 <td style="font-size:12px;color:${amtStr ? 'var(--camel)' : 'var(--text-tertiary)'};">${amtStr || '\u2014'}</td>
@@ -1664,22 +1789,33 @@ function toggleAccordion(header) {
     body.classList.toggle('open');
 }
 
+function toggleRuleForm() {
+    const form = document.getElementById('rule-form');
+    const isHidden = form.style.display === 'none';
+    form.style.display = isHidden ? '' : 'none';
+    form.classList.toggle('hidden', !isHidden);
+    if (isHidden) {
+        document.getElementById('rule-pattern').focus();
+    }
+}
+
 async function addRule() {
     const pattern = document.getElementById('rule-pattern').value.trim();
-    const categoryId = document.getElementById('rule-category').value;
+    const picker = getAddRuleServicePicker();
+    const { id: serviceId, name: serviceName } = picker.getValue();
     const matchType = document.getElementById('rule-match-type').value;
     const priority = parseInt(document.getElementById('rule-priority').value) || 0;
     const minAmountVal = document.getElementById('rule-min-amount').value;
     const maxAmountVal = document.getElementById('rule-max-amount').value;
 
-    if (!pattern || !categoryId) {
-        alert('Pattern and category are required');
+    if (!pattern || !serviceId) {
+        alert('Pattern and service are required');
         return;
     }
 
     const body = {
         pattern,
-        category_id: parseInt(categoryId),
+        service_id: serviceId,
         match_type: matchType,
         priority,
     };
@@ -1705,7 +1841,7 @@ async function addRule() {
     await loadRules();
 }
 
-function editRule(ruleId) {
+async function editRule(ruleId) {
     const rule = allRules.find(r => r.id === ruleId);
     if (!rule) return;
 
@@ -1716,18 +1852,11 @@ function editRule(ruleId) {
     document.getElementById('edit-rule-min').value = rule.min_amount || '';
     document.getElementById('edit-rule-max').value = rule.max_amount || '';
 
-    // Populate category dropdown
-    const sel = document.getElementById('edit-rule-category');
-    sel.innerHTML = '';
-    categories
-        .sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name))
-        .forEach(c => {
-            const opt = document.createElement('option');
-            opt.value = c.id;
-            opt.textContent = c.display_name || c.name;
-            if (c.id === rule.category_id) opt.selected = true;
-            sel.appendChild(opt);
-        });
+    // Set current service in picker
+    const picker = getEditRuleServicePicker();
+    picker.setValue(rule.service_name || '', rule.service_id || null);
+    document.getElementById('edit-rule-cat-display').textContent =
+        rule.display_category ? `Category: ${rule.display_category}` : '';
 
     document.getElementById('edit-rule-modal').style.display = 'flex';
     document.getElementById('edit-rule-pattern').focus();
@@ -1739,14 +1868,22 @@ function closeEditRuleModal() {
 
 async function saveEditRule() {
     const ruleId = document.getElementById('edit-rule-id').value;
+    const picker = getEditRuleServicePicker();
+    const { id: serviceId } = picker.getValue();
+
+    if (!serviceId) {
+        alert('Service is required.');
+        return;
+    }
+
     const payload = {
         pattern: document.getElementById('edit-rule-pattern').value.trim(),
-        category_id: parseInt(document.getElementById('edit-rule-category').value),
         match_type: document.getElementById('edit-rule-match').value,
         priority: parseInt(document.getElementById('edit-rule-priority').value) || 0,
         min_amount: parseFloat(document.getElementById('edit-rule-min').value) || null,
         max_amount: parseFloat(document.getElementById('edit-rule-max').value) || null,
     };
+    if (serviceId) payload.service_id = serviceId;
 
     await fetch(`/api/rules/${ruleId}`, {
         method: 'PUT',
@@ -1880,30 +2017,45 @@ async function addCategory() {
 // ============================================================
 
 function toggleChartFilter(category, period, source) {
-    // If switching source type (bar ↔ doughnut), reset
-    if (chartFilter.source && chartFilter.source !== source) {
-        chartFilter.categories = [];
-        chartFilter.period = null;
-    }
+    // Donut click: period=null (all periods for this category)
+    // Bar click: period=specific month
 
-    // Bar chart: if clicking a different period, reset categories
-    if (source === 'bar' && chartFilter.period && chartFilter.period !== period) {
-        chartFilter.categories = [];
-    }
+    // If donut click for a category that already has a period-null entry, remove it (toggle off)
+    // If bar click for same category that has period-null, narrow to this specific period
+    const sel = chartFilter.selections;
 
-    chartFilter.source = source;
-    chartFilter.period = period;
-
-    // Toggle category (multi-select)
-    const idx = chartFilter.categories.indexOf(category);
-    if (idx >= 0) {
-        chartFilter.categories.splice(idx, 1);
+    if (source === 'doughnut') {
+        // Check if this category already has an all-periods entry
+        const allIdx = sel.findIndex(s => s.category === category && s.period === null);
+        if (allIdx >= 0) {
+            // Toggle off
+            sel.splice(allIdx, 1);
+        } else {
+            // Remove any period-specific entries for this category (donut replaces them)
+            for (let i = sel.length - 1; i >= 0; i--) {
+                if (sel[i].category === category) sel.splice(i, 1);
+            }
+            sel.push({ category, period: null });
+        }
     } else {
-        chartFilter.categories.push(category);
+        // Bar click — specific period
+        // If category has an all-periods entry, narrow to this specific period
+        const allIdx = sel.findIndex(s => s.category === category && s.period === null);
+        if (allIdx >= 0) {
+            sel.splice(allIdx, 1);
+            sel.push({ category, period });
+        } else {
+            // Toggle this specific (category, period) pair
+            const exactIdx = sel.findIndex(s => s.category === category && s.period === period);
+            if (exactIdx >= 0) {
+                sel.splice(exactIdx, 1);
+            } else {
+                sel.push({ category, period });
+            }
+        }
     }
 
-    // If nothing selected, clear entirely
-    if (chartFilter.categories.length === 0) {
+    if (sel.length === 0) {
         clearChartFilter();
         return;
     }
@@ -1917,7 +2069,7 @@ function toggleChartFilter(category, period, source) {
 }
 
 function clearChartFilter() {
-    chartFilter = { categories: [], period: null, source: null };
+    chartFilter = { selections: [] };
     renderFilterChip();
     updateChartHighlights();
     updateCatFilterDisplay();
@@ -1925,28 +2077,75 @@ function clearChartFilter() {
     txPage(0);
 }
 
+// Helper: extract unique categories from selections
+function getChartFilterCategories() {
+    return [...new Set(chartFilter.selections.map(s => s.category))];
+}
+
+// Helper: compute date range from period-specific selections
+// If any selection has period=null, no date narrowing (all periods)
+function getChartFilterDateRange() {
+    if (chartFilter.selections.length === 0) return {};
+    // If any selection is all-periods, don't narrow dates
+    if (chartFilter.selections.some(s => s.period === null)) return {};
+    // Collect all unique periods, compute union date range
+    const periods = [...new Set(chartFilter.selections.map(s => s.period))];
+    let earliest = null, latest = null;
+    for (const p of periods) {
+        const range = periodToDateRange(p);
+        if (range.start && (!earliest || range.start < earliest)) earliest = range.start;
+        if (range.end && (!latest || range.end > latest)) latest = range.end;
+    }
+    return { start: earliest, end: latest };
+}
+
 function updateChartHighlights() {
-    const hasFilter = chartFilter.categories.length > 0;
+    const hasFilter = chartFilter.selections.length > 0;
+    const selectedCats = getChartFilterCategories();
+    const selectedPeriods = chartFilter.selections
+        .filter(s => s.period !== null)
+        .map(s => s.period);
+    const hasAllPeriods = chartFilter.selections.some(s => s.period === null);
 
     // Bar chart highlights
     if (monthlyChart) {
         monthlyChart.data.datasets.forEach((ds, i) => {
-            const baseColor = CAT_COLORS[i % CAT_COLORS.length];
+            const baseColor = categoryColorMap[ds.label] || CAT_COLORS[i % CAT_COLORS.length];
             if (!hasFilter) {
                 ds.backgroundColor = baseColor;
                 ds.borderColor = 'transparent';
                 ds.borderWidth = 0;
-            } else if (chartFilter.categories.includes(ds.label)) {
-                ds.backgroundColor = baseColor;
-                ds.borderColor = '#ededed';
-                ds.borderWidth = 1.5;
+            } else if (selectedCats.includes(ds.label)) {
+                // This category is selected — highlight its bars
+                // If all-periods or no period filter, highlight all bars
+                // If period-specific, only highlight matching period bars
+                const catSelections = chartFilter.selections.filter(s => s.category === ds.label);
+                const catAllPeriods = catSelections.some(s => s.period === null);
+                if (catAllPeriods) {
+                    // All bars for this category highlighted
+                    ds.backgroundColor = baseColor;
+                    ds.borderColor = '#ededed';
+                    ds.borderWidth = 1.5;
+                } else {
+                    // Only highlight bars at selected periods
+                    const catPeriods = catSelections.map(s => s.period);
+                    ds.backgroundColor = monthlyPeriods.map(p =>
+                        catPeriods.includes(p) ? baseColor : hexToRgba(baseColor, 0.15)
+                    );
+                    ds.borderColor = monthlyPeriods.map(p =>
+                        catPeriods.includes(p) ? '#ededed' : 'transparent'
+                    );
+                    ds.borderWidth = monthlyPeriods.map(p =>
+                        catPeriods.includes(p) ? 1.5 : 0
+                    );
+                }
             } else {
                 ds.backgroundColor = hexToRgba(baseColor, 0.15);
                 ds.borderColor = 'transparent';
                 ds.borderWidth = 0;
             }
         });
-        monthlyChart.update('none');
+        monthlyChart.update();
     }
 
     // Doughnut highlights
@@ -1954,18 +2153,18 @@ function updateChartHighlights() {
         const ds = categoryChart.data.datasets[0];
         const labels = categoryChart.data.labels;
         if (!hasFilter) {
-            ds.backgroundColor = labels.map((_, i) => CAT_COLORS[i % CAT_COLORS.length]);
+            ds.backgroundColor = labels.map(label => categoryColorMap[label] || CAT_COLORS[0]);
             ds.offset = 0;
         } else {
-            ds.backgroundColor = labels.map((label, i) => {
-                const base = CAT_COLORS[i % CAT_COLORS.length];
-                return chartFilter.categories.includes(label) ? base : hexToRgba(base, 0.15);
+            ds.backgroundColor = labels.map(label => {
+                const base = categoryColorMap[label] || CAT_COLORS[0];
+                return selectedCats.includes(label) ? base : hexToRgba(base, 0.15);
             });
             ds.offset = labels.map(label =>
-                chartFilter.categories.includes(label) ? 8 : 0
+                selectedCats.includes(label) ? 8 : 0
             );
         }
-        categoryChart.update('none');
+        categoryChart.update();
     }
 }
 
@@ -1973,33 +2172,47 @@ function renderFilterChip() {
     const el = document.getElementById('chart-filter-chip');
     if (!el) return;
 
-    if (!chartFilter.categories.length) {
+    if (!chartFilter.selections.length) {
         el.classList.add('hidden');
         return;
     }
 
-    const catsHtml = chartFilter.categories.map(c =>
-        `<span class="chip-cat" onclick="removeSingleChartCat('${escapeHtml(c)}')">${escapeHtml(c)}<span class="chip-x">&times;</span></span>`
-    ).join('');
-
-    const periodHtml = chartFilter.period
-        ? `<span class="chip-period">&middot; ${escapeHtml(formatPeriodLabel(chartFilter.period))}</span>`
-        : '';
+    // Build chips: group by category, show period if specific
+    const chips = chartFilter.selections.map(s => {
+        const label = s.period ? `${escapeHtml(s.category)} · ${escapeHtml(formatPeriodLabel(s.period))}` : escapeHtml(s.category);
+        const key = s.period ? `${s.category}|${s.period}` : s.category;
+        return `<span class="chip-cat" onclick="removeChartSelection('${escapeHtml(s.category)}', ${s.period ? "'" + escapeHtml(s.period) + "'" : 'null'})">${label}<span class="chip-x">&times;</span></span>`;
+    }).join('');
 
     el.innerHTML = `
         <span class="chip-label">Showing</span>
-        <span class="chip-cats">${catsHtml}</span>
-        ${periodHtml}
+        <span class="chip-cats">${chips}</span>
         <button class="chip-clear" onclick="clearChartFilter()" title="Clear filter">&times;</button>
     `;
     el.classList.remove('hidden');
 }
 
-function removeSingleChartCat(category) {
-    const idx = chartFilter.categories.indexOf(category);
-    if (idx >= 0) chartFilter.categories.splice(idx, 1);
+function removeChartSelection(category, period) {
+    const idx = chartFilter.selections.findIndex(s =>
+        s.category === category && s.period === period
+    );
+    if (idx >= 0) chartFilter.selections.splice(idx, 1);
 
-    if (chartFilter.categories.length === 0) {
+    if (chartFilter.selections.length === 0) {
+        clearChartFilter();
+    } else {
+        updateChartHighlights();
+        renderFilterChip();
+        updateCatFilterDisplay();
+        txCurrentPage = 1;
+        txPage(0);
+    }
+}
+
+// Legacy compat — removeSingleChartCat removes all selections for a category
+function removeSingleChartCat(category) {
+    chartFilter.selections = chartFilter.selections.filter(s => s.category !== category);
+    if (chartFilter.selections.length === 0) {
         clearChartFilter();
     } else {
         updateChartHighlights();
@@ -2076,6 +2289,275 @@ function formatPeriodLabel(period) {
 }
 
 // ============================================================
+// DASHBOARD 3-VIEW TOGGLE (Flat / By Service / By Category)
+// ============================================================
+
+let txViewMode = localStorage.getItem('fin-tx-view') || 'flat';
+
+function setTxView(mode) {
+    txViewMode = mode;
+    localStorage.setItem('fin-tx-view', mode);
+    // Update toggle buttons
+    document.querySelectorAll('.tx-view-toggle .btn-toggle').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.txview === mode);
+    });
+    // Show/hide containers
+    document.getElementById('tx-view-flat').style.display = mode === 'flat' ? '' : 'none';
+    document.getElementById('tx-view-service').style.display = mode === 'service' ? '' : 'none';
+    document.getElementById('tx-view-category').style.display = mode === 'category' ? '' : 'none';
+    // Load data for accordion views
+    if (mode === 'flat') {
+        txPage(0);
+    } else if (mode === 'service') {
+        loadServiceAccordion();
+    } else if (mode === 'category') {
+        loadCategoryAccordion();
+    }
+}
+
+async function loadServiceAccordion() {
+    const params = buildFilterParams();
+    const search = document.getElementById('tx-search').value;
+    let url = `/api/transactions?${params}&per_page=5000&sort=date&sort_dir=desc`;
+    if (search) url += '&search=' + encodeURIComponent(search);
+    const chartCats = getChartFilterCategories();
+    const activeCats = chartCats.length > 0 ? chartCats : catFilterSelections;
+    if (activeCats.length) url += '&categories=' + encodeURIComponent(activeCats.join(','));
+    const chartDateRange = getChartFilterDateRange();
+    if (chartDateRange.start) url += '&chart_start=' + chartDateRange.start;
+    if (chartDateRange.end) url += '&chart_end=' + chartDateRange.end;
+
+    const data = await fetch(url).then(r => r.json());
+    const txns = data.transactions.filter(tx => !tx.is_payment && !tx.is_transfer);
+
+    // Group by service
+    const groups = {};
+    const noService = [];
+    txns.forEach(tx => {
+        if (tx.service_id) {
+            const key = tx.service_id;
+            if (!groups[key]) groups[key] = { name: tx.service_name, category: tx.display_category || tx.category, txns: [], total: 0 };
+            groups[key].txns.push(tx);
+            groups[key].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
+        } else {
+            noService.push(tx);
+        }
+    });
+
+    const sorted = Object.entries(groups).sort((a, b) => a[1].name.localeCompare(b[1].name));
+    const container = document.getElementById('tx-view-service');
+    let html = '';
+    for (const [svcId, g] of sorted) {
+        html += `<div class="svc-accordion-item">
+            <div class="svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
+                <span class="svc-accordion-arrow">&#9654;</span>
+                <span class="svc-accordion-name">${escapeHtml(g.name)}</span>
+                <span class="svc-accordion-meta">${escapeHtml(g.category)} &middot; ${g.txns.length} txns &middot; S$${formatAmount(g.total)}</span>
+            </div>
+            <div class="svc-accordion-body">
+                <table class="data-table" style="font-size:12px;">
+                    <tbody>${g.txns.map(tx => renderAccordionTxRow(tx)).join('')}</tbody>
+                </table>
+            </div>
+        </div>`;
+    }
+    if (noService.length) {
+        html += `<div class="svc-accordion-item">
+            <div class="svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
+                <span class="svc-accordion-arrow">&#9654;</span>
+                <span class="svc-accordion-name text-muted">Unlinked</span>
+                <span class="svc-accordion-meta">${noService.length} txns</span>
+            </div>
+            <div class="svc-accordion-body">
+                <table class="data-table" style="font-size:12px;">
+                    <tbody>${noService.map(tx => renderAccordionTxRow(tx)).join('')}</tbody>
+                </table>
+            </div>
+        </div>`;
+    }
+    container.innerHTML = html || '<div class="empty-state"><div class="empty-state-text">No transactions</div></div>';
+}
+
+async function loadCategoryAccordion() {
+    const params = buildFilterParams();
+    const search = document.getElementById('tx-search').value;
+    let url = `/api/transactions?${params}&per_page=5000&sort=date&sort_dir=desc`;
+    if (search) url += '&search=' + encodeURIComponent(search);
+    const chartCats = getChartFilterCategories();
+    const activeCats = chartCats.length > 0 ? chartCats : catFilterSelections;
+    if (activeCats.length) url += '&categories=' + encodeURIComponent(activeCats.join(','));
+    const chartDateRange = getChartFilterDateRange();
+    if (chartDateRange.start) url += '&chart_start=' + chartDateRange.start;
+    if (chartDateRange.end) url += '&chart_end=' + chartDateRange.end;
+
+    const data = await fetch(url).then(r => r.json());
+    const txns = data.transactions.filter(tx => !tx.is_payment && !tx.is_transfer);
+
+    // Build 3-level: parent category → subcategory → service → transactions
+    const tree = {};
+    txns.forEach(tx => {
+        const parentCat = tx.parent_category || tx.category || 'Other';
+        const subCat = tx.parent_category ? tx.category : null;
+        const svcName = tx.service_name || 'Unlinked';
+        const svcId = tx.service_id || 0;
+
+        if (!tree[parentCat]) tree[parentCat] = { total: 0, subs: {} };
+        tree[parentCat].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
+
+        const subKey = subCat || '__direct__';
+        if (!tree[parentCat].subs[subKey]) tree[parentCat].subs[subKey] = { total: 0, services: {} };
+        tree[parentCat].subs[subKey].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
+
+        const svcKey = `${svcId}|${svcName}`;
+        if (!tree[parentCat].subs[subKey].services[svcKey]) tree[parentCat].subs[subKey].services[svcKey] = { name: svcName, txns: [], total: 0 };
+        tree[parentCat].subs[subKey].services[svcKey].txns.push(tx);
+        tree[parentCat].subs[subKey].services[svcKey].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
+    });
+
+    const container = document.getElementById('tx-view-category');
+    const sortedCats = Object.entries(tree).sort((a, b) => b[1].total - a[1].total);
+    let html = '';
+    for (const [catName, catData] of sortedCats) {
+        let innerHtml = '';
+        const sortedSubs = Object.entries(catData.subs).sort((a, b) => b[1].total - a[1].total);
+        for (const [subKey, subData] of sortedSubs) {
+            const sortedSvcs = Object.entries(subData.services).sort((a, b) => b[1].total - a[1].total);
+            let svcsHtml = '';
+            for (const [svcKey, svcData] of sortedSvcs) {
+                svcsHtml += `<div class="cat-l3-item svc-accordion-item">
+                    <div class="cat-l3-header svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
+                        <span class="svc-accordion-arrow">&#9654;</span>
+                        ${escapeHtml(svcData.name)} <span class="svc-accordion-meta">${svcData.txns.length} txns &middot; S$${formatAmount(svcData.total)}</span>
+                    </div>
+                    <div class="svc-accordion-body">
+                        <table class="data-table" style="font-size:12px;">
+                            <tbody>${svcData.txns.map(tx => renderAccordionTxRow(tx)).join('')}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+            }
+
+            if (subKey === '__direct__') {
+                innerHtml += svcsHtml;
+            } else {
+                innerHtml += `<div class="cat-l2-group svc-accordion-item">
+                    <div class="cat-l2-header svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
+                        <span class="svc-accordion-arrow">&#9654;</span>
+                        ${escapeHtml(subKey)} <span class="svc-accordion-meta">S$${formatAmount(subData.total)}</span>
+                    </div>
+                    <div class="svc-accordion-body">${svcsHtml}</div>
+                </div>`;
+            }
+        }
+
+        html += `<div class="cat-l1-group svc-accordion-item">
+            <div class="cat-l1-header svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
+                <span class="svc-accordion-arrow">&#9654;</span>
+                <strong>${escapeHtml(catName)}</strong> <span class="svc-accordion-meta">S$${formatAmount(catData.total)}</span>
+            </div>
+            <div class="svc-accordion-body">${innerHtml}</div>
+        </div>`;
+    }
+    container.innerHTML = html || '<div class="empty-state"><div class="empty-state-text">No transactions</div></div>';
+}
+
+function renderAccordionTxRow(tx) {
+    const oneOffClass = tx.is_one_off ? 'tx-one-off active' : 'tx-one-off';
+    const oneOffTitle = tx.is_one_off ? 'Marked as one-off (click to unmark)' : 'Mark as one-off (excludes from burn rate)';
+    return `<tr>
+        <td style="width:90px;">${formatDate(tx.date)}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
+        <td>${renderCategoryBadges(tx)}</td>
+        <td class="text-secondary">${tx.account_name || ''}</td>
+        <td style="text-align:right;" class="${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+        <td style="width:28px;text-align:center;"><span class="${oneOffClass}" title="${oneOffTitle}" onclick="toggleTxOneOff(${tx.id}, this)">1x</span></td>
+        <td style="width:28px;text-align:center;"><span class="tx-edit-icon" title="Resolve / edit" onclick="showCategoryPicker(${tx.id}, this)">&#9998;</span></td>
+    </tr>`;
+}
+
+// Navigate to Dashboard service view and expand a specific service
+async function navigateToService(serviceId) {
+    switchTab('dashboard', { pushHistory: false });
+
+    // Get service name for search filter
+    let svcName = null;
+    if (allServicesList && allServicesList.length) {
+        const svc = allServicesList.find(s => s.id === serviceId);
+        if (svc) svcName = svc.name;
+    }
+    if (!svcName) {
+        // Fetch if not cached
+        try {
+            const res = await fetch('/api/services');
+            allServicesList = await res.json();
+            const svc = allServicesList.find(s => s.id === serviceId);
+            if (svc) svcName = svc.name;
+        } catch (e) { /* proceed without name */ }
+    }
+
+    // Set search to service name so accordion filters to it
+    if (svcName) {
+        document.getElementById('tx-search').value = svcName;
+    }
+
+    // Switch to By Service view
+    txViewMode = 'service';
+    localStorage.setItem('fin-tx-view', 'service');
+    document.querySelectorAll('.tx-view-toggle .btn-toggle').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.txview === 'service');
+    });
+    document.getElementById('tx-view-flat').style.display = 'none';
+    document.getElementById('tx-view-service').style.display = '';
+    document.getElementById('tx-view-category').style.display = 'none';
+
+    await loadServiceAccordion();
+
+    // Auto-expand the matching accordion item
+    const container = document.getElementById('tx-view-service');
+    const items = container.querySelectorAll('.svc-accordion-item');
+    for (const item of items) {
+        const nameEl = item.querySelector('.svc-accordion-name');
+        if (!nameEl) continue;
+        if (svcName && nameEl.textContent.trim() === svcName) {
+            item.classList.add('open');
+            item.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            break;
+        }
+    }
+}
+
+async function navigateToCategory(categoryName) {
+    switchTab('dashboard', { pushHistory: false });
+
+    // Set search to category name — API searches c.name and p.name
+    document.getElementById('tx-search').value = categoryName;
+
+    // Switch to By Category view
+    txViewMode = 'category';
+    localStorage.setItem('fin-tx-view', 'category');
+    document.querySelectorAll('.tx-view-toggle .btn-toggle').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.txview === 'category');
+    });
+    document.getElementById('tx-view-flat').style.display = 'none';
+    document.getElementById('tx-view-service').style.display = 'none';
+    document.getElementById('tx-view-category').style.display = '';
+
+    await loadCategoryAccordion();
+
+    // Auto-expand the matching category
+    const container = document.getElementById('tx-view-category');
+    const items = container.querySelectorAll('.cat-l1-group');
+    for (const item of items) {
+        const header = item.querySelector('.cat-l1-header');
+        if (header && header.textContent.includes(categoryName)) {
+            item.classList.add('open');
+            item.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            break;
+        }
+    }
+}
+
+// ============================================================
 // SEARCHABLE MULTI-SELECT (Category Filter)
 // ============================================================
 
@@ -2112,7 +2594,7 @@ function populateCatMultiSelect() {
 
 function toggleCatFilterPanel() {
     // Don't open if chart filter is overriding
-    if (chartFilter.categories.length > 0) return;
+    if (chartFilter.selections.length > 0) return;
 
     const panel = document.getElementById('cat-filter-panel');
     const trigger = document.getElementById('cat-filter-trigger');
@@ -2174,8 +2656,9 @@ function updateCatFilterDisplay() {
     const trigger = document.getElementById('cat-filter-trigger');
     if (!display || !trigger) return;
 
-    if (chartFilter.categories.length > 0) {
-        display.textContent = `Chart: ${chartFilter.categories.join(', ')}`;
+    const chartCats = getChartFilterCategories();
+    if (chartCats.length > 0) {
+        display.textContent = `Chart: ${chartCats.join(', ')}`;
         trigger.classList.add('ms-has-selection');
         trigger.classList.add('ms-disabled');
     } else if (catFilterSelections.length === 0) {
@@ -2204,465 +2687,13 @@ document.addEventListener('click', e => {
 });
 
 // ============================================================
-// SERVICES TAB (accordion view)
+// SERVICES TAB (REMOVED — absorbed into Dashboard 3-view toggle)
+// Old code: renderServicesTab, switchServiceView, renderServicesCategoryView, etc.
+// Now handled by loadServiceAccordion() and loadCategoryAccordion() in Dashboard section
 // ============================================================
 
-let allServicesList = []; // cached for re-sorting without re-fetch
-
-async function renderServicesTab(skipFetch) {
-    // Populate category filter dropdown
-    const catFilter = document.getElementById('services-category-filter');
-    if (catFilter && catFilter.options.length <= 1) {
-        const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-        parents.forEach(p => {
-            catFilter.innerHTML += `<option value="${p.id}">${p.name}</option>`;
-            const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-            children.forEach(c => {
-                catFilter.innerHTML += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
-            });
-        });
-    }
-
-    if (!skipFetch) {
-        const res = await fetch('/api/services');
-        allServicesList = await res.json();
-    }
-
-    const container = document.getElementById('services-accordion');
-    const search = (document.getElementById('services-search')?.value || '').toLowerCase();
-    const catFilterVal = document.getElementById('services-category-filter')?.value;
-    const sortBy = document.getElementById('services-sort')?.value || 'name';
-
-    let filtered = allServicesList;
-    if (search) filtered = filtered.filter(s => s.name.toLowerCase().includes(search));
-    if (catFilterVal) filtered = filtered.filter(s => String(s.category_id) === catFilterVal);
-
-    // Sort
-    filtered = [...filtered].sort((a, b) => {
-        let va, vb;
-        switch (sortBy) {
-            case 'category':  va = (a.display_category || '').toLowerCase(); vb = (b.display_category || '').toLowerCase(); break;
-            case 'txn_count': return (b.txn_count || 0) - (a.txn_count || 0); // descending
-            default:          va = a.name.toLowerCase(); vb = b.name.toLowerCase();
-        }
-        return va < vb ? -1 : va > vb ? 1 : 0;
-    });
-
-    if (!filtered.length) {
-        container.innerHTML = '<div style="padding:var(--space-4);color:var(--text-tertiary);">No services found</div>';
-        return;
-    }
-
-    container.innerHTML = filtered.map(s => `
-        <div class="svc-accordion-item" data-svc-id="${s.id}">
-            <div class="svc-accordion-header" onclick="toggleServiceAccordion(${s.id})">
-                <span class="svc-accordion-arrow">&#9654;</span>
-                <span class="svc-accordion-name">${escapeHtml(s.name)}${s.is_one_off ? ' <span class="svc-one-off-badge" title="One-off">1x</span>' : ''}</span>
-                <span class="svc-accordion-meta">
-                    <span>${escapeHtml(s.display_category || '')}</span>
-                    <span>${s.txn_count || 0} txns</span>
-                </span>
-            </div>
-            <div class="svc-accordion-body" id="svc-body-${s.id}"></div>
-        </div>
-    `).join('');
-}
-
-// Cache loaded transactions per service for re-sorting without re-fetch
-const svcTxCache = {};
-
-async function toggleServiceAccordion(svcId) {
-    const item = document.querySelector(`.svc-accordion-item[data-svc-id="${svcId}"]`);
-    const body = document.getElementById('svc-body-' + svcId);
-
-    if (item.classList.contains('open')) {
-        item.classList.remove('open');
-        return;
-    }
-
-    // Close others
-    document.querySelectorAll('.svc-accordion-item.open').forEach(el => el.classList.remove('open'));
-
-    // Load transactions
-    body.innerHTML = '<div style="padding:var(--space-3);color:var(--text-tertiary);">Loading...</div>';
-    item.classList.add('open');
-
-    const res = await fetch('/api/services/' + svcId + '/transactions');
-    svcTxCache[svcId] = await res.json();
-
-    renderSvcTxTable(svcId, 'date', false);
-}
-
-function renderSvcTxTable(svcId, sortCol, sortAsc) {
-    const body = document.getElementById('svc-body-' + svcId);
-    const txns = svcTxCache[svcId] || [];
-
-    if (!txns.length) {
-        body.innerHTML = '<div style="padding:var(--space-3);color:var(--text-tertiary);">No transactions found</div>';
-        return;
-    }
-
-    // Sort
-    const sorted = [...txns].sort((a, b) => {
-        let va, vb;
-        switch (sortCol) {
-            case 'description': va = a.description.toLowerCase(); vb = b.description.toLowerCase(); break;
-            case 'amount':      va = Math.abs(a.amount_sgd); vb = Math.abs(b.amount_sgd); break;
-            default:            va = a.date; vb = b.date;
-        }
-        if (va < vb) return sortAsc ? -1 : 1;
-        if (va > vb) return sortAsc ? 1 : -1;
-        return 0;
-    });
-
-    const arrow = (col) => {
-        if (col !== sortCol) return '';
-        return sortAsc ? ' ▲' : ' ▼';
-    };
-
-    body.innerHTML = `
-        <table class="svc-tx-table">
-            <thead><tr>
-                <th class="sortable" style="cursor:pointer;" onclick="sortSvcTx(${svcId},'date',${sortCol === 'date' ? !sortAsc : true})">Date${arrow('date')}</th>
-                <th class="sortable" style="cursor:pointer;" onclick="sortSvcTx(${svcId},'description',${sortCol === 'description' ? !sortAsc : true})">Description${arrow('description')}</th>
-                <th class="sortable" style="cursor:pointer;text-align:right;" onclick="sortSvcTx(${svcId},'amount',${sortCol === 'amount' ? !sortAsc : false})">Amount${arrow('amount')}</th>
-            </tr></thead>
-            <tbody>
-                ${sorted.map(t => `
-                    <tr>
-                        <td style="white-space:nowrap;">${formatDate(t.date)}</td>
-                        <td>${escapeHtml(t.description)}</td>
-                        <td style="text-align:right;">S$${formatAmount(Math.abs(t.amount_sgd))}</td>
-                    </tr>
-                `).join('')}
-            </tbody>
-        </table>
-        <div style="margin-top:var(--space-3);font-size:12px;color:var(--text-tertiary);">
-            ${sorted.length} transaction${sorted.length !== 1 ? 's' : ''} &middot;
-            Total: S$${formatAmount(sorted.reduce((s, t) => s + Math.abs(t.amount_sgd), 0))}
-        </div>
-    `;
-}
-
-function sortSvcTx(svcId, col, asc) {
-    renderSvcTxTable(svcId, col, asc);
-}
-
-// ============================================================
-// SERVICES TAB — VIEW TOGGLE + DEEP LINKING
-// ============================================================
-
-let currentServiceView = 'service'; // 'service' or 'category'
-
-function switchServiceView(view) {
-    currentServiceView = view;
-    document.querySelectorAll('.svc-view-btn').forEach(b => b.classList.remove('active'));
-    document.querySelector(`.svc-view-btn[data-view="${view}"]`)?.classList.add('active');
-
-    document.getElementById('svc-view-service').style.display = view === 'service' ? '' : 'none';
-    document.getElementById('svc-view-category').style.display = view === 'category' ? '' : 'none';
-
-    if (view === 'service') renderServicesTab();
-    if (view === 'category') renderServicesCategoryView();
-}
-
-// Deep link: navigate to Services tab, open a specific service accordion, scroll to it
-async function navigateToService(svcId) {
-    // Clear filters so the target service is visible
-    const searchEl = document.getElementById('services-search');
-    if (searchEl) searchEl.value = '';
-    const catEl = document.getElementById('services-category-filter');
-    if (catEl) catEl.value = '';
-
-    switchTab('services');
-    // Set view without triggering a render (avoid double-render race)
-    currentServiceView = 'service';
-    document.querySelectorAll('.svc-view-btn').forEach(b => b.classList.remove('active'));
-    document.querySelector('.svc-view-btn[data-view="service"]')?.classList.add('active');
-    document.getElementById('svc-view-service').style.display = '';
-    document.getElementById('svc-view-category').style.display = 'none';
-
-    // Ensure data is loaded, then render once
-    if (!allServicesList || !allServicesList.length) {
-        const res = await fetch('/api/services');
-        allServicesList = await res.json();
-    }
-    renderServicesTab(true);
-
-    // Small delay for DOM render, then open and scroll
-    await new Promise(r => setTimeout(r, 150));
-    await toggleServiceAccordion(svcId);
-    const item = document.querySelector(`.svc-accordion-item[data-svc-id="${svcId}"]`);
-    if (item) item.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-// Deep link: navigate to Services tab in Category view, expand a category (and optionally subcategory)
-async function navigateToCategory(parentName, subcatName) {
-    // Clear filters so target is visible
-    const searchEl = document.getElementById('services-cat-search');
-    if (searchEl) searchEl.value = '';
-    const catFilter = document.getElementById('services-cat-category-filter');
-    if (catFilter) catFilter.value = '';
-    const spendFilter = document.getElementById('services-cat-spend-filter');
-    if (spendFilter) spendFilter.value = '';
-
-    switchTab('services');
-    switchServiceView('category');
-
-    // Ensure data is loaded
-    if (!allServicesList || !allServicesList.length) {
-        const res = await fetch('/api/services');
-        allServicesList = await res.json();
-    }
-    renderServicesCategoryView();
-
-    // Small delay for DOM render, then open and scroll
-    await new Promise(r => setTimeout(r, 150));
-
-    // Open parent category accordion
-    let scrollTarget = null;
-    const items = document.querySelectorAll('.cat-accordion-item');
-    for (const el of items) {
-        if (el.dataset.catName === parentName) {
-            el.classList.add('open');
-            scrollTarget = el;
-
-            // If subcategory specified, open it too
-            if (subcatName) {
-                await new Promise(r => setTimeout(r, 50));
-                const subcats = el.querySelectorAll('.subcat-accordion-item');
-                for (const sub of subcats) {
-                    // Match by the subcategory name text
-                    const nameEl = sub.querySelector('.subcat-name');
-                    if (nameEl && nameEl.textContent.trim() === subcatName) {
-                        sub.classList.add('open');
-                        scrollTarget = sub;
-                        break;
-                    }
-                }
-            }
-            break;
-        }
-    }
-    if (scrollTarget) scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-// ============================================================
-// SERVICES TAB — CATEGORY VIEW (nested: category → services)
-// ============================================================
-
-let catViewFilterPopulated = false;
-
-async function renderServicesCategoryView() {
-    if (!allServicesList || !allServicesList.length) {
-        const res = await fetch('/api/services');
-        allServicesList = await res.json();
-    }
-
-    // Populate category filter dropdown (once)
-    if (!catViewFilterPopulated) {
-        const catFilter = document.getElementById('services-cat-category-filter');
-        if (catFilter) {
-            const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-            parents.forEach(p => {
-                catFilter.innerHTML += `<option value="${p.name}">${p.name}</option>`;
-            });
-            catViewFilterPopulated = true;
-        }
-    }
-
-    const container = document.getElementById('services-cat-accordion');
-    const search = (document.getElementById('services-cat-search')?.value || '').toLowerCase();
-    const catFilterVal = document.getElementById('services-cat-category-filter')?.value || '';
-    const spendFilter = document.getElementById('services-cat-spend-filter')?.value || '';
-
-    let services = allServicesList;
-
-    // Apply filters
-    if (search) {
-        services = services.filter(s =>
-            s.name.toLowerCase().includes(search) ||
-            (s.display_category || '').toLowerCase().includes(search)
-        );
-    }
-    if (catFilterVal) {
-        // Match parent category name or category name (for top-level cats)
-        services = services.filter(s =>
-            (s.parent_name || s.category_name) === catFilterVal
-        );
-    }
-    if (spendFilter === 'personal') {
-        services = services.filter(s => s.is_personal !== 0);
-    } else if (spendFilter === 'moom') {
-        services = services.filter(s => s.is_personal === 0);
-    }
-
-    // Build 3-level hierarchy: Parent Category → Subcategory → Services
-    // Structure: { parentCat: { subcats: { subcatName: [services] }, directServices: [services] } }
-    const hierarchy = {};
-    services.forEach(s => {
-        const parentCat = s.parent_name || s.category_name || 'Uncategorized';
-        if (!hierarchy[parentCat]) hierarchy[parentCat] = { subcats: {}, direct: [] };
-
-        if (s.parent_name && s.category_name !== s.parent_name) {
-            // Has a subcategory
-            const subcat = s.category_name;
-            if (!hierarchy[parentCat].subcats[subcat]) hierarchy[parentCat].subcats[subcat] = [];
-            hierarchy[parentCat].subcats[subcat].push(s);
-        } else {
-            // Top-level category, no subcategory
-            hierarchy[parentCat].direct.push(s);
-        }
-    });
-
-    const sortedParents = Object.keys(hierarchy).sort((a, b) => a.localeCompare(b));
-
-    if (!sortedParents.length) {
-        container.innerHTML = '<div style="padding:var(--space-4);color:var(--text-tertiary);">No categories found</div>';
-        return;
-    }
-
-    container.innerHTML = sortedParents.map(parentName => {
-        const group = hierarchy[parentName];
-        const subcatNames = Object.keys(group.subcats).sort((a, b) => a.localeCompare(b));
-        const allSvcs = [...group.direct, ...subcatNames.flatMap(sc => group.subcats[sc])];
-        const totalTxns = allSvcs.reduce((sum, s) => sum + (s.txn_count || 0), 0);
-        const totalSvcs = allSvcs.length;
-
-        // Render subcategory accordions
-        const subcatHtml = subcatNames.map(subcatName => {
-            const svcs = group.subcats[subcatName].sort((a, b) => a.name.localeCompare(b.name));
-            const subTxns = svcs.reduce((sum, s) => sum + (s.txn_count || 0), 0);
-            return `
-            <div class="subcat-accordion-item">
-                <div class="subcat-accordion-header" onclick="this.parentElement.classList.toggle('open')">
-                    <span class="svc-accordion-arrow">&#9654;</span>
-                    <span class="subcat-name">${escapeHtml(subcatName)}</span>
-                    <span class="svc-accordion-meta">
-                        <span>${svcs.length} svc${svcs.length !== 1 ? 's' : ''}</span>
-                        <span>${subTxns} txns</span>
-                    </span>
-                </div>
-                <div class="subcat-accordion-body">
-                    ${renderCatServiceItems(svcs)}
-                </div>
-            </div>`;
-        }).join('');
-
-        // Render direct services (no subcategory)
-        const directHtml = group.direct.length ? renderCatServiceItems(
-            group.direct.sort((a, b) => a.name.localeCompare(b.name))
-        ) : '';
-
-        return `
-        <div class="cat-accordion-item" data-cat-name="${escapeHtml(parentName)}">
-            <div class="cat-accordion-header" onclick="toggleCatAccordion(this.parentElement)">
-                <span class="svc-accordion-arrow">&#9654;</span>
-                <span class="svc-accordion-name">${escapeHtml(parentName)}</span>
-                <span class="svc-accordion-meta">
-                    <span>${totalSvcs} service${totalSvcs !== 1 ? 's' : ''}</span>
-                    <span>${totalTxns} txns</span>
-                </span>
-            </div>
-            <div class="cat-accordion-body">
-                ${subcatHtml}${directHtml}
-            </div>
-        </div>`;
-    }).join('');
-}
-
-// Shared helper: render service accordion items for category view
-function renderCatServiceItems(svcs) {
-    return svcs.map(s => `
-        <div class="svc-accordion-item" data-svc-id="${s.id}">
-            <div class="svc-accordion-header" onclick="toggleCatServiceAccordion(${s.id}, this.parentElement)">
-                <span class="svc-accordion-arrow">&#9654;</span>
-                <span class="svc-accordion-name">${escapeHtml(s.name)}</span>
-                <span class="svc-accordion-meta">
-                    <span>${s.txn_count || 0} txns</span>
-                </span>
-            </div>
-            <div class="svc-accordion-body" id="cat-svc-body-${s.id}"></div>
-        </div>
-    `).join('');
-}
-
-function toggleCatAccordion(el) {
-    el.classList.toggle('open');
-}
-
-async function toggleCatServiceAccordion(svcId, item) {
-    const body = document.getElementById('cat-svc-body-' + svcId);
-
-    if (item.classList.contains('open')) {
-        item.classList.remove('open');
-        return;
-    }
-
-    // Close sibling service accordions in same category
-    item.parentElement.querySelectorAll('.svc-accordion-item.open').forEach(el => el.classList.remove('open'));
-
-    body.innerHTML = '<div style="padding:var(--space-3);color:var(--text-tertiary);">Loading...</div>';
-    item.classList.add('open');
-
-    if (!svcTxCache[svcId]) {
-        const res = await fetch('/api/services/' + svcId + '/transactions');
-        svcTxCache[svcId] = await res.json();
-    }
-
-    renderCatSvcTxTable(svcId, 'date', false);
-}
-
-function renderCatSvcTxTable(svcId, sortCol, sortAsc) {
-    const body = document.getElementById('cat-svc-body-' + svcId);
-    const txns = svcTxCache[svcId] || [];
-
-    if (!txns.length) {
-        body.innerHTML = '<div style="padding:var(--space-3);color:var(--text-tertiary);">No transactions found</div>';
-        return;
-    }
-
-    const sorted = [...txns].sort((a, b) => {
-        let va, vb;
-        switch (sortCol) {
-            case 'description': va = a.description.toLowerCase(); vb = b.description.toLowerCase(); break;
-            case 'amount':      va = Math.abs(a.amount_sgd); vb = Math.abs(b.amount_sgd); break;
-            default:            va = a.date; vb = b.date;
-        }
-        if (va < vb) return sortAsc ? -1 : 1;
-        if (va > vb) return sortAsc ? 1 : -1;
-        return 0;
-    });
-
-    const arrow = (col) => col !== sortCol ? '' : (sortAsc ? ' ▲' : ' ▼');
-
-    body.innerHTML = `
-        <table class="svc-tx-table">
-            <thead><tr>
-                <th style="cursor:pointer;" onclick="sortCatSvcTx(${svcId},'date',${sortCol === 'date' ? !sortAsc : true})">Date${arrow('date')}</th>
-                <th style="cursor:pointer;" onclick="sortCatSvcTx(${svcId},'description',${sortCol === 'description' ? !sortAsc : true})">Description${arrow('description')}</th>
-                <th style="cursor:pointer;text-align:right;" onclick="sortCatSvcTx(${svcId},'amount',${sortCol === 'amount' ? !sortAsc : false})">Amount${arrow('amount')}</th>
-            </tr></thead>
-            <tbody>
-                ${sorted.map(t => `
-                    <tr>
-                        <td style="white-space:nowrap;">${formatDate(t.date)}</td>
-                        <td>${escapeHtml(t.description)}</td>
-                        <td style="text-align:right;">S$${formatAmount(Math.abs(t.amount_sgd))}</td>
-                    </tr>
-                `).join('')}
-            </tbody>
-        </table>
-        <div style="margin-top:var(--space-3);font-size:12px;color:var(--text-tertiary);">
-            ${sorted.length} txn${sorted.length !== 1 ? 's' : ''} &middot;
-            Total: S$${formatAmount(sorted.reduce((s, t) => s + Math.abs(t.amount_sgd), 0))}
-        </div>
-    `;
-}
-
-function sortCatSvcTx(svcId, col, asc) {
-    renderCatSvcTxTable(svcId, col, asc);
-}
+// (Old Services tab code removed — ~460 lines)
+// Accordion views now in Dashboard 3-view toggle section above
 
 // ============================================================
 // CATEGORIES MASTER TAB
@@ -3075,6 +3106,212 @@ async function mergeService() {
 }
 
 // ============================================================
+// SERVICE PICKER (reusable searchable dropdown)
+// ============================================================
+
+class ServicePicker {
+    constructor(containerEl, options = {}) {
+        this.container = typeof containerEl === 'string' ? document.getElementById(containerEl) : containerEl;
+        this.input = this.container.querySelector('.svc-picker-input');
+        this.hiddenInput = this.container.querySelector('.svc-picker-id');
+        this.dropdown = this.container.querySelector('.svc-picker-dropdown');
+        this.allowCreate = options.allowCreate || false;
+        this.onSelect = options.onSelect || null;
+        this.highlightIndex = -1;
+        this.filteredItems = [];
+        this.selectedId = null;
+        this.selectedName = '';
+
+        this.input.addEventListener('input', () => this._onInput());
+        this.input.addEventListener('focus', () => this._onInput());
+        this.input.addEventListener('keydown', e => this._onKeydown(e));
+        // Close on outside click
+        document.addEventListener('mousedown', e => {
+            if (!this.container.contains(e.target)) this._close();
+        });
+    }
+
+    async _ensureServices() {
+        if (!allServicesList || !allServicesList.length) {
+            const res = await fetch('/api/services');
+            allServicesList = await res.json();
+        }
+    }
+
+    async _onInput() {
+        await this._ensureServices();
+        const query = this.input.value.trim().toLowerCase();
+
+        // Filter and sort — exact prefix matches first, then contains
+        let items = allServicesList
+            .map(s => ({
+                id: s.id,
+                name: s.name,
+                category: s.display_category || s.category_name || '',
+            }))
+            .filter(s => !query || s.name.toLowerCase().includes(query) || s.category.toLowerCase().includes(query))
+            .sort((a, b) => {
+                if (query) {
+                    const aStarts = a.name.toLowerCase().startsWith(query) ? 0 : 1;
+                    const bStarts = b.name.toLowerCase().startsWith(query) ? 0 : 1;
+                    if (aStarts !== bStarts) return aStarts - bStarts;
+                }
+                return a.name.localeCompare(b.name);
+            });
+
+        // Limit to 30 for performance
+        const shown = items.slice(0, 30);
+        this.filteredItems = shown;
+        this.highlightIndex = -1;
+
+        let html = '';
+        if (shown.length === 0 && !this.allowCreate) {
+            html = '<div class="svc-picker-empty">No services found</div>';
+        } else {
+            html = shown.map((s, i) => {
+                // Highlight matching text
+                let nameHtml = escapeHtml(s.name);
+                if (query) {
+                    const idx = s.name.toLowerCase().indexOf(query);
+                    if (idx >= 0) {
+                        nameHtml = escapeHtml(s.name.substring(0, idx))
+                            + '<span class="svc-picker-item-match">' + escapeHtml(s.name.substring(idx, idx + query.length)) + '</span>'
+                            + escapeHtml(s.name.substring(idx + query.length));
+                    }
+                }
+                return `<div class="svc-picker-item" data-index="${i}" data-id="${s.id}">
+                    <span class="svc-picker-item-name">${nameHtml}</span>
+                    <span class="svc-picker-item-cat">${escapeHtml(s.category)}</span>
+                </div>`;
+            }).join('');
+
+            if (this.allowCreate && query && !items.some(s => s.name.toLowerCase() === query)) {
+                html += `<div class="svc-picker-item create-new" data-index="${shown.length}" data-create="true">
+                    + Create "${escapeHtml(this.input.value.trim())}"
+                </div>`;
+                this.filteredItems.push({ id: null, name: this.input.value.trim(), category: '', isNew: true });
+            }
+        }
+
+        this.dropdown.innerHTML = html;
+        this.dropdown.classList.add('open');
+
+        // Wire click handlers
+        this.dropdown.querySelectorAll('.svc-picker-item').forEach(el => {
+            el.addEventListener('mousedown', e => {
+                e.preventDefault(); // prevent input blur
+                const idx = parseInt(el.dataset.index);
+                this._selectIndex(idx);
+            });
+        });
+    }
+
+    _onKeydown(e) {
+        if (!this.dropdown.classList.contains('open')) return;
+        const maxIdx = this.filteredItems.length - 1;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            this.highlightIndex = Math.min(this.highlightIndex + 1, maxIdx);
+            this._updateHighlight();
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            this.highlightIndex = Math.max(this.highlightIndex - 1, 0);
+            this._updateHighlight();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (this.highlightIndex >= 0) {
+                this._selectIndex(this.highlightIndex);
+            }
+        } else if (e.key === 'Escape') {
+            this._close();
+        }
+    }
+
+    _updateHighlight() {
+        this.dropdown.querySelectorAll('.svc-picker-item').forEach((el, i) => {
+            el.classList.toggle('highlighted', i === this.highlightIndex);
+            if (i === this.highlightIndex) {
+                el.scrollIntoView({ block: 'nearest' });
+            }
+        });
+    }
+
+    _selectIndex(idx) {
+        const item = this.filteredItems[idx];
+        if (!item) return;
+        this.selectedId = item.id;
+        this.selectedName = item.name;
+        this.input.value = item.name;
+        this.input.classList.add('has-value');
+        this.hiddenInput.value = item.id || '';
+        this._close();
+        if (this.onSelect) this.onSelect(item);
+    }
+
+    _close() {
+        this.dropdown.classList.remove('open');
+        this.highlightIndex = -1;
+    }
+
+    setValue(name, id) {
+        this.selectedId = id;
+        this.selectedName = name;
+        this.input.value = name || '';
+        this.hiddenInput.value = id || '';
+        this.input.classList.toggle('has-value', !!name);
+    }
+
+    getValue() {
+        return { id: this.selectedId, name: this.input.value.trim() };
+    }
+
+    clear() {
+        this.selectedId = null;
+        this.selectedName = '';
+        this.input.value = '';
+        this.hiddenInput.value = '';
+        this.input.classList.remove('has-value');
+    }
+}
+
+// Initialize pickers (lazy — created when modal opens)
+let resolveServicePicker = null;
+let addRuleServicePicker = null;
+let editRuleServicePicker = null;
+
+function getResolveServicePicker() {
+    if (!resolveServicePicker) {
+        resolveServicePicker = new ServicePicker('resolve-svc-picker', {
+            allowCreate: true,
+            onSelect: (item) => {
+                if (item.isNew) {
+                    // New service — category dropdown should be editable
+                    document.getElementById('resolve-cat-hint').style.display = 'none';
+                } else {
+                    onResolveServiceChange(item.name);
+                }
+            },
+        });
+    }
+    return resolveServicePicker;
+}
+
+function getAddRuleServicePicker() {
+    if (!addRuleServicePicker) {
+        addRuleServicePicker = new ServicePicker('rule-svc-picker');
+    }
+    return addRuleServicePicker;
+}
+
+function getEditRuleServicePicker() {
+    if (!editRuleServicePicker) {
+        editRuleServicePicker = new ServicePicker('edit-rule-svc-picker');
+    }
+    return editRuleServicePicker;
+}
+
+// ============================================================
 // UTILITIES
 // ============================================================
 
@@ -3171,7 +3408,7 @@ function renderSubsStats(subs) {
             <div class="stat-sub">S$${formatAmount(personalMonthly * 12)}/year</div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">Moom (Business)</div>
+            <div class="stat-label">Business</div>
             <div class="stat-value moom">S$${formatAmount(moomMonthly)}</div>
             <div class="stat-sub">S$${formatAmount(moomMonthly * 12)}/year</div>
         </div>
@@ -3249,7 +3486,7 @@ function renderSubscriptions(subs) {
     empty.classList.add('hidden');
 
     body.innerHTML = filtered.map(s => {
-        const freqAbbr = { monthly: 'mo', yearly: 'yr', quarterly: 'qt' };
+        const freqAbbr = { weekly: 'wk', biweekly: '2wk', monthly: 'mo', quarterly: 'qt', 'half-yearly': '6mo', yearly: 'yr' };
         const freqShort = freqAbbr[s.frequency] || s.frequency;
         const freqLabel = s.periods > 1 ? `${s.periods}x ${freqShort}` : freqShort;
         const lastPaidRaw = s.tx_last_paid || s.last_paid || null;
@@ -3285,11 +3522,20 @@ function renderSubscriptions(subs) {
             lastPaidHtml = '—';
         }
 
-        return `<tr class="${statusClass}">
+        // Highlight rows with renewal in next 3 days
+        const renewalDate = s.computed_renewal || s.renewal_date;
+        let renewalSoon = false;
+        if (renewalDate && s.status === 'active') {
+            const diff = (new Date(renewalDate) - new Date()) / (1000 * 60 * 60 * 24);
+            renewalSoon = diff >= 0 && diff <= 3;
+        }
+        const rowClass = [statusClass, renewalSoon ? 'subs-row-renewal-soon' : ''].filter(Boolean).join(' ');
+
+        return `<tr class="${rowClass}">
             <td>
                 <div style="font-weight:600;font-size:13px;">${s.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${s.service_id});return false;">${escapeHtml(s.service_name || '')}</a>` : escapeHtml(s.service_name || '')}</div>
             </td>
-            <td class="subs-col-hide-sm"><a href="#" class="cat-link" onclick="navigateToCategory('${escapeHtml(s.parent_name || s.category_name || '')}'${s.parent_name ? `,'${escapeHtml(s.category_name)}'` : ''});return false;">${escapeHtml(s.display_category)}</a></td>
+            <td class="subs-col-hide-sm"><a href="#" class="cat-link" onclick="navigateToCategory('${escapeHtml(s.parent_name || s.category_name || '')}');return false;">${escapeHtml(s.display_category)}</a></td>
             <td style="text-align:right;font-size:13px;">${billedHtml}</td>
             <td style="text-align:right;font-size:13px;font-weight:600;color:var(--accent-camel);" title="${escapeHtml(monthlyTitle)}">
                 ${monthlyLabel}
@@ -3297,7 +3543,7 @@ function renderSubscriptions(subs) {
             <td class="subs-col-hide-sm" style="font-size:11px;color:var(--text-tertiary);white-space:nowrap;">${freqLabel}</td>
             <td class="subs-card-cell subs-col-hide-md" title="${escapeHtml(s.account_short_name || '')}">${escapeHtml(s.account_short_name || '')}</td>
             <td style="font-size:12px;white-space:nowrap;">${lastPaidHtml}</td>
-            <td class="subs-col-hide-sm" style="font-size:12px;color:var(--text-tertiary);white-space:nowrap;">${formatDateDMY(s.computed_renewal || s.renewal_date)}</td>
+            <td class="subs-col-hide-sm" style="font-size:12px;white-space:nowrap;${renewalSoon ? 'color:var(--accent-pop);font-weight:600;' : 'color:var(--text-tertiary);'}">${formatDateDMY(renewalDate)}${renewalSoon ? ' ●' : ''}</td>
             <td style="text-align:right;white-space:nowrap;">
                 ${linkHtml}
                 <button class="btn btn-sm" onclick="openEditSubModal(${s.id})" title="Edit">Edit</button>
@@ -3346,6 +3592,88 @@ function getServiceRulePattern(serviceId) {
     return null;
 }
 
+// Shared: populate a category dropdown with hierarchy + "+ New category..."
+function populateSubCategoryDropdown(selectId, selectedId) {
+    const sel = document.getElementById(selectId);
+    sel.innerHTML = '<option value="">—</option>';
+    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
+    parents.forEach(p => {
+        sel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
+        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
+        children.forEach(c => {
+            sel.innerHTML += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
+        });
+    });
+    sel.innerHTML += '<option value="__new__">+ New category...</option>';
+    if (selectedId) sel.value = String(selectedId);
+
+    // Populate parent dropdown for new category row
+    const prefix = selectId === 'sub-category' ? 'add-sub' : 'edit-sub';
+    const parentSelect = document.getElementById(`${prefix}-new-cat-parent`);
+    if (parentSelect) {
+        parentSelect.innerHTML = '<option value="">-- Top-level --</option>';
+        parents.forEach(p => { parentSelect.innerHTML += `<option value="${p.id}">${p.name}</option>`; });
+    }
+}
+
+function onSubCategoryChange(mode) {
+    const prefix = mode === 'add' ? 'add-sub' : 'edit-sub';
+    const selId = mode === 'add' ? 'sub-category' : 'edit-sub-category';
+    const val = document.getElementById(selId).value;
+    const newCatRow = document.getElementById(`${prefix}-new-cat-row`);
+    if (val === '__new__') {
+        newCatRow.classList.remove('hidden');
+        document.getElementById(`${prefix}-new-cat-name`).focus();
+    } else {
+        newCatRow.classList.add('hidden');
+    }
+}
+
+// Subscription ServicePicker instances
+let addSubServicePicker = null;
+let editSubServicePicker = null;
+
+function getAddSubServicePicker() {
+    if (!addSubServicePicker) {
+        addSubServicePicker = new ServicePicker('add-sub-svc-picker', {
+            allowCreate: true,
+            onSelect: (item) => {
+                // Auto-fill category from service
+                if (!item.isNew && allServicesList) {
+                    const svc = allServicesList.find(s => s.id === item.id);
+                    if (svc && svc.category_id) {
+                        document.getElementById('sub-category').value = String(svc.category_id);
+                        document.getElementById('sub-cat-hint').style.display = 'block';
+                    }
+                } else {
+                    document.getElementById('sub-cat-hint').style.display = 'none';
+                }
+            },
+        });
+    }
+    return addSubServicePicker;
+}
+
+function getEditSubServicePicker() {
+    if (!editSubServicePicker) {
+        editSubServicePicker = new ServicePicker('edit-sub-svc-picker', {
+            allowCreate: true,
+            onSelect: (item) => {
+                if (!item.isNew && allServicesList) {
+                    const svc = allServicesList.find(s => s.id === item.id);
+                    if (svc && svc.category_id) {
+                        document.getElementById('edit-sub-category').value = String(svc.category_id);
+                        document.getElementById('edit-sub-cat-hint').style.display = 'block';
+                    }
+                } else {
+                    document.getElementById('edit-sub-cat-hint').style.display = 'none';
+                }
+            },
+        });
+    }
+    return editSubServicePicker;
+}
+
 async function openAddSubModal() {
     // Reset all fields
     document.getElementById('sub-category').value = '';
@@ -3358,29 +3686,25 @@ async function openAddSubModal() {
     document.getElementById('sub-status').value = 'active';
     document.getElementById('sub-link').value = '';
     document.getElementById('sub-notes').value = '';
+    document.getElementById('sub-start-date').value = '';
+    document.getElementById('add-sub-new-cat-row').classList.add('hidden');
+    document.getElementById('sub-cat-hint').style.display = 'none';
 
-    // Populate service dropdown
-    const svcSel = document.getElementById('sub-service');
-    await populateServiceDropdown(svcSel, null);
+    // Initialize ServicePicker
+    const picker = getAddSubServicePicker();
+    picker.clear();
 
     // Populate category dropdown
-    const sel = document.getElementById('sub-category');
-    sel.innerHTML = '<option value="">—</option>';
-    categories.sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name)).forEach(c => {
-        sel.innerHTML += `<option value="${c.id}">${c.display_name || c.name}</option>`;
-    });
+    populateSubCategoryDropdown('sub-category', null);
 
-    // Wire auto-fill: selecting a service sets category
-    wireServiceAutoFill(svcSel, sel);
-
-    // Populate card dropdown from accounts
+    // Populate card dropdown from active accounts only
     const cardSel = document.getElementById('sub-card');
     cardSel.innerHTML = '<option value="">—</option>';
-    accounts.forEach(a => {
+    accounts.filter(a => a.status !== 'archived').forEach(a => {
         cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
     });
 
-    // FX rate hint — show when USD selected
+    // FX rate hint
     const currSel = document.getElementById('sub-currency');
     const updateFxHint = () => {
         document.querySelectorAll('#add-sub-modal .fx-rate-hint').forEach(el => {
@@ -3389,6 +3713,26 @@ async function openAddSubModal() {
     };
     currSel.onchange = updateFxHint;
     updateFxHint();
+
+    // Auto-suggest renewal from start date + frequency + periods
+    const suggestRenewal = () => {
+        const startVal = document.getElementById('sub-start-date').value;
+        const renewalEl = document.getElementById('sub-renewal');
+        if (!startVal || renewalEl.value) return;
+        const freq = document.getElementById('sub-frequency').value;
+        const periods = parseInt(document.getElementById('sub-periods').value) || 1;
+        const start = new Date(startVal);
+        if (freq === 'yearly') start.setFullYear(start.getFullYear() + periods);
+        else if (freq === 'half-yearly') start.setMonth(start.getMonth() + 6 * periods);
+        else if (freq === 'quarterly') start.setMonth(start.getMonth() + 3 * periods);
+        else if (freq === 'biweekly') start.setDate(start.getDate() + 14 * periods);
+        else if (freq === 'weekly') start.setDate(start.getDate() + 7 * periods);
+        else start.setMonth(start.getMonth() + periods);
+        renewalEl.value = start.toISOString().split('T')[0];
+    };
+    document.getElementById('sub-start-date').onchange = suggestRenewal;
+    document.getElementById('sub-frequency').addEventListener('change', suggestRenewal);
+    document.getElementById('sub-periods').addEventListener('change', suggestRenewal);
 
     const modal = document.getElementById('add-sub-modal');
     modal.style.display = 'flex';
@@ -3411,14 +3755,50 @@ function populateSubsCategoryDropdown() {
 }
 
 async function addSubscription() {
-    const svcSel = document.getElementById('sub-service');
-    const serviceId = svcSel.value ? parseInt(svcSel.value) : null;
-    const serviceName = svcSel.selectedOptions[0]?.textContent?.split(' (')[0] || '';
-    if (!serviceId) { alert('Please select a service'); return; }
+    const picker = getAddSubServicePicker();
+    let { id: serviceId, name: serviceName } = picker.getValue();
+    if (!serviceName) { alert('Please select or create a service'); return; }
+
+    // Handle new category creation
+    let categoryId = null;
+    const catVal = document.getElementById('sub-category').value;
+    if (catVal === '__new__') {
+        const newCatName = document.getElementById('add-sub-new-cat-name').value.trim();
+        if (!newCatName) { alert('Please enter a category name.'); return; }
+        const parentId = document.getElementById('add-sub-new-cat-parent').value || null;
+        const isPersonal = parseInt(document.getElementById('add-sub-new-cat-type').value);
+        const catRes = await fetch('/api/categories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newCatName, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }),
+        });
+        const catData = await catRes.json();
+        if (catData.error) { alert('Category error: ' + catData.error); return; }
+        categoryId = catData.id;
+        await loadReferenceData();
+        showToast(`Created category "${newCatName}"`, 'info');
+    } else {
+        categoryId = catVal ? parseInt(catVal) : null;
+    }
+
+    // Create new service if needed
+    if (!serviceId && serviceName) {
+        if (!categoryId) { alert('Please select a category for the new service.'); return; }
+        const svcRes = await fetch('/api/services', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: serviceName, category_id: categoryId }),
+        });
+        const svcData = await svcRes.json();
+        if (svcData.error) { alert('Service error: ' + svcData.error); return; }
+        serviceId = svcData.id;
+        allServicesList = null; // invalidate cache
+        showToast(`Created service "${serviceName}"`, 'info');
+    }
 
     const body = {
         service_id: serviceId,
-        category_id: document.getElementById('sub-category').value ? parseInt(document.getElementById('sub-category').value) : null,
+        category_id: categoryId,
         amount: parseFloat(document.getElementById('sub-amount').value) || 0,
         currency: document.getElementById('sub-currency').value || 'SGD',
         frequency: document.getElementById('sub-frequency').value,
@@ -3453,25 +3833,33 @@ async function toggleSubStatus(subId, currentStatus) {
     await loadSubscriptions();
 }
 
-function navigateToTransaction(txDate, matchPattern) {
-    // Switch to Dashboard tab, set month/year, search by pattern, scroll to tx table
-    const dashBtn = document.querySelector('[data-tab="dashboard"]');
-    if (dashBtn) dashBtn.click();
+async function navigateToTransaction(txDate, matchPattern) {
+    // Switch to Dashboard tab, set month/year, search by service/pattern
+    switchTab('dashboard', { pushHistory: false });
+
+    // Ensure flat view for transaction-level navigation
+    setTxView('flat');
+
+    // Set period filter to the transaction's month
     const [year, month] = txDate.split('-');
     const yearSel = document.getElementById('filter-year');
     const monthSel = document.getElementById('filter-month');
-    const searchEl = document.getElementById('tx-search');
     if (yearSel) yearSel.value = year;
     if (monthSel) monthSel.value = month;
+
+    // Set search to match pattern
+    const searchEl = document.getElementById('tx-search');
     if (searchEl) searchEl.value = matchPattern || '';
+
+    // Reload dashboard with new filters (preserves search)
     txCurrentPage = 1;
-    loadDashboard();
-    // Load transactions with the search term, then scroll to table
-    txPage(0);
+    await loadDashboard(true);
+
+    // Scroll to table
     setTimeout(() => {
         const txTable = document.getElementById('tx-table');
         if (txTable) txTable.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 400);
+    }, 300);
 }
 
 async function enrichSubscriptions() {
@@ -3480,11 +3868,20 @@ async function enrichSubscriptions() {
     btn.textContent = 'Refreshing...';
     try {
         const res = await fetch('/api/subscriptions/enrich', { method: 'POST' });
+        if (!res.ok) {
+            showToast('Failed to refresh subscriptions', 'warn');
+            return;
+        }
         const data = await res.json();
+        if (data.error) {
+            showToast('Error: ' + data.error, 'warn');
+            return;
+        }
         await loadSubscriptions();
+        showToast(`Refreshed ${data.updated || 0} subscriptions`, 'info');
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Refresh from Transactions';
+        btn.textContent = 'Refresh from Txns';
     }
 }
 
@@ -3498,50 +3895,41 @@ async function openEditSubModal(subId) {
     if (!sub) return;
 
     document.getElementById('edit-sub-id').value = sub.id;
+    document.getElementById('edit-sub-new-cat-row').classList.add('hidden');
+    document.getElementById('edit-sub-cat-hint').style.display = 'none';
 
-    // Populate service dropdown and select current
-    const svcSel = document.getElementById('edit-sub-service');
-    await populateServiceDropdown(svcSel, sub.service_id);
+    // Initialize ServicePicker with current service
+    const picker = getEditSubServicePicker();
+    picker.setValue(sub.service_name || '', sub.service_id || null);
 
     document.getElementById('edit-sub-amount').value = sub.amount || '';
     document.getElementById('edit-sub-currency').value = sub.currency || 'SGD';
     document.getElementById('edit-sub-freq').value = sub.frequency || 'monthly';
     document.getElementById('edit-sub-periods').value = sub.periods || 1;
+    document.getElementById('edit-sub-start-date').value = sub.start_date || '';
     document.getElementById('edit-sub-renewal').value = sub.renewal_date || '';
     document.getElementById('edit-sub-status').value = sub.status || 'active';
     document.getElementById('edit-sub-link').value = sub.link || '';
     document.getElementById('edit-sub-notes').value = sub.notes || '';
 
-    // Populate category dropdown
-    const catSel = document.getElementById('edit-sub-category');
-    catSel.innerHTML = '<option value="">—</option>';
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-    parents.forEach(p => {
-        catSel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
-        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-        children.forEach(c => {
-            catSel.innerHTML += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
-        });
-    });
-    if (sub.category_id) catSel.value = sub.category_id;
+    // Populate category dropdown with current selection
+    populateSubCategoryDropdown('edit-sub-category', sub.category_id);
 
-    // Populate card dropdown from accounts (uses account_id as value)
+    // Populate card dropdown from accounts (include archived if sub uses one)
     const cardSel = document.getElementById('edit-sub-card');
     cardSel.innerHTML = '<option value="">—</option>';
     accounts.forEach(a => {
-        cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
+        if (a.status !== 'archived' || a.id === sub.account_id) {
+            cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
+        }
     });
     if (sub.account_id) cardSel.value = sub.account_id;
 
-    // Wire auto-fill: selecting a service updates category
-    wireServiceAutoFill(svcSel, catSel);
-
     const modal = document.getElementById('edit-sub-modal');
     modal.style.display = 'flex';
-    modal.onclick = (e) => { if (e.target === modal) closeEditSubModal(); };
     document.addEventListener('keydown', editSubEscHandler);
 
-    // FX rate hint — show when USD selected
+    // FX rate hint
     const editCurrSel = document.getElementById('edit-sub-currency');
     const updateEditFxHint = () => {
         document.querySelectorAll('#edit-sub-modal .fx-rate-hint').forEach(el => {
@@ -3550,6 +3938,24 @@ async function openEditSubModal(subId) {
     };
     editCurrSel.onchange = updateEditFxHint;
     updateEditFxHint();
+
+    // Auto-suggest renewal from start date + frequency + periods
+    const suggestEditRenewal = () => {
+        const startVal = document.getElementById('edit-sub-start-date').value;
+        const renewalEl = document.getElementById('edit-sub-renewal');
+        if (!startVal) return;
+        const freq = document.getElementById('edit-sub-freq').value;
+        const periods = parseInt(document.getElementById('edit-sub-periods').value) || 1;
+        const start = new Date(startVal);
+        if (freq === 'yearly') start.setFullYear(start.getFullYear() + periods);
+        else if (freq === 'half-yearly') start.setMonth(start.getMonth() + 6 * periods);
+        else if (freq === 'quarterly') start.setMonth(start.getMonth() + 3 * periods);
+        else if (freq === 'biweekly') start.setDate(start.getDate() + 14 * periods);
+        else if (freq === 'weekly') start.setDate(start.getDate() + 7 * periods);
+        else start.setMonth(start.getMonth() + periods);
+        renewalEl.value = start.toISOString().split('T')[0];
+    };
+    document.getElementById('edit-sub-start-date').onchange = suggestEditRenewal;
 }
 
 function editSubEscHandler(e) {
@@ -3563,12 +3969,51 @@ function closeEditSubModal() {
 
 async function saveEditSub() {
     const subId = parseInt(document.getElementById('edit-sub-id').value);
-    const svcSel = document.getElementById('edit-sub-service');
-    const serviceId = svcSel.value ? parseInt(svcSel.value) : null;
-    const serviceName = svcSel.selectedOptions[0]?.textContent?.split(' (')[0] || '';
+    const picker = getEditSubServicePicker();
+    let { id: serviceId, name: serviceName } = picker.getValue();
+
+    if (!serviceName) { alert('Please select or create a service'); return; }
+
+    // Handle new category creation
+    let categoryId = null;
+    const catVal = document.getElementById('edit-sub-category').value;
+    if (catVal === '__new__') {
+        const newCatName = document.getElementById('edit-sub-new-cat-name').value.trim();
+        if (!newCatName) { alert('Please enter a category name.'); return; }
+        const parentId = document.getElementById('edit-sub-new-cat-parent').value || null;
+        const isPersonal = parseInt(document.getElementById('edit-sub-new-cat-type').value);
+        const catRes = await fetch('/api/categories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newCatName, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }),
+        });
+        const catData = await catRes.json();
+        if (catData.error) { alert('Category error: ' + catData.error); return; }
+        categoryId = catData.id;
+        await loadReferenceData();
+        showToast(`Created category "${newCatName}"`, 'info');
+    } else {
+        categoryId = catVal ? parseInt(catVal) : null;
+    }
+
+    // Create new service if needed
+    if (!serviceId && serviceName) {
+        if (!categoryId) { alert('Please select a category for the new service.'); return; }
+        const svcRes = await fetch('/api/services', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: serviceName, category_id: categoryId }),
+        });
+        const svcData = await svcRes.json();
+        if (svcData.error) { alert('Service error: ' + svcData.error); return; }
+        serviceId = svcData.id;
+        allServicesList = null;
+        showToast(`Created service "${serviceName}"`, 'info');
+    }
+
     const body = {
         service_id: serviceId,
-        category_id: document.getElementById('edit-sub-category').value ? parseInt(document.getElementById('edit-sub-category').value) : null,
+        category_id: categoryId,
         amount: parseFloat(document.getElementById('edit-sub-amount').value) || 0,
         currency: document.getElementById('edit-sub-currency').value || 'SGD',
         frequency: document.getElementById('edit-sub-freq').value,

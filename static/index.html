@@ -26,7 +26,6 @@
         <div class="tab-bar-main">
             <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
             <button class="tab-btn" data-tab="subs">Subscriptions</button>
-            <button class="tab-btn" data-tab="services">Services</button>
         </div>
         <div class="tab-bar-actions">
             <button class="tab-icon-btn" data-tab="import" title="Import Statements">
@@ -92,12 +91,27 @@
                     </div>
                 </div>
                 <div class="filter-section">
+                    <span class="filter-section-label">Category</span>
+                    <div class="filter-controls">
+                        <div class="ms-wrap" id="cat-filter-wrap">
+                            <div class="ms-trigger" id="cat-filter-trigger" onclick="toggleCatFilterPanel()">
+                                <span class="ms-display" id="cat-filter-display">All Categories</span>
+                                <span class="ms-arrow">&#9662;</span>
+                            </div>
+                            <div class="ms-panel hidden" id="cat-filter-panel">
+                                <input type="text" class="ms-search" id="cat-filter-search" placeholder="Search categories..." oninput="filterCatOptions()">
+                                <div class="ms-options" id="cat-filter-options"></div>
+                                <div class="ms-footer">
+                                    <button class="btn btn-sm" onclick="clearCatFilter()">Clear</button>
+                                    <button class="btn btn-sm btn-primary" onclick="applyCatFilter()">Apply</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="filter-section">
                     <span class="filter-section-label">Options</span>
                     <div class="filter-controls">
-                        <label class="filter-check">
-                            <span class="ds-toggle"><input type="checkbox" id="filter-anomaly" onchange="applyDashboardFilters()"><span class="ds-toggle__track"></span></span>
-                            Excl. anomalies
-                        </label>
                         <label class="filter-check">
                             <span class="ds-toggle"><input type="checkbox" id="filter-one-off" onchange="applyDashboardFilters()"><span class="ds-toggle__track"></span></span>
                             Excl. one-offs
@@ -134,36 +148,32 @@
             <!-- Chart Filter Chip (shown when chart segment is clicked) -->
             <div id="chart-filter-chip" class="chart-filter-chip hidden"></div>
 
-            <!-- Transaction Table -->
+            <!-- Transaction Area -->
             <div class="card">
-                <div class="section-label">/ Transactions</div>
-                <div style="display:flex;gap:12px;margin-bottom:16px;align-items:flex-start;">
-                    <input type="text" id="tx-search" placeholder="Search descriptions..." style="flex:1;">
-                    <div class="ms-wrap" id="cat-filter-wrap">
-                        <div class="ms-trigger" id="cat-filter-trigger" onclick="toggleCatFilterPanel()">
-                            <span class="ms-display" id="cat-filter-display">All Categories</span>
-                            <span class="ms-arrow">&#9662;</span>
-                        </div>
-                        <div class="ms-panel hidden" id="cat-filter-panel">
-                            <input type="text" class="ms-search" id="cat-filter-search" placeholder="Search categories..." oninput="filterCatOptions()">
-                            <div class="ms-options" id="cat-filter-options"></div>
-                            <div class="ms-footer">
-                                <button class="btn btn-sm" onclick="clearCatFilter()">Clear</button>
-                                <button class="btn btn-sm btn-primary" onclick="applyCatFilter()">Apply</button>
-                            </div>
-                        </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <div class="section-label" style="margin-bottom:0;">/ Transactions</div>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <input type="text" id="tx-search" placeholder="Search services or descriptions..." style="width:220px;font-size:12px;">
+                    <div class="tx-view-toggle">
+                        <button class="btn btn-toggle active" data-txview="flat" onclick="setTxView('flat')">Flat</button>
+                        <button class="btn btn-toggle" data-txview="service" onclick="setTxView('service')">By Service</button>
+                        <button class="btn btn-toggle" data-txview="category" onclick="setTxView('category')">By Category</button>
+                    </div>
                     </div>
                 </div>
+                <div id="tx-view-flat">
                 <div style="max-height:500px;overflow-y:auto;">
                     <table class="data-table" id="tx-table">
                         <thead>
                             <tr>
                                 <th class="sortable" data-sort="date" style="width:110px;" onclick="toggleSort('date')">Date <span class="sort-arrow">▼</span></th>
-                                <th class="sortable" data-sort="description" style="width:30%;" onclick="toggleSort('description')">Description <span class="sort-arrow"></span></th>
-                                <th class="sortable" data-sort="service" style="width:12%;" onclick="toggleSort('service')">Service <span class="sort-arrow"></span></th>
-                                <th class="sortable" data-sort="category" style="width:15%;" onclick="toggleSort('category')">Category <span class="sort-arrow"></span></th>
-                                <th class="sortable" data-sort="account" style="width:15%;" onclick="toggleSort('account')">Account <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="service" style="width:22%;" onclick="toggleSort('service')">Service <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="category" style="width:14%;" onclick="toggleSort('category')">Category <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="description" style="width:18%;" onclick="toggleSort('description')">Description <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="account" style="width:12%;" onclick="toggleSort('account')">Account <span class="sort-arrow"></span></th>
                                 <th class="sortable" data-sort="amount" style="text-align:right;width:110px;" onclick="toggleSort('amount')">Amount <span class="sort-arrow"></span></th>
+                                <th style="width:28px;font-size:10px;text-align:center;color:var(--text-muted);font-weight:400;" title="One-off (exclude from burn rate)">1x</th>
+                                <th style="width:28px;font-size:10px;text-align:center;color:var(--text-muted);font-weight:400;" title="Edit / resolve transaction">&#9998;</th>
                             </tr>
                         </thead>
                         <tbody id="tx-body"></tbody>
@@ -176,6 +186,9 @@
                         <button class="btn btn-sm" id="tx-next" onclick="txPage(1)">Next</button>
                     </div>
                 </div>
+                </div><!-- /tx-view-flat -->
+                <div id="tx-view-service" style="display:none;max-height:600px;overflow-y:auto;"></div>
+                <div id="tx-view-category" style="display:none;max-height:600px;overflow-y:auto;"></div>
             </div>
         </div>
     </div>
@@ -292,7 +305,7 @@
                                 <th class="sortable" data-sort="billed" style="text-align:right;">Billed</th>
                                 <th class="sortable" data-sort="monthly" style="text-align:right;">Monthly</th>
                                 <th class="sortable subs-col-hide-sm" data-sort="frequency">Freq</th>
-                                <th class="sortable subs-col-hide-md" data-sort="card">Card</th>
+                                <th class="sortable subs-col-hide-md" data-sort="card">Account</th>
                                 <th class="sortable" data-sort="last_paid">Last Paid</th>
                                 <th class="sortable subs-col-hide-sm" data-sort="renewal">Renewal</th>
                                 <th style="text-align:right;">Actions</th>
@@ -309,49 +322,7 @@
         </div>
     </div>
 
-    <!-- ============================================================
-         SERVICES TAB (accordion view of transactions by service)
-         ============================================================ -->
-    <div id="tab-services" class="tab-content">
-        <div class="container">
-            <div class="section-label">/ Services</div>
-            <!-- View toggle -->
-            <div class="svc-view-toggle" style="margin-bottom: var(--space-3);">
-                <button class="svc-view-btn active" data-view="service" onclick="switchServiceView('service')">By Service</button>
-                <button class="svc-view-btn" data-view="category" onclick="switchServiceView('category')">By Category</button>
-            </div>
-            <!-- By Service view (existing) -->
-            <div id="svc-view-service">
-                <div class="filter-bar" style="margin-bottom: var(--space-4);">
-                    <input type="text" id="services-search" placeholder="Search services..." style="flex:1; max-width:300px;">
-                    <select id="services-category-filter" onchange="renderServicesTab()">
-                        <option value="">All Categories</option>
-                    </select>
-                    <select id="services-sort" onchange="renderServicesTab()" style="min-width:120px;">
-                        <option value="name">Sort: Name</option>
-                        <option value="category">Sort: Category</option>
-                        <option value="txn_count">Sort: Txn Count</option>
-                    </select>
-                </div>
-                <div id="services-accordion" class="card"></div>
-            </div>
-            <!-- By Category view (nested: category → subcategory → service) -->
-            <div id="svc-view-category" style="display:none;">
-                <div class="filter-bar" style="margin-bottom: var(--space-4);">
-                    <input type="text" id="services-cat-search" placeholder="Search categories or services..." style="flex:1; max-width:300px;">
-                    <select id="services-cat-category-filter" onchange="renderServicesCategoryView()" style="min-width:150px;">
-                        <option value="">All Categories</option>
-                    </select>
-                    <select id="services-cat-spend-filter" onchange="renderServicesCategoryView()" style="min-width:120px;">
-                        <option value="">All Spend</option>
-                        <option value="personal">Personal</option>
-                        <option value="moom">Moom</option>
-                    </select>
-                </div>
-                <div id="services-cat-accordion" class="card"></div>
-            </div>
-        </div>
-    </div>
+    <!-- Services tab removed — absorbed into Dashboard 3-view toggle (V1b/V1c) -->
 
     <!-- ============================================================
          CATEGORIES MASTER TAB
@@ -454,39 +425,44 @@
         <div class="container">
             <div class="section-label">/ Merchant Rules</div>
 
-            <!-- Add Rule Form -->
-            <div class="rule-form" id="rule-form">
-                <div>
-                    <label>Pattern</label>
-                    <input type="text" id="rule-pattern" placeholder="e.g. GRAB*" style="width:100%;">
-                </div>
-                <div>
-                    <label>Category</label>
-                    <select id="rule-category" style="width:100%;"></select>
-                </div>
-                <div>
-                    <label>Match Type</label>
-                    <select id="rule-match-type" style="width:100%;">
-                        <option value="contains">Contains</option>
-                        <option value="startswith">Starts with</option>
-                        <option value="exact">Exact</option>
-                    </select>
-                </div>
-                <div>
-                    <label>Priority</label>
-                    <input type="number" id="rule-priority" value="0" min="0" max="99" style="width:100%;">
-                </div>
-                <div>
-                    <label>Min $</label>
-                    <input type="number" id="rule-min-amount" placeholder="—" step="0.01" style="width:100%;">
-                </div>
-                <div>
-                    <label>Max $</label>
-                    <input type="number" id="rule-max-amount" placeholder="—" step="0.01" style="width:100%;">
-                </div>
-                <div>
-                    <label>&nbsp;</label>
-                    <button class="btn btn-primary btn-sm" onclick="addRule()">Add Rule</button>
+            <!-- Add Rule Form (collapsed — most rules created via Resolve Modal) -->
+            <div class="rule-form hidden" id="rule-form" style="display:none;">
+                <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+                    <div style="flex:2;min-width:160px;">
+                        <label>Pattern</label>
+                        <input type="text" id="rule-pattern" placeholder="e.g. GRAB" style="width:100%;">
+                    </div>
+                    <div style="flex:2;min-width:160px;">
+                        <label>Service</label>
+                        <div class="svc-picker" id="rule-svc-picker">
+                            <input type="text" class="svc-picker-input" placeholder="Search..." autocomplete="off">
+                            <input type="hidden" class="svc-picker-id">
+                            <div class="svc-picker-dropdown"></div>
+                        </div>
+                    </div>
+                    <div style="flex:0 0 100px;">
+                        <label>Match</label>
+                        <select id="rule-match-type" style="width:100%;">
+                            <option value="contains">Contains</option>
+                            <option value="startswith">Starts with</option>
+                            <option value="exact">Exact</option>
+                        </select>
+                    </div>
+                    <div style="flex:0 0 55px;">
+                        <label>Pri</label>
+                        <input type="number" id="rule-priority" value="0" min="0" max="99" style="width:100%;">
+                    </div>
+                    <div style="flex:0 0 70px;">
+                        <label>Min $</label>
+                        <input type="number" id="rule-min-amount" placeholder="—" step="0.01" style="width:100%;">
+                    </div>
+                    <div style="flex:0 0 70px;">
+                        <label>Max $</label>
+                        <input type="number" id="rule-max-amount" placeholder="—" step="0.01" style="width:100%;">
+                    </div>
+                    <div style="flex:0 0 auto;">
+                        <button class="btn btn-primary btn-sm" onclick="addRule()">Add</button>
+                    </div>
                 </div>
             </div>
 
@@ -496,6 +472,7 @@
                     <input type="text" class="rules-search" id="rules-search" placeholder="Search rules..." oninput="filterRules()">
                     <span id="rules-count" class="text-secondary" style="font-size:12px;"></span>
                     <button class="btn btn-sm" id="recategorize-btn" onclick="recategorizeAll()" title="Re-run all rules against existing transactions">Re-categorize All</button>
+                    <button class="btn btn-sm" onclick="toggleRuleForm()">+ Add Rule</button>
                 </div>
                 <div id="rules-accordion" class="rules-accordion" style="max-height:600px;overflow-y:auto;"></div>
             </div>
@@ -599,7 +576,7 @@
 
     <!-- Resolve Transaction Modal (unified: service + rule + category) -->
     <div class="modal-overlay" id="resolve-modal" style="display:none;">
-        <div class="modal">
+        <div class="modal" style="width:520px;">
             <div class="modal-header">
                 <span class="section-label" style="margin-bottom:0;">/ Resolve Transaction</span>
                 <button class="modal-close" onclick="closeResolveModal()">&times;</button>
@@ -609,21 +586,53 @@
                 <div class="modal-field-row">
                     <div class="modal-field">
                         <label>Service</label>
-                        <input type="text" id="resolve-modal-service" list="resolve-svc-datalist" placeholder="Type to search or create new..." style="width:100%;" autocomplete="off">
-                        <datalist id="resolve-svc-datalist"></datalist>
+                        <div class="svc-picker" id="resolve-svc-picker">
+                            <input type="text" class="svc-picker-input" placeholder="Search or create new service..." autocomplete="off">
+                            <input type="hidden" class="svc-picker-id">
+                            <div class="svc-picker-dropdown"></div>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-field-row">
                     <div class="modal-field">
                         <label>Category</label>
-                        <select id="resolve-modal-category" style="width:100%;"></select>
+                        <select id="resolve-modal-category" style="width:100%;" onchange="onResolveCategoryChange()"></select>
                         <small id="resolve-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
                     </div>
                 </div>
+                <!-- New category inline (shown when "-- New category --" selected) -->
+                <div class="modal-field-row hidden" id="resolve-new-cat-row">
+                    <div class="modal-field" style="flex:2;">
+                        <label>New Category Name</label>
+                        <input type="text" id="resolve-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:1;">
+                        <label>Parent (optional)</label>
+                        <select id="resolve-new-cat-parent" style="width:100%;"></select>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 120px;">
+                        <label>Type</label>
+                        <select id="resolve-new-cat-type" style="width:100%;">
+                            <option value="1">Personal</option>
+                            <option value="0">Moom</option>
+                        </select>
+                    </div>
+                </div>
+                <!-- Cascade option (shown when category differs from service's current category) -->
+                <div class="resolve-cascade hidden" id="resolve-cascade">
+                    <div class="resolve-cascade-warning" id="resolve-cascade-warning"></div>
+                    <label class="resolve-cascade-option">
+                        <input type="radio" name="resolve-scope" value="tx" checked> Update just this transaction
+                    </label>
+                    <label class="resolve-cascade-option">
+                        <input type="radio" name="resolve-scope" value="service"> Re-categorize service + all its transactions
+                        <span class="resolve-cascade-count" id="resolve-cascade-count"></span>
+                    </label>
+                </div>
                 <div class="modal-field-row">
                     <div class="modal-field">
-                        <label>Rule Pattern</label>
-                        <input type="text" id="resolve-modal-pattern" style="width:100%;">
+                        <label>Rule Pattern <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
+                        <input type="text" id="resolve-modal-pattern" style="width:100%;" placeholder="Leave empty for PayNow / transfers">
                     </div>
                     <div class="modal-field" style="flex:0 0 140px;">
                         <label>Match Type</label>
@@ -665,8 +674,13 @@
                 </div>
                 <div class="modal-field-row" style="margin-top:8px;">
                     <div class="modal-field" style="flex:2;">
-                        <label>Category</label>
-                        <select id="edit-rule-category" style="width:100%;"></select>
+                        <label>Service</label>
+                        <div class="svc-picker" id="edit-rule-svc-picker">
+                            <input type="text" class="svc-picker-input" placeholder="Search services..." autocomplete="off">
+                            <input type="hidden" class="svc-picker-id">
+                            <div class="svc-picker-dropdown"></div>
+                        </div>
+                        <small id="edit-rule-cat-display" style="color:var(--text-muted);font-size:11px;"></small>
                     </div>
                     <div class="modal-field" style="flex:0 0 80px;">
                         <label>Priority</label>
@@ -692,7 +706,7 @@
     <!-- Add Subscription Modal -->
     <!-- Add Subscription Modal -->
     <div class="modal-overlay" id="add-sub-modal" style="display:none;">
-        <div class="modal" style="max-width:560px;">
+        <div class="modal" style="max-width:580px;">
             <div class="modal-header">
                 <span class="section-label" style="margin-bottom:0;">/ New Subscription</span>
                 <button class="modal-close" onclick="closeAddSubModal()">&times;</button>
@@ -701,11 +715,34 @@
                 <div class="sub-modal-row">
                     <div class="modal-field sub-col-service">
                         <label>Service</label>
-                        <select id="sub-service" style="width:100%;"></select>
+                        <div class="svc-picker" id="add-sub-svc-picker">
+                            <input type="text" class="svc-picker-input" placeholder="Search or create new service..." autocomplete="off">
+                            <input type="hidden" class="svc-picker-id">
+                            <div class="svc-picker-dropdown"></div>
+                        </div>
                     </div>
                     <div class="modal-field sub-col-category">
                         <label>Category</label>
-                        <select id="sub-category"></select>
+                        <select id="sub-category" onchange="onSubCategoryChange('add')"></select>
+                        <small id="sub-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
+                    </div>
+                </div>
+                <!-- New category inline (shown when "+ New category..." selected) -->
+                <div class="sub-modal-row hidden" id="add-sub-new-cat-row">
+                    <div class="modal-field" style="flex:2;">
+                        <label>New Category Name</label>
+                        <input type="text" id="add-sub-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:1;">
+                        <label>Parent</label>
+                        <select id="add-sub-new-cat-parent" style="width:100%;"></select>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 100px;">
+                        <label>Type</label>
+                        <select id="add-sub-new-cat-type" style="width:100%;">
+                            <option value="1">Personal</option>
+                            <option value="0">Moom</option>
+                        </select>
                     </div>
                 </div>
                 <div class="sub-modal-row">
@@ -723,9 +760,12 @@
                     <div class="modal-field sub-col-freq">
                         <label>Frequency</label>
                         <select id="sub-frequency">
+                            <option value="weekly">Weekly</option>
+                            <option value="biweekly">Every 2 Weeks</option>
                             <option value="monthly">Monthly</option>
-                            <option value="yearly">Yearly</option>
                             <option value="quarterly">Quarterly</option>
+                            <option value="half-yearly">Half-Yearly</option>
+                            <option value="yearly">Yearly</option>
                         </select>
                     </div>
                     <div class="modal-field sub-col-periods">
@@ -735,10 +775,14 @@
                 </div>
                 <div class="sub-modal-row">
                     <div class="modal-field sub-col-card">
-                        <label>Card</label>
+                        <label>Account</label>
                         <select id="sub-card">
                             <option value="">—</option>
                         </select>
+                    </div>
+                    <div class="modal-field sub-col-renewal">
+                        <label>Start Date</label>
+                        <input type="date" id="sub-start-date">
                     </div>
                     <div class="modal-field sub-col-renewal">
                         <label>Renewal Date</label>
@@ -776,7 +820,7 @@
 
     <!-- Edit Subscription Modal -->
     <div class="modal-overlay" id="edit-sub-modal" style="display:none;">
-        <div class="modal" style="max-width:560px;">
+        <div class="modal" style="max-width:580px;">
             <div class="modal-header">
                 <span class="section-label" style="margin-bottom:0;">/ Edit Subscription</span>
                 <button class="modal-close" onclick="closeEditSubModal()">&times;</button>
@@ -786,11 +830,34 @@
                 <div class="sub-modal-row">
                     <div class="modal-field sub-col-service">
                         <label>Service</label>
-                        <select id="edit-sub-service" style="width:100%;"></select>
+                        <div class="svc-picker" id="edit-sub-svc-picker">
+                            <input type="text" class="svc-picker-input" placeholder="Search or create new service..." autocomplete="off">
+                            <input type="hidden" class="svc-picker-id">
+                            <div class="svc-picker-dropdown"></div>
+                        </div>
                     </div>
                     <div class="modal-field sub-col-category">
                         <label>Category</label>
-                        <select id="edit-sub-category"></select>
+                        <select id="edit-sub-category" onchange="onSubCategoryChange('edit')"></select>
+                        <small id="edit-sub-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
+                    </div>
+                </div>
+                <!-- New category inline -->
+                <div class="sub-modal-row hidden" id="edit-sub-new-cat-row">
+                    <div class="modal-field" style="flex:2;">
+                        <label>New Category Name</label>
+                        <input type="text" id="edit-sub-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:1;">
+                        <label>Parent</label>
+                        <select id="edit-sub-new-cat-parent" style="width:100%;"></select>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 100px;">
+                        <label>Type</label>
+                        <select id="edit-sub-new-cat-type" style="width:100%;">
+                            <option value="1">Personal</option>
+                            <option value="0">Moom</option>
+                        </select>
                     </div>
                 </div>
                 <div class="sub-modal-row">
@@ -808,9 +875,12 @@
                     <div class="modal-field sub-col-freq">
                         <label>Frequency</label>
                         <select id="edit-sub-freq">
+                            <option value="weekly">Weekly</option>
+                            <option value="biweekly">Every 2 Weeks</option>
                             <option value="monthly">Monthly</option>
-                            <option value="yearly">Yearly</option>
                             <option value="quarterly">Quarterly</option>
+                            <option value="half-yearly">Half-Yearly</option>
+                            <option value="yearly">Yearly</option>
                         </select>
                     </div>
                     <div class="modal-field sub-col-periods">
@@ -820,10 +890,14 @@
                 </div>
                 <div class="sub-modal-row">
                     <div class="modal-field sub-col-card">
-                        <label>Card</label>
+                        <label>Account</label>
                         <select id="edit-sub-card">
                             <option value="">—</option>
                         </select>
+                    </div>
+                    <div class="modal-field sub-col-renewal">
+                        <label>Start Date</label>
+                        <input type="date" id="edit-sub-start-date">
                     </div>
                     <div class="modal-field sub-col-renewal">
                         <label>Renewal Date</label>
@@ -936,5 +1010,7 @@
 
     <script src="/static/chart.min.js"></script>
     <script src="/static/app.js"></script>
+    <!-- Toast container -->
+    <div id="toast-container"></div>
 </body>
 </html>
