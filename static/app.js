@@ -3761,6 +3761,23 @@ async function addSubscription() {
     const data = await res.json();
     if (data.error) { alert('Error: ' + data.error); return; }
 
+    // Cascade category to service (which cascades to auto-categorized transactions)
+    if (serviceId && categoryId) {
+        const svcRes = await fetch(`/api/services/${serviceId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ category_id: categoryId }),
+        });
+        const svcData = await svcRes.json();
+        if (svcData.recategorized) {
+            showToast(`Added subscription "${serviceName}" + re-categorized ${svcData.recategorized} transactions`, 'info');
+        } else {
+            showToast(`Added subscription "${serviceName}"`, 'info');
+        }
+    } else {
+        showToast(`Added subscription "${serviceName}"`, 'info');
+    }
+
     closeAddSubModal();
     await loadSubscriptions();
 }
@@ -3977,6 +3994,23 @@ async function saveEditSub() {
     });
     const data = await res.json();
     if (data.error) { alert('Error: ' + data.error); return; }
+
+    // Cascade category to service (which cascades to auto-categorized transactions)
+    if (serviceId && categoryId) {
+        const svcRes = await fetch(`/api/services/${serviceId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ category_id: categoryId }),
+        });
+        const svcData = await svcRes.json();
+        if (svcData.recategorized) {
+            showToast(`Updated subscription "${serviceName}" + re-categorized ${svcData.recategorized} transactions`, 'info');
+        } else {
+            showToast(`Updated subscription "${serviceName}"`, 'info');
+        }
+    } else {
+        showToast(`Updated subscription "${serviceName}"`, 'info');
+    }
 
     closeEditSubModal();
     await loadSubscriptions();

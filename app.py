@@ -1949,18 +1949,12 @@ def api_subscriptions_enrich():
             new_renewal = _advance_renewal(
                 s["renewal_date"], tx["date"], s["frequency"], s["periods"]
             )
-            # Update last_paid and renewal; only update amount for SGD subs
-            # (USD subs keep their configured USD amount — the SGD tx amount is a conversion)
-            if (s["currency"] or "SGD") == "SGD":
-                conn.execute(
-                    "UPDATE subscriptions SET last_paid = ?, amount = ?, renewal_date = ? WHERE id = ?",
-                    (tx["date"], round(tx["amount_sgd"], 2), new_renewal, s["id"]),
-                )
-            else:
-                conn.execute(
-                    "UPDATE subscriptions SET last_paid = ?, renewal_date = ? WHERE id = ?",
-                    (tx["date"], new_renewal, s["id"]),
-                )
+            # Update last_paid and renewal only — never overwrite the user's
+            # configured billed amount (amount is the source of truth, set manually)
+            conn.execute(
+                "UPDATE subscriptions SET last_paid = ?, renewal_date = ? WHERE id = ?",
+                (tx["date"], new_renewal, s["id"]),
+            )
             updated += 1
             if new_renewal != s["renewal_date"]:
                 renewals_advanced += 1
