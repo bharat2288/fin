@@ -1,6 +1,6 @@
 # fin
 
-Personal finance tracker for Singapore bank statements. Import CSV/PDF statements from DBS, Citi, and UOB, auto-categorize transactions via a pattern-matching rules engine, and visualize spending through interactive charts and dashboards.
+Personal finance tracker for bank statements, credit and debit cards. Import CSV/PDF statements from DBS, Citi, and UOB, auto-categorize transactions via a pattern-matching rules engine, and visualize spending through interactive charts and dashboards.
 
 ![Dashboard](docs/images/v_dash.png)
 
