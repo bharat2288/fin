@@ -1,8 +1,9 @@
-# Data (personal financial records)
+# Data
 *.db
 *.db-journal
+*.db-wal
+*_backup.db
 bulk_rules.sql
-migrate_subs.py
 
 # Python
 __pycache__/
@@ -14,11 +15,13 @@ venv/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
 
 # Environment and secrets
 .env
 .env.*
 credentials.json
+service_account.json
 *.pem
 *.key
 
@@ -34,11 +37,27 @@ credentials.json
 Thumbs.db
 desktop.ini
 
-# Specs (synced via session workflow, not git)
+# Internal workflow (synced separately, not git)
 specs/
+demos/
+*-home.md
+frontend.json
+screenshots.yaml
+.claudeignore
+migrate_subs.py
 
 # Claude Code
 .claude/
+
+# Design prototypes
+mockup*.html
+
+# Large binaries
+*.pdf
+*.mp4
+*.webm
+*.gif
+*.zip
 
 # Logs
 *.log

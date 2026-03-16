@@ -351,8 +351,10 @@ def init_db() -> None:
         conn.commit()
 
     # Migration: auto-create services from subscriptions + merchant rules
+    # Only runs on legacy databases that have old 'service' text column
     svc_count = conn.execute("SELECT COUNT(*) FROM services").fetchone()[0]
-    if svc_count == 0:
+    sub_columns = [row[1] for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()]
+    if svc_count == 0 and "service" in sub_columns:
         # Phase 1: create services from existing subscriptions
         subs = conn.execute(
             "SELECT id, service, category_id, match_pattern FROM subscriptions"
