@@ -76,6 +76,10 @@ python app.py
 
 Open [http://localhost:8450](http://localhost:8450). The seed script creates a demo database with 6 months of fictional transactions, 10 subscriptions, and sample merchant rules.
 
+### Make It Yours
+
+Give this repo's URL to Claude or Codex and ask it to interview you about your setup — which banks you use, what categories matter to you, what currency you're in. It'll adapt the categories and rules to your situation, and build new parsers for your bank's statement format.
+
 ## Architecture
 
 ```

@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS services (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,          -- e.g., "Netflix", "SP Gas BGV", "Grab"
     category_id INTEGER,                -- default category for this service
+    is_one_off INTEGER DEFAULT 0,       -- 1 = one-off service (not recurring)
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (category_id) REFERENCES categories(id)

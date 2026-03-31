@@ -12,13 +12,89 @@ import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
 
 from db import get_connection, init_db, categorize_transaction, invalidate_rules_cache
 
+
+@contextmanager
+def get_db():
+    """Context manager wrapping get_connection() for automatic cleanup."""
+    conn = get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+
+
+def format_category_display(parent: str | None, child: str | None) -> str:
+    """Format 'Parent > Child' category display string."""
+    if parent:
+        return f"{parent} > {child}"
+    return child or ""
+
+
+def _build_match_condition(match_type: str) -> str:
+    """Return SQL WHERE fragment for merchant rule matching."""
+    if match_type == "contains":
+        return "UPPER(description) LIKE '%' || ? || '%'"
+    elif match_type == "startswith":
+        return "UPPER(description) LIKE ? || '%'"
+    return "UPPER(description) = ?"
+
+
+def _crud_insert(conn, sql: str, params: tuple, entity: str, post_commit=None) -> tuple:
+    """Execute an INSERT, commit, return (response, status_code).
+
+    On success returns ({"id": N, "success": True}, 200).
+    On failure returns ({"error": "..."}, 400).
+    post_commit is called after commit if provided (e.g. cache invalidation).
+    """
+    try:
+        cur = conn.execute(sql, params)
+        new_id = cur.lastrowid
+        conn.commit()
+        if post_commit:
+            post_commit()
+        return jsonify({"id": new_id, "success": True}), 200
+    except Exception as e:
+        app.logger.warning("Failed to create %s: %s", entity, e)
+        return jsonify({"error": f"Failed to create {entity}"}), 400
+
+
+def _build_update_sets(data: dict | None, allowed: list[str]) -> tuple[list[str], list]:
+    """Build SET clause fragments and params from allowed fields present in data."""
+    if not data:
+        return [], []
+    sets = []
+    params = []
+    for field in allowed:
+        if field in data:
+            sets.append(f"{field} = ?")
+            params.append(data[field])
+    return sets, params
+
+
+def _crud_update(table: str, entity_id: int, data: dict | None, allowed: list[str], post_commit=None):
+    """Validate and execute a simple UPDATE by allowed field list.
+
+    Returns Flask response tuple. Handles empty/no-fields-to-update errors.
+    """
+    sets, params = _build_update_sets(data, allowed)
+    if not sets:
+        return jsonify({"error": "No fields to update"}), 400
+    with get_db() as conn:
+        params.append(entity_id)
+        conn.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE id = ?", params)
+        conn.commit()
+        if post_commit:
+            post_commit()
+    return jsonify({"success": True})
 
 
 def mask_card_number(text: str) -> str:
@@ -53,20 +129,19 @@ def index():
 @app.route("/api/categories")
 def api_categories():
     """List all categories as a flat list with parent info."""
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT c.id, c.name, c.parent_id, c.is_personal, p.name as parent_name "
-        "FROM categories c LEFT JOIN categories p ON c.parent_id = p.id "
-        "ORDER BY COALESCE(p.name, c.name), c.parent_id IS NOT NULL, c.name"
-    ).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT c.id, c.name, c.parent_id, c.is_personal, p.name as parent_name "
+            "FROM categories c LEFT JOIN categories p ON c.parent_id = p.id "
+            "ORDER BY COALESCE(p.name, c.name), c.parent_id IS NOT NULL, c.name"
+        ).fetchall()
     return jsonify([{
         "id": r["id"],
         "name": r["name"],
         "parent_id": r["parent_id"],
         "parent_name": r["parent_name"],
         "is_personal": r["is_personal"],
-        "display_name": f"{r['parent_name']} > {r['name']}" if r["parent_name"] else r["name"],
+        "display_name": format_category_display(r["parent_name"], r["name"]),
     } for r in rows])
 
 
@@ -77,30 +152,22 @@ def api_categories_create():
     if not data or not data.get("name"):
         return jsonify({"error": "Name is required"}), 400
 
-    conn = get_connection()
-    try:
-        conn.execute(
+    with get_db() as conn:
+        return _crud_insert(
+            conn,
             "INSERT INTO categories (name, parent_id, is_personal) VALUES (?, ?, ?)",
             (data["name"], data.get("parent_id"), data.get("is_personal", 1)),
+            "category",
         )
-        conn.commit()
-        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.close()
-        return jsonify({"success": True, "id": new_id})
-    except Exception as e:
-        app.logger.warning("Category create failed: %s", e)
-        conn.close()
-        return jsonify({"error": "Failed to create category"}), 400
 
 
 @app.route("/api/accounts")
 def api_accounts():
     """List all accounts."""
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT id, name, short_name, type, last_four, currency, status FROM accounts ORDER BY name"
-    ).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, name, short_name, type, last_four, currency, status FROM accounts ORDER BY name"
+        ).fetchall()
     result = []
     for r in rows:
         d = dict(r)
@@ -117,9 +184,9 @@ def api_accounts_create():
     if not data or not data.get("name"):
         return jsonify({"error": "Account name is required"}), 400
 
-    conn = get_connection()
-    try:
-        conn.execute(
+    with get_db() as conn:
+        return _crud_insert(
+            conn,
             "INSERT INTO accounts (name, short_name, type, last_four, currency) "
             "VALUES (?, ?, ?, ?, ?)",
             (
@@ -129,59 +196,31 @@ def api_accounts_create():
                 data.get("last_four"),
                 data.get("currency", "SGD"),
             ),
+            "account",
         )
-        conn.commit()
-        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.close()
-        return jsonify({"id": new_id, "success": True})
-    except Exception as e:
-        conn.close()
-        app.logger.warning("Failed to create account: %s", e)
-        return jsonify({"error": "Failed to create account"}), 400
 
 
 @app.route("/api/accounts/<int:acct_id>", methods=["PUT"])
 def api_accounts_update(acct_id):
     """Update an account."""
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-
-    allowed = ["name", "short_name", "type", "last_four", "currency", "status"]
-    sets = []
-    params = []
-    for field in allowed:
-        if field in data:
-            sets.append(f"{field} = ?")
-            params.append(data[field])
-
-    if not sets:
-        return jsonify({"error": "No fields to update"}), 400
-
-    conn = get_connection()
-    params.append(acct_id)
-    conn.execute(f"UPDATE accounts SET {', '.join(sets)} WHERE id = ?", params)
-    conn.commit()
-    conn.close()
-    return jsonify({"success": True})
+    return _crud_update("accounts", acct_id, request.get_json(),
+                        ["name", "short_name", "type", "last_four", "currency", "status"])
 
 
 @app.route("/api/accounts/<int:acct_id>", methods=["DELETE"])
 def api_accounts_delete(acct_id):
     """Delete an account. Refuses if statements reference it."""
-    conn = get_connection()
-    stmt_count = conn.execute(
-        "SELECT COUNT(*) FROM statements WHERE account_id = ?", (acct_id,)
-    ).fetchone()[0]
-    if stmt_count > 0:
-        conn.close()
-        return jsonify({
-            "error": f"Cannot delete: {stmt_count} statement(s) reference this account"
-        }), 400
+    with get_db() as conn:
+        stmt_count = conn.execute(
+            "SELECT COUNT(*) FROM statements WHERE account_id = ?", (acct_id,)
+        ).fetchone()[0]
+        if stmt_count > 0:
+            return jsonify({
+                "error": f"Cannot delete: {stmt_count} statement(s) reference this account"
+            }), 400
 
-    conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
-    conn.commit()
-    conn.close()
+        conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
+        conn.commit()
     return jsonify({"success": True})
 
 
@@ -192,22 +231,22 @@ def api_accounts_delete(acct_id):
 @app.route("/api/services")
 def api_services():
     """List all services with category info and transaction/rule counts."""
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT s.*, c.name as category_name, c.is_personal,
-               p.name as parent_name,
-               (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
-                AND t.is_payment = 0 AND t.is_transfer = 0) as txn_count,
-               (SELECT COUNT(*) FROM merchant_rules mr WHERE mr.service_id = s.id) as rule_count
-        FROM services s
-        LEFT JOIN categories c ON s.category_id = c.id
-        LEFT JOIN categories p ON c.parent_id = p.id
-        ORDER BY s.name
-    """).fetchall()
-    # Fetch all rule patterns grouped by service_id
-    rule_rows = conn.execute(
-        "SELECT service_id, pattern, match_type FROM merchant_rules WHERE service_id IS NOT NULL ORDER BY pattern"
-    ).fetchall()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT s.*, c.name as category_name, c.is_personal,
+                   p.name as parent_name,
+                   (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
+                    AND t.is_payment = 0 AND t.is_transfer = 0) as txn_count,
+                   (SELECT COUNT(*) FROM merchant_rules mr WHERE mr.service_id = s.id) as rule_count
+            FROM services s
+            LEFT JOIN categories c ON s.category_id = c.id
+            LEFT JOIN categories p ON c.parent_id = p.id
+            ORDER BY s.name
+        """).fetchall()
+        # Fetch all rule patterns grouped by service_id
+        rule_rows = conn.execute(
+            "SELECT service_id, pattern, match_type FROM merchant_rules WHERE service_id IS NOT NULL ORDER BY pattern"
+        ).fetchall()
     rules_by_svc: dict[int, list[dict]] = {}
     for rr in rule_rows:
         rules_by_svc.setdefault(rr["service_id"], []).append(
@@ -217,10 +256,9 @@ def api_services():
     result = []
     for r in rows:
         d = dict(r)
-        d["display_category"] = f"{d['parent_name']} > {d['category_name']}" if d["parent_name"] else (d["category_name"] or "")
+        d["display_category"] = format_category_display(d["parent_name"], d["category_name"])
         d["rules"] = rules_by_svc.get(d["id"], [])
         result.append(d)
-    conn.close()
     return jsonify(result)
 
 
@@ -232,21 +270,20 @@ def api_services_bulk_rename():
     if not renames:
         return jsonify({"error": "No renames provided"}), 400
 
-    conn = get_connection()
-    updated = 0
-    errors = []
-    for item in renames:
-        svc_id = item.get("id")
-        new_name = (item.get("name") or "").strip()
-        if not svc_id or not new_name:
-            continue
-        try:
-            conn.execute("UPDATE services SET name = ? WHERE id = ?", (new_name, svc_id))
-            updated += 1
-        except Exception as e:
-            errors.append(f"{item.get('name')}: {e}")
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        updated = 0
+        errors = []
+        for item in renames:
+            svc_id = item.get("id")
+            new_name = (item.get("name") or "").strip()
+            if not svc_id or not new_name:
+                continue
+            try:
+                conn.execute("UPDATE services SET name = ? WHERE id = ?", (new_name, svc_id))
+                updated += 1
+            except Exception as e:
+                errors.append(f"{item.get('name')}: {e}")
+        conn.commit()
     return jsonify({"updated": updated, "errors": errors})
 
 
@@ -256,59 +293,43 @@ def api_services_create():
     data = request.get_json()
     if not data or not data.get("name"):
         return jsonify({"error": "Service name is required"}), 400
-    conn = get_connection()
-    try:
-        conn.execute(
+    with get_db() as conn:
+        return _crud_insert(
+            conn,
             "INSERT INTO services (name, category_id, notes) VALUES (?, ?, ?)",
             (data["name"], data.get("category_id"), data.get("notes")),
+            "service",
         )
-        conn.commit()
-        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.close()
-        return jsonify({"id": new_id, "success": True})
-    except Exception as e:
-        conn.close()
-        app.logger.warning("Failed to create service: %s", e)
-        return jsonify({"error": "Failed to create service"}), 400
 
 
 @app.route("/api/services/<int:svc_id>", methods=["PUT"])
 def api_services_update(svc_id):
     """Update a service. Auto re-categorizes affected transactions on category change."""
     data = request.get_json()
-    conn = get_connection()
-    allowed = ["name", "category_id", "notes", "is_one_off"]
-    sets = []
-    params = []
-    for field in allowed:
-        if field in data:
-            sets.append(f"{field} = ?")
-            params.append(data[field])
-    if not sets:
-        conn.close()
-        return jsonify({"error": "Nothing to update"}), 400
-    params.append(svc_id)
-    try:
-        conn.execute(f"UPDATE services SET {', '.join(sets)} WHERE id = ?", params)
+    with get_db() as conn:
+        sets, params = _build_update_sets(data, ["name", "category_id", "notes", "is_one_off"])
+        if not sets:
+            return jsonify({"error": "Nothing to update"}), 400
+        params.append(svc_id)
+        try:
+            conn.execute(f"UPDATE services SET {', '.join(sets)} WHERE id = ?", params)
 
-        # Auto re-categorize: if category changed, update all linked transactions
-        recategorized = 0
-        if "category_id" in data:
-            new_cat_id = data["category_id"]
-            cur = conn.execute(
-                "UPDATE transactions SET category_id = ? WHERE service_id = ? AND category_id != ?",
-                (new_cat_id, svc_id, new_cat_id),
-            )
-            recategorized = cur.rowcount
+            # Auto re-categorize: if category changed, update all linked transactions
+            recategorized = 0
+            if "category_id" in data:
+                new_cat_id = data["category_id"]
+                cur = conn.execute(
+                    "UPDATE transactions SET category_id = ? WHERE service_id = ? AND category_id != ?",
+                    (new_cat_id, svc_id, new_cat_id),
+                )
+                recategorized = cur.rowcount
 
-        conn.commit()
-        invalidate_rules_cache()  # service category change affects cached category_id
-        conn.close()
-        return jsonify({"success": True, "recategorized": recategorized})
-    except Exception as e:
-        conn.close()
-        app.logger.warning("Failed to update service: %s", e)
-        return jsonify({"error": "Failed to update service"}), 400
+            conn.commit()
+            invalidate_rules_cache()  # service category change affects cached category_id
+            return jsonify({"success": True, "recategorized": recategorized})
+        except Exception as e:
+            app.logger.warning("Failed to update service: %s", e)
+            return jsonify({"error": "Failed to update service"}), 400
 
 
 @app.route("/api/services/<int:svc_id>/merge", methods=["POST"])
@@ -320,33 +341,31 @@ def api_services_merge(svc_id):
         return jsonify({"error": "Invalid merge target"}), 400
     target_id = int(target_id)
 
-    conn = get_connection()
-    # Verify both exist
-    source = conn.execute("SELECT name FROM services WHERE id = ?", (svc_id,)).fetchone()
-    target = conn.execute("SELECT name FROM services WHERE id = ?", (target_id,)).fetchone()
-    if not source or not target:
-        conn.close()
-        return jsonify({"error": "Service not found"}), 404
+    with get_db() as conn:
+        # Verify both exist
+        source = conn.execute("SELECT name FROM services WHERE id = ?", (svc_id,)).fetchone()
+        target = conn.execute("SELECT name FROM services WHERE id = ?", (target_id,)).fetchone()
+        if not source or not target:
+            return jsonify({"error": "Service not found"}), 404
 
-    # Reassign all references from source → target
-    txn_count = conn.execute(
-        "UPDATE transactions SET service_id = ? WHERE service_id = ?",
-        (target_id, svc_id),
-    ).rowcount
-    rule_count = conn.execute(
-        "UPDATE merchant_rules SET service_id = ? WHERE service_id = ?",
-        (target_id, svc_id),
-    ).rowcount
-    sub_count = conn.execute(
-        "UPDATE subscriptions SET service_id = ? WHERE service_id = ?",
-        (target_id, svc_id),
-    ).rowcount
+        # Reassign all references from source → target
+        txn_count = conn.execute(
+            "UPDATE transactions SET service_id = ? WHERE service_id = ?",
+            (target_id, svc_id),
+        ).rowcount
+        rule_count = conn.execute(
+            "UPDATE merchant_rules SET service_id = ? WHERE service_id = ?",
+            (target_id, svc_id),
+        ).rowcount
+        sub_count = conn.execute(
+            "UPDATE subscriptions SET service_id = ? WHERE service_id = ?",
+            (target_id, svc_id),
+        ).rowcount
 
-    # Delete the now-orphaned source service
-    conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
-    conn.commit()
-    invalidate_rules_cache()  # merge reassigns rule service_ids
-    conn.close()
+        # Delete the now-orphaned source service
+        conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
+        conn.commit()
+        invalidate_rules_cache()  # merge reassigns rule service_ids
 
     return jsonify({
         "success": True,
@@ -363,37 +382,34 @@ def api_services_merge(svc_id):
 @app.route("/api/services/<int:svc_id>", methods=["DELETE"])
 def api_services_delete(svc_id):
     """Delete a service if no transactions/subscriptions reference it."""
-    conn = get_connection()
-    refs = conn.execute(
-        "SELECT COUNT(*) FROM transactions WHERE service_id = ?", (svc_id,)
-    ).fetchone()[0]
-    sub_refs = conn.execute(
-        "SELECT COUNT(*) FROM subscriptions WHERE service_id = ?", (svc_id,)
-    ).fetchone()[0]
-    if refs > 0 or sub_refs > 0:
-        conn.close()
-        return jsonify({"error": f"Service has {refs} transactions and {sub_refs} subscriptions"}), 400
-    conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        refs = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE service_id = ?", (svc_id,)
+        ).fetchone()[0]
+        sub_refs = conn.execute(
+            "SELECT COUNT(*) FROM subscriptions WHERE service_id = ?", (svc_id,)
+        ).fetchone()[0]
+        if refs > 0 or sub_refs > 0:
+            return jsonify({"error": f"Service has {refs} transactions and {sub_refs} subscriptions"}), 400
+        conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
+        conn.commit()
     return jsonify({"success": True})
 
 
 @app.route("/api/services/<int:svc_id>/transactions")
 def api_service_transactions(svc_id):
     """Get all transactions for a specific service."""
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT t.id, t.date, t.description, t.amount_sgd,
-               t.amount_foreign, t.currency_foreign,
-               c.name as category_name
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        WHERE t.service_id = ?
-          AND t.is_payment = 0 AND t.is_transfer = 0
-        ORDER BY t.date DESC
-    """, (svc_id,)).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT t.id, t.date, t.description, t.amount_sgd,
+                   t.amount_foreign, t.currency_foreign,
+                   c.name as category_name
+            FROM transactions t
+            LEFT JOIN categories c ON t.category_id = c.id
+            WHERE t.service_id = ?
+              AND t.is_payment = 0 AND t.is_transfer = 0
+            ORDER BY t.date DESC
+        """, (svc_id,)).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
@@ -439,7 +455,6 @@ def api_dashboard_stat_cards():
     avg_months.reverse()  # chronological order
 
     # Filters (account, anomaly — but NOT start/end, personal/moom applied below)
-    conn = get_connection()
     personal_only = request.args.get("personal_only") == "true"
     moom_only = request.args.get("moom_only") == "true"
     account_id = request.args.get("account_id")
@@ -457,54 +472,53 @@ def api_dashboard_stat_cards():
         except (ValueError, TypeError):
             pass
 
-    def query_month(y: int, m: int) -> dict:
-        """Query spend totals for a single month."""
-        start = f"{y:04d}-{m:02d}-01"
-        if m == 12:
-            end_d = date(y + 1, 1, 1) - timedelta(days=1)
-        else:
-            end_d = date(y, m + 1, 1) - timedelta(days=1)
-        end = end_d.strftime("%Y-%m-%d")
+    with get_db() as conn:
+        def query_month(y: int, m: int) -> dict:
+            """Query spend totals for a single month."""
+            start = f"{y:04d}-{m:02d}-01"
+            if m == 12:
+                end_d = date(y + 1, 1, 1) - timedelta(days=1)
+            else:
+                end_d = date(y, m + 1, 1) - timedelta(days=1)
+            end = end_d.strftime("%Y-%m-%d")
 
-        params = [start, end] + extra_params
-        row = conn.execute(f"""
-            SELECT
-                SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0
-                         THEN amount_sgd ELSE 0 END) as total,
-                SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0
-                         AND c.is_personal = 1 THEN amount_sgd ELSE 0 END) as personal,
-                SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0
-                         AND c.is_personal = 0 THEN amount_sgd ELSE 0 END) as moom,
-                COUNT(CASE WHEN t.category_id IS NULL AND is_payment = 0 AND is_transfer = 0
-                           THEN 1 END) as uncategorized,
-                COUNT(CASE WHEN is_payment = 0 AND is_transfer = 0 THEN 1 END) as tx_count
-            FROM transactions t
-            LEFT JOIN categories c ON t.category_id = c.id
-            LEFT JOIN services svc ON t.service_id = svc.id
-            JOIN statements s ON t.statement_id = s.id
-            WHERE is_payment = 0 AND is_transfer = 0
-              AND t.date >= ? AND t.date <= ?
-              {extra_filters}
-        """, params).fetchone()
-        return {
-            "total": round(row["total"] or 0, 2),
-            "personal": round(row["personal"] or 0, 2),
-            "moom": round(row["moom"] or 0, 2),
-            "uncategorized": row["uncategorized"] or 0,
-            "tx_count": row["tx_count"] or 0,
-        }
+            params = [start, end] + extra_params
+            row = conn.execute(f"""
+                SELECT
+                    SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0
+                             THEN amount_sgd ELSE 0 END) as total,
+                    SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0
+                             AND c.is_personal = 1 THEN amount_sgd ELSE 0 END) as personal,
+                    SUM(CASE WHEN amount_sgd > 0 AND is_payment = 0 AND is_transfer = 0
+                             AND c.is_personal = 0 THEN amount_sgd ELSE 0 END) as moom,
+                    COUNT(CASE WHEN t.category_id IS NULL AND is_payment = 0 AND is_transfer = 0
+                               THEN 1 END) as uncategorized,
+                    COUNT(CASE WHEN is_payment = 0 AND is_transfer = 0 THEN 1 END) as tx_count
+                FROM transactions t
+                LEFT JOIN categories c ON t.category_id = c.id
+                LEFT JOIN services svc ON t.service_id = svc.id
+                JOIN statements s ON t.statement_id = s.id
+                WHERE is_payment = 0 AND is_transfer = 0
+                  AND t.date >= ? AND t.date <= ?
+                  {extra_filters}
+            """, params).fetchone()
+            return {
+                "total": round(row["total"] or 0, 2),
+                "personal": round(row["personal"] or 0, 2),
+                "moom": round(row["moom"] or 0, 2),
+                "uncategorized": row["uncategorized"] or 0,
+                "tx_count": row["tx_count"] or 0,
+            }
 
-    # Query reference month
-    ref_data = query_month(ref_y, ref_m)
+        # Query reference month
+        ref_data = query_month(ref_y, ref_m)
 
-    # Query 3 prior months for rolling average
-    avg_data = [query_month(y, m) for y, m in avg_months]
-    n = len([d for d in avg_data if d["tx_count"] > 0]) or 1  # only months with data
-    avg_total = round(sum(d["total"] for d in avg_data) / n, 2)
-    avg_personal = round(sum(d["personal"] for d in avg_data) / n, 2)
-    avg_moom = round(sum(d["moom"] for d in avg_data) / n, 2)
-
-    conn.close()
+        # Query 3 prior months for rolling average
+        avg_data = [query_month(y, m) for y, m in avg_months]
+        n = len([d for d in avg_data if d["tx_count"] > 0]) or 1  # only months with data
+        avg_total = round(sum(d["total"] for d in avg_data) / n, 2)
+        avg_personal = round(sum(d["personal"] for d in avg_data) / n, 2)
+        avg_moom = round(sum(d["moom"] for d in avg_data) / n, 2)
 
     # Pick which spend to feature based on filter
     if moom_only:
@@ -543,7 +557,6 @@ def api_dashboard_monthly():
     Query params: start, end, personal_only, moom_only, exclude_one_off, granularity
     granularity: 'monthly' (default), 'weekly', 'quarterly'
     """
-    conn = get_connection()
     filters, params = _build_filters(request.args)
     granularity = request.args.get("granularity", "monthly")
 
@@ -564,22 +577,22 @@ def api_dashboard_monthly():
     else:
         cat_expr = "c.name"
 
-    rows = conn.execute(f"""
-        SELECT
-            {time_bucket} as period,
-            {cat_expr} as category,
-            c.is_personal,
-            SUM(t.amount_sgd) as total
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        LEFT JOIN categories p ON c.parent_id = p.id
-        LEFT JOIN services svc ON t.service_id = svc.id
-        JOIN statements s ON t.statement_id = s.id
-        WHERE t.amount_sgd > 0 AND t.is_payment = 0 AND t.is_transfer = 0 {filters}
-        GROUP BY period, category
-        ORDER BY period, total DESC
-    """, params).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                {time_bucket} as period,
+                {cat_expr} as category,
+                c.is_personal,
+                SUM(t.amount_sgd) as total
+            FROM transactions t
+            LEFT JOIN categories c ON t.category_id = c.id
+            LEFT JOIN categories p ON c.parent_id = p.id
+            LEFT JOIN services svc ON t.service_id = svc.id
+            JOIN statements s ON t.statement_id = s.id
+            WHERE t.amount_sgd > 0 AND t.is_payment = 0 AND t.is_transfer = 0 {filters}
+            GROUP BY period, category
+            ORDER BY period, total DESC
+        """, params).fetchall()
 
     # Structure: {period: {category: total, ...}, ...}
     result = {}
@@ -599,7 +612,6 @@ def api_dashboard_categories():
 
     Query params: start, end, personal_only, exclude_one_off, group_parent
     """
-    conn = get_connection()
     filters, params = _build_filters(request.args)
 
     group_parent = request.args.get("group_parent", "true") == "true"
@@ -611,22 +623,22 @@ def api_dashboard_categories():
         cat_expr = "c.name"
         personal_expr = "c.is_personal"
 
-    rows = conn.execute(f"""
-        SELECT
-            {cat_expr} as category,
-            {personal_expr} as is_personal,
-            SUM(t.amount_sgd) as total,
-            COUNT(*) as count
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        LEFT JOIN categories p ON c.parent_id = p.id
-        LEFT JOIN services svc ON t.service_id = svc.id
-        JOIN statements s ON t.statement_id = s.id
-        WHERE t.amount_sgd > 0 AND t.is_payment = 0 AND t.is_transfer = 0 {filters}
-        GROUP BY category
-        ORDER BY total DESC
-    """, params).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                {cat_expr} as category,
+                {personal_expr} as is_personal,
+                SUM(t.amount_sgd) as total,
+                COUNT(*) as count
+            FROM transactions t
+            LEFT JOIN categories c ON t.category_id = c.id
+            LEFT JOIN categories p ON c.parent_id = p.id
+            LEFT JOIN services svc ON t.service_id = svc.id
+            JOIN statements s ON t.statement_id = s.id
+            WHERE t.amount_sgd > 0 AND t.is_payment = 0 AND t.is_transfer = 0 {filters}
+            GROUP BY category
+            ORDER BY total DESC
+        """, params).fetchall()
 
     return jsonify([{
         "category": r["category"] or "Other",
@@ -647,7 +659,6 @@ def api_transactions():
     Query params: start, end, personal_only, exclude_one_off,
                   category, account_id, month, page, per_page, search
     """
-    conn = get_connection()
     filters, params = _build_filters(request.args)
 
     # Additional filters — single category (legacy) or multi-category
@@ -716,49 +727,45 @@ def api_transactions():
     if sort_dir not in ("ASC", "DESC"):
         sort_dir = "DESC"
 
-    # Count total (p join needed for multi-category COALESCE filter)
-    count_row = conn.execute(f"""
-        SELECT COUNT(*) as cnt
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        LEFT JOIN categories p ON c.parent_id = p.id
-        LEFT JOIN services svc ON t.service_id = svc.id
-        JOIN statements s ON t.statement_id = s.id
-        WHERE 1=1 {filters}
-    """, params).fetchone()
+    with get_db() as conn:
+        # Count total (p join needed for multi-category COALESCE filter)
+        count_row = conn.execute(f"""
+            SELECT COUNT(*) as cnt
+            FROM transactions t
+            LEFT JOIN categories c ON t.category_id = c.id
+            LEFT JOIN categories p ON c.parent_id = p.id
+            LEFT JOIN services svc ON t.service_id = svc.id
+            JOIN statements s ON t.statement_id = s.id
+            WHERE 1=1 {filters}
+        """, params).fetchone()
 
-    # Fetch page — include parent category for "Parent > Sub" display
-    rows = conn.execute(f"""
-        SELECT
-            t.id, t.date, t.description, t.amount_sgd,
-            t.amount_foreign, t.currency_foreign,
-            c.name as category, c.is_personal,
-            p.name as parent_category,
-            t.is_payment, t.is_transfer, t.is_one_off,
-            t.notes,
-            a.name as account_name,
-            t.service_id,
-            svc.name as service_name
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        LEFT JOIN categories p ON c.parent_id = p.id
-        LEFT JOIN services svc ON t.service_id = svc.id
-        JOIN statements s ON t.statement_id = s.id
-        JOIN accounts a ON s.account_id = a.id
-        WHERE 1=1 {filters}
-        ORDER BY {order_col} {sort_dir}, t.date DESC
-        LIMIT ? OFFSET ?
-    """, params + [per_page, offset]).fetchall()
-    conn.close()
+        # Fetch page — include parent category for "Parent > Sub" display
+        rows = conn.execute(f"""
+            SELECT
+                t.id, t.date, t.description, t.amount_sgd,
+                t.amount_foreign, t.currency_foreign,
+                c.name as category, c.is_personal,
+                p.name as parent_category,
+                t.is_payment, t.is_transfer, t.is_one_off,
+                t.notes,
+                a.name as account_name,
+                t.service_id,
+                svc.name as service_name
+            FROM transactions t
+            LEFT JOIN categories c ON t.category_id = c.id
+            LEFT JOIN categories p ON c.parent_id = p.id
+            LEFT JOIN services svc ON t.service_id = svc.id
+            JOIN statements s ON t.statement_id = s.id
+            JOIN accounts a ON s.account_id = a.id
+            WHERE 1=1 {filters}
+            ORDER BY {order_col} {sort_dir}, t.date DESC
+            LIMIT ? OFFSET ?
+        """, params + [per_page, offset]).fetchall()
 
     txns = []
     for r in rows:
         tx = dict(r)
-        # Build "Parent > Sub" display category
-        if r["parent_category"]:
-            tx["display_category"] = f"{r['parent_category']} > {r['category']}"
-        else:
-            tx["display_category"] = r["category"]
+        tx["display_category"] = format_category_display(r["parent_category"], r["category"])
         if tx.get("account_name"):
             tx["account_name"] = mask_card_number(tx["account_name"])
         txns.append(tx)
@@ -776,29 +783,22 @@ def api_transactions():
 def api_update_transaction(tx_id: int):
     """Update a transaction's notes, category, or one-off flag."""
     data = request.get_json()
-    conn = get_connection()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
 
-    # Build SET clause from allowed fields
-    allowed = {"notes": "notes", "category_id": "category_id", "is_one_off": "is_one_off"}
-    sets = []
-    values = []
-    for key, col in allowed.items():
-        if key in data:
-            sets.append(f"{col} = ?")
-            values.append(data[key])
+    sets, values = _build_update_sets(data, ["notes", "category_id", "is_one_off"])
 
     # If category or service is being changed, mark as manual
     if "category_id" in data or "service_id" in data:
         sets.append("cat_source = 'manual'")
 
     if not sets:
-        conn.close()
         return jsonify({"error": "No valid fields to update"}), 400
 
-    values.append(tx_id)
-    conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", values)
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        values.append(tx_id)
+        conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", values)
+        conn.commit()
     return jsonify({"ok": True, "id": tx_id})
 
 
@@ -836,105 +836,94 @@ def api_resolve_transaction():
     if not service_name and not service_id:
         return jsonify({"error": "service_name or service_id required"}), 400
 
-    conn = get_connection()
-    try:
-        # Step 1: Resolve service — find existing or create new
-        if service_id:
-            svc = conn.execute(
-                "SELECT id, category_id FROM services WHERE id = ?", (service_id,)
-            ).fetchone()
-            if not svc:
-                conn.close()
-                return jsonify({"error": f"Service ID {service_id} not found"}), 404
-            service_id = svc["id"]
-            # If category_id provided and differs, update the service's category
-            if category_id and category_id != svc["category_id"]:
-                conn.execute("UPDATE services SET category_id = ? WHERE id = ?",
-                             (category_id, service_id))
-            else:
-                category_id = svc["category_id"]
-        else:
-            # Look up by name (case-insensitive)
-            existing = conn.execute(
-                "SELECT id, category_id FROM services WHERE UPPER(name) = ?",
-                (service_name.upper(),),
-            ).fetchone()
-            if existing:
-                service_id = existing["id"]
-                if category_id and category_id != existing["category_id"]:
+    with get_db() as conn:
+        try:
+            # Step 1: Resolve service — find existing or create new
+            if service_id:
+                svc = conn.execute(
+                    "SELECT id, category_id FROM services WHERE id = ?", (service_id,)
+                ).fetchone()
+                if not svc:
+                    return jsonify({"error": f"Service ID {service_id} not found"}), 404
+                service_id = svc["id"]
+                # If category_id provided and differs, update the service's category
+                if category_id and category_id != svc["category_id"]:
                     conn.execute("UPDATE services SET category_id = ? WHERE id = ?",
                                  (category_id, service_id))
                 else:
-                    category_id = existing["category_id"]
+                    category_id = svc["category_id"]
             else:
-                # Create new service — category_id is required
-                if not category_id:
-                    conn.close()
-                    return jsonify({"error": "category_id required for new service"}), 400
-                conn.execute(
-                    "INSERT INTO services (name, category_id) VALUES (?, ?)",
-                    (service_name, category_id),
-                )
-                service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                # Look up by name (case-insensitive)
+                existing = conn.execute(
+                    "SELECT id, category_id FROM services WHERE UPPER(name) = ?",
+                    (service_name.upper(),),
+                ).fetchone()
+                if existing:
+                    service_id = existing["id"]
+                    if category_id and category_id != existing["category_id"]:
+                        conn.execute("UPDATE services SET category_id = ? WHERE id = ?",
+                                     (category_id, service_id))
+                    else:
+                        category_id = existing["category_id"]
+                else:
+                    # Create new service — category_id is required
+                    if not category_id:
+                        return jsonify({"error": "category_id required for new service"}), 400
+                    conn.execute(
+                        "INSERT INTO services (name, category_id) VALUES (?, ?)",
+                        (service_name, category_id),
+                    )
+                    service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        # Step 2: Create merchant rule if pattern provided (optional for PayNow/transfers)
-        rule_id = None
-        backfilled = 0
-        if pattern:
-            rule_exists = conn.execute(
-                "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
-                (pattern.upper(),),
-            ).fetchone()
-            if not rule_exists:
-                conn.execute(
-                    "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
-                    "VALUES (?, ?, ?, 'confirmed')",
-                    (pattern, service_id, match_type),
-                )
-                rule_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            else:
-                rule_id = rule_exists["id"]
-                conn.execute(
-                    "UPDATE merchant_rules SET service_id = ? WHERE id = ?",
-                    (service_id, rule_id),
-                )
+            # Step 2: Create merchant rule if pattern provided (optional for PayNow/transfers)
+            rule_id = None
+            backfilled = 0
+            if pattern:
+                rule_exists = conn.execute(
+                    "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
+                    (pattern.upper(),),
+                ).fetchone()
+                if not rule_exists:
+                    conn.execute(
+                        "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
+                        "VALUES (?, ?, ?, 'confirmed')",
+                        (pattern, service_id, match_type),
+                    )
+                    rule_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                else:
+                    rule_id = rule_exists["id"]
+                    conn.execute(
+                        "UPDATE merchant_rules SET service_id = ? WHERE id = ?",
+                        (service_id, rule_id),
+                    )
 
-            # Backfill other transactions matching this pattern with NULL service
-            if match_type == "contains":
+                # Backfill other transactions matching this pattern with NULL service
+                match_cond = _build_match_condition(match_type)
                 cur = conn.execute(
-                    "UPDATE transactions SET service_id = ?, category_id = ? "
-                    "WHERE service_id IS NULL AND UPPER(description) LIKE '%' || ? || '%'",
+                    f"UPDATE transactions SET service_id = ?, category_id = ? "
+                    f"WHERE service_id IS NULL AND {match_cond}",
                     (service_id, category_id, pattern.upper()),
                 )
                 backfilled = cur.rowcount
-            elif match_type == "startswith":
-                cur = conn.execute(
-                    "UPDATE transactions SET service_id = ?, category_id = ? "
-                    "WHERE service_id IS NULL AND UPPER(description) LIKE ? || '%'",
-                    (service_id, category_id, pattern.upper()),
-                )
-                backfilled = cur.rowcount
 
-        # Step 3: Update the target transaction (mark as manual)
-        conn.execute(
-            "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = 'manual' WHERE id = ?",
-            (category_id, service_id, tx_id),
-        )
+            # Step 3: Update the target transaction (mark as manual)
+            conn.execute(
+                "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = 'manual' WHERE id = ?",
+                (category_id, service_id, tx_id),
+            )
 
-        conn.commit()
-        invalidate_rules_cache()
-        conn.close()
-        return jsonify({
-            "success": True,
-            "service_id": service_id,
-            "rule_id": rule_id,
-            "category_id": category_id,
-            "backfilled": backfilled,
-        })
-    except Exception as e:
-        conn.close()
-        app.logger.warning("Failed to resolve transaction: %s", e)
-        return jsonify({"error": "Failed to resolve transaction"}), 400
+            conn.commit()
+            invalidate_rules_cache()
+            return jsonify({
+                "success": True,
+                "service_id": service_id,
+                "rule_id": rule_id,
+                "category_id": category_id,
+                "backfilled": backfilled,
+            })
+        except Exception as e:
+            app.logger.warning("Failed to resolve transaction: %s", e)
+            return jsonify({"error": "Failed to resolve transaction"}), 400
 
 
 def _build_filters(args) -> tuple[str, list]:
@@ -994,14 +983,12 @@ def api_import_upload():
     if not files:
         return jsonify({"error": "No files uploaded"}), 400
 
-    conn = get_connection()
-
     all_groups = {}  # account_name -> list of transaction dicts
     errors = []
     filenames = []
 
     # Save uploaded files to temp dir for parsing
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with get_db() as conn, tempfile.TemporaryDirectory() as tmpdir:
         saved_paths = []
         for f in files:
             if not f.filename:
@@ -1067,8 +1054,6 @@ def api_import_upload():
                     all_groups[account] = []
                 all_groups[account].append(entry)
 
-    conn.close()
-
     # Build response
     groups = []
     total = 0
@@ -1096,25 +1081,24 @@ def api_import_upload():
         skipped += group_skip
 
     # Save preview to batch_imports and fetch services list in one connection
-    conn = get_connection()
-    conn.execute(
-        "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines) VALUES (?, ?, 'preview', ?, ?)",
-        (
-            json.dumps(filenames),
-            json.dumps(list(all_groups.keys())),
-            total,
-            categorized,
-        ),
-    )
-    conn.commit()
-    import_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines) VALUES (?, ?, 'preview', ?, ?)",
+            (
+                json.dumps(filenames),
+                json.dumps(list(all_groups.keys())),
+                total,
+                categorized,
+            ),
+        )
+        conn.commit()
+        import_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    services_rows = conn.execute(
-        "SELECT s.id, s.name, s.category_id, COALESCE(c.name, '') as category_name "
-        "FROM services s LEFT JOIN categories c ON s.category_id = c.id "
-        "ORDER BY s.name"
-    ).fetchall()
-    conn.close()
+        services_rows = conn.execute(
+            "SELECT s.id, s.name, s.category_id, COALESCE(c.name, '') as category_name "
+            "FROM services s LEFT JOIN categories c ON s.category_id = c.id "
+            "ORDER BY s.name"
+        ).fetchall()
     services_list = [
         {"id": r["id"], "name": r["name"], "category_id": r["category_id"], "category_name": r["category_name"]}
         for r in services_rows
@@ -1171,204 +1155,201 @@ def api_import_confirm():
     groups = data.get("groups", [])
     new_rules = data.get("new_rules", [])
 
-    conn = get_connection()
     total_saved = 0
     total_duplicates = 0
     accounts_created = []
 
-    try:
-        for group in groups:
-            account_name = group["account"]
-            txns = group["transactions"]
+    with get_db() as conn:
+        try:
+            for group in groups:
+                account_name = group["account"]
+                txns = group["transactions"]
 
-            # Filter out skipped transactions
-            active_txns = [t for t in txns if not t.get("_skip", False)]
-            if not active_txns:
-                continue
+                # Filter out skipped transactions
+                active_txns = [t for t in txns if not t.get("_skip", False)]
+                if not active_txns:
+                    continue
 
-            # Ensure account exists
-            from ingest import ensure_account, ensure_statement
-            stmt_type = "credit_card"  # default; could detect from account name
-            if "bank" in account_name.lower() or "one account" in account_name.lower() or "home" in account_name.lower():
-                stmt_type = "bank"
+                # Ensure account exists
+                from ingest import ensure_account, ensure_statement
+                stmt_type = "credit_card"  # default; could detect from account name
+                if "bank" in account_name.lower() or "one account" in account_name.lower() or "home" in account_name.lower():
+                    stmt_type = "bank"
 
-            account_id = ensure_account(conn, account_name, stmt_type)
-            accounts_created.append(account_name)
+                account_id = ensure_account(conn, account_name, stmt_type)
+                accounts_created.append(account_name)
 
-            # Create per-month statement records so coverage matrix reflects each month.
-            # A multi-month CSV (e.g. Citi Oct-Dec) creates 3 statement records.
-            filename = f"import_{import_id}_{account_name[:30]}"
-            month_stmt_ids: dict[str, int] = {}
-            for tx in active_txns:
-                ym = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
-                if ym not in month_stmt_ids:
-                    stmt_date = f"{ym}-01"
-                    sid, _ = ensure_statement(conn, account_id, stmt_date, filename)
-                    month_stmt_ids[ym] = sid
+                # Create per-month statement records so coverage matrix reflects each month.
+                # A multi-month CSV (e.g. Citi Oct-Dec) creates 3 statement records.
+                filename = f"import_{import_id}_{account_name[:30]}"
+                month_stmt_ids: dict[str, int] = {}
+                for tx in active_txns:
+                    ym = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
+                    if ym not in month_stmt_ids:
+                        stmt_date = f"{ym}-01"
+                        sid, _ = ensure_statement(conn, account_id, stmt_date, filename)
+                        month_stmt_ids[ym] = sid
 
-            # --- Deduplication ---
-            # Group import transactions by (date, description, amount) to handle
-            # genuine same-day repeats (e.g. two identical coffees).
-            # For each group, count how many already exist in DB for this account.
-            # Only insert (import_count - existing_count), minimum 0.
-            from collections import Counter
+                # --- Deduplication ---
+                # Group import transactions by (date, description, amount) to handle
+                # genuine same-day repeats (e.g. two identical coffees).
+                # For each group, count how many already exist in DB for this account.
+                # Only insert (import_count - existing_count), minimum 0.
+                from collections import Counter
 
-            import_counts = Counter()
-            import_by_key = {}  # key -> [list of tx dicts]
-            for tx in active_txns:
-                key = (tx["date"], tx["description"], tx["amount_sgd"])
-                import_counts[key] += 1
-                import_by_key.setdefault(key, []).append(tx)
+                import_counts = Counter()
+                import_by_key = {}  # key -> [list of tx dicts]
+                for tx in active_txns:
+                    key = (tx["date"], tx["description"], tx["amount_sgd"])
+                    import_counts[key] += 1
+                    import_by_key.setdefault(key, []).append(tx)
 
-            duplicates_skipped = 0
-            for key, import_count in import_counts.items():
-                date_val, desc_val, amount_val = key
+                duplicates_skipped = 0
+                for key, import_count in import_counts.items():
+                    date_val, desc_val, amount_val = key
 
-                # Count existing matches for this account
+                    # Count existing matches for this account
+                    existing = conn.execute(
+                        """SELECT COUNT(*) FROM transactions t
+                           JOIN statements s ON t.statement_id = s.id
+                           WHERE s.account_id = ?
+                             AND t.date = ? AND t.description = ? AND t.amount_sgd = ?""",
+                        (account_id, date_val, desc_val, amount_val),
+                    ).fetchone()[0]
+
+                    # Only insert the net-new ones
+                    to_insert = max(0, import_count - existing)
+                    skipped = import_count - to_insert
+                    duplicates_skipped += skipped
+
+                    # Link each transaction to its month's statement record
+                    for tx in import_by_key[key][:to_insert]:
+                        tx_month = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
+                        statement_id = month_stmt_ids[tx_month]
+                        conn.execute(
+                            "INSERT INTO transactions "
+                            "(statement_id, date, description, amount_sgd, amount_foreign, "
+                            "currency_foreign, category_id, service_id, is_payment, is_transfer, is_one_off) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                statement_id,
+                                tx["date"],
+                                tx["description"],
+                                tx["amount_sgd"],
+                                tx.get("amount_foreign"),
+                                tx.get("currency_foreign"),
+                                tx.get("category_id"),
+                                tx.get("service_id"),
+                                1 if tx.get("is_payment") else 0,
+                                1 if tx.get("is_transfer") else 0,
+                                1 if tx.get("is_one_off") else 0,
+                            ),
+                        )
+                        total_saved += 1
+
+                total_duplicates += duplicates_skipped
+                conn.commit()
+
+            # Create new services submitted from the preview
+            # Each entry: {name, category_id, description} — description becomes the merchant rule
+            new_services = data.get("new_services", [])
+            services_created = 0
+            for ns in new_services:
+                svc_name = (ns.get("name") or "").strip()
+                cat_id = ns.get("category_id")
+                desc = (ns.get("description") or "").strip()
+                if not svc_name:
+                    continue
+                # Dedup: skip if service already exists
                 existing = conn.execute(
-                    """SELECT COUNT(*) FROM transactions t
-                       JOIN statements s ON t.statement_id = s.id
-                       WHERE s.account_id = ?
-                         AND t.date = ? AND t.description = ? AND t.amount_sgd = ?""",
-                    (account_id, date_val, desc_val, amount_val),
-                ).fetchone()[0]
-
-                # Only insert the net-new ones
-                to_insert = max(0, import_count - existing)
-                skipped = import_count - to_insert
-                duplicates_skipped += skipped
-
-                # Link each transaction to its month's statement record
-                for tx in import_by_key[key][:to_insert]:
-                    tx_month = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
-                    statement_id = month_stmt_ids[tx_month]
+                    "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
+                ).fetchone()
+                if existing:
+                    svc_id = existing["id"]
+                else:
                     conn.execute(
-                        "INSERT INTO transactions "
-                        "(statement_id, date, description, amount_sgd, amount_foreign, "
-                        "currency_foreign, category_id, service_id, is_payment, is_transfer, is_one_off) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            statement_id,
-                            tx["date"],
-                            tx["description"],
-                            tx["amount_sgd"],
-                            tx.get("amount_foreign"),
-                            tx.get("currency_foreign"),
-                            tx.get("category_id"),
-                            tx.get("service_id"),
-                            1 if tx.get("is_payment") else 0,
-                            1 if tx.get("is_transfer") else 0,
-                            1 if tx.get("is_one_off") else 0,
-                        ),
+                        "INSERT INTO services (name, category_id) VALUES (?, ?)",
+                        (svc_name, cat_id),
                     )
-                    total_saved += 1
-
-            total_duplicates += duplicates_skipped
+                    svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    services_created += 1
+                # Create merchant rule from description → service
+                if desc:
+                    # Use a cleaned pattern: uppercase, trimmed
+                    pattern = desc.upper().strip()
+                    rule_exists = conn.execute(
+                        "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?", (pattern,)
+                    ).fetchone()
+                    if not rule_exists:
+                        conn.execute(
+                            "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
+                            "VALUES (?, ?, 'contains', 'confirmed')",
+                            (pattern, svc_id),
+                        )
+                # Backfill service_id on transactions in this import that match this description
+                conn.execute(
+                    "UPDATE transactions SET service_id = ? WHERE UPPER(description) = ? AND service_id IS NULL",
+                    (svc_id, desc.upper()),
+                )
             conn.commit()
 
-        # Create new services submitted from the preview
-        # Each entry: {name, category_id, description} — description becomes the merchant rule
-        new_services = data.get("new_services", [])
-        services_created = 0
-        for ns in new_services:
-            svc_name = (ns.get("name") or "").strip()
-            cat_id = ns.get("category_id")
-            desc = (ns.get("description") or "").strip()
-            if not svc_name:
-                continue
-            # Dedup: skip if service already exists
-            existing = conn.execute(
-                "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
-            ).fetchone()
-            if existing:
-                svc_id = existing["id"]
-            else:
-                conn.execute(
-                    "INSERT INTO services (name, category_id) VALUES (?, ?)",
-                    (svc_name, cat_id),
-                )
-                svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                services_created += 1
-            # Create merchant rule from description → service
-            if desc:
-                # Use a cleaned pattern: uppercase, trimmed
-                pattern = desc.upper().strip()
-                rule_exists = conn.execute(
-                    "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?", (pattern,)
-                ).fetchone()
-                if not rule_exists:
+            # Save new merchant rules
+            rules_added = 0
+            for rule in new_rules:
+                try:
+                    # Rules require service_id — skip if not provided
+                    if not rule.get("service_id"):
+                        continue
                     conn.execute(
-                        "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
-                        "VALUES (?, ?, 'contains', 'confirmed')",
-                        (pattern, svc_id),
+                        "INSERT OR REPLACE INTO merchant_rules (pattern, service_id, match_type, confidence) "
+                        "VALUES (?, ?, ?, 'confirmed')",
+                        (rule["pattern"], rule["service_id"], rule.get("match_type", "contains")),
                     )
-            # Backfill service_id on transactions in this import that match this description
+                    rules_added += 1
+                except Exception as e:
+                    app.logger.warning("Failed to insert rule '%s': %s", rule.get("pattern"), e)
+            conn.commit()
+            invalidate_rules_cache()
+
+            # Update batch_imports record
+            result_summary = {
+                "transactions_saved": total_saved,
+                "duplicates_skipped": total_duplicates,
+                "accounts": accounts_created,
+                "rules_added": rules_added,
+                "services_created": services_created,
+            }
             conn.execute(
-                "UPDATE transactions SET service_id = ? WHERE UPPER(description) = ? AND service_id IS NULL",
-                (svc_id, desc.upper()),
+                "UPDATE batch_imports SET status = 'committed', result_json = ? WHERE id = ?",
+                (json.dumps(result_summary), import_id),
             )
-        conn.commit()
+            conn.commit()
 
-        # Save new merchant rules
-        rules_added = 0
-        for rule in new_rules:
-            try:
-                # Rules require service_id — skip if not provided
-                if not rule.get("service_id"):
-                    continue
-                conn.execute(
-                    "INSERT OR REPLACE INTO merchant_rules (pattern, service_id, match_type, confidence) "
-                    "VALUES (?, ?, ?, 'confirmed')",
-                    (rule["pattern"], rule["service_id"], rule.get("match_type", "contains")),
-                )
-                rules_added += 1
-            except Exception as e:
-                app.logger.warning("Failed to insert rule '%s': %s", rule.get("pattern"), e)
-        conn.commit()
-        invalidate_rules_cache()
+            return jsonify({
+                "success": True,
+                "transactions_saved": total_saved,
+                "duplicates_skipped": total_duplicates,
+                "rules_added": rules_added,
+                "accounts": accounts_created,
+            })
 
-        # Update batch_imports record
-        result_summary = {
-            "transactions_saved": total_saved,
-            "duplicates_skipped": total_duplicates,
-            "accounts": accounts_created,
-            "rules_added": rules_added,
-            "services_created": services_created,
-        }
-        conn.execute(
-            "UPDATE batch_imports SET status = 'committed', result_json = ? WHERE id = ?",
-            (json.dumps(result_summary), import_id),
-        )
-        conn.commit()
-        conn.close()
-
-        return jsonify({
-            "success": True,
-            "transactions_saved": total_saved,
-            "duplicates_skipped": total_duplicates,
-            "rules_added": rules_added,
-            "accounts": accounts_created,
-        })
-
-    except Exception as e:
-        conn.execute(
-            "UPDATE batch_imports SET status = 'failed', result_json = ? WHERE id = ?",
-            (json.dumps({"error": str(e)}), import_id),
-        )
-        conn.commit()
-        conn.close()
-        app.logger.warning("Import failed: %s", e)
-        return jsonify({"error": "Import failed"}), 500
+        except Exception as e:
+            conn.execute(
+                "UPDATE batch_imports SET status = 'failed', result_json = ? WHERE id = ?",
+                (json.dumps({"error": str(e)}), import_id),
+            )
+            conn.commit()
+            app.logger.warning("Import failed: %s", e)
+            return jsonify({"error": "Import failed"}), 500
 
 
 @app.route("/api/import/history")
 def api_import_history():
     """List past imports."""
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM batch_imports ORDER BY created_at DESC"
-    ).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM batch_imports ORDER BY created_at DESC"
+        ).fetchall()
 
     result = []
     for r in rows:
@@ -1412,28 +1393,26 @@ def api_statements_coverage():
             y -= 1
     months.reverse()  # oldest first
 
-    conn = get_connection()
+    with get_db() as conn:
+        # Get active accounts
+        accounts = conn.execute(
+            "SELECT id, short_name, type FROM accounts "
+            "WHERE status = 'active' OR status IS NULL "
+            "ORDER BY type, short_name"
+        ).fetchall()
+        accounts = [dict(a) for a in accounts]
 
-    # Get active accounts
-    accounts = conn.execute(
-        "SELECT id, short_name, type FROM accounts "
-        "WHERE status = 'active' OR status IS NULL "
-        "ORDER BY type, short_name"
-    ).fetchall()
-    accounts = [dict(a) for a in accounts]
-
-    # Get all statements for active accounts in the date range
-    min_month = months[0] + "-01"
-    statements = conn.execute(
-        "SELECT s.account_id, s.statement_date, s.filename, s.imported_at "
-        "FROM statements s "
-        "JOIN accounts a ON s.account_id = a.id "
-        "WHERE (a.status = 'active' OR a.status IS NULL) "
-        "  AND s.statement_date >= ? "
-        "ORDER BY s.statement_date",
-        (min_month,),
-    ).fetchall()
-    conn.close()
+        # Get all statements for active accounts in the date range
+        min_month = months[0] + "-01"
+        statements = conn.execute(
+            "SELECT s.account_id, s.statement_date, s.filename, s.imported_at "
+            "FROM statements s "
+            "JOIN accounts a ON s.account_id = a.id "
+            "WHERE (a.status = 'active' OR a.status IS NULL) "
+            "  AND s.statement_date >= ? "
+            "ORDER BY s.statement_date",
+            (min_month,),
+        ).fetchall()
 
     # Build matrix: {account_id: {month: {imported, date, filename}}}
     matrix = {}
@@ -1483,23 +1462,22 @@ def api_statements_coverage():
 @app.route("/api/rules")
 def api_rules():
     """List all merchant rules with service and category info."""
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT mr.id, mr.pattern, mr.match_type, mr.confidence,
-               mr.priority, mr.min_amount, mr.max_amount,
-               mr.service_id,
-               s.name as service_name,
-               s.category_id,
-               c.name as category_name,
-               c.parent_id,
-               p.name as parent_name
-        FROM merchant_rules mr
-        JOIN services s ON mr.service_id = s.id
-        LEFT JOIN categories c ON s.category_id = c.id
-        LEFT JOIN categories p ON c.parent_id = p.id
-        ORDER BY COALESCE(p.name, c.name), c.name, mr.priority DESC, mr.pattern
-    """).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT mr.id, mr.pattern, mr.match_type, mr.confidence,
+                   mr.priority, mr.min_amount, mr.max_amount,
+                   mr.service_id,
+                   s.name as service_name,
+                   s.category_id,
+                   c.name as category_name,
+                   c.parent_id,
+                   p.name as parent_name
+            FROM merchant_rules mr
+            JOIN services s ON mr.service_id = s.id
+            LEFT JOIN categories c ON s.category_id = c.id
+            LEFT JOIN categories p ON c.parent_id = p.id
+            ORDER BY COALESCE(p.name, c.name), c.name, mr.priority DESC, mr.pattern
+        """).fetchall()
     return jsonify([{
         "id": r["id"],
         "pattern": r["pattern"],
@@ -1513,7 +1491,7 @@ def api_rules():
         "category_id": r["category_id"],
         "category_name": r["category_name"],
         "parent_name": r["parent_name"],
-        "display_category": f"{r['parent_name']} > {r['category_name']}" if r["parent_name"] else r["category_name"],
+        "display_category": format_category_display(r["parent_name"], r["category_name"]),
     } for r in rows])
 
 
@@ -1524,9 +1502,9 @@ def api_rules_create():
     if not data or "pattern" not in data or "service_id" not in data:
         return jsonify({"error": "pattern and service_id required"}), 400
 
-    conn = get_connection()
-    try:
-        conn.execute(
+    with get_db() as conn:
+        return _crud_insert(
+            conn,
             "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence, priority, min_amount, max_amount) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -1538,80 +1516,54 @@ def api_rules_create():
                 data.get("min_amount"),
                 data.get("max_amount"),
             ),
+            "rule",
+            post_commit=invalidate_rules_cache,
         )
-        conn.commit()
-        invalidate_rules_cache()
-        rule_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.close()
-        return jsonify({"id": rule_id, "success": True})
-    except Exception as e:
-        conn.close()
-        app.logger.warning("Failed to create rule: %s", e)
-        return jsonify({"error": "Failed to create rule"}), 400
 
 
 @app.route("/api/rules/<int:rule_id>", methods=["PUT"])
 def api_rules_update(rule_id):
     """Update a merchant rule."""
     data = request.get_json()
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-
-    conn = get_connection()
-    allowed = ["pattern", "service_id", "match_type", "priority", "min_amount", "max_amount"]
-    sets = []
-    params = []
-    for field in allowed:
-        if field in data:
-            sets.append(f"{field} = ?")
-            params.append(data[field])
-
+    sets, params = _build_update_sets(data, ["pattern", "service_id", "match_type", "priority", "min_amount", "max_amount"])
     if not sets:
-        conn.close()
         return jsonify({"error": "No fields to update"}), 400
 
-    params.append(rule_id)
-    conn.execute(f"UPDATE merchant_rules SET {', '.join(sets)} WHERE id = ?", params)
+    with get_db() as conn:
+        params.append(rule_id)
+        conn.execute(f"UPDATE merchant_rules SET {', '.join(sets)} WHERE id = ?", params)
 
-    # Auto re-categorize: re-run this specific rule against transactions
-    # Fetch the updated rule + service category
-    rule = conn.execute(
-        "SELECT mr.pattern, mr.match_type, mr.service_id, s.category_id "
-        "FROM merchant_rules mr JOIN services s ON mr.service_id = s.id "
-        "WHERE mr.id = ?", (rule_id,)
-    ).fetchone()
-    recategorized = 0
-    if rule:
-        pattern_upper = rule["pattern"].upper()
-        if rule["match_type"] == "contains":
-            match_cond = "UPPER(description) LIKE '%' || ? || '%'"
-        elif rule["match_type"] == "startswith":
-            match_cond = "UPPER(description) LIKE ? || '%'"
-        else:
-            match_cond = "UPPER(description) = ?"
+        # Auto re-categorize: re-run this specific rule against transactions
+        # Fetch the updated rule + service category
+        rule = conn.execute(
+            "SELECT mr.pattern, mr.match_type, mr.service_id, s.category_id "
+            "FROM merchant_rules mr JOIN services s ON mr.service_id = s.id "
+            "WHERE mr.id = ?", (rule_id,)
+        ).fetchone()
+        recategorized = 0
+        if rule:
+            pattern_upper = rule["pattern"].upper()
+            match_cond = _build_match_condition(rule["match_type"])
+            cur = conn.execute(
+                f"UPDATE transactions SET category_id = ?, service_id = ? "
+                f"WHERE {match_cond} AND is_payment = 0 AND is_transfer = 0"
+                f" AND COALESCE(cat_source, 'auto') = 'auto'",
+                (rule["category_id"], rule["service_id"], pattern_upper),
+            )
+            recategorized = cur.rowcount
 
-        cur = conn.execute(
-            f"UPDATE transactions SET category_id = ?, service_id = ? "
-            f"WHERE {match_cond} AND is_payment = 0 AND is_transfer = 0"
-            f" AND COALESCE(cat_source, 'auto') = 'auto'",
-            (rule["category_id"], rule["service_id"], pattern_upper),
-        )
-        recategorized = cur.rowcount
-
-    conn.commit()
-    invalidate_rules_cache()
-    conn.close()
+        conn.commit()
+        invalidate_rules_cache()
     return jsonify({"success": True, "recategorized": recategorized})
 
 
 @app.route("/api/rules/<int:rule_id>", methods=["DELETE"])
 def api_rules_delete(rule_id):
     """Delete a merchant rule."""
-    conn = get_connection()
-    conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
-    conn.commit()
-    invalidate_rules_cache()
-    conn.close()
+    with get_db() as conn:
+        conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
+        conn.commit()
+        invalidate_rules_cache()
     return jsonify({"success": True})
 
 
@@ -1621,36 +1573,34 @@ def api_rules_recategorize():
 
     Category derived from service (no rule-level category to sync).
     """
-    conn = get_connection()
+    with get_db() as conn:
+        # Skip manually resolved transactions — only re-run on auto-categorized ones
+        rows = conn.execute("""
+            SELECT id, description, amount_sgd, category_id, service_id
+            FROM transactions
+            WHERE is_payment = 0 AND is_transfer = 0
+              AND COALESCE(cat_source, 'auto') = 'auto'
+        """).fetchall()
 
-    # Skip manually resolved transactions — only re-run on auto-categorized ones
-    rows = conn.execute("""
-        SELECT id, description, amount_sgd, category_id, service_id
-        FROM transactions
-        WHERE is_payment = 0 AND is_transfer = 0
-          AND COALESCE(cat_source, 'auto') = 'auto'
-    """).fetchall()
+        skipped = conn.execute("""
+            SELECT COUNT(*) FROM transactions
+            WHERE is_payment = 0 AND is_transfer = 0 AND cat_source = 'manual'
+        """).fetchone()[0]
 
-    skipped = conn.execute("""
-        SELECT COUNT(*) FROM transactions
-        WHERE is_payment = 0 AND is_transfer = 0 AND cat_source = 'manual'
-    """).fetchone()[0]
+        updated = 0
+        unchanged = 0
+        for tx in rows:
+            new_cat, new_svc = categorize_transaction(tx["description"], conn, amount=tx["amount_sgd"])
+            if new_cat and (new_cat != tx["category_id"] or new_svc != tx["service_id"]):
+                conn.execute(
+                    "UPDATE transactions SET category_id = ?, service_id = ? WHERE id = ?",
+                    (new_cat, new_svc, tx["id"]),
+                )
+                updated += 1
+            else:
+                unchanged += 1
 
-    updated = 0
-    unchanged = 0
-    for tx in rows:
-        new_cat, new_svc = categorize_transaction(tx["description"], conn, amount=tx["amount_sgd"])
-        if new_cat and (new_cat != tx["category_id"] or new_svc != tx["service_id"]):
-            conn.execute(
-                "UPDATE transactions SET category_id = ?, service_id = ? WHERE id = ?",
-                (new_cat, new_svc, tx["id"]),
-            )
-            updated += 1
-        else:
-            unchanged += 1
-
-    conn.commit()
-    conn.close()
+        conn.commit()
     return jsonify({"updated": updated, "unchanged": unchanged, "skipped_manual": skipped})
 
 
@@ -1701,30 +1651,30 @@ def _monthly_equivalent(amount: float, frequency: str, periods: int,
 @app.route("/api/subscriptions")
 def api_subscriptions():
     """List all subscriptions with category info and transaction enrichment."""
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT s.*, c.name as category_name, c.is_personal,
-               p.name as parent_name,
-               a.short_name as account_short_name, a.name as account_name,
-               svc.name as service_name
-        FROM subscriptions s
-        LEFT JOIN categories c ON s.category_id = c.id
-        LEFT JOIN categories p ON c.parent_id = p.id
-        LEFT JOIN accounts a ON s.account_id = a.id
-        LEFT JOIN services svc ON s.service_id = svc.id
-        ORDER BY
-            CASE s.status WHEN 'active' THEN 0 ELSE 1 END,
-            s.renewal_date
-    """).fetchall()
-
     fx_rate = _get_usd_sgd_rate()
 
     # Compute 90-day cutoff for rolling averages
     cutoff_90d = (date.today() - timedelta(days=90)).isoformat()
 
-    # Batch enrichment: latest tx per subscription (replaces 2 queries per sub)
-    # Moom subs match only Moom txns; personal subs match only personal txns
-    latest_tx_rows = conn.execute("""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT s.*, c.name as category_name, c.is_personal,
+                   p.name as parent_name,
+                   a.short_name as account_short_name, a.name as account_name,
+                   svc.name as service_name
+            FROM subscriptions s
+            LEFT JOIN categories c ON s.category_id = c.id
+            LEFT JOIN categories p ON c.parent_id = p.id
+            LEFT JOIN accounts a ON s.account_id = a.id
+            LEFT JOIN services svc ON s.service_id = svc.id
+            ORDER BY
+                CASE s.status WHEN 'active' THEN 0 ELSE 1 END,
+                s.renewal_date
+        """).fetchall()
+
+        # Batch enrichment: latest tx per subscription (replaces 2 queries per sub)
+        # Moom subs match only Moom txns; personal subs match only personal txns
+        latest_tx_rows = conn.execute("""
         WITH matched AS (
             SELECT s.id as sub_id,
                    t.id as tx_id, t.date as tx_date, t.amount_sgd,
@@ -1740,27 +1690,28 @@ def api_subscriptions():
         )
         SELECT sub_id, tx_id, tx_date, amount_sgd
         FROM matched WHERE rn = 1
-    """).fetchall()
-    latest_tx = {r["sub_id"]: dict(r) for r in latest_tx_rows}
+        """).fetchall()
+        latest_tx = {r["sub_id"]: dict(r) for r in latest_tx_rows}
 
-    # Batch enrichment: monthly sums per subscription for 90-day rolling avg
-    # Same personal/moom boundary as latest tx query
-    monthly_rows = conn.execute("""
-        SELECT s.id as sub_id,
-               SUBSTR(t.date, 1, 7) as ym,
-               SUM(t.amount_sgd) as month_total
-        FROM subscriptions s
-        JOIN transactions t
-            ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
-        LEFT JOIN categories sc ON s.category_id = sc.id
-        LEFT JOIN categories tc ON t.category_id = tc.id
-        WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
-          AND t.is_payment = 0 AND t.is_transfer = 0 AND t.amount_sgd > 0
-          AND t.date >= ?
-          AND COALESCE(tc.is_personal, 1) = COALESCE(sc.is_personal, 1)
-        GROUP BY s.id, SUBSTR(t.date, 1, 7)
-        ORDER BY s.id, ym DESC
-    """, (cutoff_90d,)).fetchall()
+        # Batch enrichment: monthly sums per subscription for 90-day rolling avg
+        # Same personal/moom boundary as latest tx query
+        monthly_rows = conn.execute("""
+            SELECT s.id as sub_id,
+                   SUBSTR(t.date, 1, 7) as ym,
+                   SUM(t.amount_sgd) as month_total
+            FROM subscriptions s
+            JOIN transactions t
+                ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
+            LEFT JOIN categories sc ON s.category_id = sc.id
+            LEFT JOIN categories tc ON t.category_id = tc.id
+            WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
+              AND t.is_payment = 0 AND t.is_transfer = 0 AND t.amount_sgd > 0
+              AND t.date >= ?
+              AND COALESCE(tc.is_personal, 1) = COALESCE(sc.is_personal, 1)
+            GROUP BY s.id, SUBSTR(t.date, 1, 7)
+            ORDER BY s.id, ym DESC
+        """, (cutoff_90d,)).fetchall()
+
     # Build lookup: sub_id → [{ym, month_total}, ...] ordered by ym DESC
     monthly_by_sub: dict[int, list[dict]] = {}
     for r in monthly_rows:
@@ -1775,30 +1726,19 @@ def api_subscriptions():
         pat = (d["match_pattern"] or "").upper()
         monthly_sums = monthly_by_sub.get(sub_id, []) if pat else []
 
-        # Enrich from batch lookups (no per-row queries)
+        # Enrich from batch lookups (defaults, then override if matched)
+        d.update(tx_last_paid=None, tx_amount=None, tx_id=None,
+                 tx_avg_90d=None, tx_months_90d=0)
         if pat:
             tx = latest_tx.get(sub_id)
             if tx:
                 d["tx_last_paid"] = tx["tx_date"]
                 d["tx_amount"] = round(tx["amount_sgd"], 2)
                 d["tx_id"] = tx["tx_id"]
-            else:
-                d["tx_last_paid"] = None
-                d["tx_amount"] = None
-                d["tx_id"] = None
-
             d["tx_months_90d"] = len(monthly_sums)
             if monthly_sums:
                 totals = [m["month_total"] for m in monthly_sums]
                 d["tx_avg_90d"] = round(sum(totals) / len(totals), 2)
-            else:
-                d["tx_avg_90d"] = None
-        else:
-            d["tx_last_paid"] = None
-            d["tx_amount"] = None
-            d["tx_id"] = None
-            d["tx_avg_90d"] = None
-            d["tx_months_90d"] = 0
 
         # Last paid amount: latest month's sum (handles split payments)
         if pat and d.get("tx_months_90d"):
@@ -1809,20 +1749,17 @@ def api_subscriptions():
         cur = d.get("currency") or "SGD"
 
         # Monthly equivalent: use 90d avg if variable (>10% variance), else configured
+        d["is_variable"] = False
         if d["tx_avg_90d"] and d["tx_months_90d"] >= 2:
             totals = [m["month_total"] for m in monthly_sums]
             mn, mx = min(totals), max(totals)
             if mx > mn * 1.10:
                 d["is_variable"] = True
                 d["monthly_sgd"] = round(d["tx_avg_90d"], 2)
-            else:
-                d["is_variable"] = False
-                d["monthly_sgd"] = round(_monthly_equivalent(amt, d["frequency"], d["periods"], cur, fx_rate), 2)
-        else:
-            d["is_variable"] = False
+        if not d["is_variable"]:
             d["monthly_sgd"] = round(_monthly_equivalent(amt, d["frequency"], d["periods"], cur, fx_rate), 2)
 
-        d["display_category"] = f"{d['parent_name']} > {d['category_name']}" if d["parent_name"] else (d["category_name"] or "")
+        d["display_category"] = format_category_display(d["parent_name"], d["category_name"])
         d["fx_rate"] = fx_rate
 
         # Anchor-based renewal: advance from renewal_date anchor until future
@@ -1833,7 +1770,6 @@ def api_subscriptions():
 
         result.append(d)
 
-    conn.close()
     return jsonify(result)
 
 
@@ -1844,82 +1780,55 @@ def api_subscriptions_create():
     if not data or not data.get("service_id"):
         return jsonify({"error": "service_id is required"}), 400
 
-    conn = get_connection()
-    try:
-        amount = data.get("amount", 0)
-        currency = data.get("currency", "SGD")
+    with get_db() as conn:
         # Derive match_pattern from service name if not provided
         match_pattern = data.get("match_pattern")
         if not match_pattern:
             svc = conn.execute("SELECT name FROM services WHERE id = ?", (data["service_id"],)).fetchone()
             match_pattern = svc["name"].upper() if svc else ""
 
-        conn.execute("""
-            INSERT INTO subscriptions
-                (service_id, category_id, amount, currency,
-                 frequency, periods, account_id, last_paid, renewal_date, status,
-                 link, notes, match_pattern)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            data["service_id"],
-            data.get("category_id"),
-            amount,
-            currency,
-            data.get("frequency", "monthly"),
-            data.get("periods", 1),
-            data.get("account_id"),
-            data.get("last_paid"),
-            data.get("renewal_date"),
-            data.get("status", "active"),
-            data.get("link"),
-            data.get("notes"),
-            match_pattern,
-        ))
-        conn.commit()
-        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.close()
-        return jsonify({"id": new_id, "success": True})
-    except Exception as e:
-        conn.close()
-        app.logger.warning("Failed to create subscription: %s", e)
-        return jsonify({"error": "Failed to create subscription"}), 400
+        return _crud_insert(
+            conn,
+            "INSERT INTO subscriptions "
+            "(service_id, category_id, amount, currency, "
+            "frequency, periods, account_id, last_paid, renewal_date, status, "
+            "link, notes, match_pattern) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                data["service_id"],
+                data.get("category_id"),
+                data.get("amount", 0),
+                data.get("currency", "SGD"),
+                data.get("frequency", "monthly"),
+                data.get("periods", 1),
+                data.get("account_id"),
+                data.get("last_paid"),
+                data.get("renewal_date"),
+                data.get("status", "active"),
+                data.get("link"),
+                data.get("notes"),
+                match_pattern,
+            ),
+            "subscription",
+        )
 
 
 @app.route("/api/subscriptions/<int:sub_id>", methods=["PUT"])
 def api_subscriptions_update(sub_id):
     """Update a subscription."""
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-
-    allowed = ["service_id", "category_id", "amount", "currency", "frequency",
-               "periods", "account_id", "last_paid", "renewal_date", "status",
-               "link", "notes", "match_pattern"]
-    sets = []
-    params = []
-    for field in allowed:
-        if field in data:
-            sets.append(f"{field} = ?")
-            params.append(data[field])
-
-    if not sets:
-        return jsonify({"error": "No fields to update"}), 400
-
-    conn = get_connection()
-    params.append(sub_id)
-    conn.execute(f"UPDATE subscriptions SET {', '.join(sets)} WHERE id = ?", params)
-    conn.commit()
-    conn.close()
-    return jsonify({"success": True})
+    return _crud_update("subscriptions", sub_id, request.get_json(), [
+        "service_id", "category_id", "amount", "currency", "frequency",
+        "periods", "account_id", "last_paid", "renewal_date", "status",
+        "link", "notes", "match_pattern",
+    ])
 
 
 @app.route("/api/subscriptions/<int:sub_id>", methods=["DELETE"])
 def api_subscriptions_delete(sub_id):
     """Delete a subscription."""
-    conn = get_connection()
-    conn.execute("DELETE FROM subscriptions WHERE id = ?", (sub_id,))
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        conn.execute("DELETE FROM subscriptions WHERE id = ?", (sub_id,))
+        conn.commit()
     return jsonify({"success": True})
 
 
@@ -1929,37 +1838,36 @@ def api_subscriptions_enrich():
 
     Also auto-advances renewal_date when last_paid is past the current renewal.
     """
-    conn = get_connection()
-    subs = conn.execute(
-        "SELECT id, match_pattern, frequency, periods, renewal_date, currency "
-        "FROM subscriptions WHERE match_pattern IS NOT NULL"
-    ).fetchall()
-    updated = 0
-    renewals_advanced = 0
-    for s in subs:
-        tx = conn.execute("""
-            SELECT t.date, t.amount_sgd
-            FROM transactions t
-            WHERE UPPER(t.description) LIKE '%' || ? || '%'
-              AND t.is_payment = 0 AND t.is_transfer = 0
-              AND t.amount_sgd > 0
-            ORDER BY t.date DESC LIMIT 1
-        """, (s["match_pattern"].upper(),)).fetchone()
-        if tx:
-            new_renewal = _advance_renewal(
-                s["renewal_date"], tx["date"], s["frequency"], s["periods"]
-            )
-            # Update last_paid and renewal only — never overwrite the user's
-            # configured billed amount (amount is the source of truth, set manually)
-            conn.execute(
-                "UPDATE subscriptions SET last_paid = ?, renewal_date = ? WHERE id = ?",
-                (tx["date"], new_renewal, s["id"]),
-            )
-            updated += 1
-            if new_renewal != s["renewal_date"]:
-                renewals_advanced += 1
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        subs = conn.execute(
+            "SELECT id, match_pattern, frequency, periods, renewal_date, currency "
+            "FROM subscriptions WHERE match_pattern IS NOT NULL"
+        ).fetchall()
+        updated = 0
+        renewals_advanced = 0
+        for s in subs:
+            tx = conn.execute("""
+                SELECT t.date, t.amount_sgd
+                FROM transactions t
+                WHERE UPPER(t.description) LIKE '%' || ? || '%'
+                  AND t.is_payment = 0 AND t.is_transfer = 0
+                  AND t.amount_sgd > 0
+                ORDER BY t.date DESC LIMIT 1
+            """, (s["match_pattern"].upper(),)).fetchone()
+            if tx:
+                new_renewal = _advance_renewal(
+                    s["renewal_date"], tx["date"], s["frequency"], s["periods"]
+                )
+                # Update last_paid and renewal only — never overwrite the user's
+                # configured billed amount (amount is the source of truth, set manually)
+                conn.execute(
+                    "UPDATE subscriptions SET last_paid = ?, renewal_date = ? WHERE id = ?",
+                    (tx["date"], new_renewal, s["id"]),
+                )
+                updated += 1
+                if new_renewal != s["renewal_date"]:
+                    renewals_advanced += 1
+        conn.commit()
     return jsonify({"success": True, "updated": updated, "renewals_advanced": renewals_advanced})
 
 

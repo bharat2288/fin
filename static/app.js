@@ -24,8 +24,8 @@ let lastGranularity = null;    // Cache for chart mode toggle
 let subsFilter = 'active';     // 'active', 'all', 'deactivated'
 let subsSpend = 'personal';    // 'personal', 'all', 'moom'
 let allSubs = [];              // Cached subscription data
-let subsSortCol = 'service';   // Current sort column
-let subsSortAsc = true;        // Sort direction
+const subsSortState = { col: 'service', asc: true };
+// sortSubs toggler created after renderSubscriptions is defined (line ~3400)
 let subsFxRate = 1.35;         // USD→SGD rate from subscriptions API
 let noteModalTxId = null;      // Transaction ID being edited in note modal
 let noteModalIconEl = null;    // Icon element to update after save
@@ -49,6 +49,222 @@ const CAT_COLORS = [
 
 const MONTH_NAMES = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// ============================================================
+// SHARED HELPERS
+// ============================================================
+
+// Build hierarchical category <option> HTML from the global categories array.
+// Options: placeholder (default "—"), includeNew (appends "+ New category..."), selectedId
+function buildCategoryDropdownHtml({placeholder = '—', includeNew = false, selectedId = null} = {}) {
+    let html = `<option value="">${placeholder}</option>`;
+    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
+    parents.forEach(p => {
+        html += `<option value="${p.id}"${p.id == selectedId ? ' selected' : ''}>${p.name}</option>`;
+        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
+        children.forEach(c => {
+            html += `<option value="${c.id}"${c.id == selectedId ? ' selected' : ''}>&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
+        });
+    });
+    if (includeNew) html += '<option value="__new__">+ New category...</option>';
+    return html;
+}
+
+// Populate a <select> element with hierarchical category options.
+// parentSelectId: optional ID of a parent-only dropdown to populate alongside (for "new category" flows)
+function populateCategorySelect(selectId, {placeholder, includeNew, selectedId, parentSelectId} = {}) {
+    const sel = document.getElementById(selectId);
+    sel.innerHTML = buildCategoryDropdownHtml({placeholder, includeNew, selectedId});
+    if (parentSelectId) {
+        const parentSel = document.getElementById(parentSelectId);
+        if (parentSel) {
+            parentSel.innerHTML = '<option value="">-- Top-level --</option>';
+            categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name))
+                .forEach(p => { parentSel.innerHTML += `<option value="${p.id}">${p.name}</option>`; });
+        }
+    }
+}
+
+// Factory: create a sort toggler for a table section.
+// stateObj must have { col, asc } properties. renderFn is called after toggling.
+function createSortToggler(stateObj, renderFn) {
+    return function(col) {
+        if (stateObj.col === col) {
+            stateObj.asc = !stateObj.asc;
+        } else {
+            stateObj.col = col;
+            stateObj.asc = true;
+        }
+        renderFn();
+    };
+}
+
+// Update sort indicator CSS classes on sortable table headers.
+function updateSortIndicators(tableSelector, sortState) {
+    document.querySelectorAll(`${tableSelector} th.sortable`).forEach(th => {
+        th.classList.remove('sort-asc', 'sort-desc');
+        if (th.dataset.sort === sortState.col) {
+            th.classList.add(sortState.asc ? 'sort-asc' : 'sort-desc');
+        }
+    });
+}
+
+// Resolve a category select that may have "__new__" selected.
+// Returns { id: number|null, abort: boolean }. abort=true means validation failed (caller should return).
+async function resolveCategory(selectId, prefix) {
+    const catVal = document.getElementById(selectId).value;
+    if (catVal === '__new__') {
+        const newCatName = document.getElementById(`${prefix}-new-cat-name`).value.trim();
+        if (!newCatName) { alert('Please enter a category name.'); return { id: null, abort: true }; }
+        const parentId = document.getElementById(`${prefix}-new-cat-parent`).value || null;
+        const isPersonal = parseInt(document.getElementById(`${prefix}-new-cat-type`).value);
+        const catData = await apiFetch('/api/categories', {
+            method: 'POST', body: { name: newCatName, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }
+        });
+        if (!catData) return { id: null, abort: true };
+        await loadReferenceData();
+        showToast(`Created category "${newCatName}"`, 'info');
+        return { id: catData.id, abort: false };
+    }
+    return { id: catVal ? parseInt(catVal) : null, abort: false };
+}
+
+// Toggle new-category-row visibility when category select changes to/from "__new__".
+function toggleNewCategoryRow(selectId, newCatRowId, focusFieldId) {
+    const val = document.getElementById(selectId).value;
+    const row = document.getElementById(newCatRowId);
+    if (val === '__new__') { row.classList.remove('hidden'); document.getElementById(focusFieldId).focus(); }
+    else { row.classList.add('hidden'); }
+}
+
+// Open a modal: display flex, optional backdrop close and Escape key handler.
+// Returns a close function. Stores handler refs on the element for closeModal().
+function openModalEl(modalId, closeFn) {
+    const modal = document.getElementById(modalId);
+    modal.style.display = 'flex';
+    const backdropHandler = (e) => { if (e.target === modal) closeFn(); };
+    const escHandler = (e) => { if (e.key === 'Escape') closeFn(); };
+    modal.onclick = backdropHandler;
+    document.addEventListener('keydown', escHandler);
+    modal._escHandler = escHandler;
+}
+
+function closeModalEl(modalId) {
+    const modal = document.getElementById(modalId);
+    modal.style.display = 'none';
+    if (modal._escHandler) {
+        document.removeEventListener('keydown', modal._escHandler);
+        modal._escHandler = null;
+    }
+    modal.onclick = null;
+}
+
+// Setup FX rate hint on a currency <select> within a modal.
+function setupFxHint(modalId, currencySelectId) {
+    const currSel = document.getElementById(currencySelectId);
+    const update = () => {
+        document.querySelectorAll(`#${modalId} .fx-rate-hint`).forEach(el => {
+            el.textContent = currSel.value === 'USD' && subsFxRate ? `(1 USD = ${subsFxRate.toFixed(2)} SGD)` : '';
+        });
+    };
+    currSel.onchange = update;
+    update();
+}
+
+// Compute renewal date from start + frequency + periods.
+function calcRenewalDate(startVal, freq, periods) {
+    const start = new Date(startVal);
+    if (freq === 'yearly') start.setFullYear(start.getFullYear() + periods);
+    else if (freq === 'half-yearly') start.setMonth(start.getMonth() + 6 * periods);
+    else if (freq === 'quarterly') start.setMonth(start.getMonth() + 3 * periods);
+    else if (freq === 'biweekly') start.setDate(start.getDate() + 14 * periods);
+    else if (freq === 'weekly') start.setDate(start.getDate() + 7 * periods);
+    else start.setMonth(start.getMonth() + periods);
+    return start.toISOString().split('T')[0];
+}
+
+// Update a service's category and show toast with recategorization count.
+// Returns the recategorized count (0 if failed/skipped).
+async function cascadeServiceCategory(serviceId, categoryId, serviceName, verb) {
+    if (!serviceId || !categoryId) return 0;
+    const svcData = await apiFetch(`/api/services/${serviceId}`, {
+        method: 'PUT', body: { category_id: categoryId }
+    });
+    if (svcData && svcData.recategorized) {
+        showToast(`${verb} "${serviceName}" + re-categorized ${svcData.recategorized} transactions`, 'info');
+        return svcData.recategorized;
+    }
+    return 0;
+}
+
+// Build a visibility-change hint for toast when a transaction moves between spend filters.
+function spendFilterHint(categoryId) {
+    const cat = categories.find(c => c.id === categoryId);
+    if (!cat) return null;
+    const isPersonalCat = cat.is_personal === 1;
+    if (spendFilter === 'personal' && !isPersonalCat) return 'Moved to Moom — switch to "All" to see it';
+    if (spendFilter === 'moom' && isPersonalCat) return 'Moved to Personal — switch to "All" to see it';
+    return null;
+}
+
+// Resolve service+category from a picker: validate, create new service if needed.
+// Returns { serviceId, categoryId, serviceName } or null if aborted.
+async function resolveSubService(pickerFn, catSelectId, catPrefix) {
+    const picker = pickerFn();
+    let { id: serviceId, name: serviceName } = picker.getValue();
+    if (!serviceName) { alert('Please select or create a service'); return null; }
+
+    const { id: categoryId, abort } = await resolveCategory(catSelectId, catPrefix);
+    if (abort) return null;
+
+    if (!serviceId && serviceName) {
+        if (!categoryId) { alert('Please select a category for the new service.'); return null; }
+        const svcData = await apiFetch('/api/services', {
+            method: 'POST', body: { name: serviceName, category_id: categoryId }
+        });
+        if (!svcData) return null;
+        serviceId = svcData.id;
+        allServicesList = null;
+        showToast(`Created service "${serviceName}"`, 'info');
+    }
+    return { serviceId, categoryId, serviceName };
+}
+
+// Read subscription form fields. prefix: 'sub' for add, 'edit-sub' for edit.
+function readSubFormBody(prefix, serviceId, categoryId, serviceName) {
+    const el = (id) => document.getElementById(`${prefix}-${id}`);
+    return {
+        service_id: serviceId,
+        category_id: categoryId,
+        amount: parseFloat(el('amount').value) || 0,
+        currency: el('currency').value || 'SGD',
+        frequency: el(prefix === 'sub' ? 'frequency' : 'freq').value,
+        periods: parseInt(el('periods').value) || 1,
+        account_id: el('card').value ? parseInt(el('card').value) : null,
+        renewal_date: el('renewal').value || null,
+        match_pattern: getServiceRulePattern(serviceId) || serviceName.toUpperCase(),
+        status: el('status').value || 'active',
+        link: el('link').value.trim() || null,
+        notes: el('notes').value.trim() || null,
+    };
+}
+
+// Fetch JSON from an API endpoint with standard error handling.
+// Returns parsed JSON on success, or null if data.error was present (alert shown).
+// For non-JSON responses or network errors, throws.
+async function apiFetch(url, options = {}) {
+    if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
+        options.headers = {'Content-Type': 'application/json', ...options.headers};
+        options.body = JSON.stringify(options.body);
+    }
+    const res = await fetch(url, options);
+    const data = await res.json();
+    if (data.error) {
+        alert('Error: ' + data.error);
+        return null;
+    }
+    return data;
+}
 
 // ============================================================
 // INIT
@@ -817,10 +1033,8 @@ async function saveNote() {
     btn.textContent = 'Saving...';
 
     try {
-        await fetch(`/api/transactions/${noteModalTxId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ notes: note || null }),
+        await apiFetch(`/api/transactions/${noteModalTxId}`, {
+            method: 'PUT', body: { notes: note || null }
         });
 
         // Update icon state inline
@@ -846,10 +1060,8 @@ async function clearNote() {
     btn.disabled = true;
 
     try {
-        await fetch(`/api/transactions/${noteModalTxId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ notes: null }),
+        await apiFetch(`/api/transactions/${noteModalTxId}`, {
+            method: 'PUT', body: { notes: null }
         });
 
         if (noteModalIconEl) {
@@ -866,10 +1078,8 @@ async function toggleTxOneOff(txId, el) {
     const isActive = el.classList.contains('active');
     const newVal = isActive ? 0 : 1;
     try {
-        await fetch(`/api/transactions/${txId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ is_one_off: newVal }),
+        await apiFetch(`/api/transactions/${txId}`, {
+            method: 'PUT', body: { is_one_off: newVal }
         });
         el.classList.toggle('active');
         el.title = newVal
@@ -908,30 +1118,24 @@ document.addEventListener('DOMContentLoaded', () => {
         svcMasterSearchEl.addEventListener('input', debounce(renderServicesMaster, 300));
     }
 
-    // Close modals on Escape
+    // Close modals on Escape and overlay click (note-modal, resolve-modal, edit-rule-modal)
+    // add-service, edit-service, add-sub, edit-sub modals use openModalEl which handles its own Escape/backdrop
+    const _staticModals = {
+        'note-modal': closeNoteModal,
+        'resolve-modal': closeResolveModal,
+        'edit-rule-modal': closeEditRuleModal,
+    };
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape') {
-            if (document.getElementById('note-modal').style.display !== 'none') closeNoteModal();
-            if (document.getElementById('resolve-modal').style.display !== 'none') closeResolveModal();
-            if (document.getElementById('edit-rule-modal').style.display !== 'none') closeEditRuleModal();
-            if (document.getElementById('add-service-modal').style.display !== 'none') closeAddServiceModal();
-            if (document.getElementById('edit-service-modal').style.display !== 'none') closeEditServiceModal();
+        if (e.key !== 'Escape') return;
+        for (const [id, fn] of Object.entries(_staticModals)) {
+            if (document.getElementById(id).style.display !== 'none') { fn(); return; }
         }
     });
-
-    // Close modals on overlay click (only when clicking the overlay itself, not modal content)
-    ['note-modal', 'resolve-modal', 'edit-rule-modal', 'add-service-modal', 'edit-service-modal'].forEach(id => {
+    for (const [id, fn] of Object.entries(_staticModals)) {
         document.getElementById(id)?.addEventListener('mousedown', e => {
-            // Only close if clicking directly on the overlay background
-            if (e.target === e.currentTarget) {
-                if (id === 'note-modal') closeNoteModal();
-                if (id === 'resolve-modal') closeResolveModal();
-                if (id === 'edit-rule-modal') closeEditRuleModal();
-                if (id === 'add-service-modal') closeAddServiceModal();
-                if (id === 'edit-service-modal') closeEditServiceModal();
-            }
+            if (e.target === e.currentTarget) fn();
         });
-    });
+    }
 });
 
 // ============================================================
@@ -979,7 +1183,9 @@ async function openResolveModal(txId, description) {
     document.getElementById('resolve-cat-hint').style.display = 'none';
 
     // Populate category dropdown (for new services or manual override)
-    populateResolveCategoryDropdown();
+    populateCategorySelect('resolve-modal-category', {
+        placeholder: '-- Select category --', includeNew: true, parentSelectId: 'resolve-new-cat-parent'
+    });
 
     // Try to auto-match service from description
     await autoMatchService(description);
@@ -989,36 +1195,8 @@ async function openResolveModal(txId, description) {
     picker.input.focus();
 }
 
-function populateResolveCategoryDropdown() {
-    const select = document.getElementById('resolve-modal-category');
-    let options = '<option value="">-- Select category --</option>';
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-    parents.forEach(p => {
-        options += `<option value="${p.id}">${p.name}</option>`;
-        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-        children.forEach(c => {
-            options += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
-        });
-    });
-    options += '<option value="__new__">+ New category...</option>';
-    select.innerHTML = options;
-
-    // Populate parent dropdown for new category creation
-    const parentSelect = document.getElementById('resolve-new-cat-parent');
-    let parentOpts = '<option value="">-- Top-level --</option>';
-    parents.forEach(p => { parentOpts += `<option value="${p.id}">${p.name}</option>`; });
-    parentSelect.innerHTML = parentOpts;
-}
-
 function onResolveCategoryChange() {
-    const val = document.getElementById('resolve-modal-category').value;
-    const newCatRow = document.getElementById('resolve-new-cat-row');
-    if (val === '__new__') {
-        newCatRow.classList.remove('hidden');
-        document.getElementById('resolve-new-cat-name').focus();
-    } else {
-        newCatRow.classList.add('hidden');
-    }
+    toggleNewCategoryRow('resolve-modal-category', 'resolve-new-cat-row', 'resolve-new-cat-name');
     updateResolveCascade();
 }
 
@@ -1125,107 +1303,47 @@ async function saveResolveModal() {
     const matchType = document.getElementById('resolve-modal-match').value;
 
     if (!serviceName) { alert('Please enter a service name.'); return; }
-    // Pattern is optional (PayNow/bank transfers have no matchable pattern)
 
     const btn = document.getElementById('resolve-modal-save');
     btn.disabled = true;
     btn.textContent = 'Resolving...';
 
     try {
-        // Step 0: Create new category if needed
-        const catVal = document.getElementById('resolve-modal-category').value;
-        if (catVal === '__new__') {
-            const newCatName = document.getElementById('resolve-new-cat-name').value.trim();
-            if (!newCatName) { alert('Please enter a category name.'); return; }
-            const parentId = document.getElementById('resolve-new-cat-parent').value || null;
-            const isPersonal = parseInt(document.getElementById('resolve-new-cat-type').value);
-            const catRes = await fetch('/api/categories', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: newCatName, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }),
-            });
-            const catData = await catRes.json();
-            if (catData.error) { alert('Category error: ' + catData.error); return; }
-            categoryId = catData.id;
-            // Refresh categories cache
-            await loadReferenceData();
-            showToast(`Created category "${newCatName}"`, 'info');
-        }
+        const { id: newCatId, abort } = await resolveCategory('resolve-modal-category', 'resolve');
+        if (abort) return;
+        if (newCatId) categoryId = newCatId;
+        if (!categoryId) { alert('Please select a category.'); return; }
 
-        if (!categoryId) {
-            alert('Please select a category.');
-            return;
-        }
-
-        // Find service_id from picker selection
         const existingService = pickedServiceId
             ? allServicesList.find(s => s.id === pickedServiceId)
             : allServicesList.find(s => s.name.toLowerCase() === serviceName.toLowerCase());
 
-        // Check cascade scope
-        const cascadeEl = document.getElementById('resolve-cascade');
-        const wantsCascade = !cascadeEl.classList.contains('hidden') &&
+        // Cascade: update service category if user chose "service" scope
+        const wantsCascade = !document.getElementById('resolve-cascade').classList.contains('hidden') &&
             document.querySelector('input[name="resolve-scope"][value="service"]')?.checked;
-
-        // Step 1: If cascade requested, update service category first
         if (wantsCascade && existingService) {
-            const svcRes = await fetch(`/api/services/${existingService.id}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ category_id: categoryId }),
-            });
-            const svcData = await svcRes.json();
-            const recat = svcData.recategorized || 0;
-            showToast(`Re-categorized "${serviceName}" + ${recat} transactions`, 'info');
+            await cascadeServiceCategory(existingService.id, categoryId, serviceName, 'Re-categorized');
         }
 
-        // Step 2: Resolve the transaction (create service/rule if needed)
-        const payload = {
-            tx_id: resolveModalTxId,
-            service_name: serviceName,
-            pattern: pattern,
-            match_type: matchType,
-            category_id: categoryId,
-        };
-        if (existingService) {
-            payload.service_id = existingService.id;
-        }
+        // Resolve the transaction (create service/rule if needed)
+        const payload = { tx_id: resolveModalTxId, service_name: serviceName, pattern, match_type: matchType, category_id: categoryId };
+        if (existingService) payload.service_id = existingService.id;
 
-        const res = await fetch('/api/transactions/resolve', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (data.error) {
-            alert('Error: ' + data.error);
-            return;
-        }
+        const data = await apiFetch('/api/transactions/resolve', { method: 'POST', body: payload });
+        if (!data) return;
 
         // Toast feedback
         const parts = [];
         if (!existingService) parts.push(`Created service "${serviceName}"`);
         if (data.backfilled > 0) parts.push(`${data.backfilled} matching transactions updated`);
-
-        // Check if transaction will vanish from current view
-        const cat = categories.find(c => c.id === categoryId);
-        if (cat) {
-            const isPersonalCat = cat.is_personal === 1;
-            if (spendFilter === 'personal' && !isPersonalCat) {
-                parts.push('Moved to Moom — switch to "All" to see it');
-            } else if (spendFilter === 'moom' && isPersonalCat) {
-                parts.push('Moved to Personal — switch to "All" to see it');
-            }
-        }
-
+        const hint = spendFilterHint(categoryId);
+        if (hint) parts.push(hint);
         if (parts.length) showToast(parts.join('. '), 'info', 5000);
 
-        // Invalidate services cache so new services show up
         allServicesList = null;
         allServicesCache = [];
-
         closeResolveModal();
-        txPage(0); // reload transaction table
+        txPage(0);
 
     } finally {
         btn.disabled = false;
@@ -1522,17 +1640,8 @@ async function confirmImport() {
     confirmBtn.disabled = true;
 
     try {
-        const res = await fetch('/api/import/confirm', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-        const result = await res.json();
-
-        if (result.error) {
-            alert('Commit error: ' + result.error);
-            return;
-        }
+        const result = await apiFetch('/api/import/confirm', { method: 'POST', body });
+        if (!result) return;
 
         const dupMsg = result.duplicates_skipped ? ` (${result.duplicates_skipped} duplicates skipped)` : '';
         const svcMsg = result.services_created ? ` ${result.services_created} new services created.` : '';
@@ -1794,17 +1903,8 @@ async function addRule() {
     if (minAmountVal) body.min_amount = parseFloat(minAmountVal);
     if (maxAmountVal) body.max_amount = parseFloat(maxAmountVal);
 
-    const res = await fetch('/api/rules', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    const data = await res.json();
-
-    if (data.error) {
-        alert('Error: ' + data.error);
-        return;
-    }
+    const data = await apiFetch('/api/rules', { method: 'POST', body });
+    if (!data) return;
 
     document.getElementById('rule-pattern').value = '';
     document.getElementById('rule-priority').value = '0';
@@ -1817,12 +1917,9 @@ async function editRule(ruleId) {
     const rule = allRules.find(r => r.id === ruleId);
     if (!rule) return;
 
-    document.getElementById('edit-rule-id').value = ruleId;
-    document.getElementById('edit-rule-pattern').value = rule.pattern;
-    document.getElementById('edit-rule-match').value = rule.match_type || 'contains';
-    document.getElementById('edit-rule-priority').value = rule.priority || 0;
-    document.getElementById('edit-rule-min').value = rule.min_amount || '';
-    document.getElementById('edit-rule-max').value = rule.max_amount || '';
+    const ruleFields = { id: ruleId, pattern: rule.pattern, match: rule.match_type || 'contains',
+        priority: rule.priority || 0, min: rule.min_amount || '', max: rule.max_amount || '' };
+    for (const [k, v] of Object.entries(ruleFields)) document.getElementById(`edit-rule-${k}`).value = v;
 
     // Set current service in picker
     const picker = getEditRuleServicePicker();
@@ -1857,18 +1954,14 @@ async function saveEditRule() {
     };
     if (serviceId) payload.service_id = serviceId;
 
-    await fetch(`/api/rules/${ruleId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-    });
+    await apiFetch(`/api/rules/${ruleId}`, { method: 'PUT', body: payload });
     closeEditRuleModal();
     await loadRules();
 }
 
 async function deleteRule(ruleId) {
     if (!confirm('Delete this rule?')) return;
-    await fetch(`/api/rules/${ruleId}`, { method: 'DELETE' });
+    await apiFetch(`/api/rules/${ruleId}`, { method: 'DELETE' });
     await loadRules();
 }
 
@@ -1901,6 +1994,8 @@ function toggleCatForm() {
 }
 
 function populateCatParentDropdown() {
+    // Uses the parent-select-only path of populateCategorySelect
+    // by populating a dummy and leveraging parentSelectId — but this is simpler inline:
     const sel = document.getElementById('cat-new-parent');
     sel.innerHTML = '<option value="">-- Top-level --</option>';
     categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name)).forEach(c => {
@@ -1967,17 +2062,8 @@ async function addCategory() {
     const body = { name, is_personal: parseInt(isPersonal) };
     if (parentId) body.parent_id = parseInt(parentId);
 
-    const res = await fetch('/api/categories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    const data = await res.json();
-
-    if (data.error) {
-        alert('Error: ' + data.error);
-        return;
-    }
+    const data = await apiFetch('/api/categories', { method: 'POST', body });
+    if (!data) return;
 
     document.getElementById('cat-new-name').value = '';
     await loadReferenceData();
@@ -2273,7 +2359,8 @@ function setTxView(mode) {
     }
 }
 
-async function loadServiceAccordion() {
+// Build the full transaction URL for accordion views (shared by service + category accordions).
+function buildAccordionUrl() {
     const params = buildFilterParams();
     const search = document.getElementById('tx-search').value;
     let url = `/api/transactions?${params}&per_page=5000&sort=date&sort_dir=desc`;
@@ -2284,8 +2371,31 @@ async function loadServiceAccordion() {
     const chartDateRange = getChartFilterDateRange();
     if (chartDateRange.start) url += '&chart_start=' + chartDateRange.start;
     if (chartDateRange.end) url += '&chart_end=' + chartDateRange.end;
+    return url;
+}
 
-    const data = await fetch(url).then(r => r.json());
+// Build an accordion group HTML block (header + collapsible body).
+function buildAccordionGroup(label, meta, bodyHtml, extraClasses) {
+    const cls = extraClasses ? `${extraClasses} svc-accordion-item` : 'svc-accordion-item';
+    const hdrCls = extraClasses ? `${extraClasses.replace('-item', '-header').replace('-group', '-header')} svc-accordion-header` : 'svc-accordion-header';
+    return `<div class="${cls}">
+        <div class="${hdrCls}" onclick="this.parentElement.classList.toggle('open')">
+            <span class="svc-accordion-arrow">&#9654;</span>
+            ${label} <span class="svc-accordion-meta">${meta}</span>
+        </div>
+        <div class="svc-accordion-body">${bodyHtml}</div>
+    </div>`;
+}
+
+// Build a compact transaction table for accordion bodies.
+function accordionTxTable(txns) {
+    return `<table class="data-table" style="font-size:12px;">
+        <tbody>${txns.map(tx => renderAccordionTxRow(tx)).join('')}</tbody>
+    </table>`;
+}
+
+async function loadServiceAccordion() {
+    const data = await fetch(buildAccordionUrl()).then(r => r.json());
     const txns = data.transactions.filter(tx => !tx.is_payment && !tx.is_transfer);
 
     // Group by service
@@ -2306,49 +2416,21 @@ async function loadServiceAccordion() {
     const container = document.getElementById('tx-view-service');
     let html = '';
     for (const [svcId, g] of sorted) {
-        html += `<div class="svc-accordion-item">
-            <div class="svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
-                <span class="svc-accordion-arrow">&#9654;</span>
-                <span class="svc-accordion-name">${escapeHtml(g.name)}</span>
-                <span class="svc-accordion-meta">${escapeHtml(g.category)} &middot; ${g.txns.length} txns &middot; S$${formatAmount(g.total)}</span>
-            </div>
-            <div class="svc-accordion-body">
-                <table class="data-table" style="font-size:12px;">
-                    <tbody>${g.txns.map(tx => renderAccordionTxRow(tx)).join('')}</tbody>
-                </table>
-            </div>
-        </div>`;
+        html += buildAccordionGroup(
+            `<span class="svc-accordion-name">${escapeHtml(g.name)}</span>`,
+            `${escapeHtml(g.category)} &middot; ${g.txns.length} txns &middot; S$${formatAmount(g.total)}`,
+            accordionTxTable(g.txns));
     }
     if (noService.length) {
-        html += `<div class="svc-accordion-item">
-            <div class="svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
-                <span class="svc-accordion-arrow">&#9654;</span>
-                <span class="svc-accordion-name text-muted">Unlinked</span>
-                <span class="svc-accordion-meta">${noService.length} txns</span>
-            </div>
-            <div class="svc-accordion-body">
-                <table class="data-table" style="font-size:12px;">
-                    <tbody>${noService.map(tx => renderAccordionTxRow(tx)).join('')}</tbody>
-                </table>
-            </div>
-        </div>`;
+        html += buildAccordionGroup(
+            '<span class="svc-accordion-name text-muted">Unlinked</span>',
+            `${noService.length} txns`, accordionTxTable(noService));
     }
     container.innerHTML = html || '<div class="empty-state"><div class="empty-state-text">No transactions</div></div>';
 }
 
 async function loadCategoryAccordion() {
-    const params = buildFilterParams();
-    const search = document.getElementById('tx-search').value;
-    let url = `/api/transactions?${params}&per_page=5000&sort=date&sort_dir=desc`;
-    if (search) url += '&search=' + encodeURIComponent(search);
-    const chartCats = getChartFilterCategories();
-    const activeCats = chartCats.length > 0 ? chartCats : catFilterSelections;
-    if (activeCats.length) url += '&categories=' + encodeURIComponent(activeCats.join(','));
-    const chartDateRange = getChartFilterDateRange();
-    if (chartDateRange.start) url += '&chart_start=' + chartDateRange.start;
-    if (chartDateRange.end) url += '&chart_end=' + chartDateRange.end;
-
-    const data = await fetch(url).then(r => r.json());
+    const data = await fetch(buildAccordionUrl()).then(r => r.json());
     const txns = data.transactions.filter(tx => !tx.is_payment && !tx.is_transfer);
 
     // Build 3-level: parent category → subcategory → service → transactions
@@ -2382,39 +2464,24 @@ async function loadCategoryAccordion() {
             const sortedSvcs = Object.entries(subData.services).sort((a, b) => b[1].total - a[1].total);
             let svcsHtml = '';
             for (const [svcKey, svcData] of sortedSvcs) {
-                svcsHtml += `<div class="cat-l3-item svc-accordion-item">
-                    <div class="cat-l3-header svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
-                        <span class="svc-accordion-arrow">&#9654;</span>
-                        ${escapeHtml(svcData.name)} <span class="svc-accordion-meta">${svcData.txns.length} txns &middot; S$${formatAmount(svcData.total)}</span>
-                    </div>
-                    <div class="svc-accordion-body">
-                        <table class="data-table" style="font-size:12px;">
-                            <tbody>${svcData.txns.map(tx => renderAccordionTxRow(tx)).join('')}</tbody>
-                        </table>
-                    </div>
-                </div>`;
+                svcsHtml += buildAccordionGroup(
+                    escapeHtml(svcData.name),
+                    `${svcData.txns.length} txns &middot; S$${formatAmount(svcData.total)}`,
+                    accordionTxTable(svcData.txns), 'cat-l3-item');
             }
 
             if (subKey === '__direct__') {
                 innerHtml += svcsHtml;
             } else {
-                innerHtml += `<div class="cat-l2-group svc-accordion-item">
-                    <div class="cat-l2-header svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
-                        <span class="svc-accordion-arrow">&#9654;</span>
-                        ${escapeHtml(subKey)} <span class="svc-accordion-meta">S$${formatAmount(subData.total)}</span>
-                    </div>
-                    <div class="svc-accordion-body">${svcsHtml}</div>
-                </div>`;
+                innerHtml += buildAccordionGroup(
+                    escapeHtml(subKey), `S$${formatAmount(subData.total)}`,
+                    svcsHtml, 'cat-l2-group');
             }
         }
 
-        html += `<div class="cat-l1-group svc-accordion-item">
-            <div class="cat-l1-header svc-accordion-header" onclick="this.parentElement.classList.toggle('open')">
-                <span class="svc-accordion-arrow">&#9654;</span>
-                <strong>${escapeHtml(catName)}</strong> <span class="svc-accordion-meta">S$${formatAmount(catData.total)}</span>
-            </div>
-            <div class="svc-accordion-body">${innerHtml}</div>
-        </div>`;
+        html += buildAccordionGroup(
+            `<strong>${escapeHtml(catName)}</strong>`, `S$${formatAmount(catData.total)}`,
+            innerHtml, 'cat-l1-group');
     }
     container.innerHTML = html || '<div class="empty-state"><div class="empty-state-text">No transactions</div></div>';
 }
@@ -2657,8 +2724,8 @@ function renderCategoriesMaster() {
 // ============================================================
 
 let allServicesCache = [];
-let svcMasterSortCol = 'name';
-let svcMasterSortAsc = true;
+const svcSortState = { col: 'name', asc: true };
+const sortServicesMaster = createSortToggler(svcSortState, () => renderServicesMaster(true));
 
 async function renderServicesMaster(skipFetch) {
     if (!skipFetch) {
@@ -2673,23 +2740,17 @@ async function renderServicesMaster(skipFetch) {
     // Sort
     filtered = [...filtered].sort((a, b) => {
         let va, vb;
-        switch (svcMasterSortCol) {
+        switch (svcSortState.col) {
             case 'category': va = (a.display_category || '').toLowerCase(); vb = (b.display_category || '').toLowerCase(); break;
             case 'notes':    va = (a.notes || '').toLowerCase(); vb = (b.notes || '').toLowerCase(); break;
             default:         va = a.name.toLowerCase(); vb = b.name.toLowerCase();
         }
-        if (va < vb) return svcMasterSortAsc ? -1 : 1;
-        if (va > vb) return svcMasterSortAsc ? 1 : -1;
+        if (va < vb) return svcSortState.asc ? -1 : 1;
+        if (va > vb) return svcSortState.asc ? 1 : -1;
         return 0;
     });
 
-    // Update sort indicators
-    document.querySelectorAll('#services-master-table th.sortable').forEach(th => {
-        th.classList.remove('sort-asc', 'sort-desc');
-        if (th.dataset.sort === svcMasterSortCol) {
-            th.classList.add(svcMasterSortAsc ? 'sort-asc' : 'sort-desc');
-        }
-    });
+    updateSortIndicators('#services-master-table', svcSortState);
 
     const body = document.getElementById('services-master-body');
     if (!filtered.length) {
@@ -2712,16 +2773,6 @@ async function renderServicesMaster(skipFetch) {
     document.querySelectorAll('#services-master-table th.sortable').forEach(th => {
         th.onclick = () => sortServicesMaster(th.dataset.sort);
     });
-}
-
-function sortServicesMaster(col) {
-    if (svcMasterSortCol === col) {
-        svcMasterSortAsc = !svcMasterSortAsc;
-    } else {
-        svcMasterSortCol = col;
-        svcMasterSortAsc = true;
-    }
-    renderServicesMaster(true);
 }
 
 // ============================================================
@@ -2881,25 +2932,14 @@ function openAddServiceModal() {
     document.getElementById('add-svc-notes').value = '';
 
     // Populate category dropdown
-    const sel = document.getElementById('add-svc-category');
-    sel.innerHTML = '<option value="">—</option>';
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-    parents.forEach(p => {
-        sel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
-        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-        children.forEach(c => {
-            sel.innerHTML += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
-        });
-    });
+    populateCategorySelect('add-svc-category');
 
-    const modal = document.getElementById('add-service-modal');
-    modal.style.display = 'flex';
-    modal.onclick = (e) => { if (e.target === modal) closeAddServiceModal(); };
+    openModalEl('add-service-modal', closeAddServiceModal);
     document.getElementById('add-svc-name').focus();
 }
 
 function closeAddServiceModal() {
-    document.getElementById('add-service-modal').style.display = 'none';
+    closeModalEl('add-service-modal');
 }
 
 async function saveNewService() {
@@ -2912,13 +2952,8 @@ async function saveNewService() {
         notes: document.getElementById('add-svc-notes').value.trim() || null,
     };
 
-    const res = await fetch('/api/services', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    const data = await apiFetch('/api/services', { method: 'POST', body });
+    if (!data) return;
 
     closeAddServiceModal();
     await renderServicesMaster();
@@ -2934,17 +2969,7 @@ function openEditServiceModal(svcId) {
     document.getElementById('edit-svc-one-off').checked = !!svc.is_one_off;
 
     // Populate category dropdown
-    const sel = document.getElementById('edit-svc-category');
-    sel.innerHTML = '<option value="">—</option>';
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-    parents.forEach(p => {
-        sel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
-        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-        children.forEach(c => {
-            sel.innerHTML += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
-        });
-    });
-    if (svc.category_id) sel.value = svc.category_id;
+    populateCategorySelect('edit-svc-category', {selectedId: svc.category_id});
 
     // Populate merge target dropdown (all services except this one, sorted by name)
     const mergeSel = document.getElementById('edit-svc-merge-target');
@@ -2974,13 +2999,11 @@ function openEditServiceModal(svcId) {
         }
     };
 
-    const modal = document.getElementById('edit-service-modal');
-    modal.style.display = 'flex';
-    modal.onclick = (e) => { if (e.target === modal) closeEditServiceModal(); };
+    openModalEl('edit-service-modal', closeEditServiceModal);
 }
 
 function closeEditServiceModal() {
-    document.getElementById('edit-service-modal').style.display = 'none';
+    closeModalEl('edit-service-modal');
 }
 
 async function saveEditService() {
@@ -3016,9 +3039,8 @@ async function deleteServiceFromModal() {
     const name = document.getElementById('edit-svc-name').value;
     if (!confirm(`Delete service "${name}"?`)) return;
 
-    const res = await fetch(`/api/services/${svcId}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    const data = await apiFetch(`/api/services/${svcId}`, { method: 'DELETE' });
+    if (!data) return;
 
     closeEditServiceModal();
     allServicesList = null;
@@ -3224,40 +3246,34 @@ class ServicePicker {
     }
 }
 
-// Initialize pickers (lazy — created when modal opens)
-let resolveServicePicker = null;
-let addRuleServicePicker = null;
-let editRuleServicePicker = null;
+// Generic lazy ServicePicker factory — caches by container ID
+const _pickerCache = {};
+function getServicePicker(containerId, options) {
+    if (!_pickerCache[containerId]) {
+        _pickerCache[containerId] = new ServicePicker(containerId, options || {});
+    }
+    return _pickerCache[containerId];
+}
 
 function getResolveServicePicker() {
-    if (!resolveServicePicker) {
-        resolveServicePicker = new ServicePicker('resolve-svc-picker', {
-            allowCreate: true,
-            onSelect: (item) => {
-                if (item.isNew) {
-                    // New service — category dropdown should be editable
-                    document.getElementById('resolve-cat-hint').style.display = 'none';
-                } else {
-                    onResolveServiceChange(item.name);
-                }
-            },
-        });
-    }
-    return resolveServicePicker;
+    return getServicePicker('resolve-svc-picker', {
+        allowCreate: true,
+        onSelect: (item) => {
+            if (item.isNew) {
+                document.getElementById('resolve-cat-hint').style.display = 'none';
+            } else {
+                onResolveServiceChange(item.name);
+            }
+        },
+    });
 }
 
 function getAddRuleServicePicker() {
-    if (!addRuleServicePicker) {
-        addRuleServicePicker = new ServicePicker('rule-svc-picker');
-    }
-    return addRuleServicePicker;
+    return getServicePicker('rule-svc-picker');
 }
 
 function getEditRuleServicePicker() {
-    if (!editRuleServicePicker) {
-        editRuleServicePicker = new ServicePicker('edit-rule-svc-picker');
-    }
-    return editRuleServicePicker;
+    return getServicePicker('edit-rule-svc-picker');
 }
 
 // ============================================================
@@ -3376,15 +3392,7 @@ function formatDateDMY(dateStr) {
     return `${dd}-${MONTH_NAMES[d.getMonth() + 1]}-${String(d.getFullYear()).slice(2)}`;
 }
 
-function sortSubs(col) {
-    if (subsSortCol === col) {
-        subsSortAsc = !subsSortAsc;
-    } else {
-        subsSortCol = col;
-        subsSortAsc = true;
-    }
-    renderSubscriptions(allSubs);
-}
+const sortSubs = createSortToggler(subsSortState, () => renderSubscriptions(allSubs));
 
 function renderSubscriptions(subs) {
     let filtered = subs;
@@ -3398,7 +3406,7 @@ function renderSubscriptions(subs) {
     // Sort
     filtered = [...filtered].sort((a, b) => {
         let va, vb;
-        switch (subsSortCol) {
+        switch (subsSortState.col) {
             case 'service':   va = (a.service_name || '').toLowerCase(); vb = (b.service_name || '').toLowerCase(); break;
             case 'category':  va = (a.display_category || '').toLowerCase(); vb = (b.display_category || '').toLowerCase(); break;
             case 'billed':    va = a.amount || 0; vb = b.amount || 0; break;
@@ -3409,18 +3417,12 @@ function renderSubscriptions(subs) {
             case 'renewal':   va = a.computed_renewal || a.renewal_date || ''; vb = b.computed_renewal || b.renewal_date || ''; break;
             default:          va = (a.service_name || '').toLowerCase(); vb = (b.service_name || '').toLowerCase();
         }
-        if (va < vb) return subsSortAsc ? -1 : 1;
-        if (va > vb) return subsSortAsc ? 1 : -1;
+        if (va < vb) return subsSortState.asc ? -1 : 1;
+        if (va > vb) return subsSortState.asc ? 1 : -1;
         return 0;
     });
 
-    // Update header sort indicators
-    document.querySelectorAll('#subs-table th.sortable').forEach(th => {
-        th.classList.remove('sort-asc', 'sort-desc');
-        if (th.dataset.sort === subsSortCol) {
-            th.classList.add(subsSortAsc ? 'sort-asc' : 'sort-desc');
-        }
-    });
+    updateSortIndicators('#subs-table', subsSortState);
 
     const body = document.getElementById('subs-body');
     const empty = document.getElementById('subs-empty');
@@ -3506,31 +3508,6 @@ function toggleSubsForm() {
     openAddSubModal();
 }
 
-// Populate a service <select> with searchable options from allServicesList
-async function populateServiceDropdown(selectEl, selectedId) {
-    if (!allServicesList || !allServicesList.length) {
-        const res = await fetch('/api/services');
-        allServicesList = await res.json();
-    }
-    const sorted = [...allServicesList].sort((a, b) => a.name.localeCompare(b.name));
-    selectEl.innerHTML = '<option value="">— Select service —</option>';
-    sorted.forEach(s => {
-        const label = s.display_category ? `${s.name} (${s.display_category})` : s.name;
-        selectEl.innerHTML += `<option value="${s.id}" data-category-id="${s.category_id || ''}">${label}</option>`;
-    });
-    if (selectedId) selectEl.value = String(selectedId);
-}
-
-// When service dropdown changes, auto-fill category
-function wireServiceAutoFill(serviceEl, categoryEl) {
-    serviceEl.addEventListener('change', () => {
-        const opt = serviceEl.selectedOptions[0];
-        if (!opt || !opt.value) return;
-        const catId = opt.dataset.categoryId;
-        if (catId && categoryEl) categoryEl.value = catId;
-    });
-}
-
 // Get the first rule pattern for a service (for match_pattern auto-derivation)
 function getServiceRulePattern(serviceId) {
     if (!allServicesList) return null;
@@ -3541,99 +3518,53 @@ function getServiceRulePattern(serviceId) {
 
 // Shared: populate a category dropdown with hierarchy + "+ New category..."
 function populateSubCategoryDropdown(selectId, selectedId) {
-    const sel = document.getElementById(selectId);
-    sel.innerHTML = '<option value="">—</option>';
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-    parents.forEach(p => {
-        sel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
-        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-        children.forEach(c => {
-            sel.innerHTML += `<option value="${c.id}">&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
-        });
-    });
-    sel.innerHTML += '<option value="__new__">+ New category...</option>';
-    if (selectedId) sel.value = String(selectedId);
-
-    // Populate parent dropdown for new category row
     const prefix = selectId === 'sub-category' ? 'add-sub' : 'edit-sub';
-    const parentSelect = document.getElementById(`${prefix}-new-cat-parent`);
-    if (parentSelect) {
-        parentSelect.innerHTML = '<option value="">-- Top-level --</option>';
-        parents.forEach(p => { parentSelect.innerHTML += `<option value="${p.id}">${p.name}</option>`; });
-    }
+    populateCategorySelect(selectId, {
+        includeNew: true, selectedId, parentSelectId: `${prefix}-new-cat-parent`
+    });
 }
 
 function onSubCategoryChange(mode) {
     const prefix = mode === 'add' ? 'add-sub' : 'edit-sub';
     const selId = mode === 'add' ? 'sub-category' : 'edit-sub-category';
-    const val = document.getElementById(selId).value;
-    const newCatRow = document.getElementById(`${prefix}-new-cat-row`);
-    if (val === '__new__') {
-        newCatRow.classList.remove('hidden');
-        document.getElementById(`${prefix}-new-cat-name`).focus();
-    } else {
-        newCatRow.classList.add('hidden');
-    }
+    toggleNewCategoryRow(selId, `${prefix}-new-cat-row`, `${prefix}-new-cat-name`);
 }
 
-// Subscription ServicePicker instances
-let addSubServicePicker = null;
-let editSubServicePicker = null;
+// Subscription ServicePicker — auto-fill category on selection
+function _subPickerOnSelect(catSelectId, catHintId) {
+    return (item) => {
+        if (!item.isNew && allServicesList) {
+            const svc = allServicesList.find(s => s.id === item.id);
+            if (svc && svc.category_id) {
+                document.getElementById(catSelectId).value = String(svc.category_id);
+                document.getElementById(catHintId).style.display = 'block';
+                return;
+            }
+        }
+        document.getElementById(catHintId).style.display = 'none';
+    };
+}
 
 function getAddSubServicePicker() {
-    if (!addSubServicePicker) {
-        addSubServicePicker = new ServicePicker('add-sub-svc-picker', {
-            allowCreate: true,
-            onSelect: (item) => {
-                // Auto-fill category from service
-                if (!item.isNew && allServicesList) {
-                    const svc = allServicesList.find(s => s.id === item.id);
-                    if (svc && svc.category_id) {
-                        document.getElementById('sub-category').value = String(svc.category_id);
-                        document.getElementById('sub-cat-hint').style.display = 'block';
-                    }
-                } else {
-                    document.getElementById('sub-cat-hint').style.display = 'none';
-                }
-            },
-        });
-    }
-    return addSubServicePicker;
+    return getServicePicker('add-sub-svc-picker', {
+        allowCreate: true,
+        onSelect: _subPickerOnSelect('sub-category', 'sub-cat-hint'),
+    });
 }
 
 function getEditSubServicePicker() {
-    if (!editSubServicePicker) {
-        editSubServicePicker = new ServicePicker('edit-sub-svc-picker', {
-            allowCreate: true,
-            onSelect: (item) => {
-                if (!item.isNew && allServicesList) {
-                    const svc = allServicesList.find(s => s.id === item.id);
-                    if (svc && svc.category_id) {
-                        document.getElementById('edit-sub-category').value = String(svc.category_id);
-                        document.getElementById('edit-sub-cat-hint').style.display = 'block';
-                    }
-                } else {
-                    document.getElementById('edit-sub-cat-hint').style.display = 'none';
-                }
-            },
-        });
-    }
-    return editSubServicePicker;
+    return getServicePicker('edit-sub-svc-picker', {
+        allowCreate: true,
+        onSelect: _subPickerOnSelect('edit-sub-category', 'edit-sub-cat-hint'),
+    });
 }
 
 async function openAddSubModal() {
     // Reset all fields
-    document.getElementById('sub-category').value = '';
-    document.getElementById('sub-amount').value = '';
-    document.getElementById('sub-currency').value = 'SGD';
-    document.getElementById('sub-frequency').value = 'monthly';
-    document.getElementById('sub-periods').value = '1';
-    document.getElementById('sub-card').value = '';
-    document.getElementById('sub-renewal').value = '';
-    document.getElementById('sub-status').value = 'active';
-    document.getElementById('sub-link').value = '';
-    document.getElementById('sub-notes').value = '';
-    document.getElementById('sub-start-date').value = '';
+    const defaults = { 'sub-category': '', 'sub-amount': '', 'sub-currency': 'SGD', 'sub-frequency': 'monthly',
+        'sub-periods': '1', 'sub-card': '', 'sub-renewal': '', 'sub-status': 'active',
+        'sub-link': '', 'sub-notes': '', 'sub-start-date': '' };
+    for (const [id, val] of Object.entries(defaults)) document.getElementById(id).value = val;
     document.getElementById('add-sub-new-cat-row').classList.add('hidden');
     document.getElementById('sub-cat-hint').style.display = 'none';
 
@@ -3651,132 +3582,39 @@ async function openAddSubModal() {
         cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
     });
 
-    // FX rate hint
-    const currSel = document.getElementById('sub-currency');
-    const updateFxHint = () => {
-        document.querySelectorAll('#add-sub-modal .fx-rate-hint').forEach(el => {
-            el.textContent = currSel.value === 'USD' && subsFxRate ? `(1 USD = ${subsFxRate.toFixed(2)} SGD)` : '';
-        });
-    };
-    currSel.onchange = updateFxHint;
-    updateFxHint();
+    setupFxHint('add-sub-modal', 'sub-currency');
 
-    // Auto-suggest renewal from start date + frequency + periods
+    // Auto-suggest renewal from start date + frequency + periods (only if empty)
     const suggestRenewal = () => {
         const startVal = document.getElementById('sub-start-date').value;
         const renewalEl = document.getElementById('sub-renewal');
         if (!startVal || renewalEl.value) return;
-        const freq = document.getElementById('sub-frequency').value;
-        const periods = parseInt(document.getElementById('sub-periods').value) || 1;
-        const start = new Date(startVal);
-        if (freq === 'yearly') start.setFullYear(start.getFullYear() + periods);
-        else if (freq === 'half-yearly') start.setMonth(start.getMonth() + 6 * periods);
-        else if (freq === 'quarterly') start.setMonth(start.getMonth() + 3 * periods);
-        else if (freq === 'biweekly') start.setDate(start.getDate() + 14 * periods);
-        else if (freq === 'weekly') start.setDate(start.getDate() + 7 * periods);
-        else start.setMonth(start.getMonth() + periods);
-        renewalEl.value = start.toISOString().split('T')[0];
+        renewalEl.value = calcRenewalDate(startVal,
+            document.getElementById('sub-frequency').value,
+            parseInt(document.getElementById('sub-periods').value) || 1);
     };
     document.getElementById('sub-start-date').onchange = suggestRenewal;
     document.getElementById('sub-frequency').addEventListener('change', suggestRenewal);
     document.getElementById('sub-periods').addEventListener('change', suggestRenewal);
 
-    const modal = document.getElementById('add-sub-modal');
-    modal.style.display = 'flex';
-    modal.onclick = (e) => { if (e.target === modal) closeAddSubModal(); };
-    document.addEventListener('keydown', addSubEscHandler);
-}
-
-function addSubEscHandler(e) {
-    if (e.key === 'Escape') closeAddSubModal();
+    openModalEl('add-sub-modal', closeAddSubModal);
 }
 
 function closeAddSubModal() {
-    document.getElementById('add-sub-modal').style.display = 'none';
-    document.removeEventListener('keydown', addSubEscHandler);
+    closeModalEl('add-sub-modal');
 }
 
 async function addSubscription() {
-    const picker = getAddSubServicePicker();
-    let { id: serviceId, name: serviceName } = picker.getValue();
-    if (!serviceName) { alert('Please select or create a service'); return; }
+    const resolved = await resolveSubService(getAddSubServicePicker, 'sub-category', 'add-sub');
+    if (!resolved) return;
+    const { serviceId, categoryId, serviceName } = resolved;
 
-    // Handle new category creation
-    let categoryId = null;
-    const catVal = document.getElementById('sub-category').value;
-    if (catVal === '__new__') {
-        const newCatName = document.getElementById('add-sub-new-cat-name').value.trim();
-        if (!newCatName) { alert('Please enter a category name.'); return; }
-        const parentId = document.getElementById('add-sub-new-cat-parent').value || null;
-        const isPersonal = parseInt(document.getElementById('add-sub-new-cat-type').value);
-        const catRes = await fetch('/api/categories', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: newCatName, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }),
-        });
-        const catData = await catRes.json();
-        if (catData.error) { alert('Category error: ' + catData.error); return; }
-        categoryId = catData.id;
-        await loadReferenceData();
-        showToast(`Created category "${newCatName}"`, 'info');
-    } else {
-        categoryId = catVal ? parseInt(catVal) : null;
-    }
+    const body = readSubFormBody('sub', serviceId, categoryId, serviceName);
+    const data = await apiFetch('/api/subscriptions', { method: 'POST', body });
+    if (!data) return;
 
-    // Create new service if needed
-    if (!serviceId && serviceName) {
-        if (!categoryId) { alert('Please select a category for the new service.'); return; }
-        const svcRes = await fetch('/api/services', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: serviceName, category_id: categoryId }),
-        });
-        const svcData = await svcRes.json();
-        if (svcData.error) { alert('Service error: ' + svcData.error); return; }
-        serviceId = svcData.id;
-        allServicesList = null; // invalidate cache
-        showToast(`Created service "${serviceName}"`, 'info');
-    }
-
-    const body = {
-        service_id: serviceId,
-        category_id: categoryId,
-        amount: parseFloat(document.getElementById('sub-amount').value) || 0,
-        currency: document.getElementById('sub-currency').value || 'SGD',
-        frequency: document.getElementById('sub-frequency').value,
-        periods: parseInt(document.getElementById('sub-periods').value) || 1,
-        account_id: document.getElementById('sub-card').value ? parseInt(document.getElementById('sub-card').value) : null,
-        renewal_date: document.getElementById('sub-renewal').value || null,
-        match_pattern: getServiceRulePattern(serviceId) || serviceName.toUpperCase(),
-        status: document.getElementById('sub-status').value || 'active',
-        link: document.getElementById('sub-link').value.trim() || null,
-        notes: document.getElementById('sub-notes').value.trim() || null,
-    };
-
-    const res = await fetch('/api/subscriptions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
-
-    // Cascade category to service (which cascades to auto-categorized transactions)
-    if (serviceId && categoryId) {
-        const svcRes = await fetch(`/api/services/${serviceId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ category_id: categoryId }),
-        });
-        const svcData = await svcRes.json();
-        if (svcData.recategorized) {
-            showToast(`Added subscription "${serviceName}" + re-categorized ${svcData.recategorized} transactions`, 'info');
-        } else {
-            showToast(`Added subscription "${serviceName}"`, 'info');
-        }
-    } else {
-        showToast(`Added subscription "${serviceName}"`, 'info');
-    }
+    const recat = await cascadeServiceCategory(serviceId, categoryId, serviceName, 'Added subscription');
+    if (!recat) showToast(`Added subscription "${serviceName}"`, 'info');
 
     closeAddSubModal();
     await loadSubscriptions();
@@ -3861,15 +3699,10 @@ async function openEditSubModal(subId) {
     const picker = getEditSubServicePicker();
     picker.setValue(sub.service_name || '', sub.service_id || null);
 
-    document.getElementById('edit-sub-amount').value = sub.amount || '';
-    document.getElementById('edit-sub-currency').value = sub.currency || 'SGD';
-    document.getElementById('edit-sub-freq').value = sub.frequency || 'monthly';
-    document.getElementById('edit-sub-periods').value = sub.periods || 1;
-    document.getElementById('edit-sub-start-date').value = sub.start_date || '';
-    document.getElementById('edit-sub-renewal').value = sub.renewal_date || '';
-    document.getElementById('edit-sub-status').value = sub.status || 'active';
-    document.getElementById('edit-sub-link').value = sub.link || '';
-    document.getElementById('edit-sub-notes').value = sub.notes || '';
+    const fieldMap = { amount: sub.amount || '', currency: sub.currency || 'SGD', freq: sub.frequency || 'monthly',
+        periods: sub.periods || 1, 'start-date': sub.start_date || '', renewal: sub.renewal_date || '',
+        status: sub.status || 'active', link: sub.link || '', notes: sub.notes || '' };
+    for (const [k, v] of Object.entries(fieldMap)) document.getElementById(`edit-sub-${k}`).value = v;
 
     // Populate category dropdown with current selection
     populateSubCategoryDropdown('edit-sub-category', sub.category_id);
@@ -3884,133 +3717,39 @@ async function openEditSubModal(subId) {
     });
     if (sub.account_id) cardSel.value = sub.account_id;
 
-    const modal = document.getElementById('edit-sub-modal');
-    modal.style.display = 'flex';
-    document.addEventListener('keydown', editSubEscHandler);
+    openModalEl('edit-sub-modal', closeEditSubModal);
 
-    // FX rate hint
-    const editCurrSel = document.getElementById('edit-sub-currency');
-    const updateEditFxHint = () => {
-        document.querySelectorAll('#edit-sub-modal .fx-rate-hint').forEach(el => {
-            el.textContent = editCurrSel.value === 'USD' && subsFxRate ? `(1 USD = ${subsFxRate.toFixed(2)} SGD)` : '';
-        });
-    };
-    editCurrSel.onchange = updateEditFxHint;
-    updateEditFxHint();
+    setupFxHint('edit-sub-modal', 'edit-sub-currency');
 
-    // Auto-suggest renewal from start date + frequency + periods
+    // Auto-suggest renewal (always recalculate for edits)
     const suggestEditRenewal = () => {
         const startVal = document.getElementById('edit-sub-start-date').value;
-        const renewalEl = document.getElementById('edit-sub-renewal');
         if (!startVal) return;
-        const freq = document.getElementById('edit-sub-freq').value;
-        const periods = parseInt(document.getElementById('edit-sub-periods').value) || 1;
-        const start = new Date(startVal);
-        if (freq === 'yearly') start.setFullYear(start.getFullYear() + periods);
-        else if (freq === 'half-yearly') start.setMonth(start.getMonth() + 6 * periods);
-        else if (freq === 'quarterly') start.setMonth(start.getMonth() + 3 * periods);
-        else if (freq === 'biweekly') start.setDate(start.getDate() + 14 * periods);
-        else if (freq === 'weekly') start.setDate(start.getDate() + 7 * periods);
-        else start.setMonth(start.getMonth() + periods);
-        renewalEl.value = start.toISOString().split('T')[0];
+        document.getElementById('edit-sub-renewal').value = calcRenewalDate(startVal,
+            document.getElementById('edit-sub-freq').value,
+            parseInt(document.getElementById('edit-sub-periods').value) || 1);
     };
     document.getElementById('edit-sub-start-date').onchange = suggestEditRenewal;
 }
 
-function editSubEscHandler(e) {
-    if (e.key === 'Escape') closeEditSubModal();
-}
-
 function closeEditSubModal() {
-    document.getElementById('edit-sub-modal').style.display = 'none';
-    document.removeEventListener('keydown', editSubEscHandler);
+    closeModalEl('edit-sub-modal');
 }
 
 async function saveEditSub() {
     const subId = parseInt(document.getElementById('edit-sub-id').value);
-    const picker = getEditSubServicePicker();
-    let { id: serviceId, name: serviceName } = picker.getValue();
-
-    if (!serviceName) { alert('Please select or create a service'); return; }
-
-    // Handle new category creation
-    let categoryId = null;
-    const catVal = document.getElementById('edit-sub-category').value;
-    if (catVal === '__new__') {
-        const newCatName = document.getElementById('edit-sub-new-cat-name').value.trim();
-        if (!newCatName) { alert('Please enter a category name.'); return; }
-        const parentId = document.getElementById('edit-sub-new-cat-parent').value || null;
-        const isPersonal = parseInt(document.getElementById('edit-sub-new-cat-type').value);
-        const catRes = await fetch('/api/categories', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: newCatName, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }),
-        });
-        const catData = await catRes.json();
-        if (catData.error) { alert('Category error: ' + catData.error); return; }
-        categoryId = catData.id;
-        await loadReferenceData();
-        showToast(`Created category "${newCatName}"`, 'info');
-    } else {
-        categoryId = catVal ? parseInt(catVal) : null;
-    }
-
-    // Create new service if needed
-    if (!serviceId && serviceName) {
-        if (!categoryId) { alert('Please select a category for the new service.'); return; }
-        const svcRes = await fetch('/api/services', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: serviceName, category_id: categoryId }),
-        });
-        const svcData = await svcRes.json();
-        if (svcData.error) { alert('Service error: ' + svcData.error); return; }
-        serviceId = svcData.id;
-        allServicesList = null;
-        showToast(`Created service "${serviceName}"`, 'info');
-    }
-
-    const body = {
-        service_id: serviceId,
-        category_id: categoryId,
-        amount: parseFloat(document.getElementById('edit-sub-amount').value) || 0,
-        currency: document.getElementById('edit-sub-currency').value || 'SGD',
-        frequency: document.getElementById('edit-sub-freq').value,
-        periods: parseInt(document.getElementById('edit-sub-periods').value) || 1,
-        account_id: document.getElementById('edit-sub-card').value ? parseInt(document.getElementById('edit-sub-card').value) : null,
-        renewal_date: document.getElementById('edit-sub-renewal').value || null,
-        match_pattern: getServiceRulePattern(serviceId) || serviceName.toUpperCase(),
-        status: document.getElementById('edit-sub-status').value,
-        link: document.getElementById('edit-sub-link').value.trim() || null,
-        notes: document.getElementById('edit-sub-notes').value.trim() || null,
-    };
+    const resolved = await resolveSubService(getEditSubServicePicker, 'edit-sub-category', 'edit-sub');
+    if (!resolved) return;
+    const { serviceId, categoryId, serviceName } = resolved;
 
     if (!serviceId) { alert('Please select a service'); return; }
 
-    const res = await fetch(`/api/subscriptions/${subId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    const body = readSubFormBody('edit-sub', serviceId, categoryId, serviceName);
+    const data = await apiFetch(`/api/subscriptions/${subId}`, { method: 'PUT', body });
+    if (!data) return;
 
-    // Cascade category to service (which cascades to auto-categorized transactions)
-    if (serviceId && categoryId) {
-        const svcRes = await fetch(`/api/services/${serviceId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ category_id: categoryId }),
-        });
-        const svcData = await svcRes.json();
-        if (svcData.recategorized) {
-            showToast(`Updated subscription "${serviceName}" + re-categorized ${svcData.recategorized} transactions`, 'info');
-        } else {
-            showToast(`Updated subscription "${serviceName}"`, 'info');
-        }
-    } else {
-        showToast(`Updated subscription "${serviceName}"`, 'info');
-    }
+    const recat = await cascadeServiceCategory(serviceId, categoryId, serviceName, 'Updated subscription');
+    if (!recat) showToast(`Updated subscription "${serviceName}"`, 'info');
 
     closeEditSubModal();
     await loadSubscriptions();
@@ -4022,9 +3761,8 @@ async function deleteSubFromModal() {
     const { name: service } = picker.getValue();
     if (!confirm(`Delete subscription "${service}"?`)) return;
 
-    const res = await fetch(`/api/subscriptions/${subId}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    const data = await apiFetch(`/api/subscriptions/${subId}`, { method: 'DELETE' });
+    if (!data) return;
 
     closeEditSubModal();
     await loadSubscriptions();
@@ -4121,13 +3859,8 @@ async function addAccount() {
         currency: document.getElementById('acct-currency').value.trim() || 'SGD',
     };
 
-    const res = await fetch('/api/accounts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    const data = await apiFetch('/api/accounts', { method: 'POST', body });
+    if (!data) return;
 
     // Reset form
     document.getElementById('acct-name').value = '';
@@ -4161,13 +3894,8 @@ async function saveEditAcct(id) {
 
     if (!body.name) { alert('Account name is required'); return; }
 
-    const res = await fetch(`/api/accounts/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    const data = await apiFetch(`/api/accounts/${id}`, { method: 'PUT', body });
+    if (!data) return;
 
     editingAcctId = null;
     await reloadAccounts();
@@ -4178,13 +3906,8 @@ async function toggleArchiveAcct(id, newStatus) {
     const action = newStatus === 'archived' ? 'Archive' : 'Restore';
     if (!confirm(`${action} account "${acct ? acct.short_name : id}"?`)) return;
 
-    const res = await fetch(`/api/accounts/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-    });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    const data = await apiFetch(`/api/accounts/${id}`, { method: 'PUT', body: { status: newStatus } });
+    if (!data) return;
 
     await reloadAccounts();
 }
@@ -4193,9 +3916,8 @@ async function deleteAccount(id) {
     const acct = accounts.find(a => a.id === id);
     if (!confirm(`Delete account "${acct ? acct.name : id}"?`)) return;
 
-    const res = await fetch(`/api/accounts/${id}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    const data = await apiFetch(`/api/accounts/${id}`, { method: 'DELETE' });
+    if (!data) return;
 
     await reloadAccounts();
 }
