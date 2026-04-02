@@ -60,10 +60,10 @@ function buildCategoryDropdownHtml({placeholder = '—', includeNew = false, sel
     let html = `<option value="">${placeholder}</option>`;
     const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
     parents.forEach(p => {
-        html += `<option value="${p.id}"${p.id == selectedId ? ' selected' : ''}>${p.name}</option>`;
+        html += `<option value="${p.id}"${p.id == selectedId ? ' selected' : ''}>${escapeHtml(p.name)}</option>`;
         const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
         children.forEach(c => {
-            html += `<option value="${c.id}"${c.id == selectedId ? ' selected' : ''}>&nbsp;&nbsp;${p.name} > ${c.name}</option>`;
+            html += `<option value="${c.id}"${c.id == selectedId ? ' selected' : ''}>&nbsp;&nbsp;${escapeHtml(p.name)} > ${escapeHtml(c.name)}</option>`;
         });
     });
     if (includeNew) html += '<option value="__new__">+ New category...</option>';
@@ -1281,6 +1281,26 @@ function closeResolveModal() {
     document.getElementById('resolve-new-cat-name').value = '';
 }
 
+// In-app confirm dialog (replaces browser confirm()). Returns a promise that resolves true/false.
+function showConfirmDialog(title, bodyHtml, {okLabel = 'Continue', cancelLabel = 'Cancel'} = {}) {
+    return new Promise(resolve => {
+        document.getElementById('confirm-dialog-title').textContent = title;
+        document.getElementById('confirm-dialog-body').innerHTML = bodyHtml;
+        const okBtn = document.getElementById('confirm-dialog-ok');
+        const cancelBtn = document.getElementById('confirm-dialog-cancel');
+        okBtn.textContent = okLabel;
+        cancelBtn.textContent = cancelLabel;
+
+        const cleanup = (result) => {
+            closeModalEl('confirm-dialog');
+            resolve(result);
+        };
+        okBtn.onclick = () => cleanup(true);
+        cancelBtn.onclick = () => cleanup(false);
+        openModalEl('confirm-dialog', () => cleanup(false));
+    });
+}
+
 function showToast(message, type = 'info', duration = 4000) {
     const container = document.getElementById('toast-container');
     if (!container) return;
@@ -1477,9 +1497,8 @@ function renderImportPreview(data) {
                         oninput="setServiceOverride(${gi}, ${ti}, this.value)">
                 </td>
                 <td>
-                    <select class="cat-select ${tx.status === 'uncategorized' ? 'unresolved' : ''}" data-gi="${gi}" data-ti="${ti}" onchange="setCategoryOverride(${gi}, ${ti}, this.value)">
-                        <option value="">-- Select --</option>
-                        ${categories.map(c => `<option value="${c.id}" ${tx.category_id === c.id ? 'selected' : ''}>${c.display_name}</option>`).join('')}
+                    <select class="cat-select ${tx.status === 'uncategorized' ? 'unresolved' : ''}" data-gi="${gi}" data-ti="${ti}" onchange="onImportCategoryChange(${gi}, ${ti}, this)">
+                        ${buildCategoryDropdownHtml({placeholder: '-- Select --', includeNew: true, selectedId: tx.category_id})}
                     </select>
                 </td>
                 <td><span class="badge badge-${tx.status === 'categorized' ? 'success' : tx.status === 'transfer' ? 'muted' : 'warning'}">${tx.status}</span></td>
@@ -1580,6 +1599,62 @@ function setCategoryOverride(gi, ti, catId) {
     updateConfirmBar();
 }
 
+// Import preview: handle category dropdown change, intercept __new__
+let _importNewCatTrigger = null; // {gi, ti, selectEl} — which row triggered the modal
+function onImportCategoryChange(gi, ti, selectEl) {
+    if (selectEl.value === '__new__') {
+        _importNewCatTrigger = {gi, ti, selectEl};
+        openImportNewCatModal();
+        // Reset dropdown to blank while modal is open
+        selectEl.value = '';
+    } else {
+        setCategoryOverride(gi, ti, selectEl.value);
+    }
+}
+
+function openImportNewCatModal() {
+    document.getElementById('import-new-cat-name').value = '';
+    // Populate parent dropdown with top-level categories
+    const parentSel = document.getElementById('import-new-cat-parent');
+    parentSel.innerHTML = '<option value="">-- Top-level --</option>';
+    categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name)).forEach(c => {
+        parentSel.innerHTML += `<option value="${c.id}">${escapeHtml(c.name)}</option>`;
+    });
+    document.getElementById('import-new-cat-type').value = '1';
+    openModalEl('import-new-cat-modal', closeImportNewCatModal);
+    document.getElementById('import-new-cat-name').focus();
+}
+
+function closeImportNewCatModal() {
+    closeModalEl('import-new-cat-modal');
+    _importNewCatTrigger = null;
+}
+
+async function saveImportNewCategory() {
+    const name = document.getElementById('import-new-cat-name').value.trim();
+    if (!name) { alert('Please enter a category name.'); return; }
+    const parentId = document.getElementById('import-new-cat-parent').value || null;
+    const isPersonal = parseInt(document.getElementById('import-new-cat-type').value);
+
+    const catData = await apiFetch('/api/categories', {
+        method: 'POST', body: { name, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }
+    });
+    if (!catData) return;
+
+    await loadReferenceData();
+    showToast(`Created category "${name}"`, 'info');
+
+    // Auto-select the new category in the triggering row
+    if (_importNewCatTrigger) {
+        const {gi, ti, selectEl} = _importNewCatTrigger;
+        // Rebuild dropdown options with the new category
+        selectEl.innerHTML = buildCategoryDropdownHtml({placeholder: '-- Select --', includeNew: true, selectedId: catData.id});
+        setCategoryOverride(gi, ti, catData.id.toString());
+    }
+
+    closeImportNewCatModal();
+}
+
 function updateConfirmBar() {
     if (!currentImportData) return;
     let active = 0, total = 0;
@@ -1606,6 +1681,24 @@ function discardImport() {
 
 async function confirmImport() {
     if (!currentImportData) return;
+
+    // Warn about uncategorized transactions
+    let uncatCount = 0, activeCount = 0;
+    for (const g of currentImportData.groups) {
+        for (const tx of g.transactions) {
+            if (tx._skip) continue;
+            activeCount++;
+            if (!tx.category_id) uncatCount++;
+        }
+    }
+    if (uncatCount > 0) {
+        const proceed = await showConfirmDialog(
+            'Uncategorized Transactions',
+            `<strong>${uncatCount}</strong> of ${activeCount} transactions have no category assigned.<br><br>They'll be imported as uncategorized — you can resolve them later from the Dashboard.`,
+            {okLabel: 'Import Anyway', cancelLabel: 'Go Back'}
+        );
+        if (!proceed) return;
+    }
 
     // Collect new services to create (deduped by name)
     const newServicesMap = {};
@@ -1645,11 +1738,11 @@ async function confirmImport() {
 
         const dupMsg = result.duplicates_skipped ? ` (${result.duplicates_skipped} duplicates skipped)` : '';
         const svcMsg = result.services_created ? ` ${result.services_created} new services created.` : '';
-        alert(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${svcMsg}`);
+        showToast(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${svcMsg}`, 'success', 6000);
         discardImport();
         await loadReferenceData();
     } catch (err) {
-        alert('Commit failed: ' + err.message);
+        showToast('Commit failed: ' + err.message, 'error', 6000);
     } finally {
         confirmBtn.textContent = 'Confirm & Commit';
         confirmBtn.disabled = false;
@@ -2930,9 +3023,10 @@ async function saveCleanupRenames() {
 function openAddServiceModal() {
     document.getElementById('add-svc-name').value = '';
     document.getElementById('add-svc-notes').value = '';
+    document.getElementById('add-svc-new-cat-row').classList.add('hidden');
 
-    // Populate category dropdown
-    populateCategorySelect('add-svc-category');
+    // Populate category dropdown with "+ New category..." option
+    populateCategorySelect('add-svc-category', {includeNew: true, parentSelectId: 'add-svc-new-cat-parent'});
 
     openModalEl('add-service-modal', closeAddServiceModal);
     document.getElementById('add-svc-name').focus();
@@ -2946,9 +3040,12 @@ async function saveNewService() {
     const name = document.getElementById('add-svc-name').value.trim();
     if (!name) { alert('Service name is required'); return; }
 
+    const { id: categoryId, abort } = await resolveCategory('add-svc-category', 'add-svc');
+    if (abort) return;
+
     const body = {
         name,
-        category_id: document.getElementById('add-svc-category').value ? parseInt(document.getElementById('add-svc-category').value) : null,
+        category_id: categoryId,
         notes: document.getElementById('add-svc-notes').value.trim() || null,
     };
 
@@ -2968,8 +3065,9 @@ function openEditServiceModal(svcId) {
     document.getElementById('edit-svc-notes').value = svc.notes || '';
     document.getElementById('edit-svc-one-off').checked = !!svc.is_one_off;
 
-    // Populate category dropdown
-    populateCategorySelect('edit-svc-category', {selectedId: svc.category_id});
+    // Populate category dropdown with "+ New category..." option
+    populateCategorySelect('edit-svc-category', {selectedId: svc.category_id, includeNew: true, parentSelectId: 'edit-svc-new-cat-parent'});
+    document.getElementById('edit-svc-new-cat-row').classList.add('hidden');
 
     // Populate merge target dropdown (all services except this one, sorted by name)
     const mergeSel = document.getElementById('edit-svc-merge-target');
@@ -3008,14 +3106,18 @@ function closeEditServiceModal() {
 
 async function saveEditService() {
     const svcId = parseInt(document.getElementById('edit-svc-id').value);
+    const name = document.getElementById('edit-svc-name').value.trim();
+    if (!name) { alert('Service name is required'); return; }
+
+    const { id: categoryId, abort } = await resolveCategory('edit-svc-category', 'edit-svc');
+    if (abort) return;
+
     const body = {
-        name: document.getElementById('edit-svc-name').value.trim(),
-        category_id: document.getElementById('edit-svc-category').value ? parseInt(document.getElementById('edit-svc-category').value) : null,
+        name,
+        category_id: categoryId,
         notes: document.getElementById('edit-svc-notes').value.trim() || null,
         is_one_off: document.getElementById('edit-svc-one-off').checked ? 1 : 0,
     };
-
-    if (!body.name) { alert('Service name is required'); return; }
 
     const res = await fetch(`/api/services/${svcId}`, {
         method: 'PUT',

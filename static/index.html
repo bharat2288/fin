@@ -228,6 +228,37 @@
 
                 <div id="preview-groups"></div>
 
+                <!-- New Category mini-modal (shared by all import preview rows) -->
+                <div class="modal-overlay" id="import-new-cat-modal" style="display:none;">
+                    <div class="modal" style="max-width:400px;">
+                        <div class="modal-header">
+                            <span class="section-label" style="margin-bottom:0;">/ New Category</span>
+                            <button class="modal-close" onclick="closeImportNewCatModal()">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="modal-field">
+                                <label>Name</label>
+                                <input type="text" id="import-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
+                            </div>
+                            <div class="modal-field">
+                                <label>Parent (optional)</label>
+                                <select id="import-new-cat-parent" style="width:100%;"></select>
+                            </div>
+                            <div class="modal-field">
+                                <label>Type</label>
+                                <select id="import-new-cat-type" style="width:100%;">
+                                    <option value="1">Personal</option>
+                                    <option value="0">Moom</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn" onclick="closeImportNewCatModal()">Cancel</button>
+                            <button class="btn btn-primary" onclick="saveImportNewCategory()">Create</button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Confirm Bar -->
                 <div class="confirm-bar" id="confirm-bar">
                     <div class="confirm-bar-info" id="confirm-info"></div>
@@ -947,7 +978,24 @@
                 </div>
                 <div class="modal-field">
                     <label>Category</label>
-                    <select id="add-svc-category" style="width:100%;"></select>
+                    <select id="add-svc-category" style="width:100%;" onchange="toggleNewCategoryRow('add-svc-category', 'add-svc-new-cat-row', 'add-svc-new-cat-name')"></select>
+                </div>
+                <div class="modal-field-row hidden" id="add-svc-new-cat-row">
+                    <div class="modal-field" style="flex:2;">
+                        <label>New Category Name</label>
+                        <input type="text" id="add-svc-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:1;">
+                        <label>Parent</label>
+                        <select id="add-svc-new-cat-parent" style="width:100%;"></select>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 100px;">
+                        <label>Type</label>
+                        <select id="add-svc-new-cat-type" style="width:100%;">
+                            <option value="1">Personal</option>
+                            <option value="0">Moom</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="modal-field">
                     <label>Notes</label>
@@ -976,7 +1024,24 @@
                 </div>
                 <div class="modal-field">
                     <label>Category</label>
-                    <select id="edit-svc-category" style="width:100%;"></select>
+                    <select id="edit-svc-category" style="width:100%;" onchange="toggleNewCategoryRow('edit-svc-category', 'edit-svc-new-cat-row', 'edit-svc-new-cat-name')"></select>
+                </div>
+                <div class="modal-field-row hidden" id="edit-svc-new-cat-row">
+                    <div class="modal-field" style="flex:2;">
+                        <label>New Category Name</label>
+                        <input type="text" id="edit-svc-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
+                    </div>
+                    <div class="modal-field" style="flex:1;">
+                        <label>Parent</label>
+                        <select id="edit-svc-new-cat-parent" style="width:100%;"></select>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 100px;">
+                        <label>Type</label>
+                        <select id="edit-svc-new-cat-type" style="width:100%;">
+                            <option value="1">Personal</option>
+                            <option value="0">Moom</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="modal-field">
                     <label>Notes</label>
@@ -1011,5 +1076,18 @@
     <script src="/static/app.js"></script>
     <!-- Toast container -->
     <div id="toast-container"></div>
+    <!-- Confirm dialog (reusable, promise-based) -->
+    <div class="modal-overlay" id="confirm-dialog" style="display:none;">
+        <div class="modal" style="max-width:420px;">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;" id="confirm-dialog-title">Confirm</span>
+            </div>
+            <div class="modal-body" id="confirm-dialog-body" style="font-size:13px;line-height:1.5;"></div>
+            <div class="modal-footer">
+                <button class="btn" id="confirm-dialog-cancel">Cancel</button>
+                <button class="btn btn-primary" id="confirm-dialog-ok">Continue</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
