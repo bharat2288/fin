@@ -183,5 +183,12 @@ def _register_builtins():
     from parse_dbs_csv import parse_csv as parse_dbs_csv
     register("DBS CSV", ".csv", detect_fn=None, parse_fn=parse_dbs_csv)  # fallback
 
+    # XLS parsers — UOB and DBS Business Banking
+    from parse_uob_xls import detect_uob_xls, parse_uob_xls
+    register("UOB XLS", ".xls", detect_fn=detect_uob_xls, parse_fn=parse_uob_xls)
+
+    from parse_dbs_xls import detect_dbs_xls, parse_dbs_xls
+    register("DBS Business XLS", ".xls", detect_fn=detect_dbs_xls, parse_fn=parse_dbs_xls)
+
 
 _register_builtins()

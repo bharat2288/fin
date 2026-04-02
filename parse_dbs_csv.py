@@ -205,11 +205,19 @@ def parse_bank_csv(filepath: str) -> ParsedStatement:
 
     account_name = _extract_account_name(raw_lines[0], "bank")
 
-    # Find data header
+    # Find data header — two formats:
+    # 12-col: "Transaction Date","Value Date","Statement Code",...
+    # 9-col:  "Transaction Date","Transaction Code","Description",...
     data_start = None
+    header_format = "12col"
     for i, line in enumerate(raw_lines):
         if line.startswith('"Transaction Date","Value Date"'):
             data_start = i
+            header_format = "12col"
+            break
+        if line.startswith('"Transaction Date","Transaction Code"'):
+            data_start = i
+            header_format = "9col"
             break
 
     if data_start is None:
@@ -233,17 +241,26 @@ def parse_bank_csv(filepath: str) -> ParsedStatement:
         tx_date = _parse_date(tx_date_str)
         dates.append(tx_date)
 
-        # Build description from multiple fields
-        desc_parts = [
-            row.get("Description", "").strip(),
-        ]
-        client_ref = row.get("Client Reference", "").strip()
-        addl_ref = row.get("Additional Reference", "").strip()
-        if client_ref:
-            desc_parts.append(client_ref)
-        if addl_ref:
-            desc_parts.append(addl_ref)
-        description = " | ".join(p for p in desc_parts if p)
+        # Build description from available fields (format-dependent)
+        if header_format == "12col":
+            desc_parts = [row.get("Description", "").strip()]
+            client_ref = row.get("Client Reference", "").strip()
+            addl_ref = row.get("Additional Reference", "").strip()
+            if client_ref:
+                desc_parts.append(client_ref)
+            if addl_ref:
+                desc_parts.append(addl_ref)
+            description = " | ".join(p for p in desc_parts if p)
+            stmt_code = row.get("Statement Code", "").strip().upper()
+        else:
+            # 9-col: Description, Transaction Ref1, Ref2, Ref3
+            desc_parts = [row.get("Description", "").strip()]
+            for ref_key in ("Transaction Ref1", "Transaction Ref2", "Transaction Ref3"):
+                ref = row.get(ref_key, "").strip()
+                if ref:
+                    desc_parts.append(ref)
+            description = " | ".join(p for p in desc_parts if p)
+            stmt_code = row.get("Transaction Code", "").strip().upper()
 
         debit = row.get("Debit Amount", "").strip()
         credit = row.get("Credit Amount", "").strip()
@@ -257,7 +274,6 @@ def parse_bank_csv(filepath: str) -> ParsedStatement:
 
         # Detect transfers and payments
         desc_upper = description.upper()
-        stmt_code = row.get("Statement Code", "").strip().upper()
 
         # Bill payments to own credit cards
         is_payment = "BILL DBSC" in desc_upper or "BILL PAYMENT" in desc_upper
@@ -266,7 +282,7 @@ def parse_bank_csv(filepath: str) -> ParsedStatement:
         is_transfer = (
             "TRF FT" in desc_upper
             or "FUNDS TRANSFER" in desc_upper
-            or stmt_code == "ATINT"  # interest earned
+            or stmt_code in ("ATINT", "INT")  # interest earned
             or "SI TO :" in desc_upper  # standing instruction to self
             or "MEP " in desc_upper  # fixed deposit / money market placement
             or "ICT CSL:" in desc_upper  # bank-to-bank (Citi)

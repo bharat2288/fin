@@ -45,19 +45,46 @@ def categorize_bank_paynow(description: str) -> tuple[int | None, str | None]:
 
 
 def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> int:
-    """Find or create an account from card info string."""
+    """Find or create an account from card info string.
+
+    Matching priority:
+    1. Exact name match
+    2. Last-four digit match (extracts trailing 4-digit group from card_info)
+    3. Account number substring match (long digit sequences in card_info)
+    4. Create new account if no match found
+    """
     if not card_info:
         card_info = "Unknown Account"
 
+    # 1. Exact name match
     existing = conn.execute(
         "SELECT id FROM accounts WHERE name = ?", (card_info,)
     ).fetchone()
     if existing:
         return existing[0]
 
-    digits = re.findall(r"\d{4}", card_info)
-    last_four = digits[-1] if digits else None
+    # 2. Match by last_four digits (strip all non-digits, take last 4)
+    all_digits = re.sub(r"\D", "", card_info)
+    last_four = all_digits[-4:] if len(all_digits) >= 4 else None
+    if last_four:
+        match = conn.execute(
+            "SELECT id FROM accounts WHERE last_four = ? AND status = 'active'",
+            (last_four,),
+        ).fetchone()
+        if match:
+            return match[0]
 
+    # 3. Match by long account number substring (6+ digits)
+    long_digits = re.findall(r"\d{6,}", card_info)
+    for num in long_digits:
+        match = conn.execute(
+            "SELECT id FROM accounts WHERE name LIKE ? AND status = 'active'",
+            (f"%{num}%",),
+        ).fetchone()
+        if match:
+            return match[0]
+
+    # 4. Create new account
     conn.execute(
         "INSERT INTO accounts (name, short_name, type, last_four) VALUES (?, ?, ?, ?)",
         (card_info, card_info, stmt_type, last_four),
