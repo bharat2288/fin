@@ -12,8 +12,10 @@ import sqlite3
 # These are identified by the "To:" field in bank statement descriptions
 PAYNOW_RULES = [
     # (pattern_in_description, category_name, notes)
+    ("CENTRAL PROVIDENT FUND BOARD", "Tax", "CPF payment"),
+    ("CPF VOLUNTARY CONTRIBUTIONS", "Tax", "CPF voluntary contribution"),
     ("SINGAPORE LIFE", "Insurance", "Life insurance premium"),
-    ("INLAND REVENUE", "Other", "Tax payment (IRAS)"),
+    ("INLAND REVENUE", "Tax", "Tax payment (IRAS)"),
     ("SINGAPORE ISLAND", "Fitness", "SICC country club"),
     ("SICC", "Fitness", "SICC country club"),
     ("SITOH SIEW KIM", "Kids", "Nanny"),

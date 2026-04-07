@@ -39,6 +39,30 @@ MONTH_MAP = {
 }
 
 
+DBS_SUPPLEMENTARY_CARDHOLDER_MAP = {
+    ("7436", "BHARAT SURI"): "DBS Vantage Visa Infinite Card 3696",
+    ("7436", "MILI KALE"): "DBS Vantage Visa Infinite Card 7436 (MK)",
+}
+
+
+def _normalize_card_header(card_header: str) -> str:
+    """Normalize a DBS card header to a stable account label."""
+    digits = re.findall(r"\d{4}", card_header)
+    if digits:
+        return f"{card_header.split('CARD NO')[0].strip()} {digits[-1]}"
+    return card_header.strip()
+
+
+def _subsection_account_label(base_card: str, holder_name: str) -> str:
+    """Map known consolidated-card subsections to the correct live account."""
+    digits = re.findall(r"\d{4}", base_card)
+    last_four = digits[-1] if digits else ""
+    return DBS_SUPPLEMENTARY_CARDHOLDER_MAP.get(
+        (last_four, holder_name.upper().strip()),
+        base_card,
+    )
+
+
 def _parse_statement_date(text: str) -> str:
     """Extract statement date from header text. Returns YYYY-MM-DD."""
     # CC format: "STATEMENT DATE" on one line, then "03 Jun 2024 ..." on the next
@@ -98,6 +122,7 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
     stmt_year = statement.statement_date[:4] if statement.statement_date != "unknown" else "2024"
 
     current_card = ""
+    current_tx_account = ""
     lines = all_text.split("\n")
     i = 0
 
@@ -107,13 +132,22 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
         # Detect card section headers
         card_match = re.match(r"(DBS\s+.*?CARD\s+NO\.?:?\s*[\d\s]+)", line)
         if card_match:
-            current_card = card_match.group(1).strip()
+            current_card = _normalize_card_header(card_match.group(1).strip())
             # Clean up card info — extract last 4 digits
-            digits = re.findall(r"\d{4}", current_card)
-            if digits:
-                current_card = f"{current_card.split('CARD NO')[0].strip()} {digits[-1]}"
+            current_tx_account = current_card
             if current_card not in statement.accounts:
                 statement.accounts.append(current_card)
+            i += 1
+            continue
+
+        subsection_match = re.match(r"NEW TRANSACTIONS\s+(.+?)$", line, re.IGNORECASE)
+        if subsection_match and current_card:
+            current_tx_account = _subsection_account_label(
+                current_card,
+                subsection_match.group(1),
+            )
+            if current_tx_account not in statement.accounts:
+                statement.accounts.append(current_tx_account)
             i += 1
             continue
 
@@ -171,7 +205,7 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
                 amount_foreign=amount_foreign,
                 currency_foreign=currency_foreign,
                 is_payment=is_payment,
-                card_info=current_card,
+                card_info=current_tx_account or current_card,
             )
             statement.transactions.append(tx)
 
