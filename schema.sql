@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     parent_id INTEGER,             -- NULL = top-level parent; FK = subcategory
-    is_personal INTEGER DEFAULT 1,  -- 0 = business (Moom), 1 = personal
+    is_personal INTEGER DEFAULT 1,  -- 0 = business (Moom/Kalesh), 1 = personal
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (parent_id) REFERENCES categories(id)
 );
@@ -14,13 +14,15 @@ CREATE TABLE IF NOT EXISTS merchant_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern TEXT NOT NULL,          -- merchant name pattern (case-insensitive match)
     service_id INTEGER NOT NULL,   -- FK to services (category derived from service)
+    category_override_id INTEGER,  -- optional category override when pattern implies spend type
     match_type TEXT DEFAULT 'contains',  -- 'contains', 'startswith', 'exact'
     confidence TEXT DEFAULT 'confirmed', -- 'auto', 'confirmed' (user-verified)
     priority INTEGER DEFAULT 0,    -- higher priority wins (for overlapping patterns)
     min_amount REAL,               -- if set, rule only matches when amount >= this
     max_amount REAL,               -- if set, rule only matches when amount <= this
     created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (service_id) REFERENCES services(id)
+    FOREIGN KEY (service_id) REFERENCES services(id),
+    FOREIGN KEY (category_override_id) REFERENCES categories(id)
 );
 
 CREATE TABLE IF NOT EXISTS accounts (
@@ -53,6 +55,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     amount_foreign REAL,           -- original amount if foreign currency
     currency_foreign TEXT,         -- e.g., 'USD', 'AUD', 'INR'
     category_id INTEGER,
+    service_id INTEGER,            -- FK to services table (merchant identity)
     is_payment INTEGER DEFAULT 0,  -- 1 = payment/credit, not an expense
     is_transfer INTEGER DEFAULT 0, -- 1 = internal transfer (bank statements)
     is_one_off INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in table)
@@ -60,7 +63,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (statement_id) REFERENCES statements(id),
-    FOREIGN KEY (category_id) REFERENCES categories(id)
+    FOREIGN KEY (category_id) REFERENCES categories(id),
+    FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -89,6 +93,7 @@ CREATE TABLE IF NOT EXISTS services (
     name TEXT NOT NULL UNIQUE,          -- e.g., "Netflix", "SP Gas BGV", "Grab"
     category_id INTEGER,                -- default category for this service
     is_one_off INTEGER DEFAULT 0,       -- 1 = one-off service (not recurring)
+    exclude_from_expense_views INTEGER DEFAULT 0,  -- 1 = keep in ledger but hide from dashboard/expense tables
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (category_id) REFERENCES categories(id)

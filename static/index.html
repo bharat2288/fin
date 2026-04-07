@@ -80,6 +80,7 @@
                         <button class="btn btn-toggle" data-filter="all" onclick="setSpendFilter('all')">All</button>
                         <button class="btn btn-toggle active" data-filter="personal" onclick="setSpendFilter('personal')">Personal</button>
                         <button class="btn btn-toggle" data-filter="moom" onclick="setSpendFilter('moom')">Moom</button>
+                        <button class="btn btn-toggle" data-filter="kalesh" onclick="setSpendFilter('kalesh')">Kalesh</button>
                     </div>
                 </div>
                 <div class="filter-section">
@@ -248,7 +249,7 @@
                                 <label>Type</label>
                                 <select id="import-new-cat-type" style="width:100%;">
                                     <option value="1">Personal</option>
-                                    <option value="0">Moom</option>
+                                    <option value="0">Business</option>
                                 </select>
                             </div>
                         </div>
@@ -315,6 +316,7 @@
                         <button class="btn btn-toggle active" data-subs-spend="personal" onclick="setSubsSpend('personal')">Personal</button>
                         <button class="btn btn-toggle" data-subs-spend="all" onclick="setSubsSpend('all')">All</button>
                         <button class="btn btn-toggle" data-subs-spend="moom" onclick="setSubsSpend('moom')">Moom</button>
+                        <button class="btn btn-toggle" data-subs-spend="kalesh" onclick="setSubsSpend('kalesh')">Kalesh</button>
                     </div>
                     <div style="display:flex;gap:8px;">
                         <button class="btn btn-sm" onclick="enrichSubscriptions()">Refresh from Txns</button>
@@ -384,7 +386,7 @@
                             <label>Type</label>
                             <select id="cat-new-personal" style="width:100%;">
                                 <option value="1">Personal</option>
-                                <option value="0">Business (Moom)</option>
+                                <option value="0">Business</option>
                             </select>
                         </div>
                         <div>
@@ -456,54 +458,13 @@
         <div class="container">
             <div class="section-label">/ Merchant Rules</div>
 
-            <!-- Add Rule Form (collapsed — most rules created via Resolve Modal) -->
-            <div class="rule-form hidden" id="rule-form" style="display:none;">
-                <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
-                    <div style="flex:2;min-width:160px;">
-                        <label>Pattern</label>
-                        <input type="text" id="rule-pattern" placeholder="e.g. GRAB" style="width:100%;">
-                    </div>
-                    <div style="flex:2;min-width:160px;">
-                        <label>Service</label>
-                        <div class="svc-picker" id="rule-svc-picker">
-                            <input type="text" class="svc-picker-input" placeholder="Search..." autocomplete="off">
-                            <input type="hidden" class="svc-picker-id">
-                            <div class="svc-picker-dropdown"></div>
-                        </div>
-                    </div>
-                    <div style="flex:0 0 100px;">
-                        <label>Match</label>
-                        <select id="rule-match-type" style="width:100%;">
-                            <option value="contains">Contains</option>
-                            <option value="startswith">Starts with</option>
-                            <option value="exact">Exact</option>
-                        </select>
-                    </div>
-                    <div style="flex:0 0 55px;">
-                        <label>Pri</label>
-                        <input type="number" id="rule-priority" value="0" min="0" max="99" style="width:100%;">
-                    </div>
-                    <div style="flex:0 0 70px;">
-                        <label>Min $</label>
-                        <input type="number" id="rule-min-amount" placeholder="—" step="0.01" style="width:100%;">
-                    </div>
-                    <div style="flex:0 0 70px;">
-                        <label>Max $</label>
-                        <input type="number" id="rule-max-amount" placeholder="—" step="0.01" style="width:100%;">
-                    </div>
-                    <div style="flex:0 0 auto;">
-                        <button class="btn btn-primary btn-sm" onclick="addRule()">Add</button>
-                    </div>
-                </div>
-            </div>
-
             <!-- Rules Accordion -->
             <div class="card">
                 <div class="rules-toolbar">
                     <input type="text" class="rules-search" id="rules-search" placeholder="Search rules..." oninput="filterRules()">
                     <span id="rules-count" class="text-secondary" style="font-size:12px;"></span>
                     <button class="btn btn-sm" id="recategorize-btn" onclick="recategorizeAll()" title="Re-run all rules against existing transactions">Re-categorize All</button>
-                    <button class="btn btn-sm" onclick="toggleRuleForm()">+ Add Rule</button>
+                    <button class="btn btn-sm" onclick="openCreateRuleModal()">+ Add Rule</button>
                 </div>
                 <div id="rules-accordion" class="rules-accordion" style="max-height:600px;overflow-y:auto;"></div>
             </div>
@@ -607,7 +568,7 @@
 
     <!-- Resolve Transaction Modal (unified: service + rule + category) -->
     <div class="modal-overlay" id="resolve-modal" style="display:none;">
-        <div class="modal" style="width:520px;">
+        <div class="modal modal-resolve" style="width:520px;">
             <div class="modal-header">
                 <span class="section-label" style="margin-bottom:0;">/ Resolve Transaction</span>
                 <button class="modal-close" onclick="closeResolveModal()">&times;</button>
@@ -645,25 +606,27 @@
                         <label>Type</label>
                         <select id="resolve-new-cat-type" style="width:100%;">
                             <option value="1">Personal</option>
-                            <option value="0">Moom</option>
+                            <option value="0">Business</option>
                         </select>
                     </div>
                 </div>
-                <!-- Cascade option (shown when category differs from service's current category) -->
-                <div class="resolve-cascade hidden" id="resolve-cascade">
+                <div class="resolve-cascade" id="resolve-cascade">
                     <div class="resolve-cascade-warning" id="resolve-cascade-warning"></div>
                     <label class="resolve-cascade-option">
-                        <input type="radio" name="resolve-scope" value="tx" checked> Update just this transaction
+                        <input type="radio" name="resolve-scope" value="transaction" checked onchange="updateResolveCascade()"> This transaction only
                     </label>
                     <label class="resolve-cascade-option">
-                        <input type="radio" name="resolve-scope" value="service"> Re-categorize service + all its transactions
+                        <input type="radio" name="resolve-scope" value="rule" onchange="updateResolveCascade()"> Rule override for this pattern
+                    </label>
+                    <label class="resolve-cascade-option">
+                        <input type="radio" name="resolve-scope" value="service_default" onchange="updateResolveCascade()"> Service default + inherited transactions
                         <span class="resolve-cascade-count" id="resolve-cascade-count"></span>
                     </label>
                 </div>
                 <div class="modal-field-row">
                     <div class="modal-field">
                         <label>Rule Pattern <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
-                        <input type="text" id="resolve-modal-pattern" style="width:100%;" placeholder="Leave empty for PayNow / transfers">
+                        <input type="text" id="resolve-modal-pattern" style="width:100%;" placeholder="Leave empty for PayNow / transfers" oninput="updateResolveCascade()">
                     </div>
                     <div class="modal-field" style="flex:0 0 140px;">
                         <label>Match Type</label>
@@ -683,9 +646,9 @@
 
     <!-- Edit Rule Modal -->
     <div class="modal-overlay" id="edit-rule-modal" style="display:none;">
-        <div class="modal">
+        <div class="modal modal-rule-editor">
             <div class="modal-header">
-                <span class="section-label" style="margin-bottom:0;">/ Edit Merchant Rule</span>
+                <span class="section-label" style="margin-bottom:0;" id="rule-modal-title">/ Edit Merchant Rule</span>
                 <button class="modal-close" onclick="closeEditRuleModal()">&times;</button>
             </div>
             <div class="modal-body">
@@ -700,11 +663,12 @@
                         <select id="edit-rule-match" style="width:100%;">
                             <option value="contains">Contains</option>
                             <option value="startswith">Starts with</option>
+                            <option value="exact">Exact</option>
                         </select>
                     </div>
                 </div>
-                <div class="modal-field-row" style="margin-top:8px;">
-                    <div class="modal-field" style="flex:2;">
+                <div class="modal-field-row modal-field-row-compact" style="margin-top:8px;">
+                    <div class="modal-field">
                         <label>Service</label>
                         <div class="svc-picker" id="edit-rule-svc-picker">
                             <input type="text" class="svc-picker-input" placeholder="Search services..." autocomplete="off">
@@ -713,15 +677,22 @@
                         </div>
                         <small id="edit-rule-cat-display" style="color:var(--text-muted);font-size:11px;"></small>
                     </div>
-                    <div class="modal-field" style="flex:0 0 80px;">
+                    <div class="modal-field">
+                        <label>Category Override</label>
+                        <select id="edit-rule-category-override" style="width:100%;"></select>
+                        <small style="color:var(--text-muted);font-size:11px;">Leave blank to inherit the service default.</small>
+                    </div>
+                </div>
+                <div class="modal-field-row modal-field-row-compact">
+                    <div class="modal-field" style="flex:0 0 120px;">
                         <label>Priority</label>
                         <input type="number" id="edit-rule-priority" value="0" style="width:100%;">
                     </div>
-                    <div class="modal-field" style="flex:0 0 100px;">
+                    <div class="modal-field" style="flex:0 0 160px;">
                         <label>Min $</label>
                         <input type="number" id="edit-rule-min" step="0.01" placeholder="—" style="width:100%;">
                     </div>
-                    <div class="modal-field" style="flex:0 0 100px;">
+                    <div class="modal-field" style="flex:0 0 160px;">
                         <label>Max $</label>
                         <input type="number" id="edit-rule-max" step="0.01" placeholder="—" style="width:100%;">
                     </div>
@@ -729,7 +700,7 @@
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="closeEditRuleModal()">Cancel</button>
-                <button class="btn btn-primary" onclick="saveEditRule()">Save</button>
+                <button class="btn btn-primary" id="rule-modal-save" onclick="saveRuleModal()">Save</button>
             </div>
         </div>
     </div>
@@ -771,7 +742,7 @@
                         <label>Type</label>
                         <select id="add-sub-new-cat-type" style="width:100%;">
                             <option value="1">Personal</option>
-                            <option value="0">Moom</option>
+                            <option value="0">Business</option>
                         </select>
                     </div>
                 </div>
@@ -886,7 +857,7 @@
                         <label>Type</label>
                         <select id="edit-sub-new-cat-type" style="width:100%;">
                             <option value="1">Personal</option>
-                            <option value="0">Moom</option>
+                            <option value="0">Business</option>
                         </select>
                     </div>
                 </div>
@@ -993,7 +964,7 @@
                         <label>Type</label>
                         <select id="add-svc-new-cat-type" style="width:100%;">
                             <option value="1">Personal</option>
-                            <option value="0">Moom</option>
+                            <option value="0">Business</option>
                         </select>
                     </div>
                 </div>
@@ -1039,7 +1010,7 @@
                         <label>Type</label>
                         <select id="edit-svc-new-cat-type" style="width:100%;">
                             <option value="1">Personal</option>
-                            <option value="0">Moom</option>
+                            <option value="0">Business</option>
                         </select>
                     </div>
                 </div>

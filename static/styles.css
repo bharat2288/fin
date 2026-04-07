@@ -1325,7 +1325,19 @@ input[type="checkbox"]:focus-visible {
     padding: var(--space-6);
     width: 460px;
     max-width: 90vw;
+    max-height: 88vh;
+    overflow-y: auto;
+    box-sizing: border-box;
     box-shadow: var(--shadow-lg);
+}
+
+.modal.modal-rule-editor {
+    width: 760px;
+    max-width: 94vw;
+}
+
+.modal.modal-resolve {
+    max-width: 94vw;
 }
 
 .modal-header {
@@ -1463,10 +1475,16 @@ input[type="checkbox"]:focus-visible {
 .modal-field-row {
     display: flex;
     gap: var(--space-3);
+    align-items: flex-start;
+    flex-wrap: wrap;
 }
 
 .modal-field-row > * {
     flex: 1;
+}
+
+.modal-field-row-compact > * {
+    min-width: 0;
 }
 
 /* ----------------------------------------------------------------
@@ -1769,6 +1787,17 @@ input[type="checkbox"]:focus-visible {
 @media (max-width: 700px) {
     .subs-col-hide-sm { display: none; }
     .subs-table-wrap table { min-width: 480px; }
+    .modal {
+        width: 94vw !important;
+        padding: var(--space-4);
+        max-height: 90vh;
+    }
+    .modal-field-row {
+        flex-direction: column;
+    }
+    .sub-modal-row {
+        grid-template-columns: 1fr;
+    }
 }
 
 .subs-row-inactive td {

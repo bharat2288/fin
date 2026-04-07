@@ -5,7 +5,7 @@
 // STATE
 // ============================================================
 
-let categories = [];          // [{id, name, parent_id, parent_name, display_name, is_personal}, ...]
+let categories = [];          // [{id, name, parent_id, parent_name, display_name, is_personal, scope}, ...]
 let accounts = [];            // [{id, name, ...}, ...]
 let currentImportId = null;   // Active import preview
 let currentImportData = null; // Preview data from upload
@@ -83,6 +83,15 @@ function populateCategorySelect(selectId, {placeholder, includeNew, selectedId, 
                 .forEach(p => { parentSel.innerHTML += `<option value="${p.id}">${p.name}</option>`; });
         }
     }
+}
+
+function categoryDisplayName(categoryId) {
+    if (!categoryId) return '';
+    const cat = categories.find(c => c.id === categoryId);
+    if (!cat) return '';
+    if (!cat.parent_id) return cat.name;
+    const parent = categories.find(c => c.id === cat.parent_id);
+    return parent ? `${parent.name} > ${cat.name}` : cat.name;
 }
 
 // Factory: create a sort toggler for a table section.
@@ -197,13 +206,35 @@ async function cascadeServiceCategory(serviceId, categoryId, serviceName, verb) 
     return 0;
 }
 
+function getScope(item) {
+    if (!item) return 'personal';
+    if (item.scope) return item.scope;
+    return item.is_personal === 0 ? 'moom' : 'personal';
+}
+
+function scopeLabel(scope) {
+    if (scope === 'moom') return 'Moom';
+    if (scope === 'kalesh') return 'Kalesh';
+    return 'Personal';
+}
+
+function matchesScope(filter, item) {
+    return filter === 'all' || getScope(item) === filter;
+}
+
+function scopeBadgeHtml(scope) {
+    if (!scope || scope === 'personal') return '';
+    return ` <span class="badge badge-muted">${escapeHtml(scopeLabel(scope))}</span>`;
+}
+
 // Build a visibility-change hint for toast when a transaction moves between spend filters.
 function spendFilterHint(categoryId) {
     const cat = categories.find(c => c.id === categoryId);
     if (!cat) return null;
-    const isPersonalCat = cat.is_personal === 1;
-    if (spendFilter === 'personal' && !isPersonalCat) return 'Moved to Moom — switch to "All" to see it';
-    if (spendFilter === 'moom' && isPersonalCat) return 'Moved to Personal — switch to "All" to see it';
+    const nextScope = getScope(cat);
+    if (spendFilter !== 'all' && nextScope !== spendFilter) {
+        return `Moved to ${scopeLabel(nextScope)} — switch to "All" to see it`;
+    }
     return null;
 }
 
@@ -456,8 +487,7 @@ async function loadDashboard(preserveChartFilter) {
     if (year && month) {
         statParams = `ref_month=${year}-${month}`;
     }
-    if (spendFilter === 'personal') statParams += (statParams ? '&' : '') + 'personal_only=true';
-    if (spendFilter === 'moom') statParams += (statParams ? '&' : '') + 'moom_only=true';
+    if (spendFilter !== 'all') statParams += (statParams ? '&' : '') + 'scope=' + spendFilter;
     if (document.getElementById('filter-one-off').checked) statParams += (statParams ? '&' : '') + 'exclude_one_off=true';
     const accountId = document.getElementById('filter-account')?.value;
     if (accountId) statParams += (statParams ? '&' : '') + 'account_id=' + accountId;
@@ -499,8 +529,7 @@ function buildFilterParams() {
     const accountId = document.getElementById('filter-account')?.value;
     if (accountId) p.set('account_id', accountId);
 
-    if (spendFilter === 'personal') p.set('personal_only', 'true');
-    if (spendFilter === 'moom') p.set('moom_only', 'true');
+    if (spendFilter !== 'all') p.set('scope', spendFilter);
     if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
     return p.toString();
 }
@@ -516,8 +545,7 @@ function buildChartParams() {
     }
     const accountId = document.getElementById('filter-account')?.value;
     if (accountId) p.set('account_id', accountId);
-    if (spendFilter === 'personal') p.set('personal_only', 'true');
-    if (spendFilter === 'moom') p.set('moom_only', 'true');
+    if (spendFilter !== 'all') p.set('scope', spendFilter);
     if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
     return p.toString();
 }
@@ -536,12 +564,12 @@ function setSpendFilter(filter) {
     document.querySelectorAll('[data-filter]').forEach(b => {
         b.classList.toggle('active', b.dataset.filter === filter);
     });
-    // Auto-toggle subcategories: on for Moom, off for Personal/All
-    if (filter === 'moom' && !showSubcategories) {
+    // Auto-toggle subcategories: on for business scopes, off for Personal/All
+    if ((filter === 'moom' || filter === 'kalesh') && !showSubcategories) {
         showSubcategories = true;
         const btn = document.getElementById('subcategory-toggle');
         if (btn) btn.classList.add('active');
-    } else if (filter !== 'moom' && showSubcategories) {
+    } else if (filter !== 'moom' && filter !== 'kalesh' && showSubcategories) {
         showSubcategories = false;
         const btn = document.getElementById('subcategory-toggle');
         if (btn) btn.classList.remove('active');
@@ -576,9 +604,14 @@ function renderStatCards(d) {
             ${avgLine(d.avg_personal)}
         </div>
         <div class="stat-card">
-            <div class="stat-label">Business</div>
+            <div class="stat-label">Moom</div>
             <div class="stat-value moom">S$${formatAmount(d.moom)} ${delta(d.moom, d.avg_moom)}</div>
             ${avgLine(d.avg_moom)}
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Kalesh</div>
+            <div class="stat-value" style="color:var(--accent-pop);">S$${formatAmount(d.kalesh)} ${delta(d.kalesh, d.avg_kalesh)}</div>
+            ${avgLine(d.avg_kalesh)}
         </div>
         <div class="stat-card">
             <div class="stat-label">Uncategorized</div>
@@ -837,8 +870,7 @@ function renderTrendChart(catList, periods, labels, data) {
 
 function renderCategoryChart(data) {
     let filtered = data;
-    if (spendFilter === 'personal') filtered = data.filter(d => d.is_personal === 1);
-    if (spendFilter === 'moom') filtered = data.filter(d => d.is_personal === 0);
+    if (spendFilter !== 'all') filtered = data.filter(d => matchesScope(spendFilter, d));
 
     // Top 10 + "Other"
     const top = filtered.slice(0, 10);
@@ -1142,7 +1174,19 @@ document.addEventListener('DOMContentLoaded', () => {
 // RULE CREATION MODAL (from category picker)
 // ============================================================
 
+function isTransferLikeDescription(description) {
+    const normalized = (description || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    if (!normalized) return false;
+    if (normalized.includes('PAYNOW') || normalized.includes('PAYLAH') || normalized.includes('I-BANK') || normalized.includes(':IB')) {
+        return true;
+    }
+    return /^FT\d+[A-Z0-9-]*/.test(normalized);
+}
+
 function suggestPattern(description) {
+    if (isTransferLikeDescription(description)) {
+        return '';
+    }
     // Extract a useful merchant pattern from the description
     // Strip trailing reference numbers and clean up
     let pattern = description.toUpperCase();
@@ -1166,6 +1210,7 @@ function suggestPattern(description) {
 // Unified flow: pick/create service → category auto-fills → rule pattern → one save
 
 let resolveModalTxId = null;
+let resolveCascadeCountToken = 0;
 async function openResolveModal(txId, description) {
     resolveModalTxId = txId;
 
@@ -1181,6 +1226,8 @@ async function openResolveModal(txId, description) {
     const picker = getResolveServicePicker();
     picker.clear();
     document.getElementById('resolve-cat-hint').style.display = 'none';
+    const defaultScope = document.querySelector('input[name="resolve-scope"][value="transaction"]');
+    if (defaultScope) defaultScope.checked = true;
 
     // Populate category dropdown (for new services or manual override)
     populateCategorySelect('resolve-modal-category', {
@@ -1189,6 +1236,7 @@ async function openResolveModal(txId, description) {
 
     // Try to auto-match service from description
     await autoMatchService(description);
+    updateResolveCascade();
 
     // Show modal and focus service input
     document.getElementById('resolve-modal').style.display = 'flex';
@@ -1202,44 +1250,64 @@ function onResolveCategoryChange() {
 
 function updateResolveCascade() {
     const cascadeEl = document.getElementById('resolve-cascade');
+    const warningEl = document.getElementById('resolve-cascade-warning');
+    const countEl = document.getElementById('resolve-cascade-count');
     const picker = getResolveServicePicker();
     const { id: serviceId, name: serviceName } = picker.getValue();
-    const categoryId = parseInt(document.getElementById('resolve-modal-category').value);
+    const categoryRaw = document.getElementById('resolve-modal-category').value;
+    const categoryId = categoryRaw && categoryRaw !== '__new__' ? parseInt(categoryRaw) : null;
+    const pattern = document.getElementById('resolve-modal-pattern').value.trim();
+    const ruleRadio = document.querySelector('input[name="resolve-scope"][value="rule"]');
+    const txRadio = document.querySelector('input[name="resolve-scope"][value="transaction"]');
+    const serviceDefaultRadio = document.querySelector('input[name="resolve-scope"][value="service_default"]');
 
-    // Find existing service
     const existingService = serviceId
         ? allServicesList.find(s => s.id === serviceId)
         : allServicesList.find(s => s.name.toLowerCase() === serviceName.toLowerCase());
+    const defaultCategory = existingService?.display_category || categoryDisplayName(existingService?.category_id);
+    const selectedCategory = categoryDisplayName(categoryId);
+
+    if (ruleRadio) {
+        ruleRadio.disabled = !pattern;
+        if (!pattern && ruleRadio.checked && txRadio) txRadio.checked = true;
+    }
 
     if (existingService && categoryId && existingService.category_id !== categoryId) {
-        // Category mismatch — show cascade option
-        const currentCat = categories.find(c => c.id === existingService.category_id);
-        const newCat = categories.find(c => c.id === categoryId);
-        const currentName = currentCat ? currentCat.name : 'unknown';
-        const newName = newCat ? newCat.name : 'unknown';
-        document.getElementById('resolve-cascade-warning').textContent =
-            `Service "${existingService.name}" is currently "${currentName}". You selected "${newName}".`;
-        document.getElementById('resolve-cascade-count').textContent = '';
-        cascadeEl.classList.remove('hidden');
+        warningEl.textContent =
+            `Service "${existingService.name}" defaults to "${defaultCategory || 'Uncategorized'}". ` +
+            `You selected "${selectedCategory}".`;
+    } else if (existingService) {
+        warningEl.textContent = defaultCategory
+            ? `Service "${existingService.name}" defaults to "${defaultCategory}".`
+            : `Service "${existingService.name}" does not have a default category yet.`;
+    } else if (serviceName && selectedCategory) {
+        warningEl.textContent = pattern
+            ? `Create "${serviceName}" and choose whether "${selectedCategory}" applies only here, to this pattern, or as the service default.`
+            : `Create "${serviceName}" and keep it transaction-only for now, unless you want a reusable rule later.`;
+    } else {
+        warningEl.textContent = pattern
+            ? 'Choose whether this category is transaction-only, a reusable rule override, or the new service default.'
+            : 'Transaction-only is safest when you are not creating a reusable rule.';
+    }
 
-        // Fetch count of affected transactions
+    countEl.textContent = '';
+    cascadeEl.classList.remove('hidden');
+
+    const countToken = ++resolveCascadeCountToken;
+    if (existingService && serviceDefaultRadio) {
         fetch(`/api/services/${existingService.id}/transactions`)
             .then(r => r.json())
             .then(data => {
+                if (countToken !== resolveCascadeCountToken) return;
                 const count = Array.isArray(data) ? data.length : 0;
-                document.getElementById('resolve-cascade-count').textContent = ` (${count} transactions)`;
+                countEl.textContent = count ? ` (${count} linked transactions)` : '';
             }).catch(() => {});
-    } else {
-        cascadeEl.classList.add('hidden');
     }
 }
 
 async function autoMatchService(description) {
     // Try to find an existing service whose name appears in the description
-    if (!allServicesList || !allServicesList.length) {
-        const res = await fetch('/api/services');
-        allServicesList = await res.json();
-    }
+    await ensureServicesListLoaded();
     // Services cache populated for picker
 
     const descUpper = description.toUpperCase();
@@ -1277,8 +1345,9 @@ function closeResolveModal() {
     document.getElementById('resolve-modal').style.display = 'none';
     resolveModalTxId = null;
     document.getElementById('resolve-new-cat-row').classList.add('hidden');
-    document.getElementById('resolve-cascade').classList.add('hidden');
     document.getElementById('resolve-new-cat-name').value = '';
+    document.getElementById('resolve-cascade-warning').textContent = '';
+    document.getElementById('resolve-cascade-count').textContent = '';
 }
 
 // In-app confirm dialog (replaces browser confirm()). Returns a promise that resolves true/false.
@@ -1337,16 +1406,21 @@ async function saveResolveModal() {
         const existingService = pickedServiceId
             ? allServicesList.find(s => s.id === pickedServiceId)
             : allServicesList.find(s => s.name.toLowerCase() === serviceName.toLowerCase());
-
-        // Cascade: update service category if user chose "service" scope
-        const wantsCascade = !document.getElementById('resolve-cascade').classList.contains('hidden') &&
-            document.querySelector('input[name="resolve-scope"][value="service"]')?.checked;
-        if (wantsCascade && existingService) {
-            await cascadeServiceCategory(existingService.id, categoryId, serviceName, 'Re-categorized');
+        const applyScope = document.querySelector('input[name="resolve-scope"]:checked')?.value || 'transaction';
+        if (applyScope === 'rule' && !pattern) {
+            alert('Pattern is required for a rule override.');
+            return;
         }
 
         // Resolve the transaction (create service/rule if needed)
-        const payload = { tx_id: resolveModalTxId, service_name: serviceName, pattern, match_type: matchType, category_id: categoryId };
+        const payload = {
+            tx_id: resolveModalTxId,
+            service_name: serviceName,
+            pattern,
+            match_type: matchType,
+            category_id: categoryId,
+            apply_scope: applyScope,
+        };
         if (existingService) payload.service_id = existingService.id;
 
         const data = await apiFetch('/api/transactions/resolve', { method: 'POST', body: payload });
@@ -1354,6 +1428,12 @@ async function saveResolveModal() {
 
         // Toast feedback
         const parts = [];
+        const scopeMessage = {
+            transaction: 'Saved as transaction-only',
+            rule: 'Saved as a rule override',
+            service_default: 'Updated the service default',
+        }[applyScope];
+        if (scopeMessage) parts.push(scopeMessage);
         if (!existingService) parts.push(`Created service "${serviceName}"`);
         if (data.backfilled > 0) parts.push(`${data.backfilled} matching transactions updated`);
         const hint = spendFilterHint(categoryId);
@@ -1738,7 +1818,10 @@ async function confirmImport() {
 
         const dupMsg = result.duplicates_skipped ? ` (${result.duplicates_skipped} duplicates skipped)` : '';
         const svcMsg = result.services_created ? ` ${result.services_created} new services created.` : '';
-        showToast(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${svcMsg}`, 'success', 6000);
+        const guardrailMsg = result.rules_skipped_generic
+            ? ` ${result.rules_skipped_generic} generic transfer rule${result.rules_skipped_generic === 1 ? '' : 's'} skipped.`
+            : '';
+        showToast(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${svcMsg}${guardrailMsg}`, 'success', 6000);
         discardImport();
         await loadReferenceData();
     } catch (err) {
@@ -1855,6 +1938,13 @@ async function loadHistory() {
 
 let allRules = [];
 
+async function ensureServicesListLoaded() {
+    if (!allServicesList || !allServicesList.length) {
+        const res = await fetch('/api/services');
+        allServicesList = await res.json();
+    }
+}
+
 async function loadRules() {
     const res = await fetch('/api/rules');
     allRules = await res.json();
@@ -1935,10 +2025,15 @@ function renderRules(rules) {
                             } else if (r.max_amount != null) {
                                 amtStr = '\u2264 $' + r.max_amount.toLocaleString();
                             }
+                            const serviceHtml = `${escapeHtml(r.service_name || '')}${
+                                r.category_override_id
+                                    ? ' <span class="badge badge-muted" style="font-size:10px;margin-left:6px;">override</span>'
+                                    : ''
+                            }`;
                             return `
                             <tr>
                                 <td class="text-mono" style="font-size:12px;">${escapeHtml(r.pattern)}</td>
-                                <td style="font-size:12px;">${escapeHtml(r.service_name || '')}</td>
+                                <td style="font-size:12px;">${serviceHtml}</td>
                                 <td style="font-size:12px;color:var(--text-tertiary);">${r.match_type}</td>
                                 <td style="font-size:12px;color:${r.priority > 0 ? 'var(--camel)' : 'var(--text-tertiary)'};">${r.priority || ''}</td>
                                 <td style="font-size:12px;color:${amtStr ? 'var(--camel)' : 'var(--text-tertiary)'};">${amtStr || '\u2014'}</td>
@@ -1964,90 +2059,93 @@ function toggleAccordion(header) {
 }
 
 function toggleRuleForm() {
-    const form = document.getElementById('rule-form');
-    const isHidden = form.style.display === 'none';
-    form.style.display = isHidden ? '' : 'none';
-    form.classList.toggle('hidden', !isHidden);
-    if (isHidden) {
-        document.getElementById('rule-pattern').focus();
-    }
+    openCreateRuleModal();
 }
 
-async function addRule() {
-    const pattern = document.getElementById('rule-pattern').value.trim();
-    const picker = getAddRuleServicePicker();
-    const { id: serviceId, name: serviceName } = picker.getValue();
-    const matchType = document.getElementById('rule-match-type').value;
-    const priority = parseInt(document.getElementById('rule-priority').value) || 0;
-    const minAmountVal = document.getElementById('rule-min-amount').value;
-    const maxAmountVal = document.getElementById('rule-max-amount').value;
-
-    if (!pattern || !serviceId) {
-        alert('Pattern and service are required');
-        return;
-    }
-
-    const body = {
-        pattern,
-        service_id: serviceId,
-        match_type: matchType,
-        priority,
-    };
-    if (minAmountVal) body.min_amount = parseFloat(minAmountVal);
-    if (maxAmountVal) body.max_amount = parseFloat(maxAmountVal);
-
-    const data = await apiFetch('/api/rules', { method: 'POST', body });
-    if (!data) return;
-
-    document.getElementById('rule-pattern').value = '';
-    document.getElementById('rule-priority').value = '0';
-    document.getElementById('rule-min-amount').value = '';
-    document.getElementById('rule-max-amount').value = '';
-    await loadRules();
+async function openCreateRuleModal() {
+    await openRuleModal();
 }
 
 async function editRule(ruleId) {
     const rule = allRules.find(r => r.id === ruleId);
     if (!rule) return;
 
-    const ruleFields = { id: ruleId, pattern: rule.pattern, match: rule.match_type || 'contains',
-        priority: rule.priority || 0, min: rule.min_amount || '', max: rule.max_amount || '' };
-    for (const [k, v] of Object.entries(ruleFields)) document.getElementById(`edit-rule-${k}`).value = v;
+    await openRuleModal(rule);
+}
 
-    // Set current service in picker
+async function openRuleModal(rule = null) {
+    await ensureServicesListLoaded();
+    const isCreate = !rule;
+    const ruleFields = {
+        id: rule?.id || '',
+        pattern: rule?.pattern || '',
+        match: rule?.match_type || 'contains',
+        priority: rule?.priority || 0,
+        min: rule?.min_amount || '',
+        max: rule?.max_amount || '',
+    };
+    for (const [k, v] of Object.entries(ruleFields)) document.getElementById(`edit-rule-${k}`).value = v;
+    populateCategorySelect('edit-rule-category-override', {
+        placeholder: 'Use service default', selectedId: rule?.category_override_id || ''
+    });
+
     const picker = getEditRuleServicePicker();
-    picker.setValue(rule.service_name || '', rule.service_id || null);
-    document.getElementById('edit-rule-cat-display').textContent =
-        rule.display_category ? `Category: ${rule.display_category}` : '';
+    if (rule) {
+        picker.setValue(rule.service_name || '', rule.service_id || null);
+    } else {
+        picker.clear();
+    }
+    updateEditRuleServiceMeta(rule?.service_id || null);
+
+    document.getElementById('rule-modal-title').textContent = isCreate ? '/ New Merchant Rule' : '/ Edit Merchant Rule';
+    document.getElementById('rule-modal-save').textContent = isCreate ? 'Create Rule' : 'Save';
 
     document.getElementById('edit-rule-modal').style.display = 'flex';
     document.getElementById('edit-rule-pattern').focus();
+}
+
+function updateEditRuleServiceMeta(serviceId) {
+    const svc = (allServicesList || []).find(s => s.id === serviceId);
+    document.getElementById('edit-rule-cat-display').textContent =
+        svc?.display_category
+            ? `Service default: ${svc.display_category}. Leave override blank to inherit it.`
+            : 'Leave override blank to use the service default.';
 }
 
 function closeEditRuleModal() {
     document.getElementById('edit-rule-modal').style.display = 'none';
 }
 
-async function saveEditRule() {
+async function saveRuleModal() {
     const ruleId = document.getElementById('edit-rule-id').value;
     const picker = getEditRuleServicePicker();
     const { id: serviceId } = picker.getValue();
 
+    const pattern = document.getElementById('edit-rule-pattern').value.trim();
+    if (!pattern) {
+        alert('Pattern is required.');
+        return;
+    }
     if (!serviceId) {
         alert('Service is required.');
         return;
     }
 
     const payload = {
-        pattern: document.getElementById('edit-rule-pattern').value.trim(),
+        pattern,
         match_type: document.getElementById('edit-rule-match').value,
         priority: parseInt(document.getElementById('edit-rule-priority').value) || 0,
         min_amount: parseFloat(document.getElementById('edit-rule-min').value) || null,
         max_amount: parseFloat(document.getElementById('edit-rule-max').value) || null,
+        category_override_id: parseInt(document.getElementById('edit-rule-category-override').value) || null,
     };
     if (serviceId) payload.service_id = serviceId;
 
-    await apiFetch(`/api/rules/${ruleId}`, { method: 'PUT', body: payload });
+    if (ruleId) {
+        await apiFetch(`/api/rules/${ruleId}`, { method: 'PUT', body: payload });
+    } else {
+        await apiFetch('/api/rules', { method: 'POST', body: payload });
+    }
     closeEditRuleModal();
     await loadRules();
 }
@@ -2113,7 +2211,7 @@ function renderCategoryTree() {
         html += '<div class="cat-tree-grid">';
         withChildren.forEach(p => {
             const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-            const typeLabel = (!p.is_personal && p.name !== 'Moom') ? ' <span class="badge badge-muted">Moom</span>' : '';
+            const typeLabel = scopeBadgeHtml(getScope(p));
             const collapsed = children.length > 5;
             html += `<div class="cat-group${collapsed ? ' collapsed' : ''}">
                 <div class="cat-group-name" onclick="this.parentElement.classList.toggle('collapsed')">
@@ -2133,7 +2231,7 @@ function renderCategoryTree() {
     if (withoutChildren.length) {
         html += '<div class="cat-simple-row">';
         withoutChildren.forEach(p => {
-            const typeLabel = (!p.is_personal && p.name !== 'Moom') ? ' <span class="badge badge-muted">Moom</span>' : '';
+            const typeLabel = scopeBadgeHtml(getScope(p));
             html += `<span class="cat-chip">${escapeHtml(p.name)}${typeLabel}</span>`;
         });
         html += '</div>';
@@ -3375,7 +3473,9 @@ function getAddRuleServicePicker() {
 }
 
 function getEditRuleServicePicker() {
-    return getServicePicker('edit-rule-svc-picker');
+    return getServicePicker('edit-rule-svc-picker', {
+        onSelect: (item) => updateEditRuleServiceMeta(item.id),
+    });
 }
 
 // ============================================================
@@ -3454,12 +3554,12 @@ function setSubsSpend(spend) {
 function renderSubsStats(subs) {
     // Apply spend filter to stats
     let active = subs.filter(s => s.status === 'active');
-    if (subsSpend === 'personal') active = active.filter(s => s.is_personal !== 0);
-    else if (subsSpend === 'moom') active = active.filter(s => s.is_personal === 0);
+    if (subsSpend !== 'all') active = active.filter(s => matchesScope(subsSpend, s));
 
     const totalMonthly = active.reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
-    const personalMonthly = active.filter(s => s.is_personal !== 0).reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
-    const moomMonthly = active.filter(s => s.is_personal === 0).reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
+    const personalMonthly = active.filter(s => getScope(s) === 'personal').reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
+    const moomMonthly = active.filter(s => getScope(s) === 'moom').reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
+    const kaleshMonthly = active.filter(s => getScope(s) === 'kalesh').reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
     const fxRate = subs.length ? subs[0].fx_rate : 1.35;
 
     document.getElementById('subs-stats-row').innerHTML = `
@@ -3474,9 +3574,14 @@ function renderSubsStats(subs) {
             <div class="stat-sub">S$${formatAmount(personalMonthly * 12)}/year</div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">Business</div>
+            <div class="stat-label">Moom</div>
             <div class="stat-value moom">S$${formatAmount(moomMonthly)}</div>
             <div class="stat-sub">S$${formatAmount(moomMonthly * 12)}/year</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Kalesh</div>
+            <div class="stat-value" style="color:var(--accent-pop);">S$${formatAmount(kaleshMonthly)}</div>
+            <div class="stat-sub">S$${formatAmount(kaleshMonthly * 12)}/year</div>
         </div>
         <div class="stat-card">
             <div class="stat-label">USD → SGD Rate</div>
@@ -3502,8 +3607,7 @@ function renderSubscriptions(subs) {
     else if (subsFilter === 'deactivated') filtered = subs.filter(s => s.status !== 'active');
 
     // Spend filter
-    if (subsSpend === 'personal') filtered = filtered.filter(s => s.is_personal !== 0);
-    else if (subsSpend === 'moom') filtered = filtered.filter(s => s.is_personal === 0);
+    if (subsSpend !== 'all') filtered = filtered.filter(s => matchesScope(subsSpend, s));
 
     // Sort
     filtered = [...filtered].sort((a, b) => {

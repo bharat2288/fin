@@ -23,15 +23,24 @@ DEFAULT_CATEGORIES = [
     ("Pet", None, 1),
     ("Home", None, 1),
     ("Personal", None, 1),
+    ("Credits", None, 1),
+    ("Transfers", None, 1),
     ("Education", None, 1),
     ("Fitness", None, 1),
     ("Kids", None, 1),
     ("Gifts & Donations", None, 1),
-    ("Moom", None, 0),  # Business - not personal
+    ("Moom", None, 0),  # Business - Moom
+    ("Kalesh", None, 0),  # Business - Kalesh
     ("Other", None, 1),
     ("Rent", None, 1),
     ("Admin", None, 1),
     # Subcategories
+    ("Salary", "Credits", 1),
+    ("Interest", "Credits", 1),
+    ("Misc Incoming", "Credits", 1),
+    ("Misc Transfer", "Transfers", 1),
+    ("Accounting", "Kalesh", 0),
+    ("Fees", "Kalesh", 0),
     ("Tax", "Admin", 1),
     ("Insurance", "Admin", 1),
     ("Bank Fees", "Admin", 1),
@@ -257,6 +266,28 @@ def init_db() -> None:
     schema_sql = SCHEMA_PATH.read_text()
     conn.executescript(schema_sql)
 
+    # Lightweight migrations for additive columns on long-lived local DBs.
+    service_cols = {row["name"] for row in conn.execute("PRAGMA table_info(services)").fetchall()}
+    if "exclude_from_expense_views" not in service_cols:
+        conn.execute(
+            "ALTER TABLE services ADD COLUMN exclude_from_expense_views INTEGER DEFAULT 0"
+        )
+        conn.commit()
+
+    rule_cols = {row["name"] for row in conn.execute("PRAGMA table_info(merchant_rules)").fetchall()}
+    if "category_override_id" not in rule_cols:
+        conn.execute(
+            "ALTER TABLE merchant_rules ADD COLUMN category_override_id INTEGER"
+        )
+        conn.commit()
+
+    tx_cols = {row["name"] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()}
+    if "service_id" not in tx_cols:
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN service_id INTEGER"
+        )
+        conn.commit()
+
     # Seed categories — INSERT OR IGNORE so new categories get added
     # First pass: insert all top-level (parent=None)
     for name, parent_name, is_personal in DEFAULT_CATEGORIES:
@@ -338,7 +369,7 @@ def _get_rules(conn: sqlite3.Connection) -> list[dict]:
         rows = conn.execute(
             "SELECT mr.pattern, mr.match_type, "
             "       mr.priority, mr.min_amount, mr.max_amount, "
-            "       mr.service_id, s.category_id "
+            "       mr.service_id, mr.category_override_id, s.category_id "
             "FROM merchant_rules mr "
             "JOIN services s ON mr.service_id = s.id "
             "ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC"
@@ -351,14 +382,14 @@ def categorize_transaction(
     description: str,
     conn: sqlite3.Connection,
     amount: float | None = None,
-) -> tuple[int | None, int | None]:
+) -> tuple[int | None, int | None, str | None]:
     """Match a transaction description to a category using merchant rules.
 
     Rules are sorted by priority DESC, then pattern length DESC (most specific first).
     Amount-conditional rules (min_amount / max_amount) only match if the transaction
     amount falls within the specified range.
 
-    Returns (category_id, service_id) tuple. Either or both may be None.
+    Returns (category_id, service_id, cat_source) tuple. Either or both may be None.
     Category is resolved from the service (service.category_id).
     """
     desc_upper = description.upper()
@@ -393,10 +424,11 @@ def categorize_transaction(
 
         # Category derived from service (single source of truth)
         service_id = rule["service_id"]
-        category_id = rule["category_id"]
-        return (category_id, service_id)
+        category_id = rule["category_override_id"] or rule["category_id"]
+        cat_source = "rule_override" if rule["category_override_id"] else "service_default"
+        return (category_id, service_id, cat_source)
 
-    return (None, None)
+    return (None, None, None)
 
 
 if __name__ == "__main__":
