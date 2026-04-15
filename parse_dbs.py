@@ -16,8 +16,9 @@ class ParsedTransaction:
     amount_sgd: float      # positive = expense, negative = credit
     amount_foreign: float | None = None
     currency_foreign: str | None = None
-    is_payment: bool = False
-    is_transfer: bool = False
+    is_payment: bool = False        # DEPRECATED — use flow_type (ADR v2)
+    is_transfer: bool = False       # DEPRECATED — use flow_type (ADR v2)
+    flow_type: str | None = None    # expense|income|transfer|payment|refund (set post-parse)
     card_info: str = ""    # which card this belongs to
 
 

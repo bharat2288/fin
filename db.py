@@ -287,6 +287,19 @@ def init_db() -> None:
             "ALTER TABLE transactions ADD COLUMN service_id INTEGER"
         )
         conn.commit()
+    if "flow_type" not in tx_cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN flow_type TEXT")
+        conn.commit()
+    if "flow_type_manual" not in tx_cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN flow_type_manual INTEGER DEFAULT 0")
+        conn.commit()
+    # Drop legacy flags once flow_type exists (ADR v2 grep gate complete)
+    if "is_payment" in tx_cols:
+        conn.execute("ALTER TABLE transactions DROP COLUMN is_payment")
+        conn.commit()
+    if "is_transfer" in tx_cols:
+        conn.execute("ALTER TABLE transactions DROP COLUMN is_transfer")
+        conn.commit()
 
     # Seed categories — INSERT OR IGNORE so new categories get added
     # First pass: insert all top-level (parent=None)

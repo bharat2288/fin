@@ -329,8 +329,8 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
             conn.execute(
                 "INSERT INTO transactions "
                 "(statement_id, date, description, amount_sgd, category_id, "
-                "service_id, is_payment, is_transfer, is_one_off, cat_source) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)",
+                "service_id, is_one_off, cat_source, flow_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expense')",
                 (
                     stmt_id,
                     tx_date.isoformat(),
@@ -361,8 +361,8 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
             conn.execute(
                 "INSERT INTO transactions "
                 "(statement_id, date, description, amount_sgd, category_id, "
-                "service_id, is_payment, is_transfer, is_one_off, cat_source) "
-                "VALUES (?, ?, ?, ?, NULL, NULL, 0, 0, 0, 'auto')",
+                "service_id, is_one_off, cat_source, flow_type) "
+                "VALUES (?, ?, ?, ?, NULL, NULL, 0, 'auto', 'expense')",
                 (stmt_id, tx_date.isoformat(), desc, amount),
             )
             month_txns += 1

@@ -56,10 +56,10 @@ CREATE TABLE IF NOT EXISTS transactions (
     currency_foreign TEXT,         -- e.g., 'USD', 'AUD', 'INR'
     category_id INTEGER,
     service_id INTEGER,            -- FK to services table (merchant identity)
-    is_payment INTEGER DEFAULT 0,  -- 1 = payment/credit, not an expense
-    is_transfer INTEGER DEFAULT 0, -- 1 = internal transfer (bank statements)
     is_one_off INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in table)
     cat_source TEXT DEFAULT 'auto',  -- 'auto' = rule engine, 'manual' = user resolved
+    flow_type TEXT,                -- expense|income|transfer|payment|refund (ADR v2)
+    flow_type_manual INTEGER DEFAULT 0,  -- 1 = user overrode classifier; preserve on recategorize
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (statement_id) REFERENCES statements(id),

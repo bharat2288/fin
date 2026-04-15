@@ -955,7 +955,7 @@ function renderTransactions(data) {
     tbody.innerHTML = '';
 
     data.transactions.forEach(tx => {
-        if (tx.is_payment || tx.is_transfer) return;
+        if (tx.flow_type !== 'expense' && tx.flow_type !== 'refund') return;
         const tr = document.createElement('tr');
         tr.dataset.description = tx.description || '';
         // Note indicator: small icon after description, clickable to edit
@@ -2587,7 +2587,7 @@ function accordionTxTable(txns) {
 
 async function loadServiceAccordion() {
     const data = await fetch(buildAccordionUrl()).then(r => r.json());
-    const txns = data.transactions.filter(tx => !tx.is_payment && !tx.is_transfer);
+    const txns = data.transactions.filter(tx => tx.flow_type === 'expense' || tx.flow_type === 'refund');
 
     // Group by service
     const groups = {};
@@ -2622,7 +2622,7 @@ async function loadServiceAccordion() {
 
 async function loadCategoryAccordion() {
     const data = await fetch(buildAccordionUrl()).then(r => r.json());
-    const txns = data.transactions.filter(tx => !tx.is_payment && !tx.is_transfer);
+    const txns = data.transactions.filter(tx => tx.flow_type === 'expense' || tx.flow_type === 'refund');
 
     // Build 3-level: parent category → subcategory → service → transactions
     const tree = {};
