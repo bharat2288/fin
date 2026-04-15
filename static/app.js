@@ -328,7 +328,7 @@ async function loadReferenceData() {
 
     populateCatMultiSelect();
     populateAccountFilter();
-    populateYearDropdown();
+    await populateYearDropdown();
 }
 
 function populateAccountFilter() {
@@ -370,6 +370,10 @@ async function populateYearDropdown() {
         const endYear = parseInt(newest.transactions[0].date.substring(0, 4));
         for (let y = endYear; y >= startYear; y--) {
             sel.innerHTML += `<option value="${y}">${y}</option>`;
+        }
+        if (!sel.value) {
+            if (sel.querySelector('option[value="2026"]')) sel.value = '2026';
+            else sel.value = String(endYear);
         }
     }
 }
@@ -1018,7 +1022,7 @@ function txPage(delta) {
     const params = buildFilterParams();
     const search = document.getElementById('tx-search').value;
 
-    let url = `/api/transactions?${params}&per_page=50&page=${txCurrentPage}&sort=${txSortCol}&sort_dir=${txSortDir}`;
+    let url = `/api/transactions?${params}&expense_only=true&per_page=50&page=${txCurrentPage}&sort=${txSortCol}&sort_dir=${txSortDir}`;
     if (search) url += '&search=' + encodeURIComponent(search);
 
     // Category filter: chart selections take precedence over multi-select dropdown
@@ -2554,7 +2558,7 @@ function setTxView(mode) {
 function buildAccordionUrl() {
     const params = buildFilterParams();
     const search = document.getElementById('tx-search').value;
-    let url = `/api/transactions?${params}&per_page=5000&sort=date&sort_dir=desc`;
+    let url = `/api/transactions?${params}&expense_only=true&per_page=5000&sort=date&sort_dir=desc`;
     if (search) url += '&search=' + encodeURIComponent(search);
     const chartCats = getChartFilterCategories();
     const activeCats = chartCats.length > 0 ? chartCats : catFilterSelections;

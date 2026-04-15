@@ -356,6 +356,17 @@ def init_db() -> None:
     if added > 0:
         print(f"Added {added} new merchant rules")
 
+    # Backfill legacy rows that were migrated to flow_type columns before the
+    # classifier ran. This keeps dashboard expense views from treating old
+    # transfer/payment rows as spend after restart.
+    null_flow_count = conn.execute(
+        "SELECT COUNT(*) FROM transactions WHERE flow_type IS NULL"
+    ).fetchone()[0]
+    if null_flow_count:
+        from backfill_flow_type import backfill
+
+        backfill(conn)
+
     total_cats = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
     total_rules = conn.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0]
     print(f"Database ready: {total_cats} categories, {total_rules} merchant rules")

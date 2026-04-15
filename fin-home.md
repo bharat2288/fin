@@ -7,7 +7,7 @@ cssclasses:
 ---
 # fin
 *[[dev-hub|Hub]] · [[README|GitHub]]*
-<span class="hub-status">Historical imports backfilled through Mar 2026, PayNow cleanup and provenance shipped, rule modal parity done. Next: architect flow_type and credits/payments import behavior.</span>
+<span class="hub-status">Dashboard expense-only contract is now tight, 2026 transfer cleanup is manual-locked, and transfer-rail hardening is in. Next: import credits/payments preview behavior + Resolve Modal flow_type UI.</span>
 
 Personal finance tracker. Statement parsing, expense categorization, subscription tracking, monthly spending breakdown. Claude is the interface.
 

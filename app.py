@@ -139,6 +139,35 @@ def _paynow_fallback_category_id(description: str | None, conn) -> int | None:
     return row["id"] if row else None
 
 
+def _classify_flow_for_tx(
+    conn,
+    description: str,
+    amount_sgd: float,
+    category_id: int | None,
+    *,
+    flow_ctx=None,
+    cats_by_id: dict[int, str] | None = None,
+) -> str:
+    """Classify a transaction using the shared flow_type model."""
+    from flow import build_context, classify_flow
+
+    if flow_ctx is None:
+        flow_ctx = build_context(conn)
+    if cats_by_id is None:
+        cats_by_id = {
+            row["id"]: row["name"]
+            for row in conn.execute("SELECT id, name FROM categories").fetchall()
+        }
+    return classify_flow(
+        {
+            "description": description,
+            "amount_sgd": amount_sgd,
+            "category_name": cats_by_id.get(category_id) if category_id else None,
+        },
+        flow_ctx,
+    )
+
+
 def _expense_visibility_filter(service_alias: str = "svc") -> str:
     """SQL clause excluding services hidden from dashboard and expense tables."""
     return f"({service_alias}.exclude_from_expense_views IS NULL OR {service_alias}.exclude_from_expense_views = 0)"
@@ -593,23 +622,23 @@ def api_dashboard_stat_cards():
             params = [start, end] + extra_params
             row = conn.execute(f"""
                 SELECT
-                    SUM(CASE WHEN COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+                    SUM(CASE WHEN t.flow_type IN ('expense', 'refund')
                              THEN amount_sgd ELSE 0 END) as total,
-                    SUM(CASE WHEN COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+                    SUM(CASE WHEN t.flow_type IN ('expense', 'refund')
                              AND {category_scope_expr('c', 'p')} = 'personal' THEN amount_sgd ELSE 0 END) as personal,
-                    SUM(CASE WHEN COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+                    SUM(CASE WHEN t.flow_type IN ('expense', 'refund')
                              AND {category_scope_expr('c', 'p')} = 'moom' THEN amount_sgd ELSE 0 END) as moom,
-                    SUM(CASE WHEN COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+                    SUM(CASE WHEN t.flow_type IN ('expense', 'refund')
                              AND {category_scope_expr('c', 'p')} = 'kalesh' THEN amount_sgd ELSE 0 END) as kalesh,
-                    COUNT(CASE WHEN t.category_id IS NULL AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+                    COUNT(CASE WHEN t.category_id IS NULL AND t.flow_type IN ('expense', 'refund')
                                THEN 1 END) as uncategorized,
-                    COUNT(CASE WHEN COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') THEN 1 END) as tx_count
+                    COUNT(CASE WHEN t.flow_type IN ('expense', 'refund') THEN 1 END) as tx_count
                 FROM transactions t
                 LEFT JOIN categories c ON t.category_id = c.id
                 LEFT JOIN categories p ON c.parent_id = p.id
                 LEFT JOIN services svc ON t.service_id = svc.id
                 JOIN statements s ON t.statement_id = s.id
-                WHERE COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+                WHERE t.flow_type IN ('expense', 'refund')
                   AND t.date >= ? AND t.date <= ?
                   {extra_filters}
             """, params).fetchone()
@@ -707,7 +736,7 @@ def api_dashboard_monthly():
             LEFT JOIN categories p ON c.parent_id = p.id
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
-            WHERE COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') {filters}
+            WHERE t.flow_type IN ('expense', 'refund') {filters}
             GROUP BY period, category
             ORDER BY period, total DESC
         """, params).fetchall()
@@ -751,7 +780,7 @@ def api_dashboard_categories():
             LEFT JOIN categories p ON c.parent_id = p.id
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
-            WHERE COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') {filters}
+            WHERE t.flow_type IN ('expense', 'refund') {filters}
             GROUP BY category
             ORDER BY total DESC
         """, params).fetchall()
@@ -814,6 +843,9 @@ def api_transactions():
         filters += " AND t.date <= ?"
         params.append(chart_end)
 
+    if request.args.get("expense_only") == "true":
+        filters += " AND t.flow_type IN ('expense', 'refund')"
+
     month = request.args.get("month")
     if month:
         filters += " AND strftime('%Y-%m', t.date) = ?"
@@ -865,7 +897,7 @@ def api_transactions():
                 c.name as category, c.is_personal,
                 p.name as parent_category,
                 {category_scope_expr("c", "p")} as scope,
-                t.is_one_off, t.flow_type, t.flow_type_manual,
+                t.is_one_off, COALESCE(t.flow_type, 'expense') as flow_type, t.flow_type_manual,
                 t.notes,
                 a.name as account_name,
                 t.service_id,
@@ -1049,12 +1081,28 @@ def api_resolve_transaction():
                 "service_default": "service_default",
             }.get(apply_scope, "manual")
             flow_type = data.get("flow_type")
+            tx_row = conn.execute(
+                "SELECT description, amount_sgd, flow_type_manual FROM transactions WHERE id = ?",
+                (tx_id,),
+            ).fetchone()
             if flow_type is not None:
                 if flow_type not in ("expense", "income", "transfer", "payment", "refund"):
                     return jsonify({"error": f"invalid flow_type: {flow_type}"}), 400
                 conn.execute(
                     "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ?, "
                     "flow_type = ?, flow_type_manual = 1 WHERE id = ?",
+                    (category_id, service_id, tx_cat_source, flow_type, tx_id),
+                )
+            elif tx_row and not tx_row["flow_type_manual"]:
+                flow_type = _classify_flow_for_tx(
+                    conn,
+                    tx_row["description"],
+                    tx_row["amount_sgd"],
+                    category_id,
+                )
+                conn.execute(
+                    "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ?, "
+                    "flow_type = ? WHERE id = ?",
                     (category_id, service_id, tx_cat_source, flow_type, tx_id),
                 )
             else:
@@ -1740,13 +1788,45 @@ def api_rules_update(rule_id):
             match_cond = _build_match_condition(rule["match_type"])
             effective_category_id = rule["category_override_id"] or rule["category_id"]
             effective_source = "rule_override" if rule["category_override_id"] else "service_default"
-            cur = conn.execute(
-                f"UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ? "
-                f"WHERE {match_cond} AND COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')"
-                f" AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')",
-                (effective_category_id, rule["service_id"], effective_source, pattern_upper),
-            )
-            recategorized = cur.rowcount
+            flow_ctx = None
+            cats_by_id = None
+            rows = conn.execute(
+                f"""
+                SELECT id, description, amount_sgd, flow_type_manual
+                FROM transactions
+                WHERE {match_cond}
+                  AND COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
+                  AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')
+                """,
+                (pattern_upper,),
+            ).fetchall()
+            for tx in rows:
+                params = [effective_category_id, rule["service_id"], effective_source]
+                sql = "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ?"
+                if not tx["flow_type_manual"]:
+                    if flow_ctx is None:
+                        from flow import build_context
+
+                        flow_ctx = build_context(conn)
+                        cats_by_id = {
+                            row["id"]: row["name"]
+                            for row in conn.execute("SELECT id, name FROM categories").fetchall()
+                        }
+                    params.append(
+                        _classify_flow_for_tx(
+                            conn,
+                            tx["description"],
+                            tx["amount_sgd"],
+                            effective_category_id,
+                            flow_ctx=flow_ctx,
+                            cats_by_id=cats_by_id,
+                        )
+                    )
+                    sql += ", flow_type = ?"
+                sql += " WHERE id = ?"
+                params.append(tx["id"])
+                conn.execute(sql, params)
+                recategorized += 1
 
         conn.commit()
         invalidate_rules_cache()
@@ -1772,7 +1852,8 @@ def api_rules_recategorize():
     with get_db() as conn:
         # Skip manually resolved transactions — only re-run on auto-categorized ones
         rows = conn.execute("""
-            SELECT id, description, amount_sgd, category_id, service_id, cat_source
+            SELECT id, description, amount_sgd, category_id, service_id, cat_source,
+                   COALESCE(flow_type, 'expense') AS flow_type, flow_type_manual
             FROM transactions
             WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
               AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')
@@ -1785,6 +1866,8 @@ def api_rules_recategorize():
 
         updated = 0
         unchanged = 0
+        flow_ctx = None
+        cats_by_id = None
         for tx in rows:
             new_cat, new_svc, new_source = categorize_transaction(
                 tx["description"],
@@ -1796,14 +1879,34 @@ def api_rules_recategorize():
                 if new_cat:
                     new_svc = None
                     new_source = "fallback"
+            new_flow = tx["flow_type"]
+            if not tx["flow_type_manual"]:
+                if flow_ctx is None:
+                    from flow import build_context
+
+                    flow_ctx = build_context(conn)
+                    cats_by_id = {
+                        row["id"]: row["name"]
+                        for row in conn.execute("SELECT id, name FROM categories").fetchall()
+                    }
+                new_flow = _classify_flow_for_tx(
+                    conn,
+                    tx["description"],
+                    tx["amount_sgd"],
+                    new_cat,
+                    flow_ctx=flow_ctx,
+                    cats_by_id=cats_by_id,
+                )
             if (
                 new_cat != tx["category_id"]
                 or new_svc != tx["service_id"]
                 or new_source != tx["cat_source"]
+                or new_flow != tx["flow_type"]
             ):
                 conn.execute(
-                    "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ? WHERE id = ?",
-                    (new_cat, new_svc, new_source, tx["id"]),
+                    "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ?, flow_type = ? "
+                    "WHERE id = ?",
+                    (new_cat, new_svc, new_source, new_flow, tx["id"]),
                 )
                 updated += 1
             else:

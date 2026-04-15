@@ -78,7 +78,7 @@ def parse_dbs_business_pdf(filepath: str) -> ParsedStatement:
     acct_match = re.search(r"Account No:\s*([\d-]+)", full_text)
     account_no = acct_match.group(1) if acct_match else ""
     compact = account_no.replace("-", "")
-    account_name = f"DBS Kalesh Inc {compact}" if compact else "DBS Kalesh Business"
+    account_name = f"DBS Business {compact}" if compact else "DBS Business"
 
     lines = full_text.split("\n")
     txns: list[ParsedTransaction] = []

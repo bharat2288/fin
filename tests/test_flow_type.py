@@ -9,6 +9,12 @@ CTX_OWN_ONLY = ClassifierContext(
     linked_cc_patterns=("DBSC-%7436", "7436"),
 )
 
+CTX_WITH_RAILS = ClassifierContext(
+    own_aliases=("SURI BHARAT", "MILI KALE", "KALESH INC", "XXXX018277"),
+    linked_cc_patterns=("DBSC-%7436", "7436"),
+    owned_bank_refs=("100-018277-1", "272-794335-2", "438-59169-9"),
+)
+
 
 def test_flow_type_column_exists(conn):
     """Bullet 1: flow_type and flow_type_manual columns present after init_db."""
@@ -100,6 +106,60 @@ def test_transfer_beats_income_for_own_alias_inflow():
         "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
+
+
+def test_paylah_topup_classifies_as_transfer():
+    facts = {
+        "description": "TOP-UP TO PAYLAH! : 97863267 TF635241773149937651",
+        "amount_sgd": 120.00,
+        "category_name": "Transfers",
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
+
+
+def test_mep_transfer_classifies_as_transfer():
+    facts = {
+        "description": "MEP 100172443 0016OI8504497",
+        "amount_sgd": 100.00,
+        "category_name": "Transfers",
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
+
+
+def test_mep_charge_stays_expense():
+    facts = {
+        "description": "MEP CHG 100172443 0016OI8504154",
+        "amount_sgd": 20.00,
+        "category_name": "Transfers",
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "expense"
+
+
+def test_known_internal_ib_ref_classifies_as_transfer():
+    facts = {
+        "description": "TRF FT260209MB29906564 100-018277-1:IB",
+        "amount_sgd": 7000.00,
+        "category_name": "Transfers",
+    }
+    assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
+
+
+def test_recurring_internal_ib_ref_classifies_as_transfer():
+    facts = {
+        "description": "FT260329MB39802467 438-59169-9:IB",
+        "amount_sgd": 75.00,
+        "category_name": "Transfers",
+    }
+    assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
+
+
+def test_named_paynow_counterparty_stays_expense():
+    facts = {
+        "description": "PayNow Transfer 6741027 To: Lev OTHR PayNow transfer",
+        "amount_sgd": 1710.00,
+        "category_name": "Transfers",
+    }
+    assert classify_flow(facts, CTX_WITH_RAILS) == "expense"
 
 
 # ----- Bullet 4: backfill script -----
@@ -197,6 +257,55 @@ def test_resolve_accepts_flow_type_override_and_sets_manual_flag(client, conn):
     assert row["flow_type_manual"] == 1
 
 
+def test_resolve_recomputes_flow_type_when_category_changes(client, conn):
+    """Resolve without explicit override should refresh classifier-derived flow_type."""
+    conn.execute(
+        "INSERT INTO categories (name, parent_id, is_personal) VALUES ('Refunds', NULL, 1)"
+    )
+    refund_cat = conn.execute(
+        "SELECT id FROM categories WHERE name = 'Refunds'"
+    ).fetchone()[0]
+    conn.execute("INSERT INTO services (name) VALUES ('Refund Service')")
+    svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute(
+        "INSERT INTO accounts (name, short_name, type, last_four, status) "
+        "VALUES ('B', 'B', 'bank', '1111', 'active')"
+    )
+    acc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO statements (account_id, statement_date, filename) "
+        "VALUES (?, '2025-04-01', 't')",
+        (acc,),
+    )
+    stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
+        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ', -20.0, 'income')",
+        (stmt,),
+    )
+    tx_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+
+    resp = client.post(
+        "/api/transactions/resolve",
+        json={
+            "tx_id": tx_id,
+            "service_id": svc_id,
+            "category_id": refund_cat,
+            "apply_scope": "transaction",
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    row = conn.execute(
+        "SELECT flow_type, flow_type_manual FROM transactions WHERE id = ?",
+        (tx_id,),
+    ).fetchone()
+    assert row["flow_type"] == "refund"
+    assert row["flow_type_manual"] == 0
+
+
 def test_recategorize_preserves_flow_type_manual_rows(client, conn):
     """Bullet 9b: /api/rules/recategorize does not touch flow_type on manual rows."""
     tx_id, _, _ = _seed_one_tx(conn)
@@ -215,6 +324,56 @@ def test_recategorize_preserves_flow_type_manual_rows(client, conn):
     ).fetchone()
     assert row["flow_type"] == "transfer"  # preserved
     assert row["flow_type_manual"] == 1
+
+
+def test_recategorize_recomputes_flow_type_when_rule_changes_category(client, conn):
+    """Rule-driven recategorization should refresh derived flow_type on non-manual rows."""
+    conn.execute(
+        "INSERT INTO categories (name, parent_id, is_personal) VALUES ('Refunds', NULL, 1)"
+    )
+    refund_cat = conn.execute(
+        "SELECT id FROM categories WHERE name = 'Refunds'"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO services (name, category_id) VALUES ('Refund Service', ?)",
+        (refund_cat,),
+    )
+    svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
+        "VALUES ('CREDIT ADJ', ?, 'contains', 'confirmed')",
+        (svc_id,),
+    )
+    conn.execute(
+        "INSERT INTO accounts (name, short_name, type, last_four, status) "
+        "VALUES ('C', 'C', 'bank', '2222', 'active')"
+    )
+    acc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO statements (account_id, statement_date, filename) "
+        "VALUES (?, '2025-04-01', 't')",
+        (acc,),
+    )
+    stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type, cat_source) "
+        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ', -20.0, 'income', 'auto')",
+        (stmt,),
+    )
+    tx_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+
+    resp = client.post("/api/rules/recategorize")
+    assert resp.status_code == 200, resp.get_json()
+
+    row = conn.execute(
+        "SELECT flow_type, flow_type_manual, category_id, service_id FROM transactions WHERE id = ?",
+        (tx_id,),
+    ).fetchone()
+    assert row["category_id"] == refund_cat
+    assert row["service_id"] == svc_id
+    assert row["flow_type"] == "refund"
+    assert row["flow_type_manual"] == 0
 
 
 def test_refund_reduces_monthly_spend_in_same_month(client, conn):
@@ -271,6 +430,90 @@ def test_dashboard_spend_uses_flow_type_and_preserves_exclude(client, conn):
     data = resp.get_json()
     # Spend should be 100.0 only (income excluded, transfer excluded, loan-svc excluded)
     assert data["spend"] == 100.0
+
+
+def test_dashboard_monthly_excludes_null_flow_type_rows(client, conn):
+    """Monthly chart data should only include explicit expense/refund rows."""
+    shopping_cat = conn.execute(
+        "SELECT id FROM categories WHERE name = 'Shopping'"
+    ).fetchone()[0]
+    transfers_cat = conn.execute(
+        "SELECT id FROM categories WHERE name = 'Transfers'"
+    ).fetchone()[0]
+    conn.execute("INSERT INTO accounts (name, short_name, type, last_four, status) "
+                 "VALUES ('A', 'A', 'bank', '0000', 'active')")
+    acc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO statements (account_id, statement_date, filename) "
+                 "VALUES (?, '2025-04-01', 't')", (acc,))
+    stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd, category_id, flow_type) "
+        "VALUES (?, '2025-04-15', 'Expense', 100.0, ?, 'expense')",
+        (stmt, shopping_cat),
+    )
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd, category_id) "
+        "VALUES (?, '2025-04-15', 'Legacy Transfer', 50.0, ?)",
+        (stmt, transfers_cat),
+    )
+    conn.commit()
+
+    resp = client.get("/api/dashboard/monthly?start=2025-01-01&end=2025-12-31")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"2025-04": {"Shopping": 100.0}}
+
+
+def test_transactions_api_normalizes_null_flow_type(client, conn):
+    """Legacy NULL flow_type rows should be surfaced consistently to the UI."""
+    conn.execute("INSERT INTO accounts (name, short_name, type, last_four, status) "
+                 "VALUES ('A', 'A', 'bank', '0000', 'active')")
+    acc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO statements (account_id, statement_date, filename) "
+                 "VALUES (?, '2025-04-01', 't')", (acc,))
+    stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
+        "VALUES (?, '2025-04-15', 'LEGACY ROW', 42.0)",
+        (stmt,),
+    )
+    conn.commit()
+
+    resp = client.get("/api/transactions")
+    assert resp.status_code == 200
+    tx = resp.get_json()["transactions"][0]
+    assert tx["flow_type"] == "expense"
+
+
+def test_transactions_api_expense_only_excludes_transfer_and_null_rows(client, conn):
+    """Dashboard reads should only receive explicit expense/refund rows."""
+    conn.execute("INSERT INTO accounts (name, short_name, type, last_four, status) "
+                 "VALUES ('A', 'A', 'bank', '0000', 'active')")
+    acc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO statements (account_id, statement_date, filename) "
+                 "VALUES (?, '2025-04-01', 't')", (acc,))
+    stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    rows = [
+        ("Expense", 20.0, "expense"),
+        ("Refund", -5.0, "refund"),
+        ("Transfer", -50.0, "transfer"),
+    ]
+    for desc, amt, ft in rows:
+        conn.execute(
+            "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
+            "VALUES (?, '2025-04-15', ?, ?, ?)",
+            (stmt, desc, amt, ft),
+        )
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
+        "VALUES (?, '2025-04-15', 'Legacy Null', 42.0)",
+        (stmt,),
+    )
+    conn.commit()
+
+    resp = client.get("/api/transactions?expense_only=true&per_page=10")
+    assert resp.status_code == 200
+    descriptions = [tx["description"] for tx in resp.get_json()["transactions"]]
+    assert set(descriptions) == {"Expense", "Refund"}
 
 
 def test_import_preview_kept_default_for_income_skipped_default_for_transfer(client, conn):
@@ -355,6 +598,24 @@ def test_parser_post_parse_classification_sets_flow_type(conn):
     assert txns[3].flow_type == "refund"
 
 
+def test_build_context_extracts_bank_refs_from_account_names(conn):
+    from flow import build_context
+
+    conn.execute(
+        "INSERT INTO accounts (name, short_name, type, last_four, status) "
+        "VALUES ('DBS Home 100-018277-1', 'DBS-Home-2771', 'bank', '2771', 'active')"
+    )
+    conn.execute(
+        "INSERT INTO accounts (name, short_name, type, last_four, status) "
+        "VALUES ('DBS Zo 272-794335-2', 'DBS-Zo-3352', 'bank', '3352', 'active')"
+    )
+    conn.commit()
+
+    ctx = build_context(conn)
+    assert "100-018277-1" in ctx.owned_bank_refs
+    assert "272-794335-2" in ctx.owned_bank_refs
+
+
 def test_backfill_skips_already_populated_rows(conn):
     """Rows that already have flow_type are left alone."""
     from backfill_flow_type import backfill
@@ -387,3 +648,73 @@ def test_transfer_does_not_swallow_refund_with_own_alias_false_positive():
         "category_name": "Refunds",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "refund"
+
+
+def test_dbs_business_parser_uses_generic_account_label(monkeypatch):
+    """Generic DBS Business statements should not be hardcoded to Kalesh naming."""
+    import parse_dbs_business
+
+    text = "\n".join([
+        "Details Of Your DBS Business/Corporate Multi-Currency Account",
+        "01-Jan-2025 to 31-Jan-2025",
+        "Account No: 123-456789-01",
+        "Balance Brought Forward 1,000.00",
+        "02-Jan-25 02-Jan-25 VENDOR PAYMENT 100.00 900.00",
+        "Balance Carried Forward",
+    ])
+
+    class FakePage:
+        def extract_text(self):
+            return text
+
+    class FakePdf:
+        pages = [FakePage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(parse_dbs_business.pdfplumber, "open", lambda _: FakePdf())
+
+    stmt = parse_dbs_business.parse_dbs_business_pdf("fake.pdf")
+    assert stmt.accounts == ["DBS Business 12345678901"]
+
+
+def test_init_db_backfills_null_flow_type_rows(temp_db):
+    """init_db should classify legacy rows with NULL flow_type on startup."""
+    import sqlite3
+    import db as db_module
+
+    conn = sqlite3.connect(str(temp_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "INSERT INTO accounts (name, short_name, type, last_four, status) "
+        "VALUES ('A', 'A', 'bank', '0000', 'active')"
+    )
+    acc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO statements (account_id, statement_date, filename) "
+        "VALUES (?, '2025-04-01', 't')",
+        (acc,),
+    )
+    stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
+        "VALUES (?, '2025-04-15', 'TRANSFER OF FUND TRF SURI BHARAT I-BANK', -50.0)",
+        (stmt,),
+    )
+    conn.commit()
+    conn.close()
+
+    db_module.init_db()
+
+    conn = db_module.get_connection()
+    try:
+        row = conn.execute(
+            "SELECT flow_type FROM transactions WHERE description = 'TRANSFER OF FUND TRF SURI BHARAT I-BANK'"
+        ).fetchone()
+        assert row["flow_type"] == "transfer"
+    finally:
+        conn.close()
