@@ -173,6 +173,9 @@ def _register_builtins():
     from parse_uob import detect_uob_pdf, parse_uob_pdf
     register("UOB PDF", ".pdf", detect_fn=detect_uob_pdf, parse_fn=parse_uob_pdf)
 
+    from parse_dbs_business import detect_dbs_business_pdf, parse_dbs_business_pdf
+    register("DBS Business PDF", ".pdf", detect_fn=detect_dbs_business_pdf, parse_fn=parse_dbs_business_pdf)
+
     from parse_dbs import parse_statement as parse_dbs_pdf
     register("DBS PDF", ".pdf", detect_fn=None, parse_fn=parse_dbs_pdf)  # fallback
 
