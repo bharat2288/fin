@@ -153,6 +153,21 @@ def test_recurring_internal_ib_ref_classifies_as_transfer():
     assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
 
 
+def test_local_own_alias_overrides_are_loaded(conn, monkeypatch):
+    """Private aliases stay outside source while still feeding classifier context."""
+    from flow import build_context
+
+    monkeypatch.setenv("FIN_OWN_ALIAS_OVERRIDES", "LOCAL PAYNOW ALIAS;ALT ALIAS")
+    ctx = build_context(conn)
+
+    facts = {
+        "description": "Inward PayNow LOCAL PAYNOW ALIAS",
+        "amount_sgd": -100.00,
+        "category_name": None,
+    }
+    assert classify_flow(facts, ctx) == "transfer"
+
+
 def test_named_paynow_counterparty_stays_expense():
     facts = {
         "description": "PayNow Transfer 6741027 To: Lev OTHR PayNow transfer",

@@ -62,6 +62,11 @@ mockup*.html
 # Logs
 *.log
 
+# Local runtime scratch
+.fin_server_pid
+.tmp/
+subscriptions_backup.json
+
 # Canonical specs live in the private dev-specs repo
 specs/
 *-home.md

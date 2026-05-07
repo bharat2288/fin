@@ -5,6 +5,7 @@ post-parse; backfill calls it over historical rows. Never called twice on
 the same row.
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -33,6 +34,13 @@ REFUND_KEYWORDS = ("CASH REBATE", "REBATE", "REFUND", "REVERSAL")
 PAYLAH_TOPUP_MARKERS = ("TOP-UP TO PAYLAH", "TOP UP TO PAYLAH")
 CURATED_INTERNAL_BANK_REFS = ("438-59169-9",)
 ACCOUNT_REF_RE = re.compile(r"\b\d{3}-\d{5,9}-\d\b")
+LOCAL_ALIAS_SPLIT_RE = re.compile(r"[\n,;]+")
+
+
+def _load_local_own_aliases() -> tuple[str, ...]:
+    """Load private own-counterparty aliases from the local environment."""
+    raw = os.environ.get("FIN_OWN_ALIAS_OVERRIDES", "")
+    return tuple(alias.strip() for alias in LOCAL_ALIAS_SPLIT_RE.split(raw) if alias.strip())
 
 
 @dataclass
@@ -53,7 +61,7 @@ def _extract_bank_refs(text: str | None) -> tuple[str, ...]:
 
 def build_context(conn) -> ClassifierContext:
     """Build context from the live accounts master."""
-    aliases: list[str] = list(OWN_ALIAS_SEED)
+    aliases: list[str] = [*OWN_ALIAS_SEED, *_load_local_own_aliases()]
     linked: list[str] = []
     bank_refs: set[str] = set(CURATED_INTERNAL_BANK_REFS)
 
