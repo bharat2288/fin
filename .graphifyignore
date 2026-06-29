@@ -1,0 +1,31 @@
+# AKL scoping filter (gitignore-spec, merged with .gitignore by graphify).
+# Keeps the substrate spine free of vendored/minified/generated noise.
+# Evidence this matters for fin: chart.min.js alone = ~1433 junk AST nodes
+# (cited in claude-workflow-system/design-architecture-knowledge-layer.md).
+
+# Vendored / minified
+*.min.js
+*.min.css
+chart.min.js
+static/chart.min.js
+
+# Design prototypes (not production code)
+mockup-*.html
+
+# Generated / data artifacts
+*.db
+*.db-journal
+*.db-wal
+*_backup.db
+demos/
+
+# Tests (Python tree)
+tests/
+test_*.py
+*_test.py
+
+# One-off migration / backfill scripts (not part of the app surface)
+backfill_*.py
+migrate_*.py
+repair_*.py
+seed_mock_data.py
