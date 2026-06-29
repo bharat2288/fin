@@ -70,3 +70,6 @@ subscriptions_backup.json
 # Canonical specs live in the private dev-specs repo
 specs/
 *-home.md
+
+# Financial records — invoices, contracts, receipts (bank details; never push)
+business/
