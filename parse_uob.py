@@ -117,6 +117,7 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
 
         lines = text.split("\n")
         in_transactions = False
+        prev_balance = None
 
         for line in lines:
             line = line.strip()
@@ -177,27 +178,37 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
             amounts = re.findall(r"[\d,]+\.\d{2}", rest)
 
             if len(amounts) >= 2:
-                # Last amount is always balance — ignore it
-                # If BALANCE B/F, skip entirely
+                # Last amount is always balance
+                # If BALANCE B/F, anchor the running balance and skip
                 if "BALANCE B/F" in rest:
+                    prev_balance = _parse_amount(amounts[-1])
                     continue
 
                 # Extract description (everything before the first amount)
                 first_amt_pos = rest.find(amounts[0])
                 description = rest[:first_amt_pos].strip()
 
-                # Determine if withdrawal or deposit
-                # If 3 amounts: withdrawal, deposit (empty), balance — but text extraction
-                # may merge them. Use context from description.
-                if "Interest Credit" in description or "Inward Credit" in description:
-                    # Deposit (credit) — negative in our convention
+                # Direction from running-balance delta (deposit = negative in
+                # our convention). Keyword guessing mis-signed deposits like
+                # "One Bonus Interest" and incoming PayNow.
+                from parse_dbs import _direction_from_balance
+
+                balance = _parse_amount(amounts[-1])
+                candidates = [_parse_amount(a) for a in amounts[:-1]]
+                withdrawal, deposit = _direction_from_balance(
+                    prev_balance, balance, candidates
+                )
+                if deposit is not None:
+                    amount_sgd = -deposit
+                elif withdrawal is not None:
+                    amount_sgd = withdrawal
+                elif "Interest Credit" in description or "Inward Credit" in description:
+                    # Fallback when no balance anchor: credits are negative
                     amount_sgd = -_parse_amount(amounts[0])
-                elif "Bill Payment" in description or "Misc Debit" in description or "PAYNOW" in description.upper():
-                    # Withdrawal (debit) — positive in our convention
-                    amount_sgd = _parse_amount(amounts[0])
                 else:
-                    # Default: positive = expense
+                    # Fallback default: positive = expense
                     amount_sgd = _parse_amount(amounts[0])
+                prev_balance = balance
 
                 desc_upper = description.upper()
                 is_payment = "BILL PAYMENT" in desc_upper
@@ -219,6 +230,7 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                 )
                 transactions.append(tx)
             elif len(amounts) == 1 and "BALANCE B/F" in rest:
+                prev_balance = _parse_amount(amounts[0])
                 continue
 
     pdf.close()

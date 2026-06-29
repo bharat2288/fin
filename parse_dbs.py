@@ -216,6 +216,27 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
     return statement
 
 
+def _direction_from_balance(
+    prev_balance: float | None,
+    new_balance: float,
+    candidate_amounts: list[float],
+) -> tuple[float | None, float | None]:
+    """Resolve (withdrawal, deposit) from a running-balance delta.
+
+    Returns (withdrawal, deposit) where exactly one is set, or (None, None)
+    when the delta doesn't reconcile against any amount printed on the line
+    (caller falls back to its keyword heuristic).
+    """
+    if prev_balance is None:
+        return None, None
+    delta = round(new_balance - prev_balance, 2)
+    if not any(abs(abs(delta) - amt) < 0.011 for amt in candidate_amounts):
+        return None, None
+    if delta < 0:
+        return -delta, None
+    return None, delta
+
+
 def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     """Parse a DBS bank/savings statement PDF.
 
@@ -251,9 +272,19 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     current_date = None
     current_withdrawal = None
     current_deposit = None
+    prev_balance = None
 
     while i < len(lines):
         line = lines[i].strip()
+
+        # Running balance anchor — restarts at each page/section header
+        bf_match = re.search(
+            r"Balance Brought Forward(?:\s+SGD)?\s+([\d,]+\.\d{2})", line
+        )
+        if bf_match:
+            prev_balance = float(bf_match.group(1).replace(",", ""))
+            i += 1
+            continue
 
         # Match transaction start: DD/MM/YYYY Description [amount] [amount] balance
         tx_match = re.match(
@@ -285,29 +316,21 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             current_deposit = None
 
             if len(amounts) >= 2:
-                # Last amount is always balance
-                # If 3 amounts: withdrawal, deposit, balance (rare)
-                # If 2 amounts: either (withdrawal, balance) or (deposit, balance)
-                # We look at context to decide
+                # Last amount is always the running balance. Direction comes
+                # from the balance delta — the printed columns merge under
+                # pdfplumber, so keyword guessing mis-signs deposits.
                 balance = float(amounts[-1].replace(",", ""))
-                if len(amounts) == 3:
-                    current_withdrawal = float(amounts[0].replace(",", ""))
-                    current_deposit = float(amounts[1].replace(",", ""))
-                elif len(amounts) == 2:
-                    amt = float(amounts[0].replace(",", ""))
-                    # Heuristic: if description contains deposit keywords, it's a deposit
-                    if any(kw in desc_part.upper() for kw in [
-                        "INTEREST EARNED", "SALARY", "FUNDS TRANSFER"
-                    ]) and "BILL PAYMENT" not in desc_part.upper():
-                        # Could be either — check against balance change
-                        # For now, use keyword heuristics
-                        pass
-                    # Actually the DBS format puts withdrawal and deposit in fixed columns
-                    # But pdfplumber merges them. We need a different approach for bank statements.
-                    # For now, mark as withdrawal (most common) — user can correct
-                    current_withdrawal = amt
+                candidates = [float(a.replace(",", "")) for a in amounts[:-1]]
+                current_withdrawal, current_deposit = _direction_from_balance(
+                    prev_balance, balance, candidates
+                )
+                if current_withdrawal is None and current_deposit is None:
+                    # No balance anchor or delta doesn't reconcile —
+                    # legacy fallback: treat first amount as withdrawal
+                    current_withdrawal = candidates[0]
+                prev_balance = balance
 
-        elif current_date and line and not line.startswith("Balance") and not line.startswith("PDS_"):
+        elif current_date and line and not line.startswith("Balance") and not line.startswith("Total Balance") and not line.startswith("PDS_"):
             # Continuation line for current transaction description
             if not re.match(r"^[A-Z]\d+$", line):  # skip reference numbers
                 current_desc_lines.append(line)

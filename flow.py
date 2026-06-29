@@ -28,11 +28,15 @@ OWN_ALIAS_SEED = (
     "From: RK ",
     "TO: RK ",
     "FROM: RK ",
+    # Own crypto-exchange account — remittances to/from it are own-account moves
+    "INDEPENDENT RESERVE",
 )
 
 REFUND_KEYWORDS = ("CASH REBATE", "REBATE", "REFUND", "REVERSAL")
 PAYLAH_TOPUP_MARKERS = ("TOP-UP TO PAYLAH", "TOP UP TO PAYLAH")
-CURATED_INTERNAL_BANK_REFS = ("438-59169-9",)
+# Dashed statement-ref forms of own accounts whose master name stores the
+# number undashed (e.g. Kalesh Inc 0725605300 appears as 072-560530-0:IB).
+CURATED_INTERNAL_BANK_REFS = ("438-59169-9", "072-560530-0")
 ACCOUNT_REF_RE = re.compile(r"\b\d{3}-\d{5,9}-\d\b")
 LOCAL_ALIAS_SPLIT_RE = re.compile(r"[\n,;]+")
 
