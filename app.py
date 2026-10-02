@@ -1478,14 +1478,9 @@ def api_resolve_transaction():
 
             # Afterwards, for a merchant the model was asked about: the type
             # the operator chose and whether the suggestion was on screen.
-            chosen = conn.execute(
-                "SELECT description, flow_type FROM transactions WHERE id = ?", (tx_id,)
-            ).fetchone()
-            if chosen:
-                suggest.record_choice(
-                    conn, chosen["description"], chosen["flow_type"], type_id,
-                    data.get("suggestion_visible") is True,
-                )
+            suggest.record_choice(
+                conn, tx_id, type_id, data.get("suggestion_visible") is True,
+            )
 
             conn.commit()
             invalidate_rules_cache()
@@ -1596,6 +1591,11 @@ def api_suggestions_send():
         return jsonify({
             "error": "Nothing has been prepared. Prepare the list and read it before sending."
         }), 409
+    if suggest.approval_expired(path.stat().st_mtime, suggest.clock()):
+        return jsonify({
+            "error": "The prepared list is more than 24 hours old, so it is not sent. "
+                     "Prepare the list again and read it before sending."
+        }), 409
     left_in_file = {
         line.strip() for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.startswith("#")
@@ -1666,13 +1666,13 @@ def api_transaction_suggestion(tx_id: int):
     blank = {"route": "blank", "types": [], "merchant": None}
     with get_db() as conn:
         tx = conn.execute(
-            "SELECT description, flow_type, service_id FROM transactions WHERE id = ?", (tx_id,)
+            "SELECT service_id FROM transactions WHERE id = ?", (tx_id,)
         ).fetchone()
         if not tx:
             return jsonify({"error": "Transaction not found"}), 404
         if suggest.key() is None or tx["service_id"] is not None:
             return jsonify(blank)
-        merchant = suggest.merchant_string(tx["description"], tx["flow_type"])
+        merchant = suggest.row_merchant(conn, tx_id)
         if merchant is None:
             return jsonify(blank)
         answer = suggest.stored_answer(conn, merchant)

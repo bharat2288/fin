@@ -63,6 +63,24 @@ FILE_HEADER = (
     "# Delete any line that is a person's name or that you do not want sent, save,\n"
     "# then press Send in fin.\n"
 )
+# A file older than this is not an approval: the operator read it too long ago
+# to be taken as having read what would go now.
+APPROVAL_SECONDS = 24 * 60 * 60
+# The one kind of account whose rows may be sent: a card statement prints
+# purchases at merchants. A bank statement prints payees, and a payee can be a
+# person, whatever words stand before the name.
+SENT_FROM_KIND = "card"
+
+
+def clock() -> float:
+    """Now, in seconds since the epoch; tests replace it."""
+    return time.time()
+
+
+def approval_expired(written_at: float, now: float) -> bool:
+    """Whether a strings file last saved at `written_at` is too old at `now`
+    to count as the operator's approval."""
+    return now - written_at > APPROVAL_SECONDS
 
 
 # --- the code gate: no model in it ------------------------------------------
@@ -76,8 +94,8 @@ _PAYEE_SHAPE = re.compile(
 _BANK_LINE = re.compile(
     r"^(ADVICE|BILL PAYMENT|PAYMENT\b|PAYMT\b|CARD PAYMENT|SERVICE CHARGE|MISC DEBIT"
     r"|BUSINESS ADVANCE|INTEREST|CASH REBATE|SALARY|DIVIDEND|GST\b|FINANCE CHARGE"
-    r"|CCY CONVERSION FEE)"
-    r"|\b(ANNUAL (MEMBERSHIP )?FEE|LATE (PAYMENT )?(CHARGE|FEE)|ADMIN(ISTRATION)? FEE|OVERLIMIT FEE"
+    r"|CCY CONVERSION FEE|FEE$)"
+    r"|\b(SERVICE FEE|ADMINISTRATIVE FEE|FOREIGN CURRENCY TRANSACTION FEE|ANNUAL (MEMBERSHIP )?FEE|LATE (PAYMENT )?(CHARGE|FEE)|ADMIN(ISTRATION)? FEE|OVERLIMIT FEE"
     r"|GOODS (AND|&) SERVICES TAX|((CREDIT )?CARDS?|CC) (PAYMENT|PAYMT))\b"
 )
 # Payment processors that print their own name before the merchant's.
@@ -125,14 +143,17 @@ def clean(description: str | None) -> str:
     return _TRAILING_PLACE.sub("", text).strip(" *-/.")
 
 
-def merchant_string(description: str | None, flow_type: str | None) -> str | None:
+def merchant_string(description: str | None, flow_type: str | None,
+                    account_kind: str | None) -> str | None:
     """The string that may be sent for a row, or None when the gate stops it.
 
-    A row passes only if it says it is spending, has no payee or transfer
-    shape, is not a bank or fee line, and has readable text left after
-    cleaning. A row with no flow at all has not said it is spending.
+    A row passes only if it sits on a card account, says it is spending, has
+    no payee or transfer shape, is not a bank or fee line, and has readable
+    text left after cleaning. A row on any other kind of account is never
+    sent, whatever its wording. A row with no flow at all has not said it is
+    spending.
     """
-    if flow_type != "expense":
+    if account_kind != SENT_FROM_KIND or flow_type != "expense":
         return None
     upper = " ".join((description or "").upper().split())
     if _PAYEE_SHAPE.search(upper):
@@ -271,15 +292,18 @@ def stored_answer(conn: sqlite3.Connection, merchant: str) -> sqlite3.Row | None
 
 def unanswered(conn: sqlite3.Connection) -> list[str]:
     """The distinct merchant strings of rows with no type and no merchant that
-    no rule matches, that pass the gate and have no stored answer, in
-    alphabetical order. The rules are asked here, not read off the row: a rule
+    no rule matches, that pass the gate (so: card purchases only) and have no
+    stored answer, in alphabetical order. The rules are asked here, not read off the row: a rule
     made since the row arrived knows it all the same."""
     rows = conn.execute(
-        "SELECT description, flow_type, amount_minor FROM transactions"
-        " WHERE type_id IS NULL AND service_id IS NULL"
+        "SELECT t.description, t.flow_type, t.amount_minor, a.type AS account_kind"
+        " FROM transactions t"
+        " JOIN statements s ON s.id = t.statement_id"
+        " JOIN accounts a ON a.id = s.account_id"
+        " WHERE t.type_id IS NULL AND t.service_id IS NULL"
     ).fetchall()
     merchants = {
-        merchant_string(r["description"], r["flow_type"]) for r in rows
+        merchant_string(r["description"], r["flow_type"], r["account_kind"]) for r in rows
         if db.match_merchant(r["description"] or "", conn, r["amount_minor"])["service_id"] is None
     }
     merchants.discard(None)
@@ -306,12 +330,27 @@ def route(pick: str, probabilities: dict) -> tuple[str, list[tuple[str, float]]]
     return "top3", ranked[:3]
 
 
-def record_choice(conn: sqlite3.Connection, description: str | None, flow_type: str | None,
-                  type_id: int | None, visible: bool) -> None:
+def row_merchant(conn: sqlite3.Connection, tx_id: int) -> str | None:
+    """The string that may be sent for a stored row, read with the kind of the
+    account it sits on; None when the gate stops it or there is no such row."""
+    tx = conn.execute(
+        "SELECT t.description, t.flow_type, a.type AS account_kind FROM transactions t"
+        " JOIN statements s ON s.id = t.statement_id"
+        " JOIN accounts a ON a.id = s.account_id"
+        " WHERE t.id = ?",
+        (tx_id,),
+    ).fetchone()
+    if tx is None:
+        return None
+    return merchant_string(tx["description"], tx["flow_type"], tx["account_kind"])
+
+
+def record_choice(conn: sqlite3.Connection, tx_id: int, type_id: int | None,
+                  visible: bool) -> None:
     """Afterwards: the type the operator chose for a merchant that has a
     stored answer, and whether the suggestion was on screen when they chose.
     The first choice is the one kept. No commit: the caller owns it."""
-    merchant = merchant_string(description, flow_type)
+    merchant = row_merchant(conn, tx_id)
     if merchant is None or type_id is None:
         return
     conn.execute(
