@@ -598,31 +598,39 @@ function renderStatCards(d) {
         return `<div class="stat-sub">3mo avg: S$${formatAmount(avg)}</div>`;
     }
 
+    const transfers = (n) => `${n} ${n === 1 ? 'transfer' : 'transfers'}`;
+    const rows = (n) => `${n} ${n === 1 ? 'row' : 'rows'}`;
+    // What the headline is held short of: this month's transfers nobody has labelled.
+    const heldOut = d.held_out_count
+        ? `<div class="stat-sub text-warning">excludes ${d.held_out_count} unreviewed ${d.held_out_count === 1 ? 'transfer' : 'transfers'} (S$${formatAmount(d.held_out_total)})</div>`
+        : '';
+
+    // The headline is household spending only. A company's costs sit beside
+    // it and are never added into it.
     document.getElementById('stats-row').innerHTML = `
         <div class="stat-card">
-            <div class="stat-label">${d.ref_label} Spend</div>
-            <div class="stat-value">S$${formatAmount(d.spend)} ${delta(d.spend, d.avg_spend)}</div>
-            <div class="stat-sub">${d.tx_count} transactions</div>
-            ${avgLine(d.avg_spend)}
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Household</div>
+            <div class="stat-label">${d.ref_label} Household spending</div>
             <div class="stat-value accent">S$${formatAmount(d.household)} ${delta(d.household, d.avg_household)}</div>
+            <div class="stat-sub">${rows(d.household_rows)}</div>
             ${avgLine(d.avg_household)}
+            ${heldOut}
         </div>
         <div class="stat-card">
-            <div class="stat-label">Moom</div>
+            <div class="stat-label">Moom (its costs)</div>
             <div class="stat-value moom">S$${formatAmount(d.moom)} ${delta(d.moom, d.avg_moom)}</div>
+            <div class="stat-sub">paid from our accounts</div>
             ${avgLine(d.avg_moom)}
         </div>
         <div class="stat-card">
-            <div class="stat-label">Kalesh</div>
+            <div class="stat-label">Kalesh (its costs)</div>
             <div class="stat-value" style="color:var(--accent-pop);">S$${formatAmount(d.kalesh)} ${delta(d.kalesh, d.avg_kalesh)}</div>
+            <div class="stat-sub">paid from our accounts</div>
             ${avgLine(d.avg_kalesh)}
         </div>
-        <div class="stat-card">
-            <div class="stat-label">No type</div>
-            <div class="stat-value ${d.untyped > 0 ? 'text-warning' : ''}">${d.untyped}</div>
+        <div class="stat-card" style="cursor:pointer;" title="Open the review list" onclick="switchTab('review')">
+            <div class="stat-label">To review</div>
+            <div class="stat-value ${d.waiting > 0 ? 'text-warning' : ''}" style="font-size:22px;">${transfers(d.waiting)} · S$${formatAmount(d.waiting_total)}</div>
+            <div class="stat-sub">${rows(d.untyped)} with no type in ${d.ref_label}</div>
         </div>
     `;
 }
@@ -4309,7 +4317,7 @@ async function loadReviewList() {
     const noun = info.waiting === 1 ? 'transfer' : 'transfers';
     const shown = reviewRows.length < info.waiting ? ` · showing the largest ${reviewRows.length}` : '';
     document.getElementById('review-heading').textContent =
-        `/ Review list · ${info.waiting} ${noun} waiting · held out of spending · largest first${shown}`;
+        `/ Review list · ${info.waiting} ${noun} waiting · S$ ${formatAmount(info.waiting_total)} held out of spending · largest first${shown}`;
 
     document.getElementById('review-empty').classList.toggle('hidden', reviewRows.length > 0);
     document.getElementById('review-table').classList.toggle('hidden', reviewRows.length === 0);

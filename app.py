@@ -23,6 +23,7 @@ import book_type
 import db
 import flow
 import money
+import pairing
 import review
 import suggest
 import tie
@@ -939,6 +940,18 @@ def api_service_transactions(svc_id):
 # Dashboard API
 # ---------------------------------------------------------------------------
 
+def _waiting_for_review(conn, filters: str = "", params: tuple | list = ()) -> tuple[int, int]:
+    """How many transfers are waiting for review, and what they add up to in
+    whole minor units: money out less money in. `filters` narrows them by the
+    row (t) or its statement (s)."""
+    row = conn.execute(
+        "SELECT COUNT(*), SUM(t.amount_minor) FROM transactions t "
+        f"LEFT JOIN statements s ON t.statement_id = s.id WHERE t.flow_type = ? {filters}",
+        [flow.REVIEW, *params],
+    ).fetchone()
+    return row[0] or 0, row[1] or 0
+
+
 @app.route("/api/dashboard/stat-cards")
 def api_dashboard_stat_cards():
     """Stat cards: single month spend + delta vs 3-month rolling average.
@@ -949,6 +962,21 @@ def api_dashboard_stat_cards():
     Override with ?ref_month=YYYY-MM.
 
     Respects: book, exclude_one_off, account_id
+
+    The cards:
+      household, household_rows   spending and refunds in the Household book.
+                                  No company's row and no row waiting for
+                                  review is in it.
+      held_out_count, _total      the month's transfers waiting for review:
+                                  what the household figure is held short of.
+      moom, kalesh                each company's costs paid from accounts the
+                                  household owns. Beside the headline, never
+                                  added into it.
+      waiting, waiting_total      every transfer waiting, whenever dated: the
+                                  review list. untyped counts the month's
+                                  spending rows with no type.
+    spend is the View filter's figure (every book, or the one asked for, on
+    any account), as the charts and the list show it; no card shows it.
     """
     # Determine reference month
     ref_month_param = request.args.get("ref_month")
@@ -982,14 +1010,19 @@ def api_dashboard_stat_cards():
 
     extra_filters = ""
     extra_params = []
+    # The account filter alone: what narrows the transfers waiting for review.
+    account_filter = ""
+    account_params = []
     extra_filters += f" AND {_expense_visibility_filter('svc')}"
     if exclude_one_off:
         # Exclude both transaction-level and service-level one-offs
         extra_filters += " AND t.is_one_off = 0 AND (svc.is_one_off IS NULL OR svc.is_one_off = 0)"
     if account_id:
         try:
-            extra_filters += " AND s.account_id = ?"
-            extra_params.append(int(account_id))
+            account_params.append(int(account_id))
+            account_filter = " AND s.account_id = ?"
+            extra_filters += account_filter
+            extra_params += account_params
         except (ValueError, TypeError):
             pass
 
@@ -997,6 +1030,13 @@ def api_dashboard_stat_cards():
     books = [(name, name.lower()) for name in book_type.BOOK_NAMES]
     book_sums = "".join(
         f"SUM(CASE WHEN {book_expr('t')} = ? THEN amount_minor ELSE 0 END), " for _ in books
+    )
+    # A company's card: its costs paid from the household's own accounts. What
+    # the company paid from an account it owns is not the household's money.
+    companies = [(name, key) for name, key in books if name != book_type.DEFAULT_BOOK]
+    paid_sums = "".join(
+        f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? THEN amount_minor ELSE 0 END), "
+        for _ in companies
     )
 
     with get_db() as conn:
@@ -1009,25 +1049,35 @@ def api_dashboard_stat_cards():
                 end_d = date(y, m + 1, 1) - timedelta(days=1)
             end = end_d.strftime("%Y-%m-%d")
 
-            params = [name for name, _ in books] + [start, end] + extra_params
+            params = [name for name, _ in books]
+            for name, _ in companies:
+                params += [name, account_kind.HOUSEHOLD]
+            params += [book_type.DEFAULT_BOOK, start, end] + extra_params
             row = conn.execute(f"""
                 SELECT
                     {book_sums}
+                    {paid_sums}
                     SUM(amount_minor),
                     COUNT(CASE WHEN t.type_id IS NULL THEN 1 END),
-                    COUNT(*)
+                    COUNT(*),
+                    COUNT(CASE WHEN {book_expr('t')} = ? THEN 1 END)
                 FROM transactions t
                 LEFT JOIN services svc ON t.service_id = svc.id
                 JOIN statements s ON t.statement_id = s.id
+                LEFT JOIN accounts a ON s.account_id = a.id
                 WHERE t.flow_type IN ('expense', 'refund')
                   AND t.date >= ? AND t.date <= ?
                   {extra_filters}
             """, params).fetchone()
             n = len(books)
             result = {key: row[i] or 0 for i, (_, key) in enumerate(books)}
+            for i, (_, key) in enumerate(companies):
+                result[f"paid_{key}"] = row[n + i] or 0
+            n += len(companies)
             result["total"] = row[n] or 0
             result["untyped"] = row[n + 1] or 0
             result["tx_count"] = row[n + 2] or 0
+            result["household_rows"] = row[n + 3] or 0
             return result
 
         # Query reference month
@@ -1038,8 +1088,18 @@ def api_dashboard_stat_cards():
         n = len([d for d in avg_data if d["tx_count"] > 0]) or 1  # only months with data
         averages = {
             key: money.mean_minor(sum(d[key] for d in avg_data), n)
-            for key in ["total"] + [key for _, key in books]
+            for key in ["total"] + [key for _, key in books] + [f"paid_{key}" for _, key in companies]
         }
+
+        # The transfers dated in the reference month that nobody has labelled:
+        # what the household figure is waiting on.
+        held_out_count, held_out_minor = _waiting_for_review(
+            conn,
+            " AND strftime('%Y-%m', t.date) = ?" + account_filter,
+            [f"{ref_y:04d}-{ref_m:02d}"] + account_params,
+        )
+        # Everything waiting, whenever it is dated: the review list's own count.
+        waiting, waiting_minor = _waiting_for_review(conn)
 
     # Pick which spend to feature based on filter
     featured = book.lower() if book else "total"
@@ -1056,12 +1116,18 @@ def api_dashboard_stat_cards():
         "spend": spend,
         "untyped": ref_data["untyped"],
         "tx_count": ref_data["tx_count"],
+        "household_rows": ref_data["household_rows"],
+        "held_out_count": held_out_count,
+        "held_out_total": money.from_minor(held_out_minor),
+        "waiting": waiting,
+        "waiting_total": money.from_minor(waiting_minor),
         "avg_spend": avg_spend,
         "avg_months": n,
     }
-    for _, key in books:
-        payload[key] = money.from_minor(ref_data[key])
-        payload[f"avg_{key}"] = money.from_minor(averages[key])
+    for name, key in books:
+        shown = key if name == book_type.DEFAULT_BOOK else f"paid_{key}"
+        payload[key] = money.from_minor(ref_data[shown])
+        payload[f"avg_{key}"] = money.from_minor(averages[shown])
     return jsonify(payload)
 
 
@@ -2272,6 +2338,9 @@ def api_import_confirm():
                 except Exception as e:
                     app.logger.warning("Failed to insert rule '%s': %s", rule.get("pattern"), e)
 
+            # Pair the moves between household accounts this import completed.
+            pairing.match_pairs(conn)
+
             # Update batch_imports record
             result_summary = {
                 "transactions_saved": total_saved,
@@ -2688,15 +2757,14 @@ def api_rules_recategorize():
 
 @app.route("/api/review")
 def api_review():
-    """How many transfers are waiting, and the choices a label can be, from
-    their one declaration. The waiting rows themselves are the transaction
-    list with flow=review."""
+    """How many transfers are waiting and what they add up to, and the choices
+    a label can be, from their one declaration. The waiting rows themselves
+    are the transaction list with flow=review."""
     with get_db() as conn:
-        waiting = conn.execute(
-            "SELECT COUNT(*) FROM transactions WHERE flow_type = ?", (flow.REVIEW,)
-        ).fetchone()[0]
+        waiting, waiting_minor = _waiting_for_review(conn)
     return jsonify({
         "waiting": waiting,
+        "waiting_total": money.from_minor(waiting_minor),
         "choices": [
             {
                 "name": c.name,
@@ -2832,6 +2900,23 @@ def api_review_label(tx_id: int):
         "other_side_name": mask_card_number(named["name"]) if named else None,
         "created_account": new_person is not None,
     })
+
+
+@app.route("/api/pair-matching", methods=["POST"])
+def api_pair_matching():
+    """Pair the moves between household accounts, on demand: the same match
+    the import runs (pairing.py). A row set by hand is never changed, and a
+    second run pairs nothing more.
+
+    Returns paired, the number of pairs made, and waiting, the transfers
+    still on the review list."""
+    with get_db() as conn:
+        paired = pairing.match_pairs(conn)
+        conn.commit()
+        waiting = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE flow_type = ?", (flow.REVIEW,)
+        ).fetchone()[0]
+    return jsonify({"paired": paired, "waiting": waiting})
 
 
 # ---------------------------------------------------------------------------
