@@ -9,8 +9,39 @@ import os
 import re
 from dataclasses import dataclass, field
 
+import account_kind
 
-FLOW_TYPES = ("expense", "income", "transfer", "payment", "refund")
+# The flow list: what a row is, economically. Declared here, once, with a
+# plain description for each member; every writer of a flow validates against
+# this declaration through `checked_flow`. (name, description).
+FLOWS = (
+    ("expense", "spending: money that left and was consumed. Whose it is, is the row's book"),
+    ("income", "money the household earned or was given"),
+    ("transfer", "a move between two of the household's own bank and card accounts"),
+    ("payment", "a card payoff: the bank side or the card side of paying a card bill"),
+    ("refund", "spending that came back; it reduces spending in its month"),
+    ("movement", "money that became, or came from, something the household owns or is owed "
+                 "outside its bank and card accounts: a loan, a holding, a company, a person"),
+    ("review", "a bank transfer nobody has labelled yet; held out of spending until it is"),
+)
+
+FLOW_TYPES = tuple(name for name, _ in FLOWS)
+MOVEMENT = "movement"
+REVIEW = "review"
+# The flows whose rows may name their other side: an account of any kind.
+NAMES_OTHER_SIDE = ("movement", "transfer", "payment")
+
+
+class UnknownFlow(ValueError):
+    """A writer was handed a flow that is not in the declared list."""
+
+
+def checked_flow(value) -> str:
+    """A flow as a writer may store it: one of the declared flows."""
+    if not isinstance(value, str) or value not in FLOW_TYPES:
+        raise UnknownFlow(f"unknown flow: {value!r}")
+    return value
+
 
 # Seed aliases for own-counterparty detection. Substring-matched against
 # uppercased description. Augmented by account short_names + masked account
@@ -50,6 +81,31 @@ CARD_PAYOFF_INFLOW_PREFIXES = (
     "PAYMT THRU E-BANK/HOMEB/CYBERB",
     "BILL PAYMENT - DBS INTERNET/WIRELESS",
 )
+# --- Rules that need to know the account a row is on ---------------------------
+# They apply to rows on a household bank account only (ticket 05).
+
+# A transfer or payee shape: wording a bank gives money sent to, or received
+# from, a named party or account rather than a merchant. Contains-matched
+# against the uppercased description.
+TRANSFER_SHAPE_MARKERS = ("PAYNOW", "FAST PAYMENT", "TELEGRAPHIC TRANSFER", "I-BANK", ":IB")
+TRANSFER_SHAPE_REF_RE = re.compile(r"^(TRF )?FT\d+")
+# The bank's own wording for pay: a receipt carrying it is income.
+SALARY_MARKERS = ("SALARY",)
+# A receipt from this source is a capital sale: a movement out of the holding
+# named. (wording, the holding's account name)
+CAPITAL_SALE_SOURCES = (("INDEPENDENT RESERVE", "Crypto held outside fin"),)
+# Every receipt from this company is income (its monthly payments).
+COMPANIES_PAYING_INCOME = ("KALESH",)
+# A PayNow receipt from this company pays the household back: a movement
+# naming the company. (wording, the company's account name)
+COMPANIES_PAYING_BACK = (("MOOM", "Moom"),)
+PAYING_BACK_RAIL = "PAYNOW"
+# A row of this merchant is a loan instalment: a movement naming the loan.
+# (the merchant's name, the loan's account name)
+LOAN_MERCHANTS = (("UOB Home Loan", "UOB home loan"), ("Car Loan", "DBS auto loan"))
+# The kinds of account a rule above may name as an other side.
+RULE_OTHER_SIDE_KINDS = ("loan", "holding", "company")
+
 ACCOUNT_REF_RE = re.compile(r"\b\d{3}-\d{5,9}-\d\b")
 LOCAL_ALIAS_SPLIT_RE = re.compile(r"[\n,;]+")
 
@@ -67,6 +123,10 @@ class ClassifierContext:
     own_aliases: tuple[str, ...] = field(default_factory=tuple)
     linked_cc_patterns: tuple[str, ...] = field(default_factory=tuple)
     owned_bank_refs: tuple[str, ...] = field(default_factory=tuple)
+    # Household accounts a rule may name as an other side: {account name: id}.
+    other_sides: dict = field(default_factory=dict)
+    # Loan merchants: {the merchant's service id: the loan's account id}.
+    loan_merchants: dict = field(default_factory=dict)
 
 
 def _extract_bank_refs(text: str | None) -> tuple[str, ...]:
@@ -82,8 +142,12 @@ def build_context(conn) -> ClassifierContext:
     linked: list[str] = []
     bank_refs: set[str] = set(CURATED_INTERNAL_BANK_REFS)
 
+    # Only a bank account or a card is an own-account endpoint. A holding, a
+    # loan, a company or a person is never an alias: "Car" sits inside "CARD".
     for row in conn.execute(
-        "SELECT name, short_name, last_four, type FROM accounts WHERE status = 'active'"
+        "SELECT name, short_name, last_four, type FROM accounts"
+        " WHERE status = 'active' AND type IN (?, ?)",
+        account_kind.STATEMENT_KINDS,
     ).fetchall():
         for ref in _extract_bank_refs(row["name"]):
             bank_refs.add(ref)
@@ -99,10 +163,28 @@ def build_context(conn) -> ClassifierContext:
         if last4:
             aliases.append(f"XXXX{last4}")
 
+    # Where two accounts share a name, the older one is the one named.
+    other_sides = {
+        row["name"]: row["id"]
+        for row in conn.execute(
+            "SELECT id, name FROM accounts WHERE owner = ? AND type IN (?, ?, ?) ORDER BY id DESC",
+            (account_kind.HOUSEHOLD, *RULE_OTHER_SIDE_KINDS),
+        ).fetchall()
+    }
+    loan_merchants = {}
+    for merchant, loan in LOAN_MERCHANTS:
+        service = conn.execute(
+            "SELECT id FROM services WHERE UPPER(name) = ?", (merchant.upper(),)
+        ).fetchone()
+        if service and loan in other_sides:
+            loan_merchants[service["id"]] = other_sides[loan]
+
     return ClassifierContext(
         own_aliases=tuple(aliases),
         linked_cc_patterns=tuple(linked),
         owned_bank_refs=tuple(sorted(bank_refs)),
+        other_sides=other_sides,
+        loan_merchants=loan_merchants,
     )
 
 
@@ -169,10 +251,71 @@ def _matches_known_transfer_rail(description: str, owned_bank_refs: tuple[str, .
     return False
 
 
+def _on_household_bank(facts: dict) -> bool:
+    return (
+        facts.get("account_kind") == "bank"
+        and facts.get("account_owner") == account_kind.HOUSEHOLD
+    )
+
+
+def _has_transfer_shape(description: str) -> bool:
+    up = " ".join(description.upper().split())
+    return any(m in up for m in TRANSFER_SHAPE_MARKERS) or bool(TRANSFER_SHAPE_REF_RE.match(up))
+
+
+def _named_other_side(facts: dict, ctx: ClassifierContext) -> int | None:
+    """The account a rule names as a row's other side: the loan of a loan
+    merchant, or for money received on a household bank account the holding
+    it was sold from or the company paying the household back."""
+    if facts.get("service_id") in ctx.loan_merchants:
+        return ctx.loan_merchants[facts["service_id"]]
+    if not _on_household_bank(facts):
+        return None
+    up = (facts.get("description", "") or "").upper()
+    for wording, holding in CAPITAL_SALE_SOURCES:
+        if wording in up:
+            return ctx.other_sides.get(holding)
+    if any(wording in up for wording in COMPANIES_PAYING_INCOME):
+        return None
+    for wording, company in COMPANIES_PAYING_BACK:
+        if wording in up and PAYING_BACK_RAIL in up:
+            return ctx.other_sides.get(company)
+    return None
+
+
+def _ledger_rule(facts: dict, ctx: ClassifierContext, received: bool) -> str | None:
+    """The flow the ledger's own rules give a row, or None when none knows it:
+    a loan instalment is a movement; on a household bank account, pay and a
+    company's monthly payments are income, and a capital sale or a company
+    paying the household back is a movement."""
+    if facts.get("service_id") in ctx.loan_merchants:
+        return MOVEMENT
+    if not (received and _on_household_bank(facts)):
+        return None
+    up = (facts.get("description", "") or "").upper()
+    if any(marker in up for marker in SALARY_MARKERS):
+        return "income"
+    if _named_other_side(facts, ctx) is not None:
+        return MOVEMENT
+    if any(wording in up for wording in COMPANIES_PAYING_INCOME):
+        return "income"
+    return None
+
+
+def classify_row(facts: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
+    """Return (flow, the account id of the row's other side or None)."""
+    flow = classify_flow(facts, ctx)
+    return flow, (_named_other_side(facts, ctx) if flow == MOVEMENT else None)
+
+
 def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     """Return one of FLOW_TYPES.
 
-    facts: {date, description, amount_sgd}
+    facts: {date, description, amount_sgd} and, where the caller knows them:
+      account_kind, account_owner — the account the row is on;
+      service_id — the merchant a rule gave the row;
+      labelled — whether a rule or the payee wording gave it a merchant or a type.
+    Without these the rules that need them do not apply.
     """
     description = facts.get("description", "") or ""
     amount = facts.get("amount_sgd", 0.0) or 0.0
@@ -194,6 +337,12 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     if amount < 0 and _looks_like_refund(description):
         return "refund"
 
+    # 2b. The ledger's own rules. Before the own-alias rule: two of the
+    #     sources they know are aliases.
+    known = _ledger_rule(facts, ctx, received=amount < 0)
+    if known:
+        return known
+
     # 3. Own-counterparty movement (non-CC)
     if _matches_own_alias(description, ctx.own_aliases):
         return "transfer"
@@ -201,6 +350,11 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     # 4. Narrow reviewed transfer rails that are not merchant spend.
     if _matches_known_transfer_rail(description, ctx.owned_bank_refs):
         return "transfer"
+
+    # 4b. A transfer on a household bank account that nothing above knows and
+    #     no merchant rule labelled waits for the operator.
+    if _on_household_bank(facts) and not facts.get("labelled") and _has_transfer_shape(description):
+        return REVIEW
 
     # 5. Remaining inflow = income
     if amount < 0:

@@ -26,6 +26,7 @@
         <div class="tab-bar-main">
             <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
             <button class="tab-btn" data-tab="subs">Subscriptions</button>
+            <button class="tab-btn" data-tab="review" id="review-tab-btn">Review list</button>
         </div>
         <div class="tab-bar-actions">
             <button class="tab-icon-btn" data-tab="import" title="Import Statements">
@@ -499,6 +500,35 @@
                     <div class="empty-state-icon">-</div>
                     <div class="empty-state-text">No accounts</div>
                     <div class="empty-state-hint">Add your cards, bank accounts, loans and holdings</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         REVIEW LIST TAB (transfers waiting for a label)
+         ============================================================ -->
+    <div id="tab-review" class="tab-content">
+        <div class="container">
+            <div class="section-label" id="review-heading">/ Review list</div>
+
+            <div class="card">
+                <table class="data-table" id="review-table">
+                    <thead>
+                        <tr>
+                            <th style="width:9%;">Date</th>
+                            <th style="width:13%;">Account</th>
+                            <th style="width:28%;">Description</th>
+                            <th style="width:10%;text-align:right;">Amount</th>
+                            <th style="width:40%;">This was...</th>
+                        </tr>
+                    </thead>
+                    <tbody id="review-body"></tbody>
+                </table>
+                <div id="review-empty" class="empty-state hidden">
+                    <div class="empty-state-icon">-</div>
+                    <div class="empty-state-text">Nothing is waiting</div>
+                    <div class="empty-state-hint">A bank transfer no merchant rule knows lands here until you say what it was</div>
                 </div>
             </div>
         </div>

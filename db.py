@@ -244,6 +244,11 @@ def _refuse_unconverted(conn: sqlite3.Connection) -> None:
             "this database is from before accounts had a kind and an owner. Convert it "
             "first: python convert_account_kinds.py <path to database>"
         )
+    if "other_side_id" not in tx_cols:
+        raise DatabaseNotConverted(
+            "this database is from before a row could name its other side. Convert it "
+            "first: python convert_movements.py <path to database>"
+        )
 
 
 def get_connection() -> sqlite3.Connection:

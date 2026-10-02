@@ -68,12 +68,13 @@ CREATE TABLE IF NOT EXISTS transactions (
     service_id INTEGER,            -- FK to services table (merchant identity)
     is_one_off INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in table)
     cat_source TEXT DEFAULT 'auto',  -- where book and type came from: auto|service_default|rule_override|fallback|manual
-    flow_type TEXT,                -- expense|income|transfer|payment|refund (ADR v2)
+    flow_type TEXT,                -- expense|income|transfer|payment|refund|movement|review (declared in flow.py)
     flow_type_manual INTEGER DEFAULT 0,  -- 1 = user overrode classifier; preserve on recategorize
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     book TEXT,                     -- whose spending: Household, Moom, Kalesh (declared in book_type.py); NULL reads as Household
-    type_id INTEGER REFERENCES types(id),  -- what kind of spending; NULL = not placed, or not spending
+    type_id INTEGER REFERENCES types(id),  -- what kind of spending, or for income its kind; NULL = not placed
+    other_side_id INTEGER REFERENCES accounts(id),  -- the account a movement, transfer or payment names as its other side; NULL = none named. An existing database gains it through convert_movements.py
     FOREIGN KEY (statement_id) REFERENCES statements(id),
     FOREIGN KEY (service_id) REFERENCES services(id)
 );

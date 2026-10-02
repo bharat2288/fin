@@ -48,14 +48,13 @@ def paynow_type(description: str) -> str | None:
     return None
 
 
-def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> int:
-    """Find or create an account from card info string.
+def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
+    """The account a card info string names, or None when there is none yet.
 
     Matching priority:
     1. Exact name match
     2. Last-four digit match (extracts trailing 4-digit group from card_info)
     3. Account number substring match (long digit sequences in card_info)
-    4. Create new account if no match found
     """
     if not card_info:
         card_info = "Unknown Account"
@@ -88,7 +87,22 @@ def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> 
         if match:
             return match[0]
 
-    # 4. Create new account
+    return None
+
+
+def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> int:
+    """Find or create an account from card info string: the account
+    `find_account` gives, or a new one of the kind given."""
+    if not card_info:
+        card_info = "Unknown Account"
+
+    found = find_account(conn, card_info)
+    if found is not None:
+        return found
+
+    all_digits = re.sub(r"\D", "", card_info)
+    last_four = all_digits[-4:] if len(all_digits) >= 4 else None
+
     account_kind.checked_kind(stmt_type)
     conn.execute(
         "INSERT INTO accounts (name, short_name, type, last_four) VALUES (?, ?, ?, ?)",
