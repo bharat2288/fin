@@ -384,6 +384,9 @@ def api_services():
     result = []
     for r in rows:
         d = dict(r)
+        # Book and type are stored but not served until the app reads them.
+        d.pop("book", None)
+        d.pop("type_id", None)
         d["display_category"] = format_category_display(d["parent_name"], d["category_name"])
         d["rules"] = rules_by_svc.get(d["id"], [])
         result.append(d)
@@ -2039,6 +2042,9 @@ def api_subscriptions():
     result = []
     for r in rows:
         d = dict(r)
+        # Book and type are stored but not served until the app reads them.
+        d.pop("book", None)
+        d.pop("type_id", None)
         sub_id = d["id"]
         pat = (d["match_pattern"] or "").upper()
         monthly_sums = monthly_by_sub.get(sub_id, []) if pat else []

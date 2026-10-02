@@ -3,6 +3,8 @@
 import sqlite3
 from pathlib import Path
 
+import book_type
+
 DB_PATH = Path(__file__).parent / "fin.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
@@ -300,6 +302,12 @@ def init_db() -> None:
     if "is_transfer" in tx_cols:
         conn.execute("ALTER TABLE transactions DROP COLUMN is_transfer")
         conn.commit()
+
+    # The type list, from its one declaration. A database created before the
+    # book and type columns existed gains those through convert_book_type.py,
+    # never here.
+    book_type.seed_types(conn)
+    conn.commit()
 
     # Seed categories — INSERT OR IGNORE so new categories get added
     # First pass: insert all top-level (parent=None)

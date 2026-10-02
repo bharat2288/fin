@@ -1,5 +1,6 @@
--- fin: personal finance tracker
--- Schema v1
+-- The schema as it stood before the book and type columns were added.
+-- Conversion tests build their old-shape database from this copy; it is never
+-- run against a real database and is not kept in step with schema.sql.
 
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,8 +22,6 @@ CREATE TABLE IF NOT EXISTS merchant_rules (
     min_amount REAL,               -- if set, rule only matches when amount >= this
     max_amount REAL,               -- if set, rule only matches when amount <= this
     created_at TEXT DEFAULT (datetime('now')),
-    book_override TEXT,            -- book the rule sets in place of the merchant's (with the type override)
-    type_override_id INTEGER REFERENCES types(id),  -- type the rule sets in place of the merchant's
     FOREIGN KEY (service_id) REFERENCES services(id),
     FOREIGN KEY (category_override_id) REFERENCES categories(id)
 );
@@ -64,8 +63,6 @@ CREATE TABLE IF NOT EXISTS transactions (
     flow_type_manual INTEGER DEFAULT 0,  -- 1 = user overrode classifier; preserve on recategorize
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    book TEXT,                     -- whose spending: Household, Moom, Kalesh (declared in book_type.py)
-    type_id INTEGER REFERENCES types(id),  -- what kind of spending; NULL = not placed, or not spending
     FOREIGN KEY (statement_id) REFERENCES statements(id),
     FOREIGN KEY (category_id) REFERENCES categories(id),
     FOREIGN KEY (service_id) REFERENCES services(id)
@@ -87,8 +84,6 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     notes TEXT,
     match_pattern TEXT,            -- pattern to match against transaction descriptions
     created_at TEXT DEFAULT (datetime('now')),
-    book TEXT,                     -- as on transactions
-    type_id INTEGER REFERENCES types(id),
     FOREIGN KEY (service_id) REFERENCES services(id),
     FOREIGN KEY (category_id) REFERENCES categories(id),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
@@ -102,26 +97,7 @@ CREATE TABLE IF NOT EXISTS services (
     exclude_from_expense_views INTEGER DEFAULT 0,  -- 1 = keep in ledger but hide from dashboard/expense tables
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    book TEXT,                          -- default book for this merchant's rows
-    type_id INTEGER REFERENCES types(id),  -- default type for this merchant's rows
     FOREIGN KEY (category_id) REFERENCES categories(id)
-);
-
--- The type list: one list for every book, with one level of sub-type, and
--- the short list of income kinds. Filled from the declaration in book_type.py.
--- Book and type sit beside the category columns until the category tree is
--- retired; an existing database gains them through convert_book_type.py.
-CREATE TABLE IF NOT EXISTS types (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL DEFAULT 'spending',  -- 'spending' = a type, 'income' = an income kind
-    name TEXT NOT NULL,
-    parent_id INTEGER,              -- NULL = top-level type; FK = sub-type
-    default_one_off INTEGER NOT NULL DEFAULT 0,  -- 0 = running by default, 1 = one-off by default
-    covers TEXT NOT NULL,           -- plain description: what the type is for
-    not_for TEXT,                   -- what it is not for
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (parent_id) REFERENCES types(id),
-    UNIQUE (kind, name)
 );
 
 CREATE TABLE IF NOT EXISTS batch_imports (
