@@ -46,6 +46,7 @@ let typeColorMap = {};     // type name → hex color (shared between bar + donu
 const DEFAULT_BOOK = 'Household';
 const NO_TYPE_LABEL = 'No type';
 const UNTYPED_FILTER = '__untyped__';
+let suggestionsEnabled = false; // Type suggestion is on only when the server has its key
 
 // Type color palette (Dark Neutral chart tokens)
 const CAT_COLORS = [
@@ -323,6 +324,15 @@ async function loadReferenceData() {
     populateTypeMultiSelect();
     populateAccountFilter();
     await populateYearDropdown();
+
+    // Type suggestion: off unless the server says its key is present.
+    try {
+        const status = await fetch('/api/suggestions/status').then(r => r.json());
+        suggestionsEnabled = !!status.enabled;
+    } catch (_) {
+        suggestionsEnabled = false;
+    }
+    updateSuggestButton();
 }
 
 function populateAccountFilter() {
@@ -1221,6 +1231,7 @@ async function openResolveModal(txId, description) {
 
     // Try to auto-match service from description
     await autoMatchService(description);
+    await showResolveSuggestion(txId);
     updateResolveCascade();
 
     // Show modal and focus service input
@@ -1336,9 +1347,102 @@ function onResolveServiceChange(value) {
     updateResolveCascade();
 }
 
+// ---- Type suggestion (suggest-only: the operator confirms or corrects) ----
+
+let resolveSuggestionVisible = false;
+
+function updateSuggestButton() {
+    const btn = document.getElementById('suggest-types-btn');
+    if (!btn) return;
+    const onNoTypeList = typeFilterSelections.includes(UNTYPED_FILTER);
+    btn.style.display = suggestionsEnabled && onNoTypeList ? '' : 'none';
+}
+
+// What the stored answer gives the dialog: a pre-filled type, three to pick
+// from, or nothing. It fills the type field only; service, pattern, scope and
+// book stay the operator's.
+async function showResolveSuggestion(txId) {
+    resolveSuggestionVisible = false;
+    const el = document.getElementById('resolve-suggestion');
+    el.style.display = 'none';
+    el.textContent = '';
+    if (!suggestionsEnabled) return;
+
+    const typeSelect = document.getElementById('resolve-modal-type');
+    if (typeSelect.value) return; // a known service already filled it
+
+    let suggestion;
+    try {
+        suggestion = await fetch(`/api/transactions/${txId}/suggestion`).then(r => r.json());
+    } catch (_) {
+        return;
+    }
+    if (resolveModalTxId !== txId || !suggestion || !suggestion.types || !suggestion.types.length) return;
+
+    const pct = p => `${Math.round(p * 100)}%`;
+    if (suggestion.route === 'prefill') {
+        const top = suggestion.types[0];
+        typeSelect.value = String(top.type_id);
+        onResolveTypeChange();
+        el.textContent = `Suggested: ${top.name} (${pct(top.probability)}). Confirm or change it.`;
+    } else if (suggestion.route === 'top3') {
+        el.textContent = 'Suggested: ';
+        suggestion.types.forEach(t => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm';
+            btn.style.marginRight = '4px';
+            btn.textContent = `${t.name} (${pct(t.probability)})`;
+            btn.onclick = () => {
+                typeSelect.value = String(t.type_id);
+                onResolveTypeChange();
+            };
+            el.appendChild(btn);
+        });
+    } else {
+        return;
+    }
+    el.style.display = 'block';
+    resolveSuggestionVisible = true;
+}
+
+// Two steps. The first click writes the merchant names to a local file and
+// sends nothing; only the operator's second, separate confirmation sends.
+async function startTypeSuggestions() {
+    const btn = document.getElementById('suggest-types-btn');
+    btn.disabled = true;
+    try {
+        const prepared = await apiFetch('/api/suggestions/prepare', { method: 'POST' });
+        if (!prepared) return;
+        if (!prepared.count) {
+            showToast('No new merchant names to ask about.', 'info');
+            return;
+        }
+        const send = await showConfirmDialog(
+            'Read the list before anything is sent',
+            `<strong>${prepared.count}</strong> merchant names were written to<br>` +
+            `<code>${escapeHtml(prepared.file)}</code><br><br>` +
+            `Nothing has been sent. Open the file, delete any line that is a person's name ` +
+            `or that you do not want sent, and save it. Each remaining line is then sent on ` +
+            `its own, with the type list and nothing else.`,
+            { okLabel: 'I have read it: send', cancelLabel: 'Not now' }
+        );
+        if (!send) return;
+
+        const result = await apiFetch('/api/suggestions/send', { method: 'POST' });
+        if (!result) return;
+        const parts = [`${result.sent} merchant names answered`];
+        if (result.stopped) parts.push(`Stopped: ${result.stopped}. ${result.remaining} not sent`);
+        showToast(parts.join('. '), result.stopped ? 'warn' : 'info', 6000);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
 function closeResolveModal() {
     document.getElementById('resolve-modal').style.display = 'none';
     resolveModalTxId = null;
+    resolveSuggestionVisible = false;
     document.getElementById('resolve-cascade-warning').textContent = '';
     document.getElementById('resolve-cascade-count').textContent = '';
 }
@@ -1416,6 +1520,8 @@ async function saveResolveModal() {
         // type proposes, and refuses a type that proposes none.
         if (book) payload.book = book;
         if (existingService) payload.service_id = existingService.id;
+        // Kept with the stored answer: was a suggestion on screen for this choice?
+        payload.suggestion_visible = resolveSuggestionVisible;
 
         const data = await apiFetch('/api/transactions/resolve', { method: 'POST', body: payload });
         if (!data) return;
@@ -2767,6 +2873,7 @@ function clearCatFilter() {
 }
 
 function updateCatFilterDisplay() {
+    updateSuggestButton();
     const display = document.getElementById('cat-filter-display');
     const trigger = document.getElementById('cat-filter-trigger');
     if (!display || !trigger) return;

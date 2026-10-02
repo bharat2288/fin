@@ -18,6 +18,8 @@ from datetime import date, datetime, timedelta
 from flask import Flask, jsonify, request, send_from_directory
 
 import book_type
+import db
+import suggest
 from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
 
 
@@ -1207,6 +1209,17 @@ def api_resolve_transaction():
                     (*label, tx_id),
                 )
 
+            # Afterwards, for a merchant the model was asked about: the type
+            # the operator chose and whether the suggestion was on screen.
+            chosen = conn.execute(
+                "SELECT description, flow_type FROM transactions WHERE id = ?", (tx_id,)
+            ).fetchone()
+            if chosen:
+                suggest.record_choice(
+                    conn, chosen["description"], chosen["flow_type"], type_id,
+                    data.get("suggestion_visible") is True,
+                )
+
             conn.commit()
             invalidate_rules_cache()
             return jsonify({
@@ -1262,6 +1275,152 @@ def _build_filters(args) -> tuple[str, list]:
             pass
 
     return filters, params
+
+
+# ---------------------------------------------------------------------------
+# Type suggestion (suggest.py)
+# ---------------------------------------------------------------------------
+# Two steps, both started by the operator from the list of rows with no type:
+# prepare writes the cleaned merchant strings to a local file and sends
+# nothing; send asks the outside model about the lines still in that file.
+# Neither runs inside an upload, and both refuse when there is no key.
+
+def _suggestion_strings_path():
+    """The file of strings waiting to be read, beside the database."""
+    return db.DB_PATH.parent / suggest.STRINGS_FILE
+
+
+def _suggestions_off():
+    return jsonify({
+        "error": f"Type suggestion is off: {suggest.KEY_ENV} is not set. "
+                 "Start fin through the launcher that sets it."
+    }), 409
+
+
+@app.route("/api/suggestions/status")
+def api_suggestions_status():
+    """Whether the feature is on. It is on only when the key is present."""
+    return jsonify({"enabled": suggest.key() is not None, "key_variable": suggest.KEY_ENV})
+
+
+@app.route("/api/suggestions/prepare", methods=["POST"])
+def api_suggestions_prepare():
+    """Step one: write the strings that would be sent to a local file for the
+    operator to read. Nothing leaves the machine."""
+    if suggest.key() is None:
+        return _suggestions_off()
+    with get_db() as conn:
+        merchants = suggest.unanswered(conn)
+    path = _suggestion_strings_path()
+    if merchants:
+        path.write_text(suggest.FILE_HEADER + "\n".join(merchants) + "\n", encoding="utf-8")
+    return jsonify({"count": len(merchants), "merchants": merchants, "file": str(path)})
+
+
+@app.route("/api/suggestions/send", methods=["POST"])
+def api_suggestions_send():
+    """Step two: one request per line the operator left in the file, each
+    answer stored in full. The first failed call stops the batch."""
+    api_key = suggest.key()
+    if api_key is None:
+        return _suggestions_off()
+    path = _suggestion_strings_path()
+    if not path.is_file():
+        return jsonify({
+            "error": "Nothing has been prepared. Prepare the list and read it before sending."
+        }), 409
+    left_in_file = {
+        line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+
+    sent = 0
+    stopped = None
+    with get_db() as conn:
+        # Only strings fin itself would have written: a line added by hand,
+        # or one already answered, is not sent.
+        to_send = [m for m in suggest.unanswered(conn) if m in left_in_file]
+        for merchant in to_send:
+            try:
+                record = suggest.ask(merchant, api_key)
+            except Exception as exc:
+                stopped = suggest.describe_failure(exc)
+                app.logger.warning("Type suggestion stopped: %s", stopped)
+                break
+            suggest.store(conn, record)
+            conn.commit()
+            if record["returned_model_id"] != suggest.RETURNED_MODEL_ID:
+                stopped = (
+                    f"a different model answered ({record['returned_model_id']}, expected "
+                    f"{suggest.RETURNED_MODEL_ID}); its answer is kept and not shown"
+                )
+                break
+            sent += 1
+
+    if stopped is None:
+        # Every line was dealt with. The file is fin's own, written by prepare
+        # under this fixed name; the next batch starts from a fresh one.
+        path.unlink()
+    return jsonify({"sent": sent, "stopped": stopped, "remaining": len(to_send) - sent})
+
+
+@app.route("/api/suggestions/answers")
+def api_suggestions_answers():
+    """Every stored answer in full, with what the operator chose afterwards."""
+    with get_db() as conn:
+        type_names = book_type.spending_type_names(conn)
+        rows = conn.execute("SELECT * FROM suggestion_answers ORDER BY merchant, id").fetchall()
+    return jsonify([{
+        "merchant": r["merchant"],
+        "model_id": r["model_id"],
+        "returned_model_id": r["returned_model_id"],
+        "cleaning_version": r["cleaning_version"],
+        "question_version": r["question_version"],
+        "pick": r["pick"],
+        "probabilities": json.loads(r["probabilities"]),
+        "confidence": r["confidence"],
+        "input_tokens": r["input_tokens"],
+        "cost_usd": r["cost_usd"],
+        "latency_ms": r["latency_ms"],
+        "asked_at": r["asked_at"],
+        "chosen_type_id": r["chosen_type_id"],
+        "chosen_type": type_names.get(r["chosen_type_id"]),
+        "suggestion_visible": (
+            None if r["suggestion_visible"] is None else bool(r["suggestion_visible"])
+        ),
+        "chosen_at": r["chosen_at"],
+    } for r in rows])
+
+
+@app.route("/api/transactions/<int:tx_id>/suggestion")
+def api_transaction_suggestion(tx_id: int):
+    """What the resolve dialog is given for a row: a type to pre-fill, three
+    to offer, or nothing. Read from the stored answers; it never asks."""
+    blank = {"route": "blank", "types": [], "merchant": None}
+    with get_db() as conn:
+        tx = conn.execute(
+            "SELECT description, flow_type, service_id FROM transactions WHERE id = ?", (tx_id,)
+        ).fetchone()
+        if not tx:
+            return jsonify({"error": "Transaction not found"}), 404
+        if suggest.key() is None or tx["service_id"] is not None:
+            return jsonify(blank)
+        merchant = suggest.merchant_string(tx["description"], tx["flow_type"])
+        if merchant is None:
+            return jsonify(blank)
+        answer = suggest.stored_answer(conn, merchant)
+        type_ids = book_type.spending_type_ids(conn)
+    if answer is None:
+        return jsonify({**blank, "merchant": merchant})
+    where, offered = suggest.route(answer["pick"], json.loads(answer["probabilities"]))
+    return jsonify({
+        "route": where,
+        "merchant": merchant,
+        "types": [
+            {"type_id": type_ids[name], "name": name, "probability": probability}
+            for name, probability in offered
+        ],
+    })
 
 
 # ---------------------------------------------------------------------------

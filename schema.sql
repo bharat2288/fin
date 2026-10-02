@@ -112,6 +112,30 @@ CREATE TABLE IF NOT EXISTS types (
     UNIQUE (kind, name)
 );
 
+-- Answers from the outside judgment model to "which type is this merchant?",
+-- one per cleaned merchant string, model and version (suggest.py). A
+-- suggestion only: nothing here labels a row. A new table, made empty by
+-- CREATE IF NOT EXISTS on start; no existing row is converted.
+CREATE TABLE IF NOT EXISTS suggestion_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    merchant TEXT NOT NULL,           -- the cleaned merchant string that was sent
+    model_id TEXT NOT NULL,           -- the model id asked for
+    returned_model_id TEXT NOT NULL,  -- the id that answered; only the pinned one is ever shown
+    cleaning_version TEXT NOT NULL,   -- version of the cleaning that made the string
+    question_version TEXT NOT NULL,   -- version of the question text
+    pick TEXT NOT NULL,               -- the option picked: a type's display name, or none_of_these
+    probabilities TEXT NOT NULL,      -- JSON: the probability of every option
+    confidence REAL,
+    input_tokens INTEGER,
+    cost_usd TEXT,                    -- decimal text, US dollars
+    latency_ms INTEGER,
+    asked_at TEXT DEFAULT (datetime('now')),
+    chosen_type_id INTEGER REFERENCES types(id),  -- afterwards: the type the operator chose
+    suggestion_visible INTEGER,       -- afterwards: 1 = the suggestion was on screen when they chose
+    chosen_at TEXT,
+    UNIQUE (merchant, model_id, returned_model_id, cleaning_version, question_version)
+);
+
 CREATE TABLE IF NOT EXISTS batch_imports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     filenames TEXT NOT NULL,          -- JSON array of filenames

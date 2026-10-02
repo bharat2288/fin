@@ -236,6 +236,12 @@ def test_a_database_through_both_steps_has_the_shape_of_a_new_one(old, tmp_path)
     conn = sqlite3.connect(str(fresh))
     conn.executescript(db.SCHEMA_PATH.read_text())
     conn.close()
+    # What the next start does to a converted database: the schema script's
+    # CREATE IF NOT EXISTS adds any table made since the conversions (the
+    # suggestion answers) and leaves every table the steps shaped as it is.
+    conn = sqlite3.connect(str(old))
+    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.close()
 
     def shape(path: Path) -> dict:
         tables = [r[0] for r in query(

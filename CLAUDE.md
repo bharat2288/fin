@@ -11,6 +11,7 @@ static/
     app.js          ← All frontend logic
     styles.css      ← All styles
 db.py               ← Database helpers, categorization engine
+suggest.py          ← Type suggestion for unknown merchants (off without OPENROUTER_API_KEY)
 schema.sql          ← SQLite schema (source of truth)
 parsers.py          ← Statement parser orchestrator
 parse_dbs.py        ← DBS PDF/CSV parser

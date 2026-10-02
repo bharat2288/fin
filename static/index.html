@@ -154,6 +154,8 @@
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
                     <div class="section-label" style="margin-bottom:0;">/ Transactions</div>
                     <div style="display:flex;align-items:center;gap:12px;">
+                        <!-- Shown only with the suggestion key present and the list filtered to rows with no type -->
+                        <button class="btn btn-sm" id="suggest-types-btn" style="display:none;" onclick="startTypeSuggestions()" title="Ask for a type suggestion for merchants no rule knows. Nothing is sent until you have read the list.">Suggest types</button>
                         <input type="text" id="tx-search" placeholder="Search services or descriptions..." style="width:220px;font-size:12px;">
                     <div class="tx-view-toggle">
                         <button class="btn btn-toggle active" data-txview="flat" onclick="setTxView('flat')">Flat</button>
@@ -547,6 +549,7 @@
                         <label>Type</label>
                         <select id="resolve-modal-type" style="width:100%;" onchange="onResolveTypeChange()"></select>
                         <small id="resolve-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
+                        <small id="resolve-suggestion" style="color:var(--text-muted);display:none;"></small>
                     </div>
                 </div>
                 <div class="resolve-cascade" id="resolve-cascade">
