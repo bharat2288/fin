@@ -9,7 +9,11 @@ the key is a made-up word.
 
 import io
 import json
+import logging
+import re
 import socket
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -606,3 +610,430 @@ def test_the_suggestion_never_files_a_row_or_makes_a_merchant_or_a_rule(
     assert (after["type_id"], after["service_id"], after["cat_source"]) == (None, None, "auto")
     assert len(client.get("/api/services").get_json()) == merchants
     assert len(client.get("/api/rules").get_json()) == rules
+
+
+# =============================================================================
+# Gate proofs G1 to G9 (ticket 22)
+# =============================================================================
+# Each is driven through the batch's own endpoints. Where the proof is about
+# what leaves, the stand-in sits one layer below `suggest.post`, at urllib's
+# `urlopen`: the real `ask` builds the request and the real `post` serialises
+# it, and the assertion is on those bytes or on how many requests there were.
+# G9 is proved by the two tests above that confirm and correct a suggestion.
+
+
+class Wire:
+    """Stands in for `urllib.request.urlopen`. Keeps every request object it is
+    handed, and answers through a FakeModel unless told to fail."""
+
+    def __init__(self):
+        self.model = FakeModel()
+        self.sent = []
+        self.failure = None
+        self.raw_reply = None
+
+    def __call__(self, request, timeout=None):
+        self.sent.append(request)
+        if self.failure is not None:
+            raise self.failure
+        if self.raw_reply is not None:
+            return io.BytesIO(self.raw_reply)
+        sent_key = request.get_header("Authorization").removeprefix("Bearer ")
+        reply = self.model(json.loads(request.data), sent_key)
+        return io.BytesIO(json.dumps(reply).encode("utf-8"))
+
+    @property
+    def bodies(self) -> list:
+        """The serialised body of every request, as text."""
+        return [request.data.decode("utf-8") for request in self.sent]
+
+    @property
+    def asked(self) -> list:
+        return [json.loads(body)["state"]["merchant"] for body in self.bodies]
+
+
+@pytest.fixture
+def wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
+    fake = Wire()
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return fake
+
+
+def approve(*lines: str) -> None:
+    """Write the strings file as if the operator had read it and left these
+    lines in: the most a send could ever be allowed to take from it."""
+    strings_file().write_text(suggest.FILE_HEADER + "\n".join(lines) + "\n", encoding="utf-8")
+
+
+def send_with_everything_approved(client, description: str) -> dict:
+    """Send with a file that approves the row's text raw, upper-cased and
+    cleaned. Whatever stops the row then, it is the gate and not the file."""
+    upper = " ".join(description.upper().split())
+    approve(description, upper, suggest.clean(description))
+    resp = client.post("/api/suggestions/send")
+    assert resp.status_code == 200, resp.get_json()
+    return resp.get_json()
+
+
+# --- G1: forbidden content never leaves --------------------------------------
+
+
+def test_g1_the_serialised_body_holds_only_the_merchant_string_the_model_id_and_the_question(
+    client, conn, statement, key, wire
+):
+    # Two rows of one merchant, each printing a date, an amount, a card
+    # fragment and a reference number in its own way; and one other row.
+    for day, description, amount in (
+        ("2026-04-17", "LANTERN NOODLE HOUSE 17 APR REF:88120457 XXXX-0001 SGD 4321.09 SINGAPORE SG", 4321.09),
+        ("2026-04-18", "2C2P*LANTERN NOODLE HOUSE 18APR26 88120458 XXXX0001 4321.09 SG", 4321.09),
+        ("2026-04-19", "MOSSY BOOKS 19/04 77003131", 12.34),
+    ):
+        conn.execute(
+            "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type)"
+            " VALUES (?, ?, ?, ?, 'expense')",
+            (statement, day, description, amount),
+        )
+    conn.commit()
+
+    result = prepare_and_send(client)
+
+    assert (result["sent"], result["stopped"]) == (2, None)
+    assert wire.asked == ["LANTERN NOODLE HOUSE", "MOSSY BOOKS"]
+    request, body = wire.sent[0], wire.bodies[0]
+    # The whole body, and nothing beside it.
+    assert json.loads(body) == {
+        "state": {"merchant": "LANTERN NOODLE HOUSE"},
+        "model": suggest.MODEL_ID,
+        "questions": {"type": suggest.question()},
+    }
+    asked_question = json.dumps(suggest.question())
+    assert body.replace(asked_question, "<question>").replace(suggest.MODEL_ID, "<model>") == (
+        '{"state": {"merchant": "LANTERN NOODLE HOUSE"}, "model": "<model>",'
+        ' "questions": {"type": <question>}}'
+    )
+    # None of what the rows carried, in any of the ways it was printed.
+    for never in (
+        "4321.09", "4321", "12.34",                      # amounts
+        "2026-04-17", "2026-04-18", "2026-04-19", "18APR26", "19/04", "2026-04-10",
+        "0001", "XXXX", "Sample Card", "Sample-0001",    # the card
+        "88120457", "88120458", "77003131", "REF",       # reference numbers
+        "MOSSY", "sample.csv", "2026-04-01", *book_type.BOOK_NAMES,
+    ):
+        assert never not in body, never
+    assert not re.search(r"\b(APR|SGD|SG)\b", body)
+    # The question is the same for every merchant: it is built from no row.
+    assert wire.bodies[1].replace("MOSSY BOOKS", "LANTERN NOODLE HOUSE") == body
+    # Nothing rides outside the body either.
+    assert request.full_url == suggest.ENDPOINT and request.get_method() == "POST"
+    assert dict(request.header_items()) == {
+        "Authorization": f"Bearer {NOT_A_KEY}", "Content-type": "application/json",
+    }
+
+
+# --- G2: forbidden rows never produce a request ------------------------------
+
+
+def test_the_same_steps_do_send_an_ordinary_merchant(client, conn, statement, key, wire):
+    """The control for the zero-request proofs below."""
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG")
+
+    result = send_with_everything_approved(client, "LANTERN NOODLE HOUSE 0042 SG")
+
+    assert result["sent"] == 1 and wire.asked == ["LANTERN NOODLE HOUSE"]
+
+
+PAYEE_AND_TRANSFER_ROWS = [
+    ("PayNow", "PAYNOW TO SAMPLE PERSON"),
+    ("PayNow", "PAYNOW-FAST SAMPLE PERSON OTHR 88120457"),
+    ("PayNow", "PAY NOW SAMPLE PERSON"),
+    ("FAST", "FAST PAYMENT SAMPLE PERSON"),
+    ("FAST", "INCOMING FAST SAMPLE PERSON"),
+    ("GIRO", "GIRO SAMPLE TOWN COUNCIL"),
+    ("GIRO", "INTERBANK GIRO SAMPLE INSURER"),
+    ("transfer", "FUNDS TRANSFER SAMPLE PERSON"),
+    ("transfer", "TRF TO SAMPLE PERSON"),
+    ("transfer", "TRANSFER 438-00000-1 SAMPLE PERSON"),
+    ("ATM", "ATM WITHDRAWAL 0042"),
+    ("ATM", "CASH WITHDRAWAL SAMPLE MALL"),
+    ("card payment", "CARD PAYMENT"),
+    ("card payment", "PAYMENT - THANK YOU"),
+    ("card payment", "BILL PAYMENT - DBS INTERNET/WIRELESS"),
+    ("card payment", "PAYMT THRU E-BANK/HOMEB/CYBERB"),
+    ("card payment", "PAYMENT TO SAMPLE CREDIT CARD"),
+    ("card payment", "CREDIT CARD PAYMENT 4417"),
+    ("card payment", "SAMPLE BANK CARDS PAYMENT"),
+    ("card payment", "CC PAYMENT SAMPLE BANK"),
+]
+
+
+@pytest.mark.parametrize("kind, description", PAYEE_AND_TRANSFER_ROWS)
+def test_g2_a_payee_transfer_atm_or_card_payment_row_produces_no_request(
+    client, conn, statement, key, wire, kind, description
+):
+    row(conn, statement, description)  # filed as spending: only its wording stops it
+
+    assert client.post("/api/suggestions/prepare").get_json()["merchants"] == []
+    send_with_everything_approved(client, description)
+
+    assert wire.sent == []
+
+
+@pytest.mark.parametrize("flow", ["income", "transfer", "payment", "refund", "movement", "review", None])
+def test_g2_a_row_that_is_not_spending_produces_no_request(
+    client, conn, statement, key, wire, flow
+):
+    # A merchant that is sent when the row is spending (the control above).
+    # `movement` and `review` are not flow values on this lane; like a row
+    # with no flow at all, they are stopped for not saying spending.
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG", flow=flow)
+
+    assert client.post("/api/suggestions/prepare").get_json()["merchants"] == []
+    send_with_everything_approved(client, "LANTERN NOODLE HOUSE 0042 SG")
+
+    assert wire.sent == []
+
+
+FEE_AND_TAX_LINES = [
+    ("GST", "GST"),
+    ("GST", "GST @ 9%"),
+    ("GST", "GOODS AND SERVICES TAX"),
+    ("annual fee", "ANNUAL FEE"),
+    ("annual fee", "CARD ANNUAL FEE"),
+    ("annual fee", "ANNUAL MEMBERSHIP FEE"),
+    ("late charge", "LATE CHARGE"),
+    ("late charge", "LATE PAYMENT CHARGE"),
+    ("programme admin fee", "PROGRAMME ADMIN FEE"),
+    ("programme admin fee", "REWARDS PROGRAMME ADMIN FEE 0042"),
+]
+
+
+@pytest.mark.parametrize("kind, description", FEE_AND_TAX_LINES)
+def test_g2_a_bare_fee_or_tax_line_produces_no_request(
+    client, conn, statement, key, wire, kind, description
+):
+    row(conn, statement, description)
+
+    assert client.post("/api/suggestions/prepare").get_json()["merchants"] == []
+    send_with_everything_approved(client, description)
+
+    assert wire.sent == []
+
+
+# --- G3: a row a rule already matches ----------------------------------------
+
+
+def test_g3_a_row_a_rule_already_matches_produces_no_request(client, conn, statement, key, wire):
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG")
+    row(conn, statement, "MOSSY BOOKS")
+    # The rule is made after the row arrived, so the row itself still has no
+    # merchant and no type: only the rules say it is known.
+    known = conn.execute(
+        "INSERT INTO services (name, book, type_id) VALUES ('Lantern Noodle House', 'Household', ?)",
+        (type_id(conn, "Dining"),),
+    ).lastrowid
+    conn.commit()
+    made = client.post("/api/rules", json={"pattern": "LANTERN NOODLE", "service_id": known})
+    assert made.status_code in (200, 201), made.get_json()
+
+    prepared = client.post("/api/suggestions/prepare").get_json()
+    approve("LANTERN NOODLE HOUSE", "MOSSY BOOKS")
+    client.post("/api/suggestions/send")
+
+    assert prepared["merchants"] == ["MOSSY BOOKS"]
+    assert wire.asked == ["MOSSY BOOKS"]
+
+
+# --- G4: nothing readable left after cleaning --------------------------------
+
+
+@pytest.mark.parametrize("description", [
+    "0042 99812",            # digits only
+    "88120457 SG",
+    "AB 0042",
+    "2C2P*",                 # a processor's prefix and nothing after it
+    "PAYPAL *",
+    "PAYPAL",
+    "STRIPE",
+    "OMISE 0042",
+    "GLOBAL-E",
+    "SQ *0042 SG",
+    "STRIPE SINGAPORE",      # prefix and place
+    "SINGAPORE SG",          # place only
+])
+def test_g4_a_row_with_nothing_readable_left_after_cleaning_produces_no_request(
+    client, conn, statement, key, wire, description
+):
+    row(conn, statement, description)
+
+    assert client.post("/api/suggestions/prepare").get_json()["merchants"] == []
+    send_with_everything_approved(client, description)
+
+    assert wire.sent == []
+
+
+# --- G5: one request per distinct cleaned string -----------------------------
+
+
+def test_g5_rows_that_clean_alike_cause_one_call_and_a_stored_answer_causes_none(
+    client, conn, statement, key, wire
+):
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SINGAPORE SG", 18.90)
+    row(conn, statement, "2C2P*LANTERN NOODLE HOUSE 0077", 1234.56)
+    row(conn, statement, "lantern  noodle house 31/03", 7.77)
+
+    first = prepare_and_send(client)
+
+    assert first["sent"] == 1
+    assert wire.asked == ["LANTERN NOODLE HOUSE"]
+
+    # A later row of the same merchant: the answer is already held under the
+    # same string and model id. Even a file that approves it sends nothing.
+    row(conn, statement, "LANTERN NOODLE HOUSE 0099 SG")
+    assert client.post("/api/suggestions/prepare").get_json()["merchants"] == []
+    send_with_everything_approved(client, "LANTERN NOODLE HOUSE 0099 SG")
+
+    assert len(wire.sent) == 1
+    held = answers(client)["LANTERN NOODLE HOUSE"]
+    assert (held["model_id"], held["returned_model_id"]) == (suggest.MODEL_ID, suggest.RETURNED_MODEL_ID)
+
+
+# --- G6: first live use -------------------------------------------------------
+
+
+def test_g6_with_no_strings_file_the_batch_writes_the_strings_and_sends_nothing(
+    client, conn, statement, key, wire
+):
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG")
+    row(conn, statement, "MOSSY BOOKS")
+    assert not strings_file().exists()
+
+    # Sending first is refused: there is no file the operator could have read.
+    refused = client.post("/api/suggestions/send")
+    assert refused.status_code == 409
+    assert wire.sent == [] and not strings_file().exists()
+
+    # The batch's first step writes the strings, and still sends nothing.
+    prepared = client.post("/api/suggestions/prepare")
+    assert prepared.status_code == 200
+    written = [
+        line for line in strings_file().read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert written == ["LANTERN NOODLE HOUSE", "MOSSY BOOKS"]
+    assert wire.sent == []
+    assert answers(client) == {}
+
+    # Once a batch has gone, the file is gone with it: the next batch starts
+    # from a new file, and sending is refused again until there is one.
+    assert client.post("/api/suggestions/send").get_json()["sent"] == 2
+    row(conn, statement, "HARBOUR KITE SHOP")
+    assert client.post("/api/suggestions/send").status_code == 409
+    assert wire.asked == ["LANTERN NOODLE HOUSE", "MOSSY BOOKS"]
+
+
+# --- G7: a failed call says its class and status, never the reply ------------
+
+# Shaped like a key, made up here, and never whole in this file.
+PLANTED_TOKEN = "sk-or-" + "v1-" + "0f" * 16
+ECHO = json.dumps({"error": {
+    "message": f"cannot judge LANTERN NOODLE HOUSE for Bearer {PLANTED_TOKEN}",
+    "metadata": {"state": {"merchant": "LANTERN NOODLE HOUSE"}},
+}}).encode("utf-8")
+
+
+def http_error(status: int) -> Exception:
+    return urllib.error.HTTPError(
+        suggest.ENDPOINT, status, f"refused LANTERN NOODLE HOUSE {PLANTED_TOKEN}", {}, io.BytesIO(ECHO),
+    )
+
+
+@pytest.mark.parametrize("failure, raw_reply, said", [
+    (lambda: http_error(402), None, "the call failed (HTTPError, HTTP 402)"),
+    (lambda: http_error(500), None, "the call failed (HTTPError, HTTP 500)"),
+    (lambda: urllib.error.URLError(f"no route for LANTERN NOODLE HOUSE {PLANTED_TOKEN}"), None,
+     "the call failed (URLError)"),
+    (None, ECHO, "the call failed (BadAnswer)"),               # a 200 that is no answer
+    (None, b"<html>LANTERN NOODLE HOUSE " + PLANTED_TOKEN.encode() + b"</html>",
+     "the call failed (JSONDecodeError)"),
+])
+def test_g7_a_failed_call_surfaces_the_error_class_and_status_and_never_the_reply(
+    client, conn, statement, key, wire, caplog, capsys, failure, raw_reply, said
+):
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG")
+    row(conn, statement, "MOSSY BOOKS")
+    wire.failure = failure() if failure else None
+    wire.raw_reply = raw_reply
+    assert client.post("/api/suggestions/prepare").status_code == 200
+
+    with caplog.at_level(logging.DEBUG):
+        resp = client.post("/api/suggestions/send")
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"sent": 0, "stopped": said, "remaining": 2}
+    assert len(wire.sent) == 1  # the first failure stops the batch
+    printed = capsys.readouterr()
+    logged = "\n".join(
+        [caplog.text, printed.out, printed.err]
+        + [repr(record.args) + repr(record.exc_info) for record in caplog.records]
+    )
+    assert said in logged  # the failure is logged, in the same words
+    for where in (resp.get_data(as_text=True), logged):
+        for never in ("LANTERN", "NOODLE", PLANTED_TOKEN, "0f0f", "sk-or", "Bearer",
+                      "cannot judge", "refused", "no route", NOT_A_KEY):
+            assert never not in where, never
+    assert answers(client) == {}  # nothing of the reply is kept either
+
+
+# --- G8: routing on the top probability, thresholds in one place -------------
+
+
+@pytest.mark.parametrize("top, route", [
+    (0.90, "prefill"), (0.8999, "top3"), (0.50, "top3"), (0.4999, "blank"),
+])
+def test_g8_the_boundaries_of_the_routing(client, conn, statement, key, wire, top, route):
+    tx = row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG")
+    wire.model.answer("LANTERN NOODLE HOUSE", "Dining", top, Groceries=0.05, **{"Fitness > Golf": 0.03})
+    prepare_and_send(client)
+
+    got = suggestion(client, tx)
+
+    assert got["route"] == route
+    assert [t["name"] for t in got["types"]] == {
+        "prefill": ["Dining"], "top3": ["Dining", "Groceries", "Fitness > Golf"], "blank": [],
+    }[route]
+
+
+@pytest.mark.parametrize("top", [0.4999, 0.50, 0.8999, 0.90, 0.99])
+def test_g8_none_of_these_leaves_the_field_blank_at_any_probability(
+    client, conn, statement, key, wire, top
+):
+    tx = row(conn, statement, "QQQ HOLDINGS")
+    wire.model.answer("QQQ HOLDINGS", suggest.NONE_OF_THESE, top, Dining=0.0001)
+    prepare_and_send(client)
+
+    assert suggestion(client, tx) == {"route": "blank", "types": [], "merchant": "QQQ HOLDINGS"}
+
+
+def test_g8_the_thresholds_are_read_from_one_place(client, conn, statement, key, wire, monkeypatch):
+    assert (suggest.PREFILL_AT, suggest.OFFER_AT) == (0.90, 0.50)
+    rows = {}
+    for name, top in (("ALPHA STALL", 0.96), ("BRAVO STALL", 0.90), ("CEDAR STALL", 0.61),
+                      ("DELTA STALL", 0.50)):
+        rows[name] = row(conn, statement, name)
+        wire.model.answer(name, "Dining", top, Groceries=0.02, Travel=0.01)
+    prepare_and_send(client)
+
+    def routes() -> list:
+        return [suggestion(client, tx)["route"] for tx in rows.values()]
+
+    assert routes() == ["prefill", "prefill", "top3", "top3"]
+    # Move the two numbers, and nothing else: every answer follows them.
+    monkeypatch.setattr(suggest, "PREFILL_AT", 0.95)
+    monkeypatch.setattr(suggest, "OFFER_AT", 0.60)
+    assert routes() == ["prefill", "top3", "top3", "blank"]
+    # And no screen decides for itself: the page is handed the route.
+    page = (Path(__file__).parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    start = page.index("async function showResolveSuggestion")
+    dialog = page[start:page.index("async function startTypeSuggestions")]
+    assert "suggestion.route === 'prefill'" in dialog and "suggestion.route === 'top3'" in dialog
+    assert not re.search(r"probability\s*[<>]=?|[<>]=?\s*0?\.\d", dialog)

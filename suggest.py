@@ -24,6 +24,7 @@ import time
 from decimal import Decimal
 
 import book_type
+import db
 
 # The name of the environment variable holding the key. The operator's
 # launcher sets it; the value is never printed, logged or stored.
@@ -41,7 +42,7 @@ USD_PER_INPUT_TOKEN = Decimal("0.042") / 1_000_000
 
 # Change one of these when the cleaning or the question text changes: stored
 # answers are kept, and reused only for the versions that produced them.
-CLEANING_VERSION = "c1"
+CLEANING_VERSION = "c2"
 QUESTION_VERSION = "q1"
 
 # Routing on the top probability. Provisional, from the answers seen on
@@ -68,7 +69,7 @@ FILE_HEADER = (
 
 # A payee or transfer shape: not a merchant, and it may carry a person's name.
 _PAYEE_SHAPE = re.compile(
-    r"PAYNOW|PAYLAH|\bFAST\b|\bIBG\b|GIRO|TRANSFER|\bTRF\b|INWARD|REMITT|\bATM\b"
+    r"PAY ?NOW|PAYLAH|\bFAST\b|\bIBG\b|GIRO|TRANSFER|\bTRF\b|INWARD|REMITT|\bATM\b"
     r"|\bCASH\b|\bFUNDS\b|I-BANK|:IB\b|\bMEP\b|\bFT\d"
 )
 # Bank advice, card payment and bare fee or tax lines: for rules, not merchants.
@@ -76,27 +77,49 @@ _BANK_LINE = re.compile(
     r"^(ADVICE|BILL PAYMENT|PAYMENT\b|PAYMT\b|CARD PAYMENT|SERVICE CHARGE|MISC DEBIT"
     r"|BUSINESS ADVANCE|INTEREST|CASH REBATE|SALARY|DIVIDEND|GST\b|FINANCE CHARGE"
     r"|CCY CONVERSION FEE)"
-    r"|\b(ANNUAL FEE|LATE (PAYMENT )?(CHARGE|FEE)|ADMIN(ISTRATION)? FEE|OVERLIMIT FEE)\b"
+    r"|\b(ANNUAL (MEMBERSHIP )?FEE|LATE (PAYMENT )?(CHARGE|FEE)|ADMIN(ISTRATION)? FEE|OVERLIMIT FEE"
+    r"|GOODS (AND|&) SERVICES TAX|((CREDIT )?CARDS?|CC) (PAYMENT|PAYMT))\b"
 )
 # Payment processors that print their own name before the merchant's.
+_PROCESSORS = "2C2P|2C2|PAYPAL|PP|STRIPE|SQUARE|SQ|OMISE|GLOBAL-E|GLOBALE|ADYEN|SUMUP|ATOME|SMP|PYU"
 _PROCESSOR_PREFIX = re.compile(
-    r"^(?:(?:2C2P|2C2|PAYPAL|PP|STRIPE|SQUARE|SQ|OMISE|GLOBAL-E|GLOBALE|ADYEN|SUMUP|ATOME|SMP|PYU)"
+    rf"^(?:(?:{_PROCESSORS})"
     r"\s*[*/]\s*"
     r"|(?:2C2P|PAYPAL|STRIPE|OMISE|GLOBAL-E|GLOBALE)\s+(?=\S))"
 )
-_TRAILING_PLACE = re.compile(
-    r"(\s+(SINGAPORE|SGP|SGD|SG|SIN|USA|US|GBR|GB|UK|LONDON|AUS|AU|SYDNEY|IND|IN|HKG|HK"
-    r"|JPN|JP|TOKYO|MYS|MY|THA|TH|BANGKOK|IDN|ID|NLD|NL|IRL|IE|DUBLIN|CAN|CA|DEU|DE|FRA|FR))+$"
+_PLACES = (
+    "SINGAPORE|SGP|SGD|SG|SIN|USA|US|GBR|GB|UK|LONDON|AUS|AU|SYDNEY|IND|IN|HKG|HK"
+    "|JPN|JP|TOKYO|MYS|MY|THA|TH|BANGKOK|IDN|ID|NLD|NL|IRL|IE|DUBLIN|CAN|CA|DEU|DE|FRA|FR"
 )
+_TRAILING_PLACE = re.compile(rf"(\s+({_PLACES}))+$")
+# What is left names no merchant: a processor alone, or places alone.
+_NO_MERCHANT = re.compile(rf"^(({_PROCESSORS})|({_PLACES})( ({_PLACES}))*)$")
+# A month beside a number is part of a date, not of a name.
+_MONTHS = frozenset(
+    "JAN FEB MAR APR MAY JUN JUL AUG SEP SEPT OCT NOV DEC JANUARY FEBRUARY MARCH APRIL"
+    " JUNE JULY AUGUST SEPTEMBER OCTOBER NOVEMBER DECEMBER".split()
+)
+
+
+def _has_digit(token: str) -> bool:
+    return re.search(r"\d", token) is not None
 
 
 def clean(description: str | None) -> str:
     """The merchant string left once everything that is not the merchant's
     name is taken out: the processor's prefix, every token containing a digit,
-    stray punctuation, and trailing country and city codes."""
+    a month standing beside one, stray punctuation, and trailing country and
+    city codes."""
     text = " ".join((description or "").upper().split())
     text = _PROCESSOR_PREFIX.sub("", text)
-    text = " ".join(token for token in text.split() if not re.search(r"\d", token))
+    tokens = text.split()
+    dated = {
+        i for i, token in enumerate(tokens)
+        if token in _MONTHS and any(_has_digit(near) for near in tokens[max(i - 1, 0):i + 2])
+    }
+    text = " ".join(
+        token for i, token in enumerate(tokens) if not _has_digit(token) and i not in dated
+    )
     text = re.sub(r"[^A-Z&'*/.\- ]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return _TRAILING_PLACE.sub("", text).strip(" *-/.")
@@ -105,10 +128,11 @@ def clean(description: str | None) -> str:
 def merchant_string(description: str | None, flow_type: str | None) -> str | None:
     """The string that may be sent for a row, or None when the gate stops it.
 
-    A row passes only if it is spending, has no payee or transfer shape, is
-    not a bank or fee line, and has readable text left after cleaning.
+    A row passes only if it says it is spending, has no payee or transfer
+    shape, is not a bank or fee line, and has readable text left after
+    cleaning. A row with no flow at all has not said it is spending.
     """
-    if (flow_type or "expense") != "expense":
+    if flow_type != "expense":
         return None
     upper = " ".join((description or "").upper().split())
     if _PAYEE_SHAPE.search(upper):
@@ -116,7 +140,7 @@ def merchant_string(description: str | None, flow_type: str | None) -> str | Non
     merchant = clean(description)
     if len(re.sub(r"[^A-Z]", "", merchant)) < 3:
         return None
-    if _BANK_LINE.search(merchant):
+    if _BANK_LINE.search(merchant) or _NO_MERCHANT.match(merchant):
         return None
     return merchant
 
@@ -247,12 +271,17 @@ def stored_answer(conn: sqlite3.Connection, merchant: str) -> sqlite3.Row | None
 
 def unanswered(conn: sqlite3.Connection) -> list[str]:
     """The distinct merchant strings of rows with no type and no merchant that
-    pass the gate and have no stored answer, in alphabetical order."""
+    no rule matches, that pass the gate and have no stored answer, in
+    alphabetical order. The rules are asked here, not read off the row: a rule
+    made since the row arrived knows it all the same."""
     rows = conn.execute(
-        "SELECT description, flow_type FROM transactions"
+        "SELECT description, flow_type, amount_sgd FROM transactions"
         " WHERE type_id IS NULL AND service_id IS NULL"
-    )
-    merchants = {merchant_string(r["description"], r["flow_type"]) for r in rows}
+    ).fetchall()
+    merchants = {
+        merchant_string(r["description"], r["flow_type"]) for r in rows
+        if db.match_merchant(r["description"] or "", conn, r["amount_sgd"])["service_id"] is None
+    }
     merchants.discard(None)
     held = {
         r["merchant"] for r in conn.execute(
