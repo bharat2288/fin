@@ -3,6 +3,7 @@
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 
 import pdfplumber
@@ -38,6 +39,11 @@ MONTH_MAP = {
     "MAY": "05", "JUN": "06", "JUL": "07", "AUG": "08",
     "SEP": "09", "OCT": "10", "NOV": "11", "DEC": "12",
 }
+
+# How far past the statement date a row may legitimately fall (late
+# postings). A row whose month wrapped the year lands ~11 months ahead, so
+# any slack well short of that separates the two cases.
+LATE_POSTING_GRACE = timedelta(days=31)
 
 
 DBS_SUPPLEMENTARY_CARDHOLDER_MAP = {
@@ -85,6 +91,30 @@ def _parse_statement_date(text: str) -> str:
     return "unknown"
 
 
+def _infer_tx_date(day: str, month: str, statement_date: str) -> str:
+    """Date a DD MON row from a card statement that prints no year.
+
+    The row takes the statement's year unless that would put it beyond the
+    statement date plus late-posting grace; then it belongs to the year
+    before (December rows of a January statement). Unknown statement dates
+    keep the legacy 2024 default.
+    """
+    try:
+        stmt = date.fromisoformat(statement_date)
+    except ValueError:
+        # "unknown" or a malformed header date: legacy stamping, no inference
+        year = statement_date[:4] if statement_date[:4].isdigit() else "2024"
+        return f"{year}-{month}-{day}"
+    try:
+        candidate = date(stmt.year, int(month), int(day))
+    except ValueError:
+        # 29 FEB against a non-leap statement year: no safe inference
+        return f"{stmt.year}-{month}-{day}"
+    if candidate > stmt + LATE_POSTING_GRACE:
+        return f"{stmt.year - 1}-{month}-{day}"
+    return f"{stmt.year}-{month}-{day}"
+
+
 def _detect_statement_type(text: str) -> str:
     """Detect whether this is a credit card or bank statement."""
     if "Credit Cards" in text or "Statement of Account" in text:
@@ -118,9 +148,6 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
         statement_date=_parse_statement_date(all_text),
         filename=path.name,
     )
-
-    # Determine the statement year from the statement date
-    stmt_year = statement.statement_date[:4] if statement.statement_date != "unknown" else "2024"
 
     current_card = ""
     current_tx_account = ""
@@ -200,7 +227,7 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
                         currency_foreign = None
 
             tx = ParsedTransaction(
-                date=f"{stmt_year}-{month}-{day}",
+                date=_infer_tx_date(day, month, statement.statement_date),
                 description=description,
                 amount_sgd=amount,
                 amount_foreign=amount_foreign,
