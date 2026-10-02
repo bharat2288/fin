@@ -352,6 +352,53 @@ def test_a_converted_database_has_the_same_shape_as_a_new_one(old, tmp_path):
         assert converted == new, table
 
 
+# --- the old database after the new app has already started on it --------
+
+
+def test_an_old_database_the_new_app_has_started_on_converts_the_same(old, monkeypatch):
+    # The state the real database is in: starting the app on this code runs
+    # init_db, which creates and seeds the type list and leaves the four old
+    # tables without their new columns. The conversion starts from there.
+    typed = old.row("Dining", "SAMPLE CAFE", 12.30)
+    marked = old.row("Other", "CORNER STALL", 4.20)
+    unknown = old.row("Hobbies", "SAMPLE HOBBY SHOP", 8.00)
+    monkeypatch.setattr(db, "DB_PATH", old.path)
+    db.invalidate_rules_cache()
+    try:
+        db.init_db()
+    finally:
+        db.invalidate_rules_cache()
+    type_list = old.query("SELECT id, kind, name, parent_id FROM types ORDER BY id")
+    assert len(type_list) == 36 + 5
+    for table, cols in (
+        ("transactions", {"book", "type_id"}),
+        ("services", {"book", "type_id"}),
+        ("subscriptions", {"book", "type_id"}),
+        ("merchant_rules", {"book_override", "type_override_id"}),
+    ):
+        present = {r[0] for r in old.query(f"SELECT name FROM pragma_table_info('{table}')")}
+        assert not cols & present, table
+    # init_db seeds merchants and rules of its own; they are old values too.
+    before = _old_columns(old)
+
+    report = old.convert()
+
+    assert report["status"] == "applied"
+    assert report["after"] == report["before"]
+    # The type list is the one init_db seeded: nothing added, nothing renumbered.
+    assert old.query("SELECT id, kind, name, parent_id FROM types ORDER BY id") == type_list
+    assert old.label("transactions", typed) == ("Household", "Dining")
+    assert old.label("transactions", marked) == ("Household", None)
+    assert old.label("transactions", unknown) == (None, None)
+    assert [(r["id"], r["reason"]) for r in old.review()] == [
+        (marked, "marked for review"),
+        (unknown, "category not in the mapping table"),
+    ]
+    assert old.summary()["unplaced"] == 0
+    assert _old_columns(old) == before
+    assert old.convert()["status"] == "already-applied"
+
+
 # --- P13 conservation: row count kept, every row mapped or listed --------
 
 
@@ -732,6 +779,8 @@ def test_no_endpoint_returns_a_book_or_type_field(client, conn, fixed_rate):
 def test_endpoints_return_the_same_before_and_after_the_conversion(
     client, conn, temp_db, fixed_rate
 ):
+    # Leaves out the one change the conversion does show: a row that names no
+    # merchant under a merchant-named category. The next test covers it.
     _seed_app_rows(conn)
     conn.close()
     before = _payloads(client)
@@ -740,3 +789,39 @@ def test_endpoints_return_the_same_before_and_after_the_conversion(
 
     assert report["status"] == "applied"
     assert _payloads(client) == before
+
+
+def test_the_one_visible_change_is_the_merchant_a_merchant_named_category_gives(
+    client, conn, temp_db, fixed_rate
+):
+    _seed_app_rows(conn)
+    moom = conn.execute("SELECT id FROM categories WHERE name = 'Moom'").fetchone()[0]
+    conn.execute("INSERT INTO categories (name, parent_id) VALUES ('Canva', ?)", (moom,))
+    canva = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    statement_id = conn.execute("SELECT id FROM statements").fetchone()[0]
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd,"
+        " category_id, cat_source, flow_type)"
+        " VALUES (?, '2026-01-11', 'CNV SAMPLE CHARGE', 18.00, ?, 'auto', 'expense')",
+        (statement_id, canva),
+    )
+    bare = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    before = _payloads(client)
+    assert not [s for s in before["/api/services"] if s["name"] == "Canva"]
+
+    report = conversion.run_step(temp_db, convert_book_type.STEP, today=DAY)
+
+    assert report["status"] == "applied"
+    after = _payloads(client)
+    # The merchant list gains the merchant the category named, holding the row.
+    [merchant] = [s for s in after["/api/services"] if s["name"] == "Canva"]
+    assert (merchant["category_id"], merchant["txn_count"], merchant["rule_count"]) == (canva, 1, 0)
+    # The row now names that merchant.
+    [row] = [t for t in after["/api/transactions"]["transactions"] if t["id"] == bare]
+    assert (row["service_id"], row["service_name"]) == (merchant["id"], "Canva")
+    # Take those two differences out and nothing else has changed.
+    after["/api/services"].remove(merchant)
+    row["service_id"] = row["service_name"] = None
+    assert after == before
