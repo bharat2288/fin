@@ -178,6 +178,42 @@ def test_the_review_list_states_the_total_it_holds_out_of_spending(client, month
     assert (shown["waiting"], shown["waiting_total"]) == (info["waiting"], info["waiting_total"])
 
 
+def test_what_is_waiting_is_stated_as_money_out_and_money_in_apart(client, month):
+    shown = cards(client)
+
+    # Everything waiting: 40,000.00, 12,000.50 and July's 25,000.00 out; 2,500.25 in.
+    assert (shown["waiting_out_count"], shown["waiting_out_total"]) == (3, 77000.5)
+    assert (shown["waiting_in_count"], shown["waiting_in_total"]) == (1, 2500.25)
+    assert cents(shown["waiting_out_total"]) == WAITING_OUT + WAITING_OUT_2 + WAITING_EARLIER
+    assert cents(shown["waiting_in_total"]) == -WAITING_IN
+    # The two sides are every waiting row, and the net figure is out less in.
+    assert shown["waiting_out_count"] + shown["waiting_in_count"] == shown["waiting"]
+    assert cents(shown["waiting_out_total"]) - cents(shown["waiting_in_total"]) == cents(
+        shown["waiting_total"])
+
+    # What the month's headline is held short of, the same way.
+    assert (shown["held_out_out_count"], shown["held_out_out_total"]) == (2, 52000.5)
+    assert (shown["held_out_in_count"], shown["held_out_in_total"]) == (1, 2500.25)
+    assert shown["held_out_out_count"] + shown["held_out_in_count"] == shown["held_out_count"]
+    assert cents(shown["held_out_out_total"]) - cents(shown["held_out_in_total"]) == cents(
+        shown["held_out_total"])
+
+    # The review list's heading states the same two sides as the card.
+    info = client.get("/api/review").get_json()
+    for key in ("waiting_out_count", "waiting_out_total", "waiting_in_count", "waiting_in_total"):
+        assert info[key] == shown[key]
+
+
+def test_a_month_with_nothing_waiting_states_both_sides_as_nothing(client, month):
+    shown = cards(client, "").copy()
+    june = client.get("/api/dashboard/stat-cards?ref_month=2026-06").get_json()
+
+    assert (june["held_out_out_count"], june["held_out_out_total"]) == (0, 0)
+    assert (june["held_out_in_count"], june["held_out_in_total"]) == (0, 0)
+    # The review list is not the month's: it is unchanged.
+    assert june["waiting_out_count"] == shown["waiting_out_count"]
+
+
 def test_a_labelled_transfer_leaves_what_is_held_out_and_joins_its_book(client, conn, month):
     before = cards(client)
     dining = book_type.spending_type_ids(conn)["Dining"]

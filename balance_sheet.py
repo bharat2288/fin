@@ -12,6 +12,13 @@ owed negative. A row's amount is positive for money out.
                  toward zero)
     holding      the supplied figure plus the movement rows naming the holding
                  since (a sale is money in to the bank, and reduces it)
+    company      the household's money in it: its opening figure if it has
+                 one, plus, on accounts the household owns and dated after the
+                 figure: the spending and refund rows in the company's book
+                 (paid for it) and the movement rows naming it (money out is
+                 capital, money in is paid back). With no figure it is counted
+                 from the day the sheet starts, and the line says so.
+    person       the same, from the movement rows naming the person
 
 An account kept in another currency (the rupee account) shows its balance in
 its own currency and, beside it, its value in SGD at the saved rate for the
@@ -36,6 +43,7 @@ from datetime import date, timedelta
 
 import account_kind
 import anchors
+import book_type
 import flow
 import money
 import rates
@@ -54,6 +62,14 @@ SECTIONS = (
     ("loans", "Loans (owed)", "loan", True),
     ("holdings", "Holdings", "holding", False),
 )
+
+# The section for the household's money in companies and with people, and the
+# kinds it lists. A balance here needs no anchor: with none it is counted from
+# the day the sheet starts.
+COUNTERPARTIES = ("companies", "Companies and people (our money in them)", ("company", "person"))
+SINCE_START = f"since {START.day} {START:%b %Y}"
+# The flows of a row a company's book counts as paid for it.
+PAID_FOR_FLOWS = ("expense", "refund")
 
 # Kinds whose balance moves by the account's own rows; the others move by the
 # movement rows that name them as their other side.
@@ -232,7 +248,19 @@ def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -
         return line
 
     balance, count, since = _moved(conn, account["id"], kind, anchor, upto)
+    line.update(
+        _valued(conn, balance, currency, upto),
+        rests_on=_rests_on(anchor, as_at, month),
+        rows_since=count,
+        since=since if count else None,
+    )
+    return line
 
+
+def _valued(conn: sqlite3.Connection, balance: int, currency: str, upto: str) -> dict:
+    """A balance as a line shows it: in its own currency, and what it is worth
+    in the currency of the totals, with the rate that says so or why it is
+    left out of them."""
     if currency == TOTAL_CURRENCY:
         value, rate, left_out = balance, None, None
     elif currency not in money.MINOR_UNIT_DIGITS:
@@ -244,25 +272,133 @@ def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -
         else:
             value = money.convert_minor(balance, found["value"], currency, TOTAL_CURRENCY)
             rate, left_out = _rate_shown(currency, found), None
+    return {
+        "balance_minor": balance,
+        "balance": anchors.format_amount(balance, currency),
+        "value_minor": value,
+        "value": None if value is None else anchors.format_amount(value, TOTAL_CURRENCY),
+        "rate": rate,
+        "in_total": value is not None,
+        "left_out": left_out,
+    }
 
-    line.update(
-        balance_minor=balance,
-        balance=anchors.format_amount(balance, currency),
-        value_minor=value,
-        value=None if value is None else anchors.format_amount(value, TOTAL_CURRENCY),
-        rate=rate,
-        rests_on={
-            "date": anchor["date"],
-            "source": anchor["source"],
-            "label": SOURCE_LABELS[anchor["source"]],
-            "age_days": (as_at - date.fromisoformat(anchor["date"])).days,
-            "in_month": anchor["date"][:7] == month,
+
+def _rests_on(anchor, as_at: date, month: str) -> dict:
+    return {
+        "date": anchor["date"],
+        "source": anchor["source"],
+        "label": SOURCE_LABELS[anchor["source"]],
+        "age_days": (as_at - date.fromisoformat(anchor["date"])).days,
+        "in_month": anchor["date"][:7] == month,
+    }
+
+
+def _counterparty_line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -> dict:
+    """A company's or a person's line: the household's money in it, and what
+    that is made of.
+
+    The balance is the opening figure if there is one (the latest figure on or
+    before the day), plus the rows dated after it up to the day, on accounts
+    the household owns: paid for it, plus capital, less paid back. With no
+    figure the rows are counted from the day the sheet starts. Only a company
+    that is a book has rows paid for it; a person has movements alone.
+
+    A row on an account kept in another currency than this one's is not
+    counted, and the line says how many: amounts in two currencies are never
+    added as if they were one.
+    """
+    kind = account["type"]
+    currency = account["currency"] or TOTAL_CURRENCY
+    upto = as_at.isoformat()
+    anchor = _anchor_before(conn, account["id"], upto, inclusive=True)
+    after = anchor["date"] if anchor is not None else (START - timedelta(days=1)).isoformat()
+    # The book whose spending is this company's costs; a person, or a company
+    # that is no book, has none.
+    name = account["name"]
+    is_book = kind == "company" and name in book_type.BOOK_NAMES and name != book_type.DEFAULT_BOOK
+    book = name if is_book else None
+
+    flows = ", ".join("?" for _ in PAID_FOR_FLOWS)
+    paid_for_row = f"(t.flow_type IN ({flows}) AND t.book = ?)"
+    naming_row = "(t.flow_type = ? AND t.other_side_id = ?)"
+    same_currency = "COALESCE(a.currency, ?) = ?"
+    paid_for_params = [*PAID_FOR_FLOWS, book]
+    naming_params = [flow.MOVEMENT, account["id"]]
+    currency_params = [TOTAL_CURRENCY, currency]
+    row = conn.execute(
+        "SELECT "
+        f"COALESCE(SUM(CASE WHEN {same_currency} THEN 1 ELSE 0 END), 0), "
+        f"COALESCE(SUM(CASE WHEN {same_currency} AND {paid_for_row} THEN t.amount_minor ELSE 0 END), 0), "
+        f"COALESCE(SUM(CASE WHEN {same_currency} AND {naming_row} AND t.amount_minor > 0 "
+        "THEN t.amount_minor ELSE 0 END), 0), "
+        f"COALESCE(SUM(CASE WHEN {same_currency} AND {naming_row} AND t.amount_minor < 0 "
+        "THEN -t.amount_minor ELSE 0 END), 0), "
+        "COUNT(*) "
+        "FROM transactions t "
+        "JOIN statements s ON t.statement_id = s.id "
+        "JOIN accounts a ON s.account_id = a.id "
+        "WHERE a.owner = ? AND t.date > ? AND t.date <= ? "
+        f"AND ({paid_for_row} OR {naming_row})",
+        [
+            *currency_params,
+            *currency_params, *paid_for_params,
+            *currency_params, *naming_params,
+            *currency_params, *naming_params,
+            account_kind.HOUSEHOLD, after, upto,
+            *paid_for_params, *naming_params,
+        ],
+    ).fetchone()
+    count, paid_for, capital, paid_back, found = row
+    opening = anchor["amount"] if anchor is not None else None
+    balance = (opening or 0) + paid_for + capital - paid_back
+    not_counted = found - count
+
+    def shown(amount: int) -> str:
+        return anchors.format_amount(amount, currency)
+
+    parts = [f"opening {shown(opening)}"] if opening is not None else []
+    if kind == "company":
+        parts += [f"paid for it {shown(paid_for)}", f"capital {shown(capital)}"]
+    else:
+        parts.append(f"lent {shown(capital)}")
+    parts.append(f"paid back {shown(paid_back)}")
+
+    if not count:
+        since = None
+    elif anchor is not None:
+        since = f"+ {_counted(count, 'row', 'rows')}"
+    else:
+        since = f"{count} {'row' if count == 1 else 'rows'}"
+
+    line = {
+        "account_id": account["id"],
+        "name": name_of(name),
+        "kind": kind,
+        "currency": currency,
+        "rests_on": _rests_on(anchor, as_at, month) if anchor is not None else None,
+        # What the balance is counted from when it rests on no figure.
+        "since_label": None if anchor is not None else SINCE_START,
+        "rows_since": count,
+        "since": since,
+        "check": None,
+        "made_of": {
+            "opening_minor": opening,
+            "opening": None if opening is None else shown(opening),
+            "paid_for_minor": paid_for,
+            "paid_for": shown(paid_for),
+            "capital_minor": capital,
+            "capital": shown(capital),
+            "paid_back_minor": paid_back,
+            "paid_back": shown(paid_back),
+            "text": " · ".join(parts),
         },
-        rows_since=count,
-        since=since if count else None,
-        in_total=value is not None,
-        left_out=left_out,
-    )
+        "rows_not_counted": not_counted,
+        "note": (
+            f"{not_counted} {'row' if not_counted == 1 else 'rows'} on an account in another "
+            f"currency {'is' if not_counted == 1 else 'are'} not counted"
+        ) if not_counted else None,
+    }
+    line.update(_valued(conn, balance, currency, upto))
     return line
 
 
@@ -343,7 +479,8 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
     """The household's balance sheet at the end of a month written YYYY-MM.
 
     Lists the household's own bank, card, loan and holding accounts that are
-    not archived. `name_of` is how an account's name is shown. Raises NotShown
+    not archived, then its money in each company and with each person.
+    `name_of` is how an account's name is shown. Raises NotShown
     for a month that is not one, or that ends before the sheet starts.
     """
     as_at = month_end(month)
@@ -371,6 +508,28 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
                 for line in lines if not line["in_total"]
             ],
         })
+
+    name, heading, kinds = COUNTERPARTIES
+    accounts = conn.execute(
+        "SELECT id, name, type, currency FROM accounts "
+        f"WHERE type IN ({', '.join('?' for _ in kinds)}) AND owner = ? "
+        "AND COALESCE(status, 'active') != 'archived' ORDER BY name, id",
+        (*kinds, account_kind.HOUSEHOLD),
+    ).fetchall()
+    lines = [_counterparty_line(conn, account, as_at, month, name_of) for account in accounts]
+    total = sum(line["value_minor"] for line in lines if line["in_total"])
+    sections.append({
+        "name": name,
+        "heading": heading,
+        "owed": False,
+        "lines": lines,
+        "total_minor": total,
+        "total": anchors.format_amount(total, TOTAL_CURRENCY),
+        "left_out": [
+            {"name": line["name"], "why": line["left_out"]}
+            for line in lines if not line["in_total"]
+        ],
+    })
 
     net_worth = sum(section["total_minor"] for section in sections)
     left_out = [entry for section in sections for entry in section["left_out"]]

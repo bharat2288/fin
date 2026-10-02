@@ -601,9 +601,10 @@ function renderStatCards(d) {
 
     const transfers = (n) => `${n} ${n === 1 ? 'transfer' : 'transfers'}`;
     const rows = (n) => `${n} ${n === 1 ? 'row' : 'rows'}`;
-    // What the headline is held short of: this month's transfers nobody has labelled.
+    // What the headline is held short of: this month's transfers nobody has
+    // labelled, money out and money in apart.
     const heldOut = d.held_out_count
-        ? `<div class="stat-sub text-warning">excludes ${d.held_out_count} unreviewed ${d.held_out_count === 1 ? 'transfer' : 'transfers'} (S$${formatAmount(d.held_out_total)})</div>`
+        ? `<div class="stat-sub text-warning">excludes unreviewed ${d.held_out_count === 1 ? 'transfer' : 'transfers'}: ${waitingOutAndIn(d, 'held_out')}</div>`
         : '';
 
     // The headline is household spending only. A company's costs sit beside
@@ -630,7 +631,8 @@ function renderStatCards(d) {
         </div>
         <div class="stat-card" style="cursor:pointer;" title="Open the review list" onclick="switchTab('review')">
             <div class="stat-label">To review</div>
-            <div class="stat-value ${d.waiting > 0 ? 'text-warning' : ''}" style="font-size:22px;">${transfers(d.waiting)} · S$${formatAmount(d.waiting_total)}</div>
+            <div class="stat-value ${d.waiting > 0 ? 'text-warning' : ''}" style="font-size:22px;">${transfers(d.waiting)}</div>
+            ${d.waiting > 0 ? `<div class="stat-sub text-warning">${waitingOutAndIn(d, 'waiting')}</div>` : ''}
             <div class="stat-sub">${rows(d.untyped)} with no type in ${d.ref_label}</div>
         </div>
     `;
@@ -4298,6 +4300,16 @@ async function reloadAccounts() {
 // REVIEW LIST (transfers waiting for a label)
 // ============================================================
 
+// What is waiting, money out and money in apart: "8 out · S$ 96,000.00 ·
+// 2 in · S$ 250,000.00". A side with nothing in it is not named. `prefix`
+// picks the figures: 'waiting' (the whole list) or 'held_out' (one month's).
+function waitingOutAndIn(d, prefix) {
+    const side = (name) => d[`${prefix}_${name}_count`]
+        ? [`${d[`${prefix}_${name}_count`]} ${name} · S$ ${formatAmount(d[`${prefix}_${name}_total`])}`]
+        : [];
+    return [...side('out'), ...side('in')].join(' · ');
+}
+
 // The tab button says how many transfers are waiting.
 function showReviewCount(waiting) {
     const btn = document.getElementById('review-tab-btn');
@@ -4329,7 +4341,7 @@ async function loadReviewList() {
     const noun = info.waiting === 1 ? 'transfer' : 'transfers';
     const shown = reviewRows.length < info.waiting ? ` · showing the largest ${reviewRows.length}` : '';
     document.getElementById('review-heading').textContent =
-        `/ Review list · ${info.waiting} ${noun} waiting · S$ ${formatAmount(info.waiting_total)} held out of spending · largest first${shown}`;
+        `/ Review list · ${info.waiting} ${noun} waiting${info.waiting ? ` · ${waitingOutAndIn(info, 'waiting')}` : ''} · held out of spending · largest first${shown}`;
 
     document.getElementById('review-empty').classList.toggle('hidden', reviewRows.length > 0);
     document.getElementById('review-table').classList.toggle('hidden', reviewRows.length === 0);
@@ -4482,13 +4494,22 @@ function onBalanceMonth() {
 // What a line rests on: "statement 31 Jul 2026", with its age when the
 // anchor is not from the month shown.
 function balanceRestsOn(line) {
+    // A company or a person with no opening figure is counted from the day
+    // the sheet starts, and says so.
+    if (!line.rests_on && line.since_label) return escapeHtml(line.since_label);
     if (!line.rests_on) return '<span class="text-muted">no figure</span>';
     const r = line.rests_on;
     const age = r.in_month ? '' : ` <span class="text-warning">[${r.age_days} ${r.age_days === 1 ? 'day' : 'days'} old]</span>`;
     return `${escapeHtml(r.label)} ${formatDate(r.date)}${age}`;
 }
 
+// A company's or a person's line says what its balance is made of in place
+// of a check: opening figure, paid for it, capital, paid back.
 function balanceCheck(line) {
+    if (line.made_of) {
+        const note = line.note ? ` <span class="text-warning">${escapeHtml(line.note)}</span>` : '';
+        return `<span class="text-secondary">${escapeHtml(line.made_of.text)}</span>${note}`;
+    }
     if (!line.check) return '';
     const cls = { ties: 'text-success', off: 'text-warning', not_checked: 'text-muted' }[line.check.status] || '';
     return `<span class="${cls}">${escapeHtml(line.check.text)}</span>`;

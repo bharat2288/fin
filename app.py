@@ -989,18 +989,49 @@ _SGD_ACCOUNT = (
 )
 
 
-def _waiting_for_review(conn, filters: str = "", params: tuple | list = ()) -> tuple[int, int]:
-    """How many transfers are waiting for review, and what they add up to in
-    whole minor units: money out less money in. `filters` narrows them by the
-    row (t) or its statement (s). Every waiting row is counted; the total is
-    of the rows on SGD accounts."""
+def _waiting_sides(conn, filters: str = "", params: tuple | list = ()) -> dict:
+    """The transfers waiting for review, money out and money in apart: how
+    many each side holds and what each adds up to in whole minor units, both
+    as positive figures. `count` is both sides together and `net_minor` is
+    money out less money in. `filters` narrows them by the row (t) or its
+    statement (s). Every waiting row is counted; the totals are of the rows
+    on SGD accounts."""
     row = conn.execute(
-        f"SELECT COUNT(*), SUM(CASE WHEN {_SGD_ACCOUNT} THEN t.amount_minor ELSE 0 END) "
+        "SELECT "
+        "SUM(CASE WHEN t.amount_minor < 0 THEN 0 ELSE 1 END), "
+        f"SUM(CASE WHEN t.amount_minor >= 0 AND {_SGD_ACCOUNT} THEN t.amount_minor ELSE 0 END), "
+        "SUM(CASE WHEN t.amount_minor < 0 THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN t.amount_minor < 0 AND {_SGD_ACCOUNT} THEN -t.amount_minor ELSE 0 END) "
         "FROM transactions t "
         f"LEFT JOIN statements s ON t.statement_id = s.id WHERE t.flow_type = ? {filters}",
         [flow.REVIEW, *params],
     ).fetchone()
-    return row[0] or 0, row[1] or 0
+    out_count, out_minor, in_count, in_minor = (value or 0 for value in row)
+    return {
+        "count": out_count + in_count,
+        "net_minor": out_minor - in_minor,
+        "out_count": out_count,
+        "out_minor": out_minor,
+        "in_count": in_count,
+        "in_minor": in_minor,
+    }
+
+
+def _sides_payload(prefix: str, sides: dict) -> dict:
+    """The two sides of what is waiting, as a payload states them."""
+    return {
+        f"{prefix}_out_count": sides["out_count"],
+        f"{prefix}_out_total": money.from_minor(sides["out_minor"]),
+        f"{prefix}_in_count": sides["in_count"],
+        f"{prefix}_in_total": money.from_minor(sides["in_minor"]),
+    }
+
+
+def _waiting_for_review(conn, filters: str = "", params: tuple | list = ()) -> tuple[int, int]:
+    """How many transfers are waiting for review, and what they add up to in
+    whole minor units: money out less money in."""
+    sides = _waiting_sides(conn, filters, params)
+    return sides["count"], sides["net_minor"]
 
 
 @app.route("/api/dashboard/stat-cards")
@@ -1020,11 +1051,17 @@ def api_dashboard_stat_cards():
                                   review is in it.
       held_out_count, _total      the month's transfers waiting for review:
                                   what the household figure is held short of.
+                                  _total is money out less money in;
+                                  held_out_out_count, _out_total and
+                                  held_out_in_count, _in_total state the two
+                                  sides apart, each as a positive figure.
       moom, kalesh                each company's costs paid from accounts the
                                   household owns. Beside the headline, never
                                   added into it.
       waiting, waiting_total      every transfer waiting, whenever dated: the
-                                  review list. untyped counts the month's
+                                  review list, with waiting_out_count,
+                                  _out_total, waiting_in_count, _in_total
+                                  the same way. untyped counts the month's
                                   spending rows with no type.
     spend is the View filter's figure (every book, or the one asked for, on
     any account), as the charts and the list show it; no card shows it.
@@ -1145,13 +1182,13 @@ def api_dashboard_stat_cards():
 
         # The transfers dated in the reference month that nobody has labelled:
         # what the household figure is waiting on.
-        held_out_count, held_out_minor = _waiting_for_review(
+        held_out = _waiting_sides(
             conn,
             " AND strftime('%Y-%m', t.date) = ?" + account_filter,
             [f"{ref_y:04d}-{ref_m:02d}"] + account_params,
         )
         # Everything waiting, whenever it is dated: the review list's own count.
-        waiting, waiting_minor = _waiting_for_review(conn)
+        waiting = _waiting_sides(conn)
 
     # Pick which spend to feature based on filter
     featured = book.lower() if book else "total"
@@ -1169,10 +1206,12 @@ def api_dashboard_stat_cards():
         "untyped": ref_data["untyped"],
         "tx_count": ref_data["tx_count"],
         "household_rows": ref_data["household_rows"],
-        "held_out_count": held_out_count,
-        "held_out_total": money.from_minor(held_out_minor),
-        "waiting": waiting,
-        "waiting_total": money.from_minor(waiting_minor),
+        "held_out_count": held_out["count"],
+        "held_out_total": money.from_minor(held_out["net_minor"]),
+        **_sides_payload("held_out", held_out),
+        "waiting": waiting["count"],
+        "waiting_total": money.from_minor(waiting["net_minor"]),
+        **_sides_payload("waiting", waiting),
         "avg_spend": avg_spend,
         "avg_months": n,
     }
@@ -2839,7 +2878,9 @@ def api_balance_sheet():
     when none is given): its bank, card, loan and holding accounts in
     sections, each line with its balance in its own currency, the anchor it
     rests on, the rows since and its check; a line in another currency with
-    its SGD value and the saved rate that gives it; section totals and net
+    its SGD value and the saved rate that gives it; then the household's money
+    in each company and with each person, each line with what it is made of
+    (opening figure, paid for it, capital, paid back); section totals and net
     worth in SGD, saying what is left out; the month's currency change; and
     how many transfers wait for review.
     A month before January 2026 is refused: nothing is shown before then."""
@@ -2917,14 +2958,16 @@ def api_rates_overwrite():
 
 @app.route("/api/review")
 def api_review():
-    """How many transfers are waiting and what they add up to, and the choices
-    a label can be, from their one declaration. The waiting rows themselves
-    are the transaction list with flow=review."""
+    """How many transfers are waiting and what they add up to (money out less
+    money in, and the two sides apart), and the choices a label can be, from
+    their one declaration. The waiting rows themselves are the transaction
+    list with flow=review."""
     with get_db() as conn:
-        waiting, waiting_minor = _waiting_for_review(conn)
+        waiting = _waiting_sides(conn)
     return jsonify({
-        "waiting": waiting,
-        "waiting_total": money.from_minor(waiting_minor),
+        "waiting": waiting["count"],
+        "waiting_total": money.from_minor(waiting["net_minor"]),
+        **_sides_payload("waiting", waiting),
         "choices": [
             {
                 "name": c.name,
