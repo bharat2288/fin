@@ -12,7 +12,8 @@ import book_type
 
 # (name, description). A new kind is a new value here.
 KINDS = (
-    ("bank", "a bank or deposit account; its balance rests on a statement"),
+    ("bank", "a bank or deposit account; its balance rests on a statement, or on a "
+             "supplied figure while it has no statement"),
     ("card", "a credit or debit card; its balance rests on a statement and what is owed is negative"),
     ("loan", "money the household owes a lender; its figure is supplied and is negative"),
     ("holding", "something owned that no statement fin imports reports: a home, a car, "
@@ -29,6 +30,8 @@ DEFAULT_KIND = "card"
 STATEMENT_KINDS = ("bank", "card")
 # Kinds whose balance rests on a figure the operator supplies.
 SUPPLIED_FIGURE_KINDS = ("loan", "holding", "company", "person")
+# Statement kinds that take a supplied figure while the account has no statement.
+SUPPLIED_UNTIL_STATEMENT_KINDS = ("bank",)
 # Kinds whose supplied figure is what is owed: typed positive, stored negative.
 OWED_KINDS = ("loan",)
 
@@ -44,6 +47,14 @@ OWNERS = ((HOUSEHOLD, "the household's own; on the household's balance sheet"),)
 
 OWNER_NAMES = tuple(name for name, _ in OWNERS)
 DEFAULT_OWNER = HOUSEHOLD
+
+
+def takes_a_figure(kind: str, statement_count: int) -> bool:
+    """Whether a figure can be supplied for an account of this kind that has
+    this many statements."""
+    if kind in SUPPLIED_FIGURE_KINDS:
+        return True
+    return kind in SUPPLIED_UNTIL_STATEMENT_KINDS and statement_count == 0
 
 
 class UnknownAccountValue(ValueError):

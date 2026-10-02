@@ -4052,7 +4052,7 @@ function formatMinorUnits(minor, currency) {
 // What an account's balance rests on: its latest anchor, or that it has none.
 function acctRestsOn(a) {
     if (!a.anchor) {
-        return kindInfo(a.type).takes_a_figure ? '<span style="color:var(--text-muted);">no figure</span>' : '—';
+        return a.takes_a_figure ? '<span style="color:var(--text-muted);">no figure</span>' : '—';
     }
     const source = a.anchor.source === 'supplied' ? 'your figure' : 'statement';
     return `${formatMinorUnits(a.anchor.amount_minor, a.currency)}<br><span style="color:var(--text-muted);">${source} ${formatDate(a.anchor.date)}</span>`;
@@ -4372,13 +4372,15 @@ async function saveReviewLabel(txId) {
 // ============================================================
 
 function figureAccounts() {
-    return accounts.filter(a => a.status !== 'archived' && kindInfo(a.type).takes_a_figure);
+    // Each account says whether it takes a figure: a bank account does only
+    // while it has no statement.
+    return accounts.filter(a => a.status !== 'archived' && a.takes_a_figure);
 }
 
 function openFigureModal() {
     const offered = figureAccounts();
     if (!offered.length) {
-        alert('No loan, holding, company or person account yet. Add one first.');
+        alert('No loan, holding, company or person account, and no bank account without a statement, yet. Add one first.');
         return;
     }
     const sel = document.getElementById('figure-account');
@@ -4406,6 +4408,7 @@ function updateFigureHint() {
         holding: 'what it is worth',
         company: 'our money in it on that date (its opening amount)',
         person: 'what they owe us on that date',
+        bank: 'the balance on that date',
     };
     const sign = acct ? (CURRENCY_SIGNS[acct.currency || 'SGD'] || acct.currency) : '';
     document.getElementById('figure-amount-hint').textContent =

@@ -450,11 +450,15 @@ def api_account_kinds():
 @app.route("/api/accounts")
 def api_accounts():
     """List all accounts. `type` is the account's kind; `anchor` is the latest
-    anchor the account rests on, or null when it has no figure."""
+    anchor the account rests on, or null when it has no figure;
+    `takes_a_figure` is whether the enter-a-figure dialog offers it."""
     with get_db() as conn:
         rows = conn.execute(
             "SELECT id, name, short_name, type, last_four, currency, status, owner FROM accounts ORDER BY name"
         ).fetchall()
+        statement_counts = dict(conn.execute(
+            "SELECT account_id, COUNT(*) FROM statements GROUP BY account_id"
+        ).fetchall())
         latest = {
             r["account_id"]: {"date": r["date"], "amount_minor": r["amount"], "source": r["source"]}
             for r in conn.execute(
@@ -468,6 +472,9 @@ def api_accounts():
         d["name"] = mask_card_number(d["name"])
         d["short_name"] = mask_card_number(d["short_name"])
         d["anchor"] = latest.get(d["id"])
+        d["takes_a_figure"] = account_kind.takes_a_figure(
+            d["type"], statement_counts.get(d["id"], 0)
+        )
         result.append(d)
     return jsonify(result)
 
@@ -594,8 +601,8 @@ def api_anchors():
 
 @app.route("/api/anchors", methods=["POST"])
 def api_anchors_create():
-    """Enter a figure: a supplied anchor for a loan, a holding, a company or a
-    person.
+    """Enter a figure: a supplied anchor for a loan, a holding, a company, a
+    person, or a bank account that has no statement.
 
     Body: account_id, amount (text, in whole units of the account's currency:
     what is owed for a loan, what it is worth or the balance otherwise), date
@@ -618,10 +625,14 @@ def api_anchors_create():
         if account is None:
             return jsonify({"error": "no such account"}), 404
         kind = account["type"]
-        if kind not in account_kind.SUPPLIED_FIGURE_KINDS:
+        statement_count = conn.execute(
+            "SELECT COUNT(*) FROM statements WHERE account_id = ?", (account_id,)
+        ).fetchone()[0]
+        if not account_kind.takes_a_figure(kind, statement_count):
             return jsonify({
                 "error": f"a {kind} account rests on its statement; a figure can be entered "
-                         "for a loan, a holding, a company or a person"
+                         "for a loan, a holding, a company, a person, or a bank account "
+                         "that has no statement"
             }), 400
         try:
             amount_minor = anchors.to_minor_units(data.get("amount"))

@@ -5,10 +5,12 @@ Gives an existing database what the ledger's accounts need:
 - the accounts gain an owner (the household unless marked otherwise) and the
   database gains the anchors table, both in the shape schema.sql declares;
 - today's credit-card and debit accounts become cards;
-- the Kalesh business account and card are marked as Kalesh's;
+- the Kalesh business account and card are marked as Kalesh's, once, as the
+  accounts gain their owner;
 - Moom and Kalesh (companies), the home, the rented property, the car and the
-  crypto holding (holdings), and the home loan and the auto loan (loans) are
-  created with no figure. One that is already there is left alone.
+  crypto holding (holdings), the home loan and the auto loan (loans), and the
+  Home Reno account and the two deposits (bank accounts) are created with no
+  figure. One that is already there is left alone.
 
 It touches no transaction row. It runs only through the conversion runner
 (conversion.run_step), so it sits behind a backup, in one transaction.
@@ -49,6 +51,11 @@ CREATED = (
     ("Crypto held outside fin", "holding"),
     ("UOB home loan", "loan"),
     ("DBS auto loan", "loan"),
+    # Household bank accounts with no statement fin imports: each rests on a
+    # supplied figure until it has one.
+    ("DBS Home Reno", "bank"),
+    ("DBS fixed deposit (MK)", "bank"),
+    ("Citi time deposit (MK)", "bank"),
 )
 
 _ANCHORS_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS anchors \((.*?)\n\);", re.DOTALL)
@@ -95,7 +102,8 @@ def _is_applied(conn: sqlite3.Connection) -> bool:
 
 
 def _apply(conn: sqlite3.Connection) -> None:
-    if "owner" not in _account_columns(conn):
+    gains_owner = "owner" not in _account_columns(conn)
+    if gains_owner:
         conn.execute(f"ALTER TABLE accounts ADD COLUMN {_OWNER_COLUMN}")
     if "anchors" not in _tables(conn):
         body = _ANCHORS_TABLE.search(SCHEMA_PATH.read_text()).group(1)
@@ -108,11 +116,14 @@ def _apply(conn: sqlite3.Connection) -> None:
     ).fetchone():
         raise UndeclaredKind()
 
-    conn.execute(
-        "UPDATE accounts SET owner = ? WHERE type IN (?, ?)"
-        " AND (UPPER(name) LIKE ? OR UPPER(short_name) LIKE ? OR UPPER(name) LIKE ?)",
-        (KALESH, *account_kind.STATEMENT_KINDS, KALESH_NAME, KALESH_NAME, KALESH_PARSER_NAME),
-    )
+    # Owners are marked only as the accounts gain one. On a database that
+    # already has owners, they are the operator's and are left as they are.
+    if gains_owner:
+        conn.execute(
+            "UPDATE accounts SET owner = ? WHERE type IN (?, ?)"
+            " AND (UPPER(name) LIKE ? OR UPPER(short_name) LIKE ? OR UPPER(name) LIKE ?)",
+            (KALESH, *account_kind.STATEMENT_KINDS, KALESH_NAME, KALESH_NAME, KALESH_PARSER_NAME),
+        )
 
     for name, kind in _missing(conn):
         conn.execute(
