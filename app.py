@@ -17,8 +17,12 @@ from datetime import date, datetime, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
 
+import account_kind
+import anchors
 import book_type
 import db
+import flow
+import review
 import suggest
 from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
 
@@ -213,13 +217,57 @@ def _label_for(conn, description: str, amount_sgd: float) -> dict:
     return found
 
 
-def _classify_flow_for_tx(conn, description: str, amount_sgd: float, *, flow_ctx=None) -> str:
-    """Classify a transaction using the shared flow_type model."""
-    from flow import build_context, classify_flow
+def _kind_from_account_name(account_name: str) -> str:
+    """The kind an import gives an account it has to create, from its name."""
+    name = account_name.lower()
+    if "bank" in name or "one account" in name or "home" in name:
+        return "bank"
+    return "card"  # default; could detect from account name
 
+
+def _account_facts(conn, tx_id) -> dict:
+    """The kind and owner of the account a row is on, as the classifier reads them."""
+    row = conn.execute(
+        "SELECT a.type, a.owner FROM transactions t "
+        "JOIN statements s ON t.statement_id = s.id "
+        "JOIN accounts a ON s.account_id = a.id WHERE t.id = ?",
+        (tx_id,),
+    ).fetchone()
+    return {"account_kind": row["type"], "account_owner": row["owner"]} if row else {}
+
+
+def _classify_flow_for_tx(
+    conn, description: str, amount_sgd: float, *,
+    flow_ctx=None, tx_id=None, service_id=None, labelled: bool = False,
+) -> tuple[str, int | None]:
+    """Classify a row using the shared flow model: (flow, its other side).
+
+    tx_id says which account the row is on; service_id and labelled say what
+    the merchant rules made of it."""
     if flow_ctx is None:
-        flow_ctx = build_context(conn)
-    return classify_flow({"description": description, "amount_sgd": amount_sgd}, flow_ctx)
+        flow_ctx = flow.build_context(conn)
+    facts = {
+        "description": description,
+        "amount_sgd": amount_sgd,
+        "service_id": service_id,
+        "labelled": labelled,
+        **_account_facts(conn, tx_id),
+    }
+    return flow.classify_row(facts, flow_ctx)
+
+
+def _checked_other_side(conn, value, flow_name) -> int | None:
+    """An other side as a writer may store it: the id of an account, on a row
+    whose flow may name one; or none."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UnknownLabel(f"unknown other side: {value!r}")
+    if flow_name not in flow.NAMES_OTHER_SIDE:
+        raise UnknownLabel(f"a row with flow {flow_name!r} names no other side")
+    if not conn.execute("SELECT 1 FROM accounts WHERE id = ?", (value,)).fetchone():
+        raise UnknownLabel(f"unknown other side: {value!r}")
+    return value
 
 
 def _expense_visibility_filter(service_alias: str = "svc") -> str:
@@ -345,18 +393,61 @@ def api_books():
     ])
 
 
+@app.route("/api/flows")
+def api_flows():
+    """The flow list, from its one declaration."""
+    return jsonify([
+        {"name": name, "description": description} for name, description in flow.FLOWS
+    ])
+
+
+@app.route("/api/account-kinds")
+def api_account_kinds():
+    """The account kinds, the owners and the anchor sources, each from its
+    one declaration."""
+    return jsonify({
+        "kinds": [
+            {
+                "name": name,
+                "description": description,
+                # Whether the enter-a-figure dialog offers accounts of this kind.
+                "takes_a_figure": name in account_kind.SUPPLIED_FIGURE_KINDS,
+                "has_statements": name in account_kind.STATEMENT_KINDS,
+            }
+            for name, description in account_kind.KINDS
+        ],
+        "owners": [
+            {"name": name, "description": description}
+            for name, description in account_kind.OWNERS
+        ],
+        "anchor_sources": [
+            {"name": name, "description": description}
+            for name, description in anchors.SOURCES
+        ],
+    })
+
+
 @app.route("/api/accounts")
 def api_accounts():
-    """List all accounts."""
+    """List all accounts. `type` is the account's kind; `anchor` is the latest
+    anchor the account rests on, or null when it has no figure."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, name, short_name, type, last_four, currency, status FROM accounts ORDER BY name"
+            "SELECT id, name, short_name, type, last_four, currency, status, owner FROM accounts ORDER BY name"
         ).fetchall()
+        latest = {
+            r["account_id"]: {"date": r["date"], "amount_minor": r["amount"], "source": r["source"]}
+            for r in conn.execute(
+                "SELECT a.account_id, a.date, a.amount, a.source FROM anchors a "
+                "WHERE a.date = (SELECT MAX(b.date) FROM anchors b WHERE b.account_id = a.account_id)"
+            )
+        }
     result = []
     for r in rows:
         d = dict(r)
         d["name"] = mask_card_number(d["name"])
         d["short_name"] = mask_card_number(d["short_name"])
+        d["anchor"] = latest.get(d["id"])
         result.append(d)
     return jsonify(result)
 
@@ -368,17 +459,24 @@ def api_accounts_create():
     if not data or not data.get("name"):
         return jsonify({"error": "Account name is required"}), 400
 
+    try:
+        kind = account_kind.checked_kind(data.get("type", account_kind.DEFAULT_KIND))
+        owner = account_kind.checked_owner(data.get("owner", account_kind.DEFAULT_OWNER))
+    except account_kind.UnknownAccountValue as e:
+        return jsonify({"error": str(e)}), 400
+
     with get_db() as conn:
         return _crud_insert(
             conn,
-            "INSERT INTO accounts (name, short_name, type, last_four, currency) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 data["name"],
                 data.get("short_name", data["name"]),
-                data.get("type", "credit_card"),
+                kind,
                 data.get("last_four"),
                 data.get("currency", "SGD"),
+                owner,
             ),
             "account",
         )
@@ -387,13 +485,22 @@ def api_accounts_create():
 @app.route("/api/accounts/<int:acct_id>", methods=["PUT"])
 def api_accounts_update(acct_id):
     """Update an account."""
-    return _crud_update("accounts", acct_id, request.get_json(),
-                        ["name", "short_name", "type", "last_four", "currency", "status"])
+    data = request.get_json()
+    try:
+        if data and "type" in data:
+            account_kind.checked_kind(data["type"])
+        if data and "owner" in data:
+            account_kind.checked_owner(data["owner"])
+    except account_kind.UnknownAccountValue as e:
+        return jsonify({"error": str(e)}), 400
+    return _crud_update("accounts", acct_id, data,
+                        ["name", "short_name", "type", "last_four", "currency", "status", "owner"])
 
 
 @app.route("/api/accounts/<int:acct_id>", methods=["DELETE"])
 def api_accounts_delete(acct_id):
-    """Delete an account. Refuses if statements reference it."""
+    """Delete an account. Refuses if statements or anchors reference it, or a
+    row names it as its other side."""
     with get_db() as conn:
         stmt_count = conn.execute(
             "SELECT COUNT(*) FROM statements WHERE account_id = ?", (acct_id,)
@@ -402,10 +509,126 @@ def api_accounts_delete(acct_id):
             return jsonify({
                 "error": f"Cannot delete: {stmt_count} statement(s) reference this account"
             }), 400
+        anchor_count = conn.execute(
+            "SELECT COUNT(*) FROM anchors WHERE account_id = ?", (acct_id,)
+        ).fetchone()[0]
+        if anchor_count > 0:
+            return jsonify({
+                "error": f"Cannot delete: {anchor_count} figure(s) are held for this account"
+            }), 400
+
+        named_count = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE other_side_id = ?", (acct_id,)
+        ).fetchone()[0]
+        if named_count > 0:
+            return jsonify({
+                "error": f"Cannot delete: {named_count} row(s) name this account as their other side"
+            }), 400
 
         conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
         conn.commit()
     return jsonify({"success": True})
+
+
+# ---------------------------------------------------------------------------
+# Anchors: an account's balance on a date
+# ---------------------------------------------------------------------------
+
+def _anchor_payload(row) -> dict:
+    return {
+        "id": row["id"],
+        "account_id": row["account_id"],
+        "account_name": mask_card_number(row["account_name"]),
+        "kind": row["kind"],
+        "currency": row["currency"] or "SGD",
+        "date": row["date"],
+        "amount_minor": row["amount"],
+        "source": row["source"],
+        "note": row["note"],
+    }
+
+
+_ANCHOR_SELECT = (
+    "SELECT n.id, n.account_id, a.name AS account_name, a.type AS kind, a.currency, "
+    "n.date, n.amount, n.source, n.note "
+    "FROM anchors n JOIN accounts a ON a.id = n.account_id "
+)
+
+
+@app.route("/api/anchors")
+def api_anchors():
+    """Every anchor, newest first; with ?account_id= those of one account.
+    `amount_minor` is whole minor units of the account's currency, signed as
+    the household sees it: owned positive, owed negative."""
+    account_id = request.args.get("account_id", type=int)
+    with get_db() as conn:
+        if account_id is None:
+            rows = conn.execute(_ANCHOR_SELECT + "ORDER BY n.date DESC, n.id DESC").fetchall()
+        else:
+            rows = conn.execute(
+                _ANCHOR_SELECT + "WHERE n.account_id = ? ORDER BY n.date DESC, n.id DESC",
+                (account_id,),
+            ).fetchall()
+    return jsonify([_anchor_payload(r) for r in rows])
+
+
+@app.route("/api/anchors", methods=["POST"])
+def api_anchors_create():
+    """Enter a figure: a supplied anchor for a loan, a holding, a company or a
+    person.
+
+    Body: account_id, amount (text, in whole units of the account's currency:
+    what is owed for a loan, what it is worth or the balance otherwise), date
+    (YYYY-MM-DD), note. The same amount again for that account and date
+    changes nothing; a different amount is refused.
+    """
+    data = request.get_json(silent=True) or {}
+    account_id = data.get("account_id")
+    if isinstance(account_id, bool) or not isinstance(account_id, int):
+        return jsonify({"error": "account_id is required: the account the figure is for"}), 400
+    note = data.get("note")
+    if note is not None and not isinstance(note, str):
+        return jsonify({"error": "note must be text"}), 400
+    note = (note or "").strip() or None
+
+    with get_db() as conn:
+        account = conn.execute(
+            "SELECT id, name, type, currency FROM accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        if account is None:
+            return jsonify({"error": "no such account"}), 404
+        kind = account["type"]
+        if kind not in account_kind.SUPPLIED_FIGURE_KINDS:
+            return jsonify({
+                "error": f"a {kind} account rests on its statement; a figure can be entered "
+                         "for a loan, a holding, a company or a person"
+            }), 400
+        try:
+            amount_minor = anchors.to_minor_units(data.get("amount"))
+            on = anchors.checked_date(data.get("date"))
+            if kind in account_kind.OWED_KINDS:
+                if amount_minor < 0:
+                    raise anchors.InvalidAnchor(
+                        "amount for a loan is what is owed, entered as a positive figure"
+                    )
+                amount_minor = -amount_minor
+            held, created = anchors.record(
+                conn, account_id, on, amount_minor, anchors.SUPPLIED, note
+            )
+        except anchors.InvalidAnchor as e:
+            return jsonify({"error": str(e)}), 400
+        except anchors.AnchorConflict as e:
+            shown = e.existing["amount"]
+            if kind in account_kind.OWED_KINDS:
+                shown = -shown
+            return jsonify({
+                "error": f"{mask_card_number(account['name'])} already has a figure of "
+                         f"{anchors.format_amount(shown, account['currency'])} for "
+                         f"{e.existing['date']}; a different amount for the same date is refused"
+            }), 409
+        conn.commit()
+        row = conn.execute(_ANCHOR_SELECT + "WHERE n.id = ?", (held["id"],)).fetchone()
+    return jsonify({"success": True, "created": created, "anchor": _anchor_payload(row)})
 
 
 # ---------------------------------------------------------------------------
@@ -876,9 +1099,20 @@ def api_transactions():
     """Paginated transaction list with filters.
 
     Query params: start, end, book, exclude_one_off, types, account_id, month,
-                  page, per_page, search
+                  page, per_page, search, flow
+
+    flow=review is the review list: the transfers waiting for a label.
     """
     filters, params = _build_filters(request.args)
+
+    flow_filter = request.args.get("flow")
+    if flow_filter:
+        try:
+            flow.checked_flow(flow_filter)
+        except flow.UnknownFlow as e:
+            return jsonify({"error": str(e)}), 400
+        filters += " AND COALESCE(t.flow_type, 'expense') = ?"
+        params.append(flow_filter)
 
     # Type filter (from chart selection or multi-select dropdown): type names,
     # a parent taking its sub-types with it. __untyped__ is the list of rows
@@ -968,6 +1202,7 @@ def api_transactions():
                 t.cat_source,
                 t.is_one_off, COALESCE(t.flow_type, 'expense') as flow_type, t.flow_type_manual,
                 t.notes,
+                t.other_side_id, oa.name as other_side_name,
                 a.name as account_name,
                 t.service_id,
                 svc.name as service_name,
@@ -977,6 +1212,7 @@ def api_transactions():
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
             JOIN accounts a ON s.account_id = a.id
+            LEFT JOIN accounts oa ON t.other_side_id = oa.id
             WHERE 1=1 {filters}
             ORDER BY {order_col} {sort_dir}, t.date DESC
             LIMIT ? OFFSET ?
@@ -990,6 +1226,8 @@ def api_transactions():
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])
         if tx.get("account_name"):
             tx["account_name"] = mask_card_number(tx["account_name"])
+        if tx.get("other_side_name"):
+            tx["other_side_name"] = mask_card_number(tx["other_side_name"])
         txns.append(tx)
 
     return jsonify({
@@ -1074,8 +1312,11 @@ def api_resolve_transaction():
     if pattern and apply_scope in {"rule", "service_default"} and pattern_error:
         return jsonify({"error": pattern_error}), 400
     flow_type = data.get("flow_type")
-    if flow_type is not None and flow_type not in ("expense", "income", "transfer", "payment", "refund"):
-        return jsonify({"error": f"invalid flow_type: {flow_type}"}), 400
+    if flow_type is not None:
+        try:
+            flow.checked_flow(flow_type)
+        except flow.UnknownFlow as e:
+            return jsonify({"error": str(e)}), 400
 
     with get_db() as conn:
         try:
@@ -1194,13 +1435,14 @@ def api_resolve_transaction():
                     (*label, flow_type, tx_id),
                 )
             elif tx_row and not tx_row["flow_type_manual"]:
-                flow_type = _classify_flow_for_tx(
-                    conn, tx_row["description"], tx_row["amount_sgd"]
+                flow_type, other_side = _classify_flow_for_tx(
+                    conn, tx_row["description"], tx_row["amount_sgd"],
+                    tx_id=tx_id, service_id=service_id, labelled=True,
                 )
                 conn.execute(
                     "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
-                    "flow_type = ? WHERE id = ?",
-                    (*label, flow_type, tx_id),
+                    "flow_type = ?, other_side_id = ? WHERE id = ?",
+                    (*label, flow_type, other_side, tx_id),
                 )
             else:
                 conn.execute(
@@ -1472,8 +1714,9 @@ def api_import_upload():
 
         # Post-parse: classify flow_type for every transaction (ADR v2).
         # Single shared classifier — parsers are fact-extractors only.
-        from flow import build_context, classify_flow
-        flow_ctx = build_context(conn)
+        flow_ctx = flow.build_context(conn)
+        from ingest import find_account
+        account_facts = {}  # account name -> the kind and owner the classifier reads
 
         # Group transactions by account and label each with book and type
         type_names = book_type.spending_type_names(conn)
@@ -1488,9 +1731,28 @@ def api_import_upload():
                 type_id = found["type_id"]
                 svc_id = found["service_id"]
 
-                # Classify flow_type post-parse, from the row's own wording
-                tx.flow_type = classify_flow(
-                    {"description": tx.description, "amount_sgd": tx.amount_sgd},
+                # The account the row will be on: the one the name finds, or
+                # the one confirm will create for it.
+                if account not in account_facts:
+                    held = conn.execute(
+                        "SELECT type, owner FROM accounts WHERE id = ?",
+                        (find_account(conn, account),),
+                    ).fetchone()
+                    account_facts[account] = {
+                        "account_kind": held["type"] if held else _kind_from_account_name(account),
+                        "account_owner": held["owner"] if held else account_kind.DEFAULT_OWNER,
+                    }
+
+                # Classify flow_type post-parse, from the row's own wording,
+                # the account it is on and what the merchant rules made of it
+                tx.flow_type, other_side_id = flow.classify_row(
+                    {
+                        "description": tx.description,
+                        "amount_sgd": tx.amount_sgd,
+                        "service_id": svc_id,
+                        "labelled": bool(type_id or svc_id),
+                        **account_facts[account],
+                    },
                     flow_ctx,
                 )
 
@@ -1510,10 +1772,11 @@ def api_import_upload():
                     # and flagged for a look each time.
                     "review_each_time": found["review_each_time"],
                     "flow_type": tx.flow_type,
+                    "other_side_id": other_side_id,
                     "account": account,
                     "status": "typed" if type_id else (
-                        "transfer" if tx.flow_type == "transfer"
-                        else "payment" if tx.flow_type == "payment"
+                        tx.flow_type
+                        if tx.flow_type in ("transfer", "payment", flow.MOVEMENT, flow.REVIEW)
                         else "untyped"
                     ),
                     # Default-skip: transfers + CC payments (non-spend events)
@@ -1618,6 +1881,8 @@ def api_import_confirm():
                         "currency_foreign": null,
                         "book": "Household",
                         "type_id": 5,
+                        "flow_type": "expense",
+                        "other_side_id": null,
                         "_skip": false
                     }, ...
                 ]
@@ -1631,8 +1896,8 @@ def api_import_confirm():
         ]
     }
 
-    A book or a type that is not in its vocabulary refuses the whole import
-    before anything is written.
+    A book, a type or a flow that is not in its vocabulary, or an other side
+    that is no account, refuses the whole import before anything is written.
     """
     data = request.get_json()
     if not data:
@@ -1647,11 +1912,15 @@ def api_import_confirm():
         try:
             for labelled in [tx for g in groups for tx in g.get("transactions", [])] + new_services:
                 _checked_labels(conn, labelled)
+            for tx in [tx for g in groups for tx in g.get("transactions", [])]:
+                if tx.get("flow_type") is not None:
+                    flow.checked_flow(tx["flow_type"])
+                _checked_other_side(conn, tx.get("other_side_id"), tx.get("flow_type"))
             # A new merchant's book is the one given, or the one its type
             # proposes; a type that proposes none has to be given one.
             for ns in new_services:
                 _book_or_proposed(conn, ns.get("book") or None, ns.get("type_id") or None)
-        except (UnknownLabel, BookNeeded) as e:
+        except (UnknownLabel, BookNeeded, flow.UnknownFlow) as e:
             return jsonify({"error": str(e)}), 400
 
     total_saved = 0
@@ -1672,9 +1941,7 @@ def api_import_confirm():
 
                 # Ensure account exists
                 from ingest import ensure_account, ensure_statement
-                stmt_type = "credit_card"  # default; could detect from account name
-                if "bank" in account_name.lower() or "one account" in account_name.lower() or "home" in account_name.lower():
-                    stmt_type = "bank"
+                stmt_type = _kind_from_account_name(account_name)
 
                 account_id = ensure_account(conn, account_name, stmt_type)
                 accounts_created.append(account_name)
@@ -1726,12 +1993,17 @@ def api_import_confirm():
                     for tx in import_by_key[key][:to_insert]:
                         tx_month = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
                         statement_id = month_stmt_ids[tx_month]
+                        # A waiting row the operator gave a type or a merchant
+                        # in the preview is labelled: it no longer waits.
+                        tx_flow = tx.get("flow_type")
+                        if tx_flow == flow.REVIEW and (tx.get("type_id") or tx.get("service_id")):
+                            tx_flow = "income" if tx["amount_sgd"] < 0 else "expense"
                         conn.execute(
                             "INSERT INTO transactions "
                             "(statement_id, date, description, amount_sgd, amount_foreign, "
                             "currency_foreign, book, type_id, service_id, "
-                            "is_one_off, cat_source, flow_type) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "is_one_off, cat_source, flow_type, other_side_id) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 statement_id,
                                 tx["date"],
@@ -1744,7 +2016,8 @@ def api_import_confirm():
                                 tx.get("service_id"),
                                 1 if tx.get("is_one_off") else 0,
                                 tx.get("cat_source"),
-                                tx.get("flow_type"),
+                                tx_flow,
+                                tx.get("other_side_id"),
                             ),
                         )
                         total_saved += 1
@@ -1909,8 +2182,9 @@ def api_statements_coverage():
         # Get active accounts
         accounts = conn.execute(
             "SELECT id, short_name, type FROM accounts "
-            "WHERE status = 'active' OR status IS NULL "
-            "ORDER BY type, short_name"
+            "WHERE (status = 'active' OR status IS NULL) AND type IN (?, ?) "
+            "ORDER BY type, short_name",
+            account_kind.STATEMENT_KINDS,
         ).fetchall()
         accounts = [dict(a) for a in accounts]
 
@@ -1921,9 +2195,10 @@ def api_statements_coverage():
             "FROM statements s "
             "JOIN accounts a ON s.account_id = a.id "
             "WHERE (a.status = 'active' OR a.status IS NULL) "
+            "  AND a.type IN (?, ?) "
             "  AND s.statement_date >= ? "
             "ORDER BY s.statement_date",
-            (min_month,),
+            (*account_kind.STATEMENT_KINDS, min_month),
         ).fetchall()
 
     # Build matrix: {account_id: {month: {imported, date, filename}}}
@@ -2103,15 +2378,14 @@ def api_rules_update(rule_id):
                 sql = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?"
                 if not tx["flow_type_manual"]:
                     if flow_ctx is None:
-                        from flow import build_context
-
-                        flow_ctx = build_context(conn)
-                    params.append(
+                        flow_ctx = flow.build_context(conn)
+                    params.extend(
                         _classify_flow_for_tx(
-                            conn, tx["description"], tx["amount_sgd"], flow_ctx=flow_ctx
+                            conn, tx["description"], tx["amount_sgd"], flow_ctx=flow_ctx,
+                            tx_id=tx["id"], service_id=rule["service_id"], labelled=True,
                         )
                     )
-                    sql += ", flow_type = ?"
+                    sql += ", flow_type = ?, other_side_id = ?"
                 sql += " WHERE id = ?"
                 params.append(tx["id"])
                 conn.execute(sql, params)
@@ -2137,13 +2411,14 @@ def api_rules_recategorize():
     """Re-run all merchant rules against existing transactions.
 
     Each row takes the book and type its rule gives it (the merchant's
-    default, or the rule's override). Rows labelled by hand are left alone.
+    default, or the rule's override). Rows labelled by hand are left alone,
+    and a flow set by hand keeps its flow and its other side.
     """
     with get_db() as conn:
         # Skip manually resolved transactions — only re-run on rows the rules labelled
         rows = conn.execute("""
             SELECT id, description, amount_sgd, book, type_id, service_id, cat_source,
-                   COALESCE(flow_type, 'expense') AS flow_type, flow_type_manual
+                   COALESCE(flow_type, 'expense') AS flow_type, flow_type_manual, other_side_id
             FROM transactions
             WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
               AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')
@@ -2160,21 +2435,22 @@ def api_rules_recategorize():
         for tx in rows:
             found = _label_for(conn, tx["description"], tx["amount_sgd"])
             new_label = (found["book"], found["type_id"], found["service_id"], found["cat_source"])
-            new_flow = tx["flow_type"]
+            old_flow = (tx["flow_type"], tx["other_side_id"])
+            new_flow = old_flow
             if not tx["flow_type_manual"]:
                 if flow_ctx is None:
-                    from flow import build_context
-
-                    flow_ctx = build_context(conn)
+                    flow_ctx = flow.build_context(conn)
                 new_flow = _classify_flow_for_tx(
-                    conn, tx["description"], tx["amount_sgd"], flow_ctx=flow_ctx
+                    conn, tx["description"], tx["amount_sgd"], flow_ctx=flow_ctx,
+                    tx_id=tx["id"], service_id=found["service_id"],
+                    labelled=bool(found["type_id"] or found["service_id"]),
                 )
             old_label = (tx["book"], tx["type_id"], tx["service_id"], tx["cat_source"])
-            if new_label != old_label or new_flow != tx["flow_type"]:
+            if new_label != old_label or new_flow != old_flow:
                 conn.execute(
                     "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
-                    "flow_type = ? WHERE id = ?",
-                    (*new_label, new_flow, tx["id"]),
+                    "flow_type = ?, other_side_id = ? WHERE id = ?",
+                    (*new_label, *new_flow, tx["id"]),
                 )
                 updated += 1
             else:
@@ -2182,6 +2458,158 @@ def api_rules_recategorize():
 
         conn.commit()
     return jsonify({"updated": updated, "unchanged": unchanged, "skipped_manual": skipped})
+
+
+# ---------------------------------------------------------------------------
+# Review list: the transfers waiting for a label
+# ---------------------------------------------------------------------------
+
+@app.route("/api/review")
+def api_review():
+    """How many transfers are waiting, and the choices a label can be, from
+    their one declaration. The waiting rows themselves are the transaction
+    list with flow=review."""
+    with get_db() as conn:
+        waiting = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE flow_type = ?", (flow.REVIEW,)
+        ).fetchone()[0]
+    return jsonify({
+        "waiting": waiting,
+        "choices": [
+            {
+                "name": c.name,
+                "label": c.label,
+                "flow": c.flow,
+                "asks": c.asks,
+                "kinds": list(c.kinds),
+                "description": c.description,
+            }
+            for c in review.CHOICES
+        ],
+    })
+
+
+def _label_account(conn, choice, account_id, row_account_id) -> int:
+    """The account a label names as the other side: one the household holds,
+    of a kind the choice allows, and not the account the row is on."""
+    if isinstance(account_id, bool) or not isinstance(account_id, int):
+        raise review.LabelRefused(f"account_id is required: {choice.label} names an account")
+    account = conn.execute(
+        "SELECT id, type, owner FROM accounts WHERE id = ?", (account_id,)
+    ).fetchone()
+    if (
+        account is None
+        or account["type"] not in choice.kinds
+        or account["owner"] != account_kind.HOUSEHOLD
+    ):
+        raise review.LabelRefused(
+            f"{choice.label} names one of the household's accounts of kind "
+            + " or ".join(choice.kinds)
+        )
+    if account["id"] == row_account_id:
+        raise review.LabelRefused("the other side cannot be the account the row is on")
+    return account["id"]
+
+
+def _typed_as(conn, kind: str, name: str) -> int:
+    return conn.execute(
+        "SELECT id FROM types WHERE kind = ? AND name = ? AND parent_id IS NULL", (kind, name)
+    ).fetchone()["id"]
+
+
+@app.route("/api/review/<int:tx_id>/label", methods=["POST"])
+def api_review_label(tx_id: int):
+    """Say what a waiting transfer was. Writes the choice's flow and its other
+    side as a manual label, which no rule and no re-run changes afterwards.
+
+    Body: choice, and what the choice asks for (see /api/review):
+        spending        type_id; book where the type proposes none
+        gift            nothing: spending when given, income when received
+        own_account     account_id of a household bank account or card
+        company         account_id of a company
+        loan_to_person  account_id of a person, or person: a name. A name
+                        nobody has yet creates that person's account.
+        loan_repayment  account_id of a loan
+        income          income_kind_id
+    """
+    data = request.get_json(silent=True) or {}
+    choice = review.BY_NAME.get(data.get("choice")) if isinstance(data.get("choice"), str) else None
+    if choice is None:
+        return jsonify({"error": f"unknown choice: {data.get('choice')!r}"}), 400
+
+    with get_db() as conn:
+        tx = conn.execute(
+            "SELECT t.id, t.amount_sgd, s.account_id FROM transactions t "
+            "JOIN statements s ON t.statement_id = s.id WHERE t.id = ?",
+            (tx_id,),
+        ).fetchone()
+        if tx is None:
+            return jsonify({"error": "no such row"}), 404
+
+        flow_name = flow.checked_flow(choice.flow)
+        book = type_id = other_side = new_person = None
+        try:
+            if choice.asks == review.ASKS_TYPE:
+                type_id = _checked_type_id(conn, data.get("type_id"))
+                if type_id is None:
+                    raise review.LabelRefused("type_id is required: spending takes a type")
+                book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
+            elif choice.name == "gift":
+                # Positive is money out: a gift given. Otherwise one received.
+                if tx["amount_sgd"] < 0:
+                    flow_name = "income"
+                    type_id = _typed_as(conn, book_type.INCOME, review.GIFT_RECEIVED_KIND)
+                else:
+                    type_id = _typed_as(conn, book_type.SPENDING, review.GIFT_GIVEN_TYPE)
+                    book = book_type.DEFAULT_BOOK
+            elif choice.asks == review.ASKS_INCOME_KIND:
+                kind_id = data.get("income_kind_id")
+                if isinstance(kind_id, bool) or not isinstance(kind_id, int) or not conn.execute(
+                    "SELECT 1 FROM types WHERE id = ? AND kind = ?", (kind_id, book_type.INCOME)
+                ).fetchone():
+                    raise review.LabelRefused("income_kind_id is required: one of the income kinds")
+                type_id = kind_id
+            elif choice.asks == review.ASKS_PERSON and data.get("account_id") is None:
+                person = data.get("person")
+                person = person.strip() if isinstance(person, str) else ""
+                if not person:
+                    raise review.LabelRefused("person is required: who the money was lent to")
+                held = conn.execute(
+                    "SELECT id FROM accounts WHERE UPPER(name) = ? AND type = ? AND owner = ? "
+                    "ORDER BY id LIMIT 1",
+                    (person.upper(), "person", account_kind.HOUSEHOLD),
+                ).fetchone()
+                if held:
+                    other_side = held["id"]
+                else:
+                    new_person = person
+            else:
+                other_side = _label_account(conn, choice, data.get("account_id"), tx["account_id"])
+        except (UnknownLabel, BookNeeded, review.LabelRefused) as e:
+            return jsonify({"error": str(e)}), 400
+
+        # Everything asked for is there: the person's account, then the label,
+        # in one transaction.
+        if new_person is not None:
+            other_side = conn.execute(
+                "INSERT INTO accounts (name, short_name, type, owner) VALUES (?, ?, ?, ?)",
+                (new_person, new_person, account_kind.checked_kind("person"), account_kind.HOUSEHOLD),
+            ).lastrowid
+        conn.execute(
+            "UPDATE transactions SET flow_type = ?, flow_type_manual = 1, other_side_id = ?, "
+            "book = ?, type_id = ?, cat_source = 'manual' WHERE id = ?",
+            (flow_name, other_side, book, type_id, tx_id),
+        )
+        conn.commit()
+        named = conn.execute("SELECT name FROM accounts WHERE id = ?", (other_side,)).fetchone()
+    return jsonify({
+        "success": True,
+        "id": tx_id,
+        "flow_type": flow_name,
+        "other_side_id": other_side,
+        "other_side_name": mask_card_number(named["name"]) if named else None,
+        "created_account": new_person is not None,
+    })
 
 
 # ---------------------------------------------------------------------------

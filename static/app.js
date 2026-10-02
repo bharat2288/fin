@@ -10,6 +10,10 @@
 let types = [];               // The type list: [{id, name, parent_id, parent_name, display_name, default_one_off, covers, not_for, proposed_book}, ...]
 let books = [];               // [{name, description}, ...] — Household, Moom, Kalesh
 let accounts = [];            // [{id, name, ...}, ...]
+let accountKinds = { kinds: [], owners: [] };  // the declared account kinds and owners, each with a description
+let reviewChoices = [];       // what a waiting transfer can be labelled: [{name, label, flow, asks, kinds, description}, ...]
+let incomeKinds = [];         // the income kinds: [{id, name, ...}, ...]
+let reviewRows = [];          // the transfers waiting for a label, largest first
 let currentImportId = null;   // Active import preview
 let currentImportData = null; // Preview data from upload
 let importServices = [];      // [{id, name, book, type_id, type_name}, ...] from upload response
@@ -312,14 +316,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function loadReferenceData() {
-    const [typeRes, bookRes, acctRes] = await Promise.all([
+    const [typeRes, bookRes, acctRes, kindRes] = await Promise.all([
         fetch('/api/types').then(r => r.json()),
         fetch('/api/books').then(r => r.json()),
         fetch('/api/accounts').then(r => r.json()),
+        fetch('/api/account-kinds').then(r => r.json()),
     ]);
     types = typeRes;
     books = bookRes;
     accounts = acctRes;
+    accountKinds = kindRes;
 
     populateTypeMultiSelect();
     populateAccountFilter();
@@ -333,6 +339,7 @@ async function loadReferenceData() {
         suggestionsEnabled = false;
     }
     updateSuggestButton();
+    refreshReviewCount();
 }
 
 function populateAccountFilter() {
@@ -341,14 +348,14 @@ function populateAccountFilter() {
     if (dashSel) {
         const current = dashSel.value;
         dashSel.innerHTML = '<option value="">All Accounts</option>';
-        accounts.forEach(a => {
+        accounts.filter(hasStatements).forEach(a => {
             dashSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         });
         if (current) dashSel.value = current;
     }
 
     // Subscription card dropdowns (add form + edit modal)
-    const activeAccounts = accounts.filter(a => a.status !== 'archived');
+    const activeAccounts = accounts.filter(a => a.status !== 'archived' && hasStatements(a));
     ['sub-card', 'edit-sub-card'].forEach(id => {
         const sel = document.getElementById(id);
         if (!sel) return;
@@ -462,6 +469,8 @@ function switchTab(tabName, {pushHistory = true} = {}) {
     if (tabName === 'rules') loadRules();
     if (tabName === 'types') renderTypesMaster();
     if (tabName === 'services-master') renderServicesMaster();
+    if (tabName === 'review') loadReviewList();
+    else refreshReviewCount();
 }
 
 // Handle browser back/forward
@@ -1152,6 +1161,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'note-modal': closeNoteModal,
         'resolve-modal': closeResolveModal,
         'edit-rule-modal': closeEditRuleModal,
+        'figure-modal': closeFigureModal,
     };
     document.addEventListener('keydown', e => {
         if (e.key !== 'Escape') return;
@@ -1712,11 +1722,18 @@ function renderImportPreview(data) {
 
 // Status badge colour and wording for an import preview row.
 function statusBadgeClass(status) {
-    return status === 'typed' ? 'success' : status === 'transfer' ? 'muted' : 'warning';
+    return status === 'typed' ? 'success'
+        : (status === 'transfer' || status === 'movement') ? 'muted' : 'warning';
 }
 
 function importStatusLabel(status) {
-    return status === 'untyped' ? 'no type' : status;
+    return status === 'untyped' ? 'no type' : status === 'review' ? 'to review' : status;
+}
+
+// What a preview row with no type is shown as: the flow that holds it out of
+// spending, or 'untyped'.
+function untypedImportStatus(tx) {
+    return ['transfer', 'payment', 'movement', 'review'].includes(tx.flow_type) ? tx.flow_type : 'untyped';
 }
 
 // The <select> of one kind ('book-select' or 'type-select') on a preview row.
@@ -1789,7 +1806,7 @@ function setTypeOverride(gi, ti, typeId) {
     const tx = currentImportData.groups[gi].transactions[ti];
     tx.type_id = typeId ? parseInt(typeId) : null;
     tx.type_name = typeId ? typeDisplayName(parseInt(typeId)) : null;
-    tx.status = typeId ? 'typed' : 'untyped';
+    tx.status = typeId ? 'typed' : untypedImportStatus(tx);
 
     // With no book on the row yet, take the one the type proposes.
     if (typeId && !tx.book) {
@@ -1803,7 +1820,7 @@ function setTypeOverride(gi, ti, typeId) {
 
     updateStatusBadge(gi, ti, tx.status);
     const select = importRowSelect(gi, ti, 'type-select');
-    if (select) select.classList.toggle('unresolved', !typeId);
+    if (select) select.classList.toggle('unresolved', tx.status === 'untyped');
 
     updateConfirmBar();
 }
@@ -3802,7 +3819,7 @@ async function openAddSubModal() {
     // Populate card dropdown from active accounts only
     const cardSel = document.getElementById('sub-card');
     cardSel.innerHTML = '<option value="">—</option>';
-    accounts.filter(a => a.status !== 'archived').forEach(a => {
+    accounts.filter(a => a.status !== 'archived' && hasStatements(a)).forEach(a => {
         cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
     });
 
@@ -3935,7 +3952,7 @@ async function openEditSubModal(subId) {
     const cardSel = document.getElementById('edit-sub-card');
     cardSel.innerHTML = '<option value="">—</option>';
     accounts.forEach(a => {
-        if (a.status !== 'archived' || a.id === sub.account_id) {
+        if ((a.status !== 'archived' && hasStatements(a)) || a.id === sub.account_id) {
             cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         }
     });
@@ -3997,11 +4014,49 @@ async function deleteSubFromModal() {
 // ACCOUNTS TAB
 // ============================================================
 
-const ACCT_TYPE_LABELS = {
-    credit_card: 'Credit Card',
-    debit: 'Debit Card',
-    bank: 'Bank Account',
-};
+// An account's kind and owner come from one declaration, served by
+// /api/account-kinds and held in accountKinds.
+function kindInfo(kind) {
+    return accountKinds.kinds.find(k => k.name === kind) || {};
+}
+
+// Whether an account's rows come from imported statements (a bank account or a card).
+function hasStatements(a) {
+    return !!kindInfo(a.type).has_statements;
+}
+
+function acctKindOptions(selected) {
+    return accountKinds.kinds.map(k =>
+        `<option value="${k.name}" title="${escapeHtml(k.description)}" ${k.name === selected ? 'selected' : ''}>${k.name}</option>`
+    ).join('');
+}
+
+function acctOwnerOptions(selected) {
+    return accountKinds.owners.map(o =>
+        `<option value="${escapeHtml(o.name)}" title="${escapeHtml(o.description)}" ${o.name === selected ? 'selected' : ''}>${escapeHtml(o.name)}</option>`
+    ).join('');
+}
+
+const CURRENCY_SIGNS = { SGD: 'S$', INR: 'Rs' };
+
+// A stored amount (whole minor units) as text: "S$ -902,500.00". Integer
+// arithmetic only.
+function formatMinorUnits(minor, currency) {
+    const abs = Math.abs(minor);
+    const units = Math.floor(abs / 100).toLocaleString('en-US');
+    const cents = String(abs % 100).padStart(2, '0');
+    const code = currency || 'SGD';
+    return `${CURRENCY_SIGNS[code] || code} ${minor < 0 ? '-' : ''}${units}.${cents}`;
+}
+
+// What an account's balance rests on: its latest anchor, or that it has none.
+function acctRestsOn(a) {
+    if (!a.anchor) {
+        return kindInfo(a.type).takes_a_figure ? '<span style="color:var(--text-muted);">no figure</span>' : '—';
+    }
+    const source = a.anchor.source === 'supplied' ? 'your figure' : 'statement';
+    return `${formatMinorUnits(a.anchor.amount_minor, a.currency)}<br><span style="color:var(--text-muted);">${source} ${formatDate(a.anchor.date)}</span>`;
+}
 
 let editingAcctId = null;  // Track which account row is being edited
 
@@ -4035,9 +4090,11 @@ function renderAccountsTab() {
         return `<tr${isArchived ? ' style="opacity:0.5;"' : ''}>
             <td style="font-size:13px;">${escapeHtml(a.name)}${isArchived ? ' <span class="badge badge-muted" style="font-size:10px;margin-left:6px;">archived</span>' : ''}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.short_name)}</td>
-            <td><span class="acct-type-badge acct-type-${a.type}">${ACCT_TYPE_LABELS[a.type] || a.type}</span></td>
+            <td><span class="acct-type-badge acct-type-${a.type}" title="${escapeHtml(kindInfo(a.type).description || '')}">${escapeHtml(a.type)}</span></td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.owner || '')}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${a.last_four || '—'}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${a.currency || 'SGD'}</td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${acctRestsOn(a)}</td>
             <td style="text-align:right;white-space:nowrap;">
                 <button class="btn btn-sm" onclick="startEditAcct(${a.id})">Edit</button>
                 ${archiveBtn}
@@ -4052,14 +4109,14 @@ function renderAcctEditRow(a) {
         <td><input type="text" id="edit-acct-name" value="${escapeHtml(a.name)}" style="width:100%;font-size:13px;"></td>
         <td><input type="text" id="edit-acct-short" value="${escapeHtml(a.short_name)}" style="width:100%;font-size:12px;"></td>
         <td>
-            <select id="edit-acct-type" style="width:100%;font-size:12px;">
-                <option value="credit_card" ${a.type === 'credit_card' ? 'selected' : ''}>Credit Card</option>
-                <option value="debit" ${a.type === 'debit' ? 'selected' : ''}>Debit Card</option>
-                <option value="bank" ${a.type === 'bank' ? 'selected' : ''}>Bank Account</option>
-            </select>
+            <select id="edit-acct-type" style="width:100%;font-size:12px;">${acctKindOptions(a.type)}</select>
+        </td>
+        <td>
+            <select id="edit-acct-owner" style="width:100%;font-size:12px;">${acctOwnerOptions(a.owner)}</select>
         </td>
         <td><input type="text" id="edit-acct-last4" value="${a.last_four || ''}" maxlength="4" style="width:100%;font-size:12px;"></td>
         <td><input type="text" id="edit-acct-currency" value="${a.currency || 'SGD'}" style="width:60px;font-size:12px;"></td>
+        <td style="font-size:12px;color:var(--text-tertiary);">${acctRestsOn(a)}</td>
         <td style="text-align:right;white-space:nowrap;">
             <button class="btn btn-sm btn-primary" onclick="saveEditAcct(${a.id})">Save</button>
             <button class="btn btn-sm" onclick="cancelEditAcct()">Cancel</button>
@@ -4068,6 +4125,11 @@ function renderAcctEditRow(a) {
 }
 
 function toggleAcctForm() {
+    const kindSel = document.getElementById('acct-type');
+    if (!kindSel.options.length) {
+        kindSel.innerHTML = acctKindOptions('card');
+        document.getElementById('acct-owner').innerHTML = acctOwnerOptions('Household');
+    }
     document.getElementById('acct-form').classList.toggle('hidden');
 }
 
@@ -4079,6 +4141,7 @@ async function addAccount() {
         name,
         short_name: document.getElementById('acct-short').value.trim() || name,
         type: document.getElementById('acct-type').value,
+        owner: document.getElementById('acct-owner').value,
         last_four: document.getElementById('acct-last4').value.trim() || null,
         currency: document.getElementById('acct-currency').value.trim() || 'SGD',
     };
@@ -4112,6 +4175,7 @@ async function saveEditAcct(id) {
         name: document.getElementById('edit-acct-name').value.trim(),
         short_name: document.getElementById('edit-acct-short').value.trim(),
         type: document.getElementById('edit-acct-type').value,
+        owner: document.getElementById('edit-acct-owner').value,
         last_four: document.getElementById('edit-acct-last4').value.trim() || null,
         currency: document.getElementById('edit-acct-currency').value.trim() || 'SGD',
     };
@@ -4152,4 +4216,234 @@ async function reloadAccounts() {
     accounts = acctRes;
     populateAccountFilter();
     renderAccountsTab();
+}
+
+
+// ============================================================
+// REVIEW LIST (transfers waiting for a label)
+// ============================================================
+
+// The tab button says how many transfers are waiting.
+function showReviewCount(waiting) {
+    const btn = document.getElementById('review-tab-btn');
+    if (btn) btn.textContent = waiting ? `Review list (${waiting})` : 'Review list';
+}
+
+async function refreshReviewCount() {
+    try {
+        const info = await fetch('/api/review').then(r => r.json());
+        reviewChoices = info.choices;
+        showReviewCount(info.waiting);
+    } catch (err) {
+        // The count is a convenience; the list itself reports a failure.
+    }
+}
+
+async function loadReviewList() {
+    const [info, list, kinds] = await Promise.all([
+        fetch('/api/review').then(r => r.json()),
+        // The transaction list's own amount sort: largest first.
+        fetch('/api/transactions?flow=review&sort=amount&sort_dir=desc&per_page=500').then(r => r.json()),
+        incomeKinds.length ? incomeKinds : fetch('/api/types?kind=income').then(r => r.json()),
+    ]);
+    reviewChoices = info.choices;
+    incomeKinds = kinds;
+    reviewRows = list.transactions;
+    showReviewCount(info.waiting);
+
+    const noun = info.waiting === 1 ? 'transfer' : 'transfers';
+    const shown = reviewRows.length < info.waiting ? ` · showing the largest ${reviewRows.length}` : '';
+    document.getElementById('review-heading').textContent =
+        `/ Review list · ${info.waiting} ${noun} waiting · held out of spending · largest first${shown}`;
+
+    document.getElementById('review-empty').classList.toggle('hidden', reviewRows.length > 0);
+    document.getElementById('review-table').classList.toggle('hidden', reviewRows.length === 0);
+    document.getElementById('review-body').innerHTML = reviewRows.map(tx => `<tr>
+            <td class="col-date">${formatDate(tx.date)}</td>
+            <td class="text-secondary" style="font-size:12px;">${escapeHtml(tx.account_name || '')}</td>
+            <td class="text-secondary" style="font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
+            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+            <td style="white-space:nowrap;">
+                <select id="review-choice-${tx.id}" style="font-size:12px;" onchange="onReviewChoice(${tx.id})">
+                    <option value="">choose</option>
+                    ${reviewChoices.map(c => `<option value="${c.name}" title="${escapeHtml(c.description)}">${escapeHtml(c.label)}</option>`).join('')}
+                </select>
+                <span id="review-detail-${tx.id}"></span>
+                <button class="btn btn-sm btn-primary hidden" id="review-save-${tx.id}" onclick="saveReviewLabel(${tx.id})">Save</button>
+            </td>
+        </tr>`).join('');
+}
+
+// The accounts a choice may name as the other side: the household's, of the
+// kinds the choice allows, and never the account the row is on.
+function reviewAccountsFor(choice, tx) {
+    return accounts.filter(a =>
+        a.status !== 'archived' && a.owner === DEFAULT_BOOK
+        && choice.kinds.includes(a.type) && a.name !== tx.account_name);
+}
+
+// Show what the chosen label asks for: a type, an account, a person, an income kind.
+function onReviewChoice(txId) {
+    const tx = reviewRows.find(r => r.id === txId);
+    const choice = reviewChoices.find(c => c.name === document.getElementById(`review-choice-${txId}`).value);
+    const detail = document.getElementById(`review-detail-${txId}`);
+    document.getElementById(`review-save-${txId}`).classList.toggle('hidden', !choice);
+    if (!choice || !tx) { detail.innerHTML = ''; return; }
+
+    if (choice.asks === 'type') {
+        detail.innerHTML = `
+            <select id="review-type-${txId}" style="font-size:12px;max-width:170px;" onchange="onReviewType(${txId})">
+                <option value="">type</option>
+                ${types.map(t => `<option value="${t.id}" title="${escapeHtml(t.covers || '')}">${escapeHtml(t.display_name)}</option>`).join('')}
+            </select>
+            <select id="review-book-${txId}" style="font-size:12px;">
+                <option value="">whose</option>
+                ${books.map(b => `<option value="${escapeHtml(b.name)}" title="${escapeHtml(b.description)}">${escapeHtml(b.name)}</option>`).join('')}
+            </select>`;
+    } else if (choice.asks === 'account') {
+        detail.innerHTML = `
+            <select id="review-account-${txId}" style="font-size:12px;max-width:220px;">
+                <option value="">which</option>
+                ${reviewAccountsFor(choice, tx).map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('')}
+            </select>`;
+    } else if (choice.asks === 'person') {
+        detail.innerHTML = `
+            <input type="text" id="review-person-${txId}" list="review-people-${txId}" placeholder="who" style="font-size:12px;width:170px;">
+            <datalist id="review-people-${txId}">
+                ${reviewAccountsFor(choice, tx).map(a => `<option value="${escapeHtml(a.name)}"></option>`).join('')}
+            </datalist>`;
+    } else if (choice.asks === 'income_kind') {
+        detail.innerHTML = `
+            <select id="review-kind-${txId}" style="font-size:12px;">
+                <option value="">what kind</option>
+                ${incomeKinds.map(k => `<option value="${k.id}" title="${escapeHtml(k.covers || '')}">${escapeHtml(k.name)}</option>`).join('')}
+            </select>`;
+    } else {
+        detail.innerHTML = '';
+    }
+}
+
+// A type proposes whose spending it is; a book already chosen is left alone.
+function onReviewType(txId) {
+    const bookSel = document.getElementById(`review-book-${txId}`);
+    const proposed = proposedBook(document.getElementById(`review-type-${txId}`).value);
+    if (bookSel && !bookSel.value && proposed) bookSel.value = proposed;
+}
+
+async function saveReviewLabel(txId) {
+    const choice = reviewChoices.find(c => c.name === document.getElementById(`review-choice-${txId}`).value);
+    if (!choice) return;
+    const body = { choice: choice.name };
+    const value = id => (document.getElementById(`${id}-${txId}`) || {}).value || '';
+
+    if (choice.asks === 'type') {
+        if (!value('review-type')) { alert('Choose a type'); return; }
+        body.type_id = parseInt(value('review-type'));
+        if (value('review-book')) body.book = value('review-book');
+    } else if (choice.asks === 'account') {
+        if (!value('review-account')) { alert('Choose which account'); return; }
+        body.account_id = parseInt(value('review-account'));
+    } else if (choice.asks === 'person') {
+        if (!value('review-person').trim()) { alert('Say who'); return; }
+        body.person = value('review-person').trim();
+    } else if (choice.asks === 'income_kind') {
+        if (!value('review-kind')) { alert('Choose what kind of income'); return; }
+        body.income_kind_id = parseInt(value('review-kind'));
+    }
+
+    const btn = document.getElementById(`review-save-${txId}`);
+    btn.disabled = true;
+    const data = await apiFetch(`/api/review/${txId}/label`, { method: 'POST', body });
+    btn.disabled = false;
+    if (!data) return;
+
+    const named = data.other_side_name ? `, naming ${data.other_side_name}` : '';
+    const created = data.created_account ? ' (a new account for them)' : '';
+    showToast(`Labelled: ${choice.label}${named}${created}`, 'success', 5000);
+    if (data.created_account) {
+        accounts = await fetch('/api/accounts').then(r => r.json());
+    }
+    await loadReviewList();
+}
+
+
+// ============================================================
+// ENTER A FIGURE (a supplied anchor: an account's balance on a date)
+// ============================================================
+
+function figureAccounts() {
+    return accounts.filter(a => a.status !== 'archived' && kindInfo(a.type).takes_a_figure);
+}
+
+function openFigureModal() {
+    const offered = figureAccounts();
+    if (!offered.length) {
+        alert('No loan, holding, company or person account yet. Add one first.');
+        return;
+    }
+    const sel = document.getElementById('figure-account');
+    sel.innerHTML = offered.map(a =>
+        `<option value="${a.id}">${escapeHtml(a.name)} (${escapeHtml(a.type)})</option>`
+    ).join('');
+    document.getElementById('figure-amount').value = '';
+    document.getElementById('figure-note').value = '';
+    const now = new Date();
+    document.getElementById('figure-date').value =
+        `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    updateFigureHint();
+    document.getElementById('figure-modal').style.display = 'flex';
+    document.getElementById('figure-amount').focus();
+}
+
+function closeFigureModal() {
+    document.getElementById('figure-modal').style.display = 'none';
+}
+
+function updateFigureHint() {
+    const acct = accounts.find(a => a.id === parseInt(document.getElementById('figure-account').value));
+    const hints = {
+        loan: 'what is owed',
+        holding: 'what it is worth',
+        company: 'our money in it on that date (its opening amount)',
+        person: 'what they owe us on that date',
+    };
+    const sign = acct ? (CURRENCY_SIGNS[acct.currency || 'SGD'] || acct.currency) : '';
+    document.getElementById('figure-amount-hint').textContent =
+        `${(acct && hints[acct.type]) || 'what is owed, or what it is worth'}${sign ? ', in ' + sign : ''}`;
+}
+
+async function saveFigure() {
+    const accountId = parseInt(document.getElementById('figure-account').value);
+    const acct = accounts.find(a => a.id === accountId);
+    // The amount goes as the text typed, less any currency sign and spaces:
+    // the server reads it exactly and refuses what is not a plain figure.
+    const amount = document.getElementById('figure-amount').value.replace(/[^0-9.,-]/g, '');
+    const date = document.getElementById('figure-date').value;
+    if (!amount) { alert('Amount is required'); return; }
+    if (!date) { alert('The date the figure is as of is required'); return; }
+
+    const btn = document.getElementById('figure-save');
+    btn.disabled = true;
+    const data = await apiFetch('/api/anchors', {
+        method: 'POST',
+        body: {
+            account_id: accountId,
+            amount,
+            date,
+            note: document.getElementById('figure-note').value.trim() || null,
+        },
+    });
+    btn.disabled = false;
+    if (!data) return;
+
+    closeFigureModal();
+    const shown = formatMinorUnits(data.anchor.amount_minor, data.anchor.currency);
+    const name = acct ? acct.name : data.anchor.account_name;
+    showToast(
+        data.created
+            ? `Saved: ${name} ${shown} as of ${formatDate(data.anchor.date)}`
+            : `${name} already had ${shown} for ${formatDate(data.anchor.date)}; nothing changed`,
+        data.created ? 'success' : 'info', 6000
+    );
+    await reloadAccounts();
 }

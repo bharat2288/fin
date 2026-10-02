@@ -26,6 +26,7 @@
         <div class="tab-bar-main">
             <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
             <button class="tab-btn" data-tab="subs">Subscriptions</button>
+            <button class="tab-btn" data-tab="review" id="review-tab-btn">Review list</button>
         </div>
         <div class="tab-bar-actions">
             <button class="tab-icon-btn" data-tab="import" title="Import Statements">
@@ -441,7 +442,10 @@
                             <input type="checkbox" id="acct-show-archived" onchange="renderAccountsTab()"> Show archived
                         </label>
                     </div>
-                    <button class="btn btn-sm btn-primary" onclick="toggleAcctForm()">+ Add Account</button>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <button class="btn btn-sm" onclick="openFigureModal()">Enter a figure</button>
+                        <button class="btn btn-sm btn-primary" onclick="toggleAcctForm()">+ Add Account</button>
+                    </div>
                 </div>
 
                 <!-- Add Account Form (hidden) -->
@@ -456,12 +460,12 @@
                             <input type="text" id="acct-short" placeholder="e.g. DBS-Altitude-1229" style="width:100%;">
                         </div>
                         <div>
-                            <label>Type</label>
-                            <select id="acct-type" style="width:100%;">
-                                <option value="credit_card">Credit Card</option>
-                                <option value="debit">Debit Card</option>
-                                <option value="bank">Bank Account</option>
-                            </select>
+                            <label>Kind</label>
+                            <select id="acct-type" style="width:100%;"></select>
+                        </div>
+                        <div>
+                            <label>Owner</label>
+                            <select id="acct-owner" style="width:100%;"></select>
                         </div>
                         <div>
                             <label>Last Four</label>
@@ -482,12 +486,14 @@
                 <table class="data-table" id="acct-table">
                     <thead>
                         <tr>
-                            <th style="width:30%;">Name</th>
-                            <th style="width:20%;">Short Name</th>
-                            <th style="width:14%;">Type</th>
-                            <th style="width:8%;">Last 4</th>
-                            <th style="width:8%;">Currency</th>
-                            <th style="width:20%;text-align:right;">Actions</th>
+                            <th style="width:22%;">Name</th>
+                            <th style="width:14%;">Short Name</th>
+                            <th style="width:9%;">Kind</th>
+                            <th style="width:9%;">Owner</th>
+                            <th style="width:6%;">Last 4</th>
+                            <th style="width:6%;">Currency</th>
+                            <th style="width:18%;">Rests on</th>
+                            <th style="width:16%;text-align:right;">Actions</th>
                         </tr>
                     </thead>
                     <tbody id="acct-body"></tbody>
@@ -495,7 +501,36 @@
                 <div id="acct-empty" class="empty-state hidden">
                     <div class="empty-state-icon">-</div>
                     <div class="empty-state-text">No accounts</div>
-                    <div class="empty-state-hint">Add your cards and bank accounts</div>
+                    <div class="empty-state-hint">Add your cards, bank accounts, loans and holdings</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         REVIEW LIST TAB (transfers waiting for a label)
+         ============================================================ -->
+    <div id="tab-review" class="tab-content">
+        <div class="container">
+            <div class="section-label" id="review-heading">/ Review list</div>
+
+            <div class="card">
+                <table class="data-table" id="review-table">
+                    <thead>
+                        <tr>
+                            <th style="width:9%;">Date</th>
+                            <th style="width:13%;">Account</th>
+                            <th style="width:28%;">Description</th>
+                            <th style="width:10%;text-align:right;">Amount</th>
+                            <th style="width:40%;">This was...</th>
+                        </tr>
+                    </thead>
+                    <tbody id="review-body"></tbody>
+                </table>
+                <div id="review-empty" class="empty-state hidden">
+                    <div class="empty-state-icon">-</div>
+                    <div class="empty-state-text">Nothing is waiting</div>
+                    <div class="empty-state-hint">A bank transfer no merchant rule knows lands here until you say what it was</div>
                 </div>
             </div>
         </div>
@@ -517,6 +552,43 @@
                 <div style="flex:1;"></div>
                 <button class="btn" onclick="closeNoteModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="saveNote()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Enter a figure Modal (a supplied anchor for a loan, a holding, a company or a person) -->
+    <div class="modal-overlay" id="figure-modal" style="display:none;">
+        <div class="modal" style="width:460px;">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ Enter a figure</span>
+                <button class="modal-close" onclick="closeFigureModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-field">
+                    <label>For</label>
+                    <select id="figure-account" style="width:100%;" onchange="updateFigureHint()"></select>
+                    <div class="figure-hint">loans, holdings, a company's opening amount</div>
+                </div>
+                <div class="modal-field-row">
+                    <div class="modal-field">
+                        <label>Amount</label>
+                        <input type="text" id="figure-amount" inputmode="decimal" style="width:100%;" placeholder="902,500.00">
+                        <div class="figure-hint" id="figure-amount-hint">what is owed, or what it is worth</div>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 160px;">
+                        <label>As of</label>
+                        <input type="date" id="figure-date" style="width:100%;">
+                    </div>
+                </div>
+                <div class="modal-field">
+                    <label>Note</label>
+                    <input type="text" id="figure-note" style="width:100%;" placeholder="from the paper statement">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div style="flex:1;"></div>
+                <button class="btn" onclick="closeFigureModal()">Cancel</button>
+                <button class="btn btn-primary" id="figure-save" onclick="saveFigure()">Save</button>
             </div>
         </div>
     </div>

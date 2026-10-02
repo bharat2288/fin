@@ -223,7 +223,8 @@ class DatabaseNotConverted(Exception):
 
 
 def _refuse_unconverted(conn: sqlite3.Connection) -> None:
-    """Stop before touching a database that still carries categories.
+    """Stop before touching a database that still carries categories, or
+    whose accounts have no owner yet.
 
     Conversions of existing rows go through the conversion runner, behind a
     backup, and never happen here.
@@ -237,6 +238,16 @@ def _refuse_unconverted(conn: sqlite3.Connection) -> None:
             "this database still carries the category tree. Convert it first, in this "
             "order: python convert_book_type.py <path to database>, then "
             "python retire_categories.py <path to database>"
+        )
+    if "owner" not in {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}:
+        raise DatabaseNotConverted(
+            "this database is from before accounts had a kind and an owner. Convert it "
+            "first: python convert_account_kinds.py <path to database>"
+        )
+    if "other_side_id" not in tx_cols:
+        raise DatabaseNotConverted(
+            "this database is from before a row could name its other side. Convert it "
+            "first: python convert_movements.py <path to database>"
         )
 
 
