@@ -156,6 +156,20 @@ def test_conversion_refuses_when_the_backup_copy_differs_in_size(old_db):
         conversion.run_step(old_db, MARK, today=DAY, backup=short_copy)
 
     assert _dump(old_db) == before
+    # The bad copy is not left under the name a good backup would have.
+    assert [name for name in _files(old_db) if name.endswith(".bak")] == []
+
+
+def test_a_refused_bad_copy_does_not_take_the_first_backup_name_of_the_day(old_db):
+    def short_copy(source: Path, target: Path) -> None:
+        target.write_bytes(source.read_bytes()[:-512])
+
+    with pytest.raises(conversion.ConversionRefused, match="size"):
+        conversion.run_step(old_db, MARK, today=DAY, backup=short_copy)
+
+    report = conversion.run_step(old_db, MARK, today=DAY)
+
+    assert Path(report["backup"]).name == "ledger.db.pre-mark-rows-20260314.bak"
 
 
 def test_conversion_refuses_a_database_that_is_not_there(tmp_path):
@@ -225,6 +239,45 @@ def test_step_that_moves_an_account_total_by_a_cent_fails(old_db):
     assert _dump(old_db) == before
 
 
+def _add_row_on_no_statement(path: Path) -> None:
+    # Foreign keys are not enforced on a plain connection, so a row can point
+    # at a statement that is not there. It belongs to no account.
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd)"
+        " VALUES (999, '2026-01-15', 'STRAY ROW', 5.00)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_rows_on_no_statement_are_totalled_under_no_account(old_db):
+    _add_row_on_no_statement(old_db)
+
+    report = conversion.run_step(old_db, MARK, today=DAY)
+
+    assert report["before"]["account_totals_cents"] == {1: 5235, 2: -285010, None: 500}
+    assert report["after"] == report["before"]
+
+
+def test_step_that_moves_the_amount_of_a_row_on_no_statement_fails(old_db):
+    _add_row_on_no_statement(old_db)
+    before = _dump(old_db)
+
+    def inflate(conn):
+        _mark_rows(conn)
+        conn.execute(
+            "UPDATE transactions SET amount_sgd = 500.00 WHERE description = 'STRAY ROW'"
+        )
+
+    step = conversion.Step(name="inflate", apply=inflate, is_applied=_rows_marked)
+
+    with pytest.raises(conversion.ConversionFailed, match="no account"):
+        conversion.run_step(old_db, step, today=DAY)
+
+    assert _dump(old_db) == before
+
+
 def test_step_is_held_to_the_invariant_it_declares(old_db):
     # A step may declare its own invariant in place of "nothing moved".
     def add_a_row(conn):
@@ -279,7 +332,9 @@ def test_step_that_raises_part_way_is_rolled_back_schema_change_included(old_db)
     assert _dump(old_db) == before
 
 
-def test_step_that_commits_on_its_own_fails(old_db):
+def test_step_that_commits_on_its_own_fails_and_nothing_is_kept(old_db):
+    before = _dump(old_db)
+
     def commits(conn):
         _mark_rows(conn)
         conn.execute("COMMIT")
@@ -288,6 +343,73 @@ def test_step_that_commits_on_its_own_fails(old_db):
 
     with pytest.raises(conversion.ConversionFailed, match="transaction"):
         conversion.run_step(old_db, step, today=DAY)
+
+    assert _dump(old_db) == before
+
+
+def test_step_that_commits_and_begins_again_cannot_keep_an_unchecked_change(old_db):
+    # Without the refusal the runner would see an open transaction, check only
+    # what came after the step's own BEGIN, and report a rollback that could
+    # not undo the committed part.
+    before = _dump(old_db)
+
+    def commits_then_begins(conn):
+        conn.execute(
+            "UPDATE transactions SET amount_sgd = 99.00 WHERE description = 'CORNER CAFE'"
+        )
+        conn.execute("COMMIT")
+        conn.execute("BEGIN")
+        _mark_rows(conn)
+
+    step = conversion.Step(
+        name="commit-begin", apply=commits_then_begins, is_applied=_rows_marked
+    )
+
+    with pytest.raises(conversion.ConversionFailed, match="transaction"):
+        conversion.run_step(old_db, step, today=DAY)
+
+    assert _dump(old_db) == before
+
+
+def test_step_that_uses_executescript_fails_and_nothing_is_kept(old_db):
+    # executescript commits the open transaction before it runs its script.
+    before = _dump(old_db)
+
+    def scripted(conn):
+        conn.executescript("UPDATE transactions SET notes = 'converted';")
+
+    step = conversion.Step(name="scripted", apply=scripted, is_applied=_rows_marked)
+
+    with pytest.raises(conversion.ConversionFailed, match="transaction"):
+        conversion.run_step(old_db, step, today=DAY)
+
+    assert _dump(old_db) == before
+
+
+def test_step_that_swallows_the_refusal_still_fails(old_db):
+    before = _dump(old_db)
+
+    def tries_quietly(conn):
+        _mark_rows(conn)
+        try:
+            conn.execute("COMMIT")
+        except sqlite3.DatabaseError:
+            pass
+
+    step = conversion.Step(name="quiet", apply=tries_quietly, is_applied=_rows_marked)
+
+    with pytest.raises(conversion.ConversionFailed, match="transaction"):
+        conversion.run_step(old_db, step, today=DAY)
+
+    assert _dump(old_db) == before
+
+
+def test_the_runner_can_still_commit_after_a_step(old_db):
+    # The refusal covers the step only: the runner's own COMMIT must go through,
+    # and so must a later run on a fresh connection.
+    conversion.run_step(old_db, MARK, today=DAY)
+
+    assert _notes(old_db) == ["converted"] * 4
 
 
 def test_step_that_does_not_reach_its_applied_state_fails(old_db):
