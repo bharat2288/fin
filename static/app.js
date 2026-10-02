@@ -603,6 +603,13 @@ function renderStatCards(d) {
     const rows = (n) => `${n} ${n === 1 ? 'row' : 'rows'}`;
     // What the headline is held short of: this month's transfers nobody has
     // labelled, money out and money in apart.
+    const loanCard = `
+        <div class="stat-card">
+            <div class="stat-label">Loan principal</div>
+            <div class="stat-value">S$${formatAmount(d.loan_principal)}</div>
+            <div class="stat-sub">not spending; cash out S$${formatAmount(d.cash_out)}</div>
+            ${d.loan_interest ? `<div class="stat-sub">interest S$${formatAmount(d.loan_interest)} is inside spending</div>` : ''}
+        </div>`;
     const heldOut = d.held_out_count
         ? `<div class="stat-sub text-warning">excludes unreviewed ${d.held_out_count === 1 ? 'transfer' : 'transfers'}: ${waitingOutAndIn(d, 'held_out')}</div>`
         : '';
@@ -617,6 +624,7 @@ function renderStatCards(d) {
             ${avgLine(d.avg_household)}
             ${heldOut}
         </div>
+        ${loanCard}
         <div class="stat-card">
             <div class="stat-label">Moom (its costs)</div>
             <div class="stat-value moom">S$${formatAmount(d.moom)} ${delta(d.moom, d.avg_moom)}</div>
@@ -4658,6 +4666,7 @@ function openFigureModal() {
     ).join('');
     document.getElementById('figure-amount').value = '';
     document.getElementById('figure-note').value = '';
+    showFigureResult(null);
     const now = new Date();
     document.getElementById('figure-date').value =
         `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -4668,6 +4677,16 @@ function openFigureModal() {
 
 function closeFigureModal() {
     document.getElementById('figure-modal').style.display = 'none';
+}
+
+// After a loan figure is saved the dialog stays open and states what was
+// worked out; with nothing to state it shows the form.
+function showFigureResult(message) {
+    const result = document.getElementById('figure-result');
+    result.textContent = message || '';
+    result.style.display = message ? 'block' : 'none';
+    document.getElementById('figure-save').style.display = message ? 'none' : '';
+    document.getElementById('figure-cancel').textContent = message ? 'Close' : 'Cancel';
 }
 
 function updateFigureHint() {
@@ -4708,7 +4727,11 @@ async function saveFigure() {
     btn.disabled = false;
     if (!data) return;
 
-    closeFigureModal();
+    if (data.message) {
+        showFigureResult(data.message);
+    } else {
+        closeFigureModal();
+    }
     const shown = formatMinorUnits(data.anchor.amount_minor, data.anchor.currency);
     const name = acct ? acct.name : data.anchor.account_name;
     showToast(
