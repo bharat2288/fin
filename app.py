@@ -1,7 +1,7 @@
 """fin — Personal Finance Tracker
 
 Flask backend serving the 4-tab SPA (Dashboard, Import, History, Merchant Rules)
-and API endpoints for statement parsing, categorization, and visualization.
+and API endpoints for statement parsing, labelling (book and type), and visualization.
 
 Usage:
     py app.py                  # Start on port 8450
@@ -17,7 +17,8 @@ from datetime import date, datetime, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from db import get_connection, init_db, categorize_transaction, invalidate_rules_cache
+import book_type
+from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
 
 
 @contextmanager
@@ -32,35 +33,92 @@ def get_db():
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 
-def format_category_display(parent: str | None, child: str | None) -> str:
-    """Format 'Parent > Child' category display string."""
-    if parent:
-        return f"{parent} > {child}"
-    return child or ""
+def format_type_display(parent: str | None, child: str | None) -> str:
+    """Format a type as 'Parent > Child', or the bare name with no parent."""
+    return book_type.display_name(child, parent) if child else ""
 
 
-def category_scope_expr(cat_alias: str = "c", parent_alias: str = "p") -> str:
-    """Return SQL CASE expression deriving scope from a category's root."""
-    return (
-        "CASE "
-        f"WHEN {cat_alias}.name = 'Kalesh' OR {parent_alias}.name = 'Kalesh' THEN 'kalesh' "
-        f"WHEN COALESCE({parent_alias}.is_personal, {cat_alias}.is_personal, 1) = 0 THEN 'moom' "
-        "ELSE 'personal' END"
-    )
+# The joins that give a labelled table its type (ty) and that type's parent
+# (tp). `{owner}` is the alias of the table carrying type_id.
+_TYPE_JOINS = (
+    "LEFT JOIN types ty ON {owner}.type_id = ty.id "
+    "LEFT JOIN types tp ON ty.parent_id = tp.id"
+)
+
+# What the charts call spending rows nobody has given a type.
+NO_TYPE_LABEL = "No type"
+# The same rows, as the transaction list's type filter names them.
+UNTYPED_FILTER = "__untyped__"
 
 
-def _requested_scope(args) -> str | None:
-    """Resolve the requested scope from new or legacy query params."""
-    scope = (args.get("scope") or "").strip().lower()
-    if scope in {"personal", "moom", "kalesh"}:
-        return scope
-    if args.get("personal_only") == "true":
-        return "personal"
-    if args.get("moom_only") == "true":
-        return "moom"
-    if args.get("kalesh_only") == "true":
-        return "kalesh"
-    return None
+def book_expr(alias: str = "t") -> str:
+    """SQL for the book a row is read as: its own, or the default when no one
+    has placed it. Scope comes from here and from nowhere else."""
+    return f"COALESCE({alias}.book, '{book_type.DEFAULT_BOOK}')"
+
+
+def _requested_book(args) -> str | None:
+    """The book the View filter asks for; None means every book."""
+    book = (args.get("book") or "").strip()
+    return book if book in book_type.BOOK_NAMES else None
+
+
+class UnknownLabel(ValueError):
+    """A writer was handed a book or a type that is not in its vocabulary."""
+
+
+def _checked_book(value) -> str | None:
+    """A book as a writer may store it: one of the declared books, or none."""
+    if value is None or value == "":
+        return None
+    if value not in book_type.BOOK_NAMES:
+        raise UnknownLabel(f"unknown book: {value!r}")
+    return value
+
+
+def _checked_type_id(conn, value) -> int | None:
+    """A type as a writer may store it: the id of a spending type, or none."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UnknownLabel(f"unknown type: {value!r}")
+    row = conn.execute(
+        "SELECT id FROM types WHERE id = ? AND kind = ?", (value, book_type.SPENDING)
+    ).fetchone()
+    if not row:
+        raise UnknownLabel(f"unknown type: {value!r}")
+    return value
+
+
+def _checked_labels(conn, data: dict, book_key: str = "book", type_key: str = "type_id") -> None:
+    """Refuse a request body whose book or type is not in the vocabulary."""
+    if book_key in data:
+        _checked_book(data[book_key])
+    if type_key in data:
+        _checked_type_id(conn, data[type_key])
+
+
+def _proposed_book(conn, type_id: int | None) -> str | None:
+    """The book a type proposes for a merchant no rule knows; None = ask."""
+    if type_id is None:
+        return None
+    return book_type.proposed_book(book_type.spending_type_names(conn).get(type_id))
+
+
+class BookNeeded(ValueError):
+    """The type proposes no book, so the operator has to say whose it is."""
+
+
+def _book_or_proposed(conn, book: str | None, type_id: int | None) -> str | None:
+    """The book given, else the one the type proposes. A type that asks
+    (Software & AI tools) with no book given is refused."""
+    if book or type_id is None:
+        return book
+    proposed = _proposed_book(conn, type_id)
+    if proposed is None:
+        name = book_type.spending_type_names(conn).get(type_id)
+        raise BookNeeded(f"book is required: {name} does not say whose spending it is")
+    return proposed
 
 
 def _build_match_condition(match_type: str) -> str:
@@ -127,45 +185,39 @@ def _rule_pattern_error(pattern: str | None) -> str | None:
     return None
 
 
-def _paynow_fallback_category_id(description: str | None, conn) -> int | None:
-    """Return fallback category_id for PayNow descriptions when no rule matches."""
+def _paynow_fallback_label(description: str | None, conn) -> tuple[str | None, int | None]:
+    """The (book, type_id) the PayNow payee wording gives a row no rule
+    matches; (None, None) when the wording says nothing. The book is the one
+    the type proposes."""
     if not description or "PAYNOW" not in description.upper():
-        return None
-    from ingest import categorize_bank_paynow
-    _, cat_name = categorize_bank_paynow(description)
-    if not cat_name:
-        return None
-    row = conn.execute("SELECT id FROM categories WHERE name = ?", (cat_name,)).fetchone()
-    return row["id"] if row else None
+        return None, None
+    from ingest import paynow_type
+    type_name = paynow_type(description)
+    type_id = book_type.spending_type_ids(conn).get(type_name) if type_name else None
+    if type_id is None:
+        return None, None
+    return book_type.proposed_book(type_name), type_id
 
 
-def _classify_flow_for_tx(
-    conn,
-    description: str,
-    amount_sgd: float,
-    category_id: int | None,
-    *,
-    flow_ctx=None,
-    cats_by_id: dict[int, str] | None = None,
-) -> str:
+def _label_for(conn, description: str, amount_sgd: float) -> dict:
+    """What the rules, then the PayNow wording, make of a row: the result of
+    match_merchant, with the fallback's type when no rule gave one. A merchant
+    the rules did find is kept, and so is its book."""
+    found = match_merchant(description, conn, amount=amount_sgd)
+    if found["type_id"] is None:
+        book, type_id = _paynow_fallback_label(description, conn)
+        if type_id is not None:
+            found.update(book=found["book"] or book, type_id=type_id, cat_source="fallback")
+    return found
+
+
+def _classify_flow_for_tx(conn, description: str, amount_sgd: float, *, flow_ctx=None) -> str:
     """Classify a transaction using the shared flow_type model."""
     from flow import build_context, classify_flow
 
     if flow_ctx is None:
         flow_ctx = build_context(conn)
-    if cats_by_id is None:
-        cats_by_id = {
-            row["id"]: row["name"]
-            for row in conn.execute("SELECT id, name FROM categories").fetchall()
-        }
-    return classify_flow(
-        {
-            "description": description,
-            "amount_sgd": amount_sgd,
-            "category_name": cats_by_id.get(category_id) if category_id else None,
-        },
-        flow_ctx,
-    )
+    return classify_flow({"description": description, "amount_sgd": amount_sgd}, flow_ctx)
 
 
 def _expense_visibility_filter(service_alias: str = "svc") -> str:
@@ -251,41 +303,44 @@ def index():
 # Reference data
 # ---------------------------------------------------------------------------
 
-@app.route("/api/categories")
-def api_categories():
-    """List all categories as a flat list with parent info."""
+@app.route("/api/types")
+def api_types():
+    """The type list as a flat list with parent info: spending types, or with
+    ?kind=income the income kinds. Read-only: the list is declared in
+    book_type.py and the table is filled from that declaration alone."""
+    kind = book_type.INCOME if request.args.get("kind") == book_type.INCOME else book_type.SPENDING
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT c.id, c.name, c.parent_id, c.is_personal, p.name as parent_name, "
-            f"{category_scope_expr('c', 'p')} as scope "
-            "FROM categories c LEFT JOIN categories p ON c.parent_id = p.id "
-            "ORDER BY COALESCE(p.name, c.name), c.parent_id IS NOT NULL, c.name"
+            "SELECT t.id, t.kind, t.name, t.parent_id, p.name as parent_name, "
+            "t.default_one_off, t.covers, t.not_for "
+            "FROM types t LEFT JOIN types p ON t.parent_id = p.id "
+            "WHERE t.kind = ? ORDER BY t.id",
+            (kind,),
         ).fetchall()
     return jsonify([{
         "id": r["id"],
+        "kind": r["kind"],
         "name": r["name"],
         "parent_id": r["parent_id"],
         "parent_name": r["parent_name"],
-        "is_personal": r["is_personal"],
-        "scope": r["scope"],
-        "display_name": format_category_display(r["parent_name"], r["name"]),
+        "display_name": format_type_display(r["parent_name"], r["name"]),
+        "default_one_off": r["default_one_off"],
+        "covers": r["covers"],
+        "not_for": r["not_for"],
+        # The book this type proposes for a merchant no rule knows; null = ask.
+        "proposed_book": (
+            book_type.proposed_book(format_type_display(r["parent_name"], r["name"]))
+            if kind == book_type.SPENDING else None
+        ),
     } for r in rows])
 
 
-@app.route("/api/categories", methods=["POST"])
-def api_categories_create():
-    """Create a new category or subcategory."""
-    data = request.get_json()
-    if not data or not data.get("name"):
-        return jsonify({"error": "Name is required"}), 400
-
-    with get_db() as conn:
-        return _crud_insert(
-            conn,
-            "INSERT INTO categories (name, parent_id, is_personal) VALUES (?, ?, ?)",
-            (data["name"], data.get("parent_id"), data.get("is_personal", 1)),
-            "category",
-        )
+@app.route("/api/books")
+def api_books():
+    """The books, from their one declaration."""
+    return jsonify([
+        {"name": name, "description": description} for name, description in book_type.BOOKS
+    ])
 
 
 @app.route("/api/accounts")
@@ -357,18 +412,15 @@ def api_accounts_delete(acct_id):
 
 @app.route("/api/services")
 def api_services():
-    """List all services with category info and transaction/rule counts."""
+    """List all services with their book, type and transaction/rule counts."""
     with get_db() as conn:
         rows = conn.execute("""
-            SELECT s.*, c.name as category_name, c.is_personal,
-                   """ + category_scope_expr("c", "p") + """ as scope,
-                   p.name as parent_name,
+            SELECT s.*, ty.name as type_name, tp.name as parent_type,
                    (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
                     AND COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')) as txn_count,
                    (SELECT COUNT(*) FROM merchant_rules mr WHERE mr.service_id = s.id) as rule_count
             FROM services s
-            LEFT JOIN categories c ON s.category_id = c.id
-            LEFT JOIN categories p ON c.parent_id = p.id
+            """ + _TYPE_JOINS.format(owner="s") + """
             ORDER BY s.name
         """).fetchall()
         # Fetch all rule patterns grouped by service_id
@@ -384,10 +436,7 @@ def api_services():
     result = []
     for r in rows:
         d = dict(r)
-        # Book and type are stored but not served until the app reads them.
-        d.pop("book", None)
-        d.pop("type_id", None)
-        d["display_category"] = format_category_display(d["parent_name"], d["category_name"])
+        d["display_type"] = format_type_display(d["parent_type"], d["type_name"])
         d["rules"] = rules_by_svc.get(d["id"], [])
         result.append(d)
     return jsonify(result)
@@ -425,48 +474,74 @@ def api_services_create():
     if not data or not data.get("name"):
         return jsonify({"error": "Service name is required"}), 400
     with get_db() as conn:
+        # A merchant carries a default book and type. With a type and no book
+        # given, the book is the one the type proposes.
+        try:
+            type_id = _checked_type_id(conn, data.get("type_id"))
+            book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
+        except (UnknownLabel, BookNeeded) as e:
+            return jsonify({"error": str(e)}), 400
         return _crud_insert(
             conn,
-            "INSERT INTO services (name, category_id, notes, exclude_from_expense_views) VALUES (?, ?, ?, ?)",
+            "INSERT INTO services (name, book, type_id, notes, exclude_from_expense_views, "
+            "review_each_time) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 data["name"],
-                data.get("category_id"),
+                book,
+                type_id,
                 data.get("notes"),
                 data.get("exclude_from_expense_views", 0),
+                1 if data.get("review_each_time") else 0,
             ),
             "service",
+            post_commit=invalidate_rules_cache,
         )
 
 
 @app.route("/api/services/<int:svc_id>", methods=["PUT"])
 def api_services_update(svc_id):
-    """Update a service. Auto re-categorizes affected transactions on category change."""
+    """Update a service. A change of its book or type is written to the
+    transactions that take their label from it."""
     data = request.get_json()
     with get_db() as conn:
         sets, params = _build_update_sets(
             data,
-            ["name", "category_id", "notes", "is_one_off", "exclude_from_expense_views"],
+            ["name", "book", "type_id", "notes", "is_one_off", "exclude_from_expense_views",
+             "review_each_time"],
         )
         if not sets:
             return jsonify({"error": "Nothing to update"}), 400
+        try:
+            _checked_labels(conn, data)
+        except UnknownLabel as e:
+            return jsonify({"error": str(e)}), 400
         params.append(svc_id)
         try:
+            was = conn.execute(
+                "SELECT book, type_id FROM services WHERE id = ?", (svc_id,)
+            ).fetchone()
             conn.execute(f"UPDATE services SET {', '.join(sets)} WHERE id = ?", params)
 
-            # Auto re-categorize: if category changed, update all linked transactions
+            # Relabel: when the merchant's default changes, rows that inherit
+            # it take its book and type. Rows labelled by hand or by a rule
+            # override keep theirs. A default sent back unchanged (a rename,
+            # a note) relabels nothing.
             recategorized = 0
-            if "category_id" in data:
-                new_cat_id = data["category_id"]
-                cur = conn.execute(
-                    "UPDATE transactions SET category_id = ? "
-                    "WHERE service_id = ? AND category_id != ? "
-                    "AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default')",
-                    (new_cat_id, svc_id, new_cat_id),
-                )
-                recategorized = cur.rowcount
+            if "book" in data or "type_id" in data:
+                svc = conn.execute(
+                    "SELECT book, type_id FROM services WHERE id = ?", (svc_id,)
+                ).fetchone()
+                if svc and tuple(svc) != tuple(was):
+                    cur = conn.execute(
+                        "UPDATE transactions SET book = ?, type_id = ? "
+                        "WHERE service_id = ? AND (book IS NOT ? OR type_id IS NOT ?) "
+                        "AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default')",
+                        (svc["book"], svc["type_id"], svc_id, svc["book"], svc["type_id"]),
+                    )
+                    recategorized = cur.rowcount
 
             conn.commit()
-            invalidate_rules_cache()  # service category change affects cached category_id
+            invalidate_rules_cache()  # the rule cache holds each merchant's book and type
             return jsonify({"success": True, "recategorized": recategorized})
         except Exception as e:
             app.logger.warning("Failed to update service: %s", e)
@@ -485,9 +560,21 @@ def api_services_merge(svc_id):
     with get_db() as conn:
         # Verify both exist
         source = conn.execute("SELECT name FROM services WHERE id = ?", (svc_id,)).fetchone()
-        target = conn.execute("SELECT name FROM services WHERE id = ?", (target_id,)).fetchone()
+        target = conn.execute(
+            "SELECT name, book, type_id FROM services WHERE id = ?", (target_id,)
+        ).fetchone()
         if not source or not target:
             return jsonify({"error": "Service not found"}), 404
+
+        # The rows being moved that inherit their merchant's default now
+        # inherit the target's book and type. Rows labelled by hand or by a
+        # rule override keep theirs (the rules move with them).
+        relabelled = conn.execute(
+            "UPDATE transactions SET book = ?, type_id = ? "
+            "WHERE service_id = ? AND (book IS NOT ? OR type_id IS NOT ?) "
+            "AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default')",
+            (target["book"], target["type_id"], svc_id, target["book"], target["type_id"]),
+        ).rowcount
 
         # Reassign all references from source → target
         txn_count = conn.execute(
@@ -516,6 +603,7 @@ def api_services_merge(svc_id):
             "transactions": txn_count,
             "rules": rule_count,
             "subscriptions": sub_count,
+            "relabelled": relabelled,
         },
     })
 
@@ -544,14 +632,20 @@ def api_service_transactions(svc_id):
         rows = conn.execute("""
             SELECT t.id, t.date, t.description, t.amount_sgd,
                    t.amount_foreign, t.currency_foreign,
-                   c.name as category_name
+                   """ + book_expr("t") + """ as book,
+                   t.type_id, ty.name as type_name, tp.name as parent_type
             FROM transactions t
-            LEFT JOIN categories c ON t.category_id = c.id
+            """ + _TYPE_JOINS.format(owner="t") + """
             WHERE t.service_id = ?
               AND COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')
             ORDER BY t.date DESC
         """, (svc_id,)).fetchall()
-    return jsonify([dict(r) for r in rows])
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["display_type"] = format_type_display(d["parent_type"], d["type_name"])
+        result.append(d)
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +661,7 @@ def api_dashboard_stat_cards():
       - If today < 15th, ref = two months ago
     Override with ?ref_month=YYYY-MM.
 
-    Respects: scope, personal_only, moom_only, kalesh_only, exclude_one_off, account_id
+    Respects: book, exclude_one_off, account_id
     """
     # Determine reference month
     ref_month_param = request.args.get("ref_month")
@@ -595,7 +689,7 @@ def api_dashboard_stat_cards():
         avg_months.append((ay, am))
     avg_months.reverse()  # chronological order
 
-    scope = _requested_scope(request.args)
+    book = _requested_book(request.args)
     account_id = request.args.get("account_id")
     exclude_one_off = request.args.get("exclude_one_off") == "true"
 
@@ -612,6 +706,12 @@ def api_dashboard_stat_cards():
         except (ValueError, TypeError):
             pass
 
+    # One total per declared book, keyed by the book's name in lower case.
+    books = [(name, name.lower()) for name in book_type.BOOK_NAMES]
+    book_sums = "".join(
+        f"SUM(CASE WHEN {book_expr('t')} = ? THEN amount_sgd ELSE 0 END), " for _ in books
+    )
+
     with get_db() as conn:
         def query_month(y: int, m: int) -> dict:
             """Query spend totals for a single month."""
@@ -622,37 +722,26 @@ def api_dashboard_stat_cards():
                 end_d = date(y, m + 1, 1) - timedelta(days=1)
             end = end_d.strftime("%Y-%m-%d")
 
-            params = [start, end] + extra_params
+            params = [name for name, _ in books] + [start, end] + extra_params
             row = conn.execute(f"""
                 SELECT
-                    SUM(CASE WHEN t.flow_type IN ('expense', 'refund')
-                             THEN amount_sgd ELSE 0 END) as total,
-                    SUM(CASE WHEN t.flow_type IN ('expense', 'refund')
-                             AND {category_scope_expr('c', 'p')} = 'personal' THEN amount_sgd ELSE 0 END) as personal,
-                    SUM(CASE WHEN t.flow_type IN ('expense', 'refund')
-                             AND {category_scope_expr('c', 'p')} = 'moom' THEN amount_sgd ELSE 0 END) as moom,
-                    SUM(CASE WHEN t.flow_type IN ('expense', 'refund')
-                             AND {category_scope_expr('c', 'p')} = 'kalesh' THEN amount_sgd ELSE 0 END) as kalesh,
-                    COUNT(CASE WHEN t.category_id IS NULL AND t.flow_type IN ('expense', 'refund')
-                               THEN 1 END) as uncategorized,
-                    COUNT(CASE WHEN t.flow_type IN ('expense', 'refund') THEN 1 END) as tx_count
+                    {book_sums}
+                    SUM(amount_sgd),
+                    COUNT(CASE WHEN t.type_id IS NULL THEN 1 END),
+                    COUNT(*)
                 FROM transactions t
-                LEFT JOIN categories c ON t.category_id = c.id
-                LEFT JOIN categories p ON c.parent_id = p.id
                 LEFT JOIN services svc ON t.service_id = svc.id
                 JOIN statements s ON t.statement_id = s.id
                 WHERE t.flow_type IN ('expense', 'refund')
                   AND t.date >= ? AND t.date <= ?
                   {extra_filters}
             """, params).fetchone()
-            return {
-                "total": round(row["total"] or 0, 2),
-                "personal": round(row["personal"] or 0, 2),
-                "moom": round(row["moom"] or 0, 2),
-                "kalesh": round(row["kalesh"] or 0, 2),
-                "uncategorized": row["uncategorized"] or 0,
-                "tx_count": row["tx_count"] or 0,
-            }
+            n = len(books)
+            result = {key: round(row[i] or 0, 2) for i, (_, key) in enumerate(books)}
+            result["total"] = round(row[n] or 0, 2)
+            result["untyped"] = row[n + 1] or 0
+            result["tx_count"] = row[n + 2] or 0
+            return result
 
         # Query reference month
         ref_data = query_month(ref_y, ref_m)
@@ -660,51 +749,48 @@ def api_dashboard_stat_cards():
         # Query 3 prior months for rolling average
         avg_data = [query_month(y, m) for y, m in avg_months]
         n = len([d for d in avg_data if d["tx_count"] > 0]) or 1  # only months with data
-        avg_total = round(sum(d["total"] for d in avg_data) / n, 2)
-        avg_personal = round(sum(d["personal"] for d in avg_data) / n, 2)
-        avg_moom = round(sum(d["moom"] for d in avg_data) / n, 2)
-        avg_kalesh = round(sum(d["kalesh"] for d in avg_data) / n, 2)
+        averages = {
+            key: round(sum(d[key] for d in avg_data) / n, 2)
+            for key in ["total"] + [key for _, key in books]
+        }
 
     # Pick which spend to feature based on filter
-    if scope == "moom":
-        spend = ref_data["moom"]
-        avg_spend = avg_moom
-    elif scope == "kalesh":
-        spend = ref_data["kalesh"]
-        avg_spend = avg_kalesh
-    elif scope == "personal":
-        spend = ref_data["personal"]
-        avg_spend = avg_personal
-    else:
-        spend = ref_data["total"]
-        avg_spend = avg_total
+    featured = book.lower() if book else "total"
+    spend = ref_data[featured]
+    avg_spend = averages[featured]
 
     month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     ref_label = f"{month_names[ref_m]} {ref_y}"
 
-    return jsonify({
+    payload = {
         "ref_month": f"{ref_y:04d}-{ref_m:02d}",
         "ref_label": ref_label,
         "spend": spend,
-        "personal": ref_data["personal"],
-        "moom": ref_data["moom"],
-        "kalesh": ref_data["kalesh"],
-        "uncategorized": ref_data["uncategorized"],
+        "untyped": ref_data["untyped"],
         "tx_count": ref_data["tx_count"],
         "avg_spend": avg_spend,
-        "avg_personal": avg_personal,
-        "avg_moom": avg_moom,
-        "avg_kalesh": avg_kalesh,
         "avg_months": n,
-    })
+    }
+    for _, key in books:
+        payload[key] = ref_data[key]
+        payload[f"avg_{key}"] = averages[key]
+    return jsonify(payload)
+
+
+def _type_group_expr(args) -> str:
+    """SQL naming the type a chart groups a row under. group_parent=true (the
+    default) rolls a sub-type up into its parent."""
+    if args.get("group_parent", "true") == "true":
+        return "COALESCE(tp.name, ty.name)"
+    return "ty.name"
 
 
 @app.route("/api/dashboard/monthly")
 def api_dashboard_monthly():
-    """Spending by category over time for stacked bar chart.
+    """Spending by type over time for stacked bar chart.
 
-    Query params: start, end, scope, personal_only, moom_only, kalesh_only, exclude_one_off, granularity
+    Query params: start, end, book, exclude_one_off, granularity, group_parent
     granularity: 'monthly' (default), 'weekly', 'quarterly'
     """
     filters, params = _build_filters(request.args)
@@ -719,79 +805,61 @@ def api_dashboard_monthly():
     else:
         time_bucket = "strftime('%Y-%m', t.date)"
 
-    # group_parent=true rolls subcategories up into their parent
-    group_parent = request.args.get("group_parent", "true") == "true"
-
-    if group_parent:
-        cat_expr = "COALESCE(p.name, c.name)"
-    else:
-        cat_expr = "c.name"
+    type_expr = _type_group_expr(request.args)
 
     with get_db() as conn:
         rows = conn.execute(f"""
             SELECT
                 {time_bucket} as period,
-                {cat_expr} as category,
-                {category_scope_expr('c', 'p')} as scope,
+                {type_expr} as type,
                 SUM(t.amount_sgd) as total
             FROM transactions t
-            LEFT JOIN categories c ON t.category_id = c.id
-            LEFT JOIN categories p ON c.parent_id = p.id
+            {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
             WHERE t.flow_type IN ('expense', 'refund') {filters}
-            GROUP BY period, category
+            GROUP BY period, type
             ORDER BY period, total DESC
         """, params).fetchall()
 
-    # Structure: {period: {category: total, ...}, ...}
+    # Structure: {period: {type: total, ...}, ...}
     result = {}
     for r in rows:
         period = r["period"]
         if period not in result:
             result[period] = {}
-        cat = r["category"] or "Other"
-        result[period][cat] = round(result[period].get(cat, 0) + r["total"], 2)
+        name = r["type"] or NO_TYPE_LABEL
+        result[period][name] = round(result[period].get(name, 0) + r["total"], 2)
 
     return jsonify(result)
 
 
-@app.route("/api/dashboard/categories")
-def api_dashboard_categories():
-    """Category totals for donut chart.
+@app.route("/api/dashboard/types")
+def api_dashboard_types():
+    """Type totals for donut chart. One type serves every book.
 
-    Query params: start, end, scope, personal_only, moom_only, kalesh_only, exclude_one_off, group_parent
+    Query params: start, end, book, exclude_one_off, group_parent
     """
     filters, params = _build_filters(request.args)
-
-    group_parent = request.args.get("group_parent", "true") == "true"
-
-    if group_parent:
-        cat_expr = "COALESCE(p.name, c.name)"
-    else:
-        cat_expr = "c.name"
+    type_expr = _type_group_expr(request.args)
 
     with get_db() as conn:
         rows = conn.execute(f"""
             SELECT
-                {cat_expr} as category,
-                {category_scope_expr('c', 'p')} as scope,
+                {type_expr} as type,
                 SUM(t.amount_sgd) as total,
                 COUNT(*) as count
             FROM transactions t
-            LEFT JOIN categories c ON t.category_id = c.id
-            LEFT JOIN categories p ON c.parent_id = p.id
+            {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
             WHERE t.flow_type IN ('expense', 'refund') {filters}
-            GROUP BY category
+            GROUP BY type
             ORDER BY total DESC
         """, params).fetchall()
 
     return jsonify([{
-        "category": r["category"] or "Other",
-        "scope": r["scope"],
-        "is_personal": 1 if r["scope"] == "personal" else 0,
+        "type": r["type"] or NO_TYPE_LABEL,
         "total": round(r["total"], 2),
         "count": r["count"],
     } for r in rows])
@@ -805,36 +873,32 @@ def api_dashboard_categories():
 def api_transactions():
     """Paginated transaction list with filters.
 
-    Query params: start, end, scope, personal_only, moom_only, kalesh_only, exclude_one_off,
-                  category, account_id, month, page, per_page, search
+    Query params: start, end, book, exclude_one_off, types, account_id, month,
+                  page, per_page, search
     """
     filters, params = _build_filters(request.args)
 
-    # Additional filters — single category (legacy) or multi-category
-    category = request.args.get("category")
-    categories_str = request.args.get("categories")
-
-    if category == "__uncategorized__":
-        filters += " AND t.category_id IS NULL"
-    elif category:
-        filters += " AND c.name = ?"
-        params.append(category)
-    elif categories_str:
-        # Multi-category filter (from chart selection or multi-select dropdown)
-        cat_list = [c.strip() for c in categories_str.split(",") if c.strip()]
-        has_uncat = "__uncategorized__" in cat_list
-        if has_uncat:
-            cat_list.remove("__uncategorized__")
-        if cat_list:
-            placeholders = ",".join("?" * len(cat_list))
-            cat_cond = f"(c.name IN ({placeholders}) OR COALESCE(p.name, c.name) IN ({placeholders}))"
-            if has_uncat:
-                filters += f" AND ({cat_cond} OR t.category_id IS NULL)"
-            else:
-                filters += f" AND {cat_cond}"
-            params.extend(cat_list * 2)
-        elif has_uncat:
-            filters += " AND t.category_id IS NULL"
+    # Type filter (from chart selection or multi-select dropdown): type names,
+    # a parent taking its sub-types with it. __untyped__ is the list of rows
+    # with no type, which holds spending and refund rows only: a transfer, a
+    # payment or income carries no type and is not waiting for one.
+    types_str = request.args.get("types")
+    if types_str:
+        type_list = [t.strip() for t in types_str.split(",") if t.strip()]
+        conds = []
+        if UNTYPED_FILTER in type_list:
+            type_list.remove(UNTYPED_FILTER)
+            conds.append(
+                "(t.type_id IS NULL AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund'))"
+            )
+        if type_list:
+            placeholders = ",".join("?" * len(type_list))
+            conds.append(
+                f"(ty.name IN ({placeholders}) OR COALESCE(tp.name, ty.name) IN ({placeholders}))"
+            )
+            params.extend(type_list * 2)
+        if conds:
+            filters += f" AND ({' OR '.join(conds)})"
 
     # Chart-driven date narrowing (adds to dashboard date filter)
     chart_start = request.args.get("chart_start")
@@ -856,7 +920,7 @@ def api_transactions():
 
     search = request.args.get("search")
     if search:
-        filters += " AND (t.description LIKE ? OR svc.name LIKE ? OR c.name LIKE ? OR p.name LIKE ?)"
+        filters += " AND (t.description LIKE ? OR svc.name LIKE ? OR ty.name LIKE ? OR tp.name LIKE ?)"
         search_param = f"%{search}%"
         params.extend([search_param] * 4)
 
@@ -870,7 +934,7 @@ def api_transactions():
     valid_sorts = {
         "date": "t.date",
         "description": "t.description",
-        "category": "c.name",
+        "type": "ty.name",
         "service": "svc.name",
         "account": "a.name",
         "amount": "t.amount_sgd",
@@ -879,35 +943,35 @@ def api_transactions():
     if sort_dir not in ("ASC", "DESC"):
         sort_dir = "DESC"
 
+    type_joins = _TYPE_JOINS.format(owner="t")
     with get_db() as conn:
-        # Count total (p join needed for multi-category COALESCE filter)
+        # Count total (type joins needed for the type filter and the search)
         count_row = conn.execute(f"""
             SELECT COUNT(*) as cnt
             FROM transactions t
-            LEFT JOIN categories c ON t.category_id = c.id
-            LEFT JOIN categories p ON c.parent_id = p.id
+            {type_joins}
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
             WHERE 1=1 {filters}
         """, params).fetchone()
 
-        # Fetch page — include parent category for "Parent > Sub" display
+        # Fetch page — include the parent type for "Parent > Sub" display
         rows = conn.execute(
             f"""
             SELECT
                 t.id, t.date, t.description, t.amount_sgd,
                 t.amount_foreign, t.currency_foreign,
-                c.name as category, c.is_personal,
-                p.name as parent_category,
-                {category_scope_expr("c", "p")} as scope,
+                {book_expr("t")} as book,
+                t.type_id, ty.name as type, tp.name as parent_type,
+                t.cat_source,
                 t.is_one_off, COALESCE(t.flow_type, 'expense') as flow_type, t.flow_type_manual,
                 t.notes,
                 a.name as account_name,
                 t.service_id,
-                svc.name as service_name
+                svc.name as service_name,
+                COALESCE(svc.review_each_time, 0) as review_each_time
             FROM transactions t
-            LEFT JOIN categories c ON t.category_id = c.id
-            LEFT JOIN categories p ON c.parent_id = p.id
+            {type_joins}
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
             JOIN accounts a ON s.account_id = a.id
@@ -921,7 +985,7 @@ def api_transactions():
     txns = []
     for r in rows:
         tx = dict(r)
-        tx["display_category"] = format_category_display(r["parent_category"], r["category"])
+        tx["display_type"] = format_type_display(r["parent_type"], r["type"])
         if tx.get("account_name"):
             tx["account_name"] = mask_card_number(tx["account_name"])
         txns.append(tx)
@@ -937,21 +1001,26 @@ def api_transactions():
 
 @app.route("/api/transactions/<int:tx_id>", methods=["PUT"])
 def api_update_transaction(tx_id: int):
-    """Update a transaction's notes, category, or one-off flag."""
+    """Update a transaction's notes, book, type, or one-off flag. A row may
+    override both the book and the type its merchant gives it."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
-    sets, values = _build_update_sets(data, ["notes", "category_id", "is_one_off"])
+    sets, values = _build_update_sets(data, ["notes", "book", "type_id", "is_one_off"])
 
-    # If category or service is being changed, mark as manual
-    if "category_id" in data or "service_id" in data:
+    # If the book, the type or the service is being changed, mark as manual
+    if "book" in data or "type_id" in data or "service_id" in data:
         sets.append("cat_source = 'manual'")
 
     if not sets:
         return jsonify({"error": "No valid fields to update"}), 400
 
     with get_db() as conn:
+        try:
+            _checked_labels(conn, data)
+        except UnknownLabel as e:
+            return jsonify({"error": str(e)}), 400
         values.append(tx_id)
         conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", values)
         conn.commit()
@@ -960,20 +1029,26 @@ def api_update_transaction(tx_id: int):
 
 @app.route("/api/transactions/resolve", methods=["POST"])
 def api_resolve_transaction():
-    """Resolve an uncategorized transaction: find-or-create service, create rule, update tx.
+    """Resolve a transaction with no type: find-or-create service, create rule, update tx.
 
     Accepts:
         tx_id: transaction ID to resolve
         service_name: existing or new service name
         service_id: existing service ID (optional — if provided, service_name ignored for lookup)
-        category_id: category for the service (used only when creating new service)
+        book, type_id: the label. Left out, an existing service's own are
+            used; for a new service the type is required and the book is the
+            one the type proposes (Software & AI tools proposes none: say it).
         pattern: merchant rule pattern (auto-suggested from description)
         match_type: 'contains' (default) or 'startswith'
+        apply_scope: where the label applies —
+            'transaction'     this row only (a row may override both)
+            'rule'            a rule override for the pattern
+            'service_default' the merchant's default (the default)
 
     Flow:
         1. Find existing service by service_id or name, or create new one
-        2. Create merchant rule linking pattern → service → category
-        3. Update the transaction with service_id + category_id
+        2. Create merchant rule linking pattern → service (→ its book and type)
+        3. Update the transaction with service_id + book + type_id
         4. Backfill any other NULL-service transactions matching the new rule
     """
     data = request.get_json()
@@ -983,7 +1058,6 @@ def api_resolve_transaction():
     tx_id = data.get("tx_id")
     service_name = (data.get("service_name") or "").strip()
     service_id = data.get("service_id")
-    category_id = data.get("category_id")
     pattern = (data.get("pattern") or "").strip()
     match_type = data.get("match_type", "contains")
     apply_scope = data.get("apply_scope") or "service_default"
@@ -997,45 +1071,60 @@ def api_resolve_transaction():
     pattern_error = _rule_pattern_error(pattern)
     if pattern and apply_scope in {"rule", "service_default"} and pattern_error:
         return jsonify({"error": pattern_error}), 400
+    flow_type = data.get("flow_type")
+    if flow_type is not None and flow_type not in ("expense", "income", "transfer", "payment", "refund"):
+        return jsonify({"error": f"invalid flow_type: {flow_type}"}), 400
 
     with get_db() as conn:
+        try:
+            book = _checked_book(data.get("book"))
+            type_id = _checked_type_id(conn, data.get("type_id"))
+        except UnknownLabel as e:
+            return jsonify({"error": str(e)}), 400
+
         try:
             # Step 1: Resolve service — find existing or create new
             if service_id:
                 svc = conn.execute(
-                    "SELECT id, category_id FROM services WHERE id = ?", (service_id,)
+                    "SELECT id, book, type_id FROM services WHERE id = ?", (service_id,)
                 ).fetchone()
                 if not svc:
                     return jsonify({"error": f"Service ID {service_id} not found"}), 404
-                service_id = svc["id"]
-                # Service-default resolution can update the service category.
-                if apply_scope == "service_default" and category_id and category_id != svc["category_id"]:
-                    conn.execute("UPDATE services SET category_id = ? WHERE id = ?",
-                                 (category_id, service_id))
-                else:
-                    category_id = category_id or svc["category_id"]
             else:
                 # Look up by name (case-insensitive)
-                existing = conn.execute(
-                    "SELECT id, category_id FROM services WHERE UPPER(name) = ?",
+                svc = conn.execute(
+                    "SELECT id, book, type_id FROM services WHERE UPPER(name) = ?",
                     (service_name.upper(),),
                 ).fetchone()
-                if existing:
-                    service_id = existing["id"]
-                    if apply_scope == "service_default" and category_id and category_id != existing["category_id"]:
-                        conn.execute("UPDATE services SET category_id = ? WHERE id = ?",
-                                     (category_id, service_id))
-                    else:
-                        category_id = category_id or existing["category_id"]
-                else:
-                    # Create new service — category_id is required
-                    if not category_id:
-                        return jsonify({"error": "category_id required for new service"}), 400
+
+            if svc:
+                service_id = svc["id"]
+                # Whatever the request leaves out is the merchant's own.
+                if type_id is None:
+                    type_id = svc["type_id"]
+                if book is None:
+                    book = svc["book"]
+                book = _book_or_proposed(conn, book, type_id)
+                # Service-default resolution can update the merchant's default.
+                if apply_scope == "service_default" and (
+                    (book, type_id) != (svc["book"], svc["type_id"])
+                ):
                     conn.execute(
-                        "INSERT INTO services (name, category_id) VALUES (?, ?)",
-                        (service_name, category_id),
+                        "UPDATE services SET book = ?, type_id = ? WHERE id = ?",
+                        (book, type_id, service_id),
                     )
-                    service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                merchant_book = book if apply_scope == "service_default" else svc["book"]
+            else:
+                # Create new service — the type is required
+                if not type_id:
+                    return jsonify({"error": "type_id required for new service"}), 400
+                book = _book_or_proposed(conn, book, type_id)
+                conn.execute(
+                    "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
+                    (service_name, book, type_id),
+                )
+                service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                merchant_book = book
 
             # Step 2: Create merchant rule if pattern provided (optional for PayNow/transfers)
             rule_id = None
@@ -1045,29 +1134,37 @@ def api_resolve_transaction():
                     "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
                     (pattern.upper(),),
                 ).fetchone()
-                override_category_id = category_id if apply_scope == "rule" else None
+                # A rule override carries the type, and the book only where it
+                # is not the merchant's.
+                override_type_id = type_id if apply_scope == "rule" else None
+                override_book = (
+                    book if apply_scope == "rule" and book != merchant_book else None
+                )
                 if not rule_exists:
                     conn.execute(
-                        "INSERT INTO merchant_rules (pattern, service_id, category_override_id, match_type, confidence) "
-                        "VALUES (?, ?, ?, ?, 'confirmed')",
-                        (pattern, service_id, override_category_id, match_type),
+                        "INSERT INTO merchant_rules (pattern, service_id, book_override, "
+                        "type_override_id, match_type, confidence) "
+                        "VALUES (?, ?, ?, ?, ?, 'confirmed')",
+                        (pattern, service_id, override_book, override_type_id, match_type),
                     )
                     rule_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                 else:
                     rule_id = rule_exists["id"]
                     conn.execute(
-                        "UPDATE merchant_rules SET service_id = ?, category_override_id = ? WHERE id = ?",
-                        (service_id, override_category_id, rule_id),
+                        "UPDATE merchant_rules SET service_id = ?, book_override = ?, "
+                        "type_override_id = ? WHERE id = ?",
+                        (service_id, override_book, override_type_id, rule_id),
                     )
 
                 # Backfill other transactions matching this pattern with NULL service
                 match_cond = _build_match_condition(match_type)
                 cur = conn.execute(
-                    f"UPDATE transactions SET service_id = ?, category_id = ?, cat_source = ? "
+                    f"UPDATE transactions SET service_id = ?, book = ?, type_id = ?, cat_source = ? "
                     f"WHERE service_id IS NULL AND {match_cond}",
                     (
                         service_id,
-                        category_id,
+                        book,
+                        type_id,
                         "rule_override" if apply_scope == "rule" else "service_default",
                         pattern.upper(),
                     ),
@@ -1075,43 +1172,39 @@ def api_resolve_transaction():
                 backfilled = cur.rowcount
 
             # Step 3: Update the target transaction with explicit provenance.
-            # flow_type override is independent of category resolution (ADR v2):
+            # flow_type override is independent of the label (ADR v2):
             #   - if caller supplies flow_type, set it + mark flow_type_manual=1
-            #   - otherwise leave flow_type alone
+            #   - otherwise leave a hand-set flow alone and re-derive the rest
             tx_cat_source = {
                 "transaction": "manual",
                 "rule": "rule_override",
                 "service_default": "service_default",
             }.get(apply_scope, "manual")
-            flow_type = data.get("flow_type")
             tx_row = conn.execute(
                 "SELECT description, amount_sgd, flow_type_manual FROM transactions WHERE id = ?",
                 (tx_id,),
             ).fetchone()
+            label = (book, type_id, service_id, tx_cat_source)
             if flow_type is not None:
-                if flow_type not in ("expense", "income", "transfer", "payment", "refund"):
-                    return jsonify({"error": f"invalid flow_type: {flow_type}"}), 400
                 conn.execute(
-                    "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ?, "
+                    "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
                     "flow_type = ?, flow_type_manual = 1 WHERE id = ?",
-                    (category_id, service_id, tx_cat_source, flow_type, tx_id),
+                    (*label, flow_type, tx_id),
                 )
             elif tx_row and not tx_row["flow_type_manual"]:
                 flow_type = _classify_flow_for_tx(
-                    conn,
-                    tx_row["description"],
-                    tx_row["amount_sgd"],
-                    category_id,
+                    conn, tx_row["description"], tx_row["amount_sgd"]
                 )
                 conn.execute(
-                    "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ?, "
+                    "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
                     "flow_type = ? WHERE id = ?",
-                    (category_id, service_id, tx_cat_source, flow_type, tx_id),
+                    (*label, flow_type, tx_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ? WHERE id = ?",
-                    (category_id, service_id, tx_cat_source, tx_id),
+                    "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ? "
+                    "WHERE id = ?",
+                    (*label, tx_id),
                 )
 
             conn.commit()
@@ -1120,10 +1213,15 @@ def api_resolve_transaction():
                 "success": True,
                 "service_id": service_id,
                 "rule_id": rule_id,
-                "category_id": category_id,
+                "book": book,
+                "type_id": type_id,
                 "backfilled": backfilled,
             })
+        except BookNeeded as e:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 400
         except Exception as e:
+            conn.rollback()
             app.logger.warning("Failed to resolve transaction: %s", e)
             return jsonify({"error": "Failed to resolve transaction"}), 400
 
@@ -1143,10 +1241,10 @@ def _build_filters(args) -> tuple[str, list]:
         filters += " AND t.date <= ?"
         params.append(end)
 
-    scope = _requested_scope(args)
-    if scope:
-        filters += f" AND {category_scope_expr('c', 'p')} = ?"
-        params.append(scope)
+    book = _requested_book(args)
+    if book:
+        filters += f" AND {book_expr('t')} = ?"
+        params.append(book)
 
     exclude_one_off = args.get("exclude_one_off")
     if exclude_one_off == "true":
@@ -1172,10 +1270,10 @@ def _build_filters(args) -> tuple[str, list]:
 
 @app.route("/api/import/upload", methods=["POST"])
 def api_import_upload():
-    """Accept statement files, parse, categorize, return preview.
+    """Accept statement files, parse, label with book and type, return preview.
 
     Accepts multipart form data with one or more files.
-    Returns grouped preview by account with categorization status.
+    Returns grouped preview by account with each row's label status.
     """
     if "files" not in request.files:
         return jsonify({"error": "No files uploaded"}), 400
@@ -1218,35 +1316,22 @@ def api_import_upload():
         from flow import build_context, classify_flow
         flow_ctx = build_context(conn)
 
-        # Group transactions by account and categorize
-        cats = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM categories").fetchall()}
-        cats_by_name = {v: k for k, v in cats.items()}
+        # Group transactions by account and label each with book and type
+        type_names = book_type.spending_type_names(conn)
         svcs = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM services").fetchall()}
 
         for stmt in parsed_statements:
             for tx in stmt.transactions:
                 account = tx.card_info or stmt.accounts[0] if stmt.accounts else "Unknown"
 
-                cat_id, svc_id, cat_source = categorize_transaction(
-                    tx.description,
-                    conn,
-                    amount=tx.amount_sgd,
-                )
+                # Merchant rules first; for bank statements, then the PayNow wording
+                found = _label_for(conn, tx.description, tx.amount_sgd)
+                type_id = found["type_id"]
+                svc_id = found["service_id"]
 
-                # For bank statements, try PayNow rules
-                if cat_id is None:
-                    paynow_cat_id = _paynow_fallback_category_id(tx.description, conn)
-                    if paynow_cat_id:
-                        cat_id = paynow_cat_id
-                        cat_source = "fallback"
-
-                # Classify flow_type post-parse with category context
+                # Classify flow_type post-parse, from the row's own wording
                 tx.flow_type = classify_flow(
-                    {
-                        "description": tx.description,
-                        "amount_sgd": tx.amount_sgd,
-                        "category_name": cats.get(cat_id) if cat_id else None,
-                    },
+                    {"description": tx.description, "amount_sgd": tx.amount_sgd},
                     flow_ctx,
                 )
 
@@ -1256,17 +1341,21 @@ def api_import_upload():
                     "amount_sgd": tx.amount_sgd,
                     "amount_foreign": tx.amount_foreign,
                     "currency_foreign": tx.currency_foreign,
-                    "category_id": cat_id,
+                    "book": found["book"],
+                    "type_id": type_id,
+                    "type_name": type_names.get(type_id) if type_id else None,
                     "service_id": svc_id,
-                    "category_name": cats.get(cat_id) if cat_id else None,
                     "service_name": svcs.get(svc_id) if svc_id else None,
-                    "cat_source": cat_source,
+                    "cat_source": found["cat_source"],
+                    # A mixed merchant: recognised, given its default type,
+                    # and flagged for a look each time.
+                    "review_each_time": found["review_each_time"],
                     "flow_type": tx.flow_type,
                     "account": account,
-                    "status": "categorized" if cat_id else (
+                    "status": "typed" if type_id else (
                         "transfer" if tx.flow_type == "transfer"
                         else "payment" if tx.flow_type == "payment"
-                        else "uncategorized"
+                        else "untyped"
                     ),
                     # Default-skip: transfers + CC payments (non-spend events)
                     "_skip": tx.flow_type in ("transfer", "payment"),
@@ -1279,28 +1368,30 @@ def api_import_upload():
     # Build response
     groups = []
     total = 0
-    categorized = 0
-    uncategorized = 0
+    typed = 0
+    untyped = 0
     skipped = 0
+    to_review = 0
 
     for account_name, txns in all_groups.items():
-        group_cat = sum(1 for t in txns if t["status"] == "categorized")
-        group_uncat = sum(1 for t in txns if t["status"] == "uncategorized")
+        group_typed = sum(1 for t in txns if t["status"] == "typed")
+        group_untyped = sum(1 for t in txns if t["status"] == "untyped")
         group_skip = sum(1 for t in txns if t["_skip"])
 
         groups.append({
             "account": mask_card_number(account_name),
             "transactions": txns,
-            "categorized": group_cat,
-            "uncategorized": group_uncat,
+            "typed": group_typed,
+            "untyped": group_untyped,
             "skipped": group_skip,
             "total": len(txns),
         })
 
         total += len(txns)
-        categorized += group_cat
-        uncategorized += group_uncat
+        typed += group_typed
+        untyped += group_untyped
         skipped += group_skip
+        to_review += sum(1 for t in txns if t["review_each_time"])
 
     # Save preview to batch_imports and fetch services list in one connection
     with get_db() as conn:
@@ -1310,19 +1401,26 @@ def api_import_upload():
                 json.dumps(filenames),
                 json.dumps(list(all_groups.keys())),
                 total,
-                categorized,
+                typed,
             ),
         )
         conn.commit()
         import_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         services_rows = conn.execute(
-            "SELECT s.id, s.name, s.category_id, COALESCE(c.name, '') as category_name "
-            "FROM services s LEFT JOIN categories c ON s.category_id = c.id "
-            "ORDER BY s.name"
+            "SELECT s.id, s.name, s.book, s.type_id, s.review_each_time "
+            "FROM services s ORDER BY s.name"
         ).fetchall()
+        type_names = book_type.spending_type_names(conn)
     services_list = [
-        {"id": r["id"], "name": r["name"], "category_id": r["category_id"], "category_name": r["category_name"]}
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "book": r["book"],
+            "type_id": r["type_id"],
+            "type_name": type_names.get(r["type_id"], ""),
+            "review_each_time": r["review_each_time"],
+        }
         for r in services_rows
     ]
 
@@ -1331,9 +1429,10 @@ def api_import_upload():
         "groups": groups,
         "stats": {
             "total": total,
-            "categorized": categorized,
-            "uncategorized": uncategorized,
+            "typed": typed,
+            "untyped": untyped,
             "skipped": skipped,
+            "review_each_time": to_review,
         },
         "errors": errors,
         "filenames": filenames,
@@ -1358,16 +1457,23 @@ def api_import_confirm():
                         "amount_sgd": 123.45,
                         "amount_foreign": null,
                         "currency_foreign": null,
-                        "category_id": 5,
+                        "book": "Household",
+                        "type_id": 5,
                         "_skip": false
                     }, ...
                 ]
             }, ...
         ],
+        "new_services": [
+            {"name": "Merchant", "book": "Household", "type_id": 5, "description": "MERCHANT 0042"}, ...
+        ],
         "new_rules": [
-            {"pattern": "MERCHANT", "category_id": 5, "match_type": "contains"}, ...
+            {"pattern": "MERCHANT", "service_id": 7, "match_type": "contains"}, ...
         ]
     }
+
+    A book or a type that is not in its vocabulary refuses the whole import
+    before anything is written.
     """
     data = request.get_json()
     if not data:
@@ -1376,6 +1482,18 @@ def api_import_confirm():
     import_id = data.get("import_id")
     groups = data.get("groups", [])
     new_rules = data.get("new_rules", [])
+    new_services = data.get("new_services", [])
+
+    with get_db() as conn:
+        try:
+            for labelled in [tx for g in groups for tx in g.get("transactions", [])] + new_services:
+                _checked_labels(conn, labelled)
+            # A new merchant's book is the one given, or the one its type
+            # proposes; a type that proposes none has to be given one.
+            for ns in new_services:
+                _book_or_proposed(conn, ns.get("book") or None, ns.get("type_id") or None)
+        except (UnknownLabel, BookNeeded) as e:
+            return jsonify({"error": str(e)}), 400
 
     total_saved = 0
     total_duplicates = 0
@@ -1452,9 +1570,9 @@ def api_import_confirm():
                         conn.execute(
                             "INSERT INTO transactions "
                             "(statement_id, date, description, amount_sgd, amount_foreign, "
-                            "currency_foreign, category_id, service_id, "
+                            "currency_foreign, book, type_id, service_id, "
                             "is_one_off, cat_source, flow_type) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 statement_id,
                                 tx["date"],
@@ -1462,7 +1580,8 @@ def api_import_confirm():
                                 tx["amount_sgd"],
                                 tx.get("amount_foreign"),
                                 tx.get("currency_foreign"),
-                                tx.get("category_id"),
+                                tx.get("book") or None,
+                                tx.get("type_id") or None,
                                 tx.get("service_id"),
                                 1 if tx.get("is_one_off") else 0,
                                 tx.get("cat_source"),
@@ -1475,12 +1594,10 @@ def api_import_confirm():
                 conn.commit()
 
             # Create new services submitted from the preview
-            # Each entry: {name, category_id, description} — description becomes the merchant rule
-            new_services = data.get("new_services", [])
+            # Each entry: {name, book, type_id, description} — description becomes the merchant rule
             services_created = 0
             for ns in new_services:
                 svc_name = (ns.get("name") or "").strip()
-                cat_id = ns.get("category_id")
                 desc = (ns.get("description") or "").strip()
                 if not svc_name:
                     continue
@@ -1491,9 +1608,13 @@ def api_import_confirm():
                 if existing:
                     svc_id = existing["id"]
                 else:
+                    # The new merchant's default book and type. With no book
+                    # sent, the type proposes it (checked before any write).
+                    svc_type_id = ns.get("type_id") or None
+                    svc_book = _book_or_proposed(conn, ns.get("book") or None, svc_type_id)
                     conn.execute(
-                        "INSERT INTO services (name, category_id) VALUES (?, ?)",
-                        (svc_name, cat_id),
+                        "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
+                        (svc_name, svc_book, svc_type_id),
                     )
                     svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     services_created += 1
@@ -1693,23 +1814,24 @@ def api_statements_coverage():
 
 @app.route("/api/rules")
 def api_rules():
-    """List all merchant rules with service and category info."""
+    """List all merchant rules with their service, and the book and type each
+    gives a row: its own override where it has one, else the merchant's."""
     with get_db() as conn:
         rows = conn.execute("""
             SELECT mr.id, mr.pattern, mr.match_type, mr.confidence,
                    mr.priority, mr.min_amount, mr.max_amount,
                    mr.service_id,
-                   mr.category_override_id,
+                   mr.book_override, mr.type_override_id,
                    s.name as service_name,
-                   COALESCE(mr.category_override_id, s.category_id) as category_id,
-                   c.name as category_name,
-                   c.parent_id,
-                   p.name as parent_name
+                   COALESCE(mr.book_override, s.book) as book,
+                   COALESCE(mr.type_override_id, s.type_id) as type_id,
+                   ty.name as type_name,
+                   tp.name as parent_type
              FROM merchant_rules mr
              JOIN services s ON mr.service_id = s.id
-             LEFT JOIN categories c ON COALESCE(mr.category_override_id, s.category_id) = c.id
-             LEFT JOIN categories p ON c.parent_id = p.id
-            ORDER BY COALESCE(p.name, c.name), c.name, mr.priority DESC, mr.pattern
+             LEFT JOIN types ty ON COALESCE(mr.type_override_id, s.type_id) = ty.id
+             LEFT JOIN types tp ON ty.parent_id = tp.id
+            ORDER BY COALESCE(tp.name, ty.name), ty.name, mr.priority DESC, mr.pattern
         """).fetchall()
     return jsonify([{
         "id": r["id"],
@@ -1721,17 +1843,20 @@ def api_rules():
         "max_amount": r["max_amount"],
         "service_id": r["service_id"],
         "service_name": r["service_name"],
-        "category_override_id": r["category_override_id"],
-        "category_id": r["category_id"],
-        "category_name": r["category_name"],
-        "parent_name": r["parent_name"],
-        "display_category": format_category_display(r["parent_name"], r["category_name"]),
+        "book_override": r["book_override"],
+        "type_override_id": r["type_override_id"],
+        "book": r["book"],
+        "type_id": r["type_id"],
+        "type_name": r["type_name"],
+        "parent_type": r["parent_type"],
+        "display_type": format_type_display(r["parent_type"], r["type_name"]),
     } for r in rows])
 
 
 @app.route("/api/rules", methods=["POST"])
 def api_rules_create():
-    """Add a new merchant rule. Requires service_id (category derived from service)."""
+    """Add a new merchant rule. Requires service_id: book and type come from
+    the service unless the rule overrides them."""
     data = request.get_json()
     if not data or "pattern" not in data or "service_id" not in data:
         return jsonify({"error": "pattern and service_id required"}), 400
@@ -1740,14 +1865,21 @@ def api_rules_create():
         return jsonify({"error": pattern_error}), 400
 
     with get_db() as conn:
+        try:
+            book_override = _checked_book(data.get("book_override"))
+            type_override_id = _checked_type_id(conn, data.get("type_override_id"))
+        except UnknownLabel as e:
+            return jsonify({"error": str(e)}), 400
         return _crud_insert(
             conn,
-            "INSERT INTO merchant_rules (pattern, service_id, category_override_id, match_type, confidence, priority, min_amount, max_amount) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO merchant_rules (pattern, service_id, book_override, type_override_id, "
+            "match_type, confidence, priority, min_amount, max_amount) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 data["pattern"],
                 data["service_id"],
-                data.get("category_override_id"),
+                book_override,
+                type_override_id,
                 data.get("match_type", "contains"),
                 "confirmed",
                 data.get("priority", 0),
@@ -1761,7 +1893,7 @@ def api_rules_create():
 
 @app.route("/api/rules/<int:rule_id>", methods=["PUT"])
 def api_rules_update(rule_id):
-    """Update a merchant rule."""
+    """Update a merchant rule, then write its book and type to its rows."""
     data = request.get_json()
     if "pattern" in (data or {}):
         pattern_error = _rule_pattern_error(data.get("pattern"))
@@ -1769,19 +1901,25 @@ def api_rules_update(rule_id):
             return jsonify({"error": pattern_error}), 400
     sets, params = _build_update_sets(
         data,
-        ["pattern", "service_id", "category_override_id", "match_type", "priority", "min_amount", "max_amount"],
+        ["pattern", "service_id", "book_override", "type_override_id", "match_type",
+         "priority", "min_amount", "max_amount"],
     )
     if not sets:
         return jsonify({"error": "No fields to update"}), 400
 
     with get_db() as conn:
+        try:
+            _checked_labels(conn, data, "book_override", "type_override_id")
+        except UnknownLabel as e:
+            return jsonify({"error": str(e)}), 400
         params.append(rule_id)
         conn.execute(f"UPDATE merchant_rules SET {', '.join(sets)} WHERE id = ?", params)
 
-        # Auto re-categorize: re-run this specific rule against transactions
-        # Fetch the updated rule + service category
+        # Relabel: re-run this specific rule against transactions
+        # Fetch the updated rule + the merchant's default book and type
         rule = conn.execute(
-            "SELECT mr.pattern, mr.match_type, mr.service_id, mr.category_override_id, s.category_id "
+            "SELECT mr.pattern, mr.match_type, mr.service_id, mr.book_override, "
+            "mr.type_override_id, s.book, s.type_id "
             "FROM merchant_rules mr JOIN services s ON mr.service_id = s.id "
             "WHERE mr.id = ?", (rule_id,)
         ).fetchone()
@@ -1789,10 +1927,8 @@ def api_rules_update(rule_id):
         if rule:
             pattern_upper = rule["pattern"].upper()
             match_cond = _build_match_condition(rule["match_type"])
-            effective_category_id = rule["category_override_id"] or rule["category_id"]
-            effective_source = "rule_override" if rule["category_override_id"] else "service_default"
+            book, type_id, source = rule_label(rule)
             flow_ctx = None
-            cats_by_id = None
             rows = conn.execute(
                 f"""
                 SELECT id, description, amount_sgd, flow_type_manual
@@ -1804,25 +1940,16 @@ def api_rules_update(rule_id):
                 (pattern_upper,),
             ).fetchall()
             for tx in rows:
-                params = [effective_category_id, rule["service_id"], effective_source]
-                sql = "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ?"
+                params = [book, type_id, rule["service_id"], source]
+                sql = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?"
                 if not tx["flow_type_manual"]:
                     if flow_ctx is None:
                         from flow import build_context
 
                         flow_ctx = build_context(conn)
-                        cats_by_id = {
-                            row["id"]: row["name"]
-                            for row in conn.execute("SELECT id, name FROM categories").fetchall()
-                        }
                     params.append(
                         _classify_flow_for_tx(
-                            conn,
-                            tx["description"],
-                            tx["amount_sgd"],
-                            effective_category_id,
-                            flow_ctx=flow_ctx,
-                            cats_by_id=cats_by_id,
+                            conn, tx["description"], tx["amount_sgd"], flow_ctx=flow_ctx
                         )
                     )
                     sql += ", flow_type = ?"
@@ -1850,12 +1977,13 @@ def api_rules_delete(rule_id):
 def api_rules_recategorize():
     """Re-run all merchant rules against existing transactions.
 
-    Category derived from service (no rule-level category to sync).
+    Each row takes the book and type its rule gives it (the merchant's
+    default, or the rule's override). Rows labelled by hand are left alone.
     """
     with get_db() as conn:
-        # Skip manually resolved transactions — only re-run on auto-categorized ones
+        # Skip manually resolved transactions — only re-run on rows the rules labelled
         rows = conn.execute("""
-            SELECT id, description, amount_sgd, category_id, service_id, cat_source,
+            SELECT id, description, amount_sgd, book, type_id, service_id, cat_source,
                    COALESCE(flow_type, 'expense') AS flow_type, flow_type_manual
             FROM transactions
             WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
@@ -1870,46 +1998,24 @@ def api_rules_recategorize():
         updated = 0
         unchanged = 0
         flow_ctx = None
-        cats_by_id = None
         for tx in rows:
-            new_cat, new_svc, new_source = categorize_transaction(
-                tx["description"],
-                conn,
-                amount=tx["amount_sgd"],
-            )
-            if new_cat is None:
-                new_cat = _paynow_fallback_category_id(tx["description"], conn)
-                if new_cat:
-                    new_svc = None
-                    new_source = "fallback"
+            found = _label_for(conn, tx["description"], tx["amount_sgd"])
+            new_label = (found["book"], found["type_id"], found["service_id"], found["cat_source"])
             new_flow = tx["flow_type"]
             if not tx["flow_type_manual"]:
                 if flow_ctx is None:
                     from flow import build_context
 
                     flow_ctx = build_context(conn)
-                    cats_by_id = {
-                        row["id"]: row["name"]
-                        for row in conn.execute("SELECT id, name FROM categories").fetchall()
-                    }
                 new_flow = _classify_flow_for_tx(
-                    conn,
-                    tx["description"],
-                    tx["amount_sgd"],
-                    new_cat,
-                    flow_ctx=flow_ctx,
-                    cats_by_id=cats_by_id,
+                    conn, tx["description"], tx["amount_sgd"], flow_ctx=flow_ctx
                 )
-            if (
-                new_cat != tx["category_id"]
-                or new_svc != tx["service_id"]
-                or new_source != tx["cat_source"]
-                or new_flow != tx["flow_type"]
-            ):
+            old_label = (tx["book"], tx["type_id"], tx["service_id"], tx["cat_source"])
+            if new_label != old_label or new_flow != tx["flow_type"]:
                 conn.execute(
-                    "UPDATE transactions SET category_id = ?, service_id = ?, cat_source = ?, flow_type = ? "
-                    "WHERE id = ?",
-                    (new_cat, new_svc, new_source, new_flow, tx["id"]),
+                    "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
+                    "flow_type = ? WHERE id = ?",
+                    (*new_label, new_flow, tx["id"]),
                 )
                 updated += 1
             else:
@@ -1965,7 +2071,8 @@ def _monthly_equivalent(amount: float, frequency: str, periods: int,
 
 @app.route("/api/subscriptions")
 def api_subscriptions():
-    """List all subscriptions with category info and transaction enrichment."""
+    """List all subscriptions with transaction enrichment. A subscription
+    carries no label of its own: its book and type are its merchant's."""
     fx_rate = _get_usd_sgd_rate()
 
     # Compute 90-day cutoff for rolling averages
@@ -1973,23 +2080,23 @@ def api_subscriptions():
 
     with get_db() as conn:
         rows = conn.execute("""
-            SELECT s.*, c.name as category_name, c.is_personal,
-                   """ + category_scope_expr("c", "p") + """ as scope,
-                   p.name as parent_name,
+            SELECT s.*,
+                   """ + book_expr("svc") + """ as merchant_book,
+                   svc.type_id as merchant_type_id,
+                   ty.name as type_name, tp.name as parent_type,
                    a.short_name as account_short_name, a.name as account_name,
                    svc.name as service_name
             FROM subscriptions s
-            LEFT JOIN categories c ON s.category_id = c.id
-            LEFT JOIN categories p ON c.parent_id = p.id
             LEFT JOIN accounts a ON s.account_id = a.id
             LEFT JOIN services svc ON s.service_id = svc.id
+            """ + _TYPE_JOINS.format(owner="svc") + """
             ORDER BY
                 CASE s.status WHEN 'active' THEN 0 ELSE 1 END,
                 s.renewal_date
         """).fetchall()
 
         # Batch enrichment: latest tx per subscription (replaces 2 queries per sub)
-        # Subscriptions only match transactions in the same derived scope.
+        # A subscription only matches transactions in its merchant's book.
         latest_tx_rows = conn.execute("""
         WITH matched AS (
             SELECT s.id as sub_id,
@@ -1998,13 +2105,10 @@ def api_subscriptions():
             FROM subscriptions s
             JOIN transactions t
                 ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
-            LEFT JOIN categories sc ON s.category_id = sc.id
-            LEFT JOIN categories sp ON sc.parent_id = sp.id
-            LEFT JOIN categories tc ON t.category_id = tc.id
-            LEFT JOIN categories tp ON tc.parent_id = tp.id
+            LEFT JOIN services svc ON s.service_id = svc.id
             WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
               AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
-              AND """ + category_scope_expr("tc", "tp") + " = " + category_scope_expr("sc", "sp") + """
+              AND """ + book_expr("t") + " = " + book_expr("svc") + """
         )
         SELECT sub_id, tx_id, tx_date, amount_sgd
         FROM matched WHERE rn = 1
@@ -2012,7 +2116,7 @@ def api_subscriptions():
         latest_tx = {r["sub_id"]: dict(r) for r in latest_tx_rows}
 
         # Batch enrichment: monthly sums per subscription for 90-day rolling avg
-        # Same scope boundary as latest tx query.
+        # Same book boundary as latest tx query.
         monthly_rows = conn.execute("""
             SELECT s.id as sub_id,
                    SUBSTR(t.date, 1, 7) as ym,
@@ -2020,14 +2124,11 @@ def api_subscriptions():
             FROM subscriptions s
             JOIN transactions t
                 ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
-            LEFT JOIN categories sc ON s.category_id = sc.id
-            LEFT JOIN categories sp ON sc.parent_id = sp.id
-            LEFT JOIN categories tc ON t.category_id = tc.id
-            LEFT JOIN categories tp ON tc.parent_id = tp.id
+            LEFT JOIN services svc ON s.service_id = svc.id
             WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
               AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
               AND t.date >= ?
-              AND """ + category_scope_expr("tc", "tp") + " = " + category_scope_expr("sc", "sp") + """
+              AND """ + book_expr("t") + " = " + book_expr("svc") + """
             GROUP BY s.id, SUBSTR(t.date, 1, 7)
             ORDER BY s.id, ym DESC
         """, (cutoff_90d,)).fetchall()
@@ -2042,9 +2143,9 @@ def api_subscriptions():
     result = []
     for r in rows:
         d = dict(r)
-        # Book and type are stored but not served until the app reads them.
-        d.pop("book", None)
-        d.pop("type_id", None)
+        # Book and type are the merchant's, never the subscription's own.
+        d["book"] = d.pop("merchant_book")
+        d["type_id"] = d.pop("merchant_type_id")
         sub_id = d["id"]
         pat = (d["match_pattern"] or "").upper()
         monthly_sums = monthly_by_sub.get(sub_id, []) if pat else []
@@ -2082,7 +2183,7 @@ def api_subscriptions():
         if not d["is_variable"]:
             d["monthly_sgd"] = round(_monthly_equivalent(amt, d["frequency"], d["periods"], cur, fx_rate), 2)
 
-        d["display_category"] = format_category_display(d["parent_name"], d["category_name"])
+        d["display_type"] = format_type_display(d["parent_type"], d["type_name"])
         d["fx_rate"] = fx_rate
 
         # Anchor-based renewal: advance from renewal_date anchor until future
@@ -2098,7 +2199,7 @@ def api_subscriptions():
 
 @app.route("/api/subscriptions", methods=["POST"])
 def api_subscriptions_create():
-    """Add a new subscription."""
+    """Add a new subscription. It takes its book and type from its service."""
     data = request.get_json()
     if not data or not data.get("service_id"):
         return jsonify({"error": "service_id is required"}), 400
@@ -2113,13 +2214,12 @@ def api_subscriptions_create():
         return _crud_insert(
             conn,
             "INSERT INTO subscriptions "
-            "(service_id, category_id, amount, currency, "
+            "(service_id, amount, currency, "
             "frequency, periods, account_id, last_paid, renewal_date, status, "
             "link, notes, match_pattern) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 data["service_id"],
-                data.get("category_id"),
                 data.get("amount", 0),
                 data.get("currency", "SGD"),
                 data.get("frequency", "monthly"),
@@ -2140,7 +2240,7 @@ def api_subscriptions_create():
 def api_subscriptions_update(sub_id):
     """Update a subscription."""
     return _crud_update("subscriptions", sub_id, request.get_json(), [
-        "service_id", "category_id", "amount", "currency", "frequency",
+        "service_id", "amount", "currency", "frequency",
         "periods", "account_id", "last_paid", "renewal_date", "status",
         "link", "notes", "match_pattern",
     ])

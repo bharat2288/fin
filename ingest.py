@@ -1,6 +1,6 @@
 """Ingest helpers for the fin database.
 
-Provides account/statement creation and PayNow categorization,
+Provides account/statement creation and the PayNow type fallback,
 imported by app.py for the import-confirm workflow.
 """
 
@@ -8,10 +8,10 @@ import re
 import sqlite3
 
 
-# Bank statement PayNow payee → category mapping
+# Bank statement PayNow payee → type mapping
 # These are identified by the "To:" field in bank statement descriptions
 PAYNOW_RULES = [
-    # (pattern_in_description, category_name, notes)
+    # (pattern_in_description, type name, notes)
     ("CENTRAL PROVIDENT FUND BOARD", "Tax", "CPF payment"),
     ("CPF VOLUNTARY CONTRIBUTIONS", "Tax", "CPF voluntary contribution"),
     ("SINGAPORE LIFE", "Insurance", "Life insurance premium"),
@@ -33,17 +33,17 @@ PAYNOW_RULES = [
 ]
 
 
-def categorize_bank_paynow(description: str) -> tuple[int | None, str | None]:
-    """Match bank statement PayNow/transfer descriptions to categories.
+def paynow_type(description: str) -> str | None:
+    """Match a bank statement PayNow/transfer description to a type.
 
-    Returns (category_id, category_name) or (None, None) if no match.
-    Requires a DB lookup, so we return the category name for later resolution.
+    Returns the type's name, or None if no payee wording matches. The caller
+    resolves the name to its id.
     """
     desc_upper = description.upper()
-    for pattern, cat_name, _ in PAYNOW_RULES:
+    for pattern, type_name, _ in PAYNOW_RULES:
         if pattern.upper() in desc_upper:
-            return None, cat_name  # category_name, resolve to ID later
-    return None, None
+            return type_name
+    return None
 
 
 def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> int:

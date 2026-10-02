@@ -17,6 +17,11 @@ BOOKS = (
     ("Kalesh", "costs of the company Kalesh, whichever account paid them"),
 )
 
+BOOK_NAMES = tuple(name for name, _ in BOOKS)
+# The book a row with none is read as: spending nobody has placed is the
+# household's until the operator says otherwise.
+DEFAULT_BOOK = "Household"
+
 RUNNING = "running"
 ONE_OFF = "one-off"
 
@@ -146,6 +151,21 @@ INCOME_KINDS = (
 SPENDING = "spending"
 INCOME = "income"
 
+# Book for a merchant no rule knows is proposed by its type, never by the
+# paying account. These types propose Moom; ASKS_FOR_BOOK types propose
+# nothing and the operator must say; every other type proposes Household.
+PROPOSES_MOOM = ("Advertising", "Stock purchases", "Payment fees")
+ASKS_FOR_BOOK = ("Software & AI tools",)
+
+
+def proposed_book(type_name: str | None) -> str | None:
+    """The book proposed for a type (its display name); None means ask."""
+    if type_name in ASKS_FOR_BOOK:
+        return None
+    if type_name in PROPOSES_MOOM:
+        return "Moom"
+    return DEFAULT_BOOK
+
 # The same statement as in schema.sql, which stays the source of truth; a test
 # holds the two to the same shape. The conversion runs it one statement at a
 # time, which a script file cannot do inside the runner's transaction.
@@ -216,3 +236,8 @@ def spending_type_ids(conn: sqlite3.Connection) -> dict[str, int]:
             (SPENDING,),
         )
     }
+
+
+def spending_type_names(conn: sqlite3.Connection) -> dict[int, str]:
+    """Each spending type's display name ('Fitness > Golf'), keyed by its id."""
+    return {type_id: name for name, type_id in spending_type_ids(conn).items()}

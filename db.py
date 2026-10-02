@@ -8,49 +8,9 @@ import book_type
 DB_PATH = Path(__file__).parent / "fin.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
-# Default expense categories — (name, parent_name_or_None, is_personal)
-# parent_name is resolved to parent_id at seed time
-DEFAULT_CATEGORIES = [
-    ("Groceries", None, 1),
-    ("Dining", None, 1),
-    ("Transport", None, 1),
-    ("Shopping", None, 1),
-    ("Health & Beauty", None, 1),
-    ("Medical", None, 1),
-    ("Entertainment", None, 1),
-    ("Utilities", None, 1),
-    ("Subscriptions", None, 1),
-    ("Loan/EMI", None, 1),
-    ("Travel", None, 1),
-    ("Pet", None, 1),
-    ("Home", None, 1),
-    ("Personal", None, 1),
-    ("Credits", None, 1),
-    ("Transfers", None, 1),
-    ("Education", None, 1),
-    ("Fitness", None, 1),
-    ("Kids", None, 1),
-    ("Gifts & Donations", None, 1),
-    ("Moom", None, 0),  # Business - Moom
-    ("Kalesh", None, 0),  # Business - Kalesh
-    ("Other", None, 1),
-    ("Rent", None, 1),
-    ("Admin", None, 1),
-    # Subcategories
-    ("Salary", "Credits", 1),
-    ("Interest", "Credits", 1),
-    ("Misc Incoming", "Credits", 1),
-    ("Misc Transfer", "Transfers", 1),
-    ("Accounting", "Kalesh", 0),
-    ("Fees", "Kalesh", 0),
-    ("Tax", "Admin", 1),
-    ("Insurance", "Admin", 1),
-    ("Bank Fees", "Admin", 1),
-    ("Government", "Admin", 1),
-]
-
-# Initial merchant → category rules based on known data
-# (pattern, category_name, match_type)
+# Initial merchant rules based on known data: (pattern, label, match_type).
+# The label is the merchant's type, with book Household, unless SEED_LABELS
+# says otherwise.
 DEFAULT_MERCHANT_RULES = [
     # Groceries
     ("TANGLIN MARKET", "Groceries", "contains"),
@@ -247,6 +207,39 @@ DEFAULT_MERCHANT_RULES = [
 ]
 
 
+# Seed labels that are not a Household type of the same name: (book, type).
+# These are what the book and type conversion makes of the old categories of
+# the same names: no type, left for the operator to place.
+SEED_LABELS = {
+    "Moom": ("Moom", None),
+    "Other": ("Household", None),
+    "Loan/EMI": ("Household", None),
+}
+
+
+class DatabaseNotConverted(Exception):
+    """The database is in a shape from before book and type replaced the
+    category tree. Nothing was changed."""
+
+
+def _refuse_unconverted(conn: sqlite3.Connection) -> None:
+    """Stop before touching a database that still carries categories.
+
+    Conversions of existing rows go through the conversion runner, behind a
+    backup, and never happen here.
+    """
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "transactions" not in tables:
+        return  # a new database
+    tx_cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+    if "categories" in tables or "category_id" in tx_cols or "book" not in tx_cols:
+        raise DatabaseNotConverted(
+            "this database still carries the category tree. Convert it first, in this "
+            "order: python convert_book_type.py <path to database>, then "
+            "python retire_categories.py <path to database>"
+        )
+
+
 def get_connection() -> sqlite3.Connection:
     """Get a database connection with row factory."""
     conn = sqlite3.connect(str(DB_PATH))
@@ -259,114 +252,59 @@ def get_connection() -> sqlite3.Connection:
 def init_db() -> None:
     """Initialize the database schema and seed data.
 
-    Safe to call multiple times — uses INSERT OR IGNORE for idempotent seeding.
-    Adds new categories and merchant rules without duplicating existing ones.
+    Safe to call multiple times: seeding skips what is already there.
+    Refuses a database that has not been through the book and type conversions.
     """
     conn = get_connection()
+    try:
+        _refuse_unconverted(conn)
+    except DatabaseNotConverted:
+        conn.close()
+        raise
 
     # Run schema (CREATE IF NOT EXISTS is safe to re-run)
     schema_sql = SCHEMA_PATH.read_text()
     conn.executescript(schema_sql)
 
-    # Lightweight migrations for additive columns on long-lived local DBs.
-    service_cols = {row["name"] for row in conn.execute("PRAGMA table_info(services)").fetchall()}
-    if "exclude_from_expense_views" not in service_cols:
-        conn.execute(
-            "ALTER TABLE services ADD COLUMN exclude_from_expense_views INTEGER DEFAULT 0"
-        )
-        conn.commit()
-
-    rule_cols = {row["name"] for row in conn.execute("PRAGMA table_info(merchant_rules)").fetchall()}
-    if "category_override_id" not in rule_cols:
-        conn.execute(
-            "ALTER TABLE merchant_rules ADD COLUMN category_override_id INTEGER"
-        )
-        conn.commit()
-
-    tx_cols = {row["name"] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()}
-    if "service_id" not in tx_cols:
-        conn.execute(
-            "ALTER TABLE transactions ADD COLUMN service_id INTEGER"
-        )
-        conn.commit()
-    if "flow_type" not in tx_cols:
-        conn.execute("ALTER TABLE transactions ADD COLUMN flow_type TEXT")
-        conn.commit()
-    if "flow_type_manual" not in tx_cols:
-        conn.execute("ALTER TABLE transactions ADD COLUMN flow_type_manual INTEGER DEFAULT 0")
-        conn.commit()
-    # Drop legacy flags once flow_type exists (ADR v2 grep gate complete)
-    if "is_payment" in tx_cols:
-        conn.execute("ALTER TABLE transactions DROP COLUMN is_payment")
-        conn.commit()
-    if "is_transfer" in tx_cols:
-        conn.execute("ALTER TABLE transactions DROP COLUMN is_transfer")
-        conn.commit()
-
-    # The type list, from its one declaration. A database created before the
-    # book and type columns existed gains those through convert_book_type.py,
-    # never here.
+    # The type list, from its one declaration.
     book_type.seed_types(conn)
     conn.commit()
-
-    # Seed categories — INSERT OR IGNORE so new categories get added
-    # First pass: insert all top-level (parent=None)
-    for name, parent_name, is_personal in DEFAULT_CATEGORIES:
-        if parent_name is None:
-            conn.execute(
-                "INSERT OR IGNORE INTO categories (name, parent_id, is_personal) VALUES (?, NULL, ?)",
-                (name, is_personal),
-            )
-    conn.commit()
-    # Second pass: insert subcategories (parent_name != None)
-    for name, parent_name, is_personal in DEFAULT_CATEGORIES:
-        if parent_name is not None:
-            parent_row = conn.execute(
-                "SELECT id FROM categories WHERE name = ?", (parent_name,)
-            ).fetchone()
-            parent_id = parent_row[0] if parent_row else None
-            conn.execute(
-                "INSERT OR IGNORE INTO categories (name, parent_id, is_personal) VALUES (?, ?, ?)",
-                (name, parent_id, is_personal),
-            )
-    conn.commit()
+    type_ids = book_type.spending_type_ids(conn)
 
     # Seed merchant rules — skip if pattern already exists in any form
-    # Rules now require service_id (service-centric model)
+    # Rules require service_id (service-centric model)
     added = 0
-    for pattern, cat_name, match_type in DEFAULT_MERCHANT_RULES:
-        cat_row = conn.execute(
-            "SELECT id FROM categories WHERE name = ?", (cat_name,)
+    for pattern, label, match_type in DEFAULT_MERCHANT_RULES:
+        book, type_name = SEED_LABELS.get(label, (book_type.DEFAULT_BOOK, label))
+        existing = conn.execute(
+            "SELECT id FROM merchant_rules WHERE pattern = ?", (pattern,)
         ).fetchone()
-        if cat_row:
-            existing = conn.execute(
-                "SELECT id FROM merchant_rules WHERE pattern = ?", (pattern,)
+        if not existing:
+            # Find or create a service for this pattern
+            svc_name = pattern.title()  # e.g., "GRAB" → "Grab"
+            svc = conn.execute(
+                "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
             ).fetchone()
-            if not existing:
-                # Find or create a service for this pattern
-                svc_name = pattern.title()  # e.g., "GRAB" → "Grab"
-                svc = conn.execute(
-                    "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
-                ).fetchone()
-                if not svc:
-                    conn.execute("INSERT INTO services (name, category_id) VALUES (?, ?)",
-                                 (svc_name, cat_row[0]))
-                    svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                else:
-                    svc_id = svc[0]
+            if not svc:
                 conn.execute(
-                    "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
-                    "VALUES (?, ?, ?, 'auto')",
-                    (pattern, svc_id, match_type),
+                    "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
+                    (svc_name, book, type_ids[type_name] if type_name else None),
                 )
-                added += 1
+                svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            else:
+                svc_id = svc[0]
+            conn.execute(
+                "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
+                "VALUES (?, ?, ?, 'auto')",
+                (pattern, svc_id, match_type),
+            )
+            added += 1
     conn.commit()
     if added > 0:
         print(f"Added {added} new merchant rules")
 
-    # Backfill legacy rows that were migrated to flow_type columns before the
-    # classifier ran. This keeps dashboard expense views from treating old
-    # transfer/payment rows as spend after restart.
+    # Backfill rows that have no flow_type yet. This keeps dashboard expense
+    # views from treating old transfer/payment rows as spend after restart.
     null_flow_count = conn.execute(
         "SELECT COUNT(*) FROM transactions WHERE flow_type IS NULL"
     ).fetchone()[0]
@@ -375,9 +313,11 @@ def init_db() -> None:
 
         backfill(conn)
 
-    total_cats = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+    total_types = conn.execute(
+        "SELECT COUNT(*) FROM types WHERE kind = ?", (book_type.SPENDING,)
+    ).fetchone()[0]
     total_rules = conn.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0]
-    print(f"Database ready: {total_cats} categories, {total_rules} merchant rules")
+    print(f"Database ready: {total_types} types, {total_rules} merchant rules")
 
     conn.close()
 
@@ -401,7 +341,8 @@ def _get_rules(conn: sqlite3.Connection) -> list[dict]:
         rows = conn.execute(
             "SELECT mr.pattern, mr.match_type, "
             "       mr.priority, mr.min_amount, mr.max_amount, "
-            "       mr.service_id, mr.category_override_id, s.category_id "
+            "       mr.service_id, mr.book_override, mr.type_override_id, "
+            "       s.book, s.type_id, s.review_each_time "
             "FROM merchant_rules mr "
             "JOIN services s ON mr.service_id = s.id "
             "ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC"
@@ -410,19 +351,44 @@ def _get_rules(conn: sqlite3.Connection) -> list[dict]:
     return _rules_cache
 
 
-def categorize_transaction(
+def rule_label(rule) -> tuple[str | None, int | None, str]:
+    """The (book, type_id, provenance) a rule gives a row.
+
+    A rule may override the merchant's type, its book, or both; whatever it
+    does not override is the merchant's default.
+    """
+    overrides = rule["type_override_id"] is not None or rule["book_override"] is not None
+    return (
+        rule["book_override"] or rule["book"],
+        rule["type_override_id"] or rule["type_id"],
+        "rule_override" if overrides else "service_default",
+    )
+
+
+# What match_merchant returns when no rule knows the description.
+NO_MATCH = {
+    "book": None,
+    "type_id": None,
+    "service_id": None,
+    "cat_source": None,
+    "review_each_time": False,
+}
+
+
+def match_merchant(
     description: str,
     conn: sqlite3.Connection,
     amount: float | None = None,
-) -> tuple[int | None, int | None, str | None]:
-    """Match a transaction description to a category using merchant rules.
+) -> dict:
+    """Match a transaction description to a merchant using merchant rules.
 
     Rules are sorted by priority DESC, then pattern length DESC (most specific first).
     Amount-conditional rules (min_amount / max_amount) only match if the transaction
     amount falls within the specified range.
 
-    Returns (category_id, service_id, cat_source) tuple. Either or both may be None.
-    Category is resolved from the service (service.category_id).
+    Returns {book, type_id, service_id, cat_source, review_each_time}; every
+    value is empty when no rule matches. Book and type are the merchant's
+    defaults unless the rule overrides them.
     """
     desc_upper = description.upper()
     rules = _get_rules(conn)
@@ -454,13 +420,16 @@ def categorize_transaction(
             if rule["min_amount"] is not None or rule["max_amount"] is not None:
                 continue
 
-        # Category derived from service (single source of truth)
-        service_id = rule["service_id"]
-        category_id = rule["category_override_id"] or rule["category_id"]
-        cat_source = "rule_override" if rule["category_override_id"] else "service_default"
-        return (category_id, service_id, cat_source)
+        book, type_id, cat_source = rule_label(rule)
+        return {
+            "book": book,
+            "type_id": type_id,
+            "service_id": rule["service_id"],
+            "cat_source": cat_source,
+            "review_each_time": bool(rule["review_each_time"]),
+        }
 
-    return (None, None, None)
+    return dict(NO_MATCH)
 
 
 if __name__ == "__main__":

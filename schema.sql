@@ -1,30 +1,23 @@
 -- fin: personal finance tracker
 -- Schema v1
 
-CREATE TABLE IF NOT EXISTS categories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    parent_id INTEGER,             -- NULL = top-level parent; FK = subcategory
-    is_personal INTEGER DEFAULT 1,  -- 0 = business (Moom/Kalesh), 1 = personal
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (parent_id) REFERENCES categories(id)
-);
+-- A row, a merchant and a rule are labelled by book (whose spending) and type
+-- (what kind), declared in book_type.py. The category tree they replaced is
+-- retired; an existing database loses it through retire_categories.py.
 
 CREATE TABLE IF NOT EXISTS merchant_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern TEXT NOT NULL,          -- merchant name pattern (case-insensitive match)
-    service_id INTEGER NOT NULL,   -- FK to services (category derived from service)
-    category_override_id INTEGER,  -- optional category override when pattern implies spend type
+    service_id INTEGER NOT NULL,   -- FK to services (book and type come from the merchant)
     match_type TEXT DEFAULT 'contains',  -- 'contains', 'startswith', 'exact'
     confidence TEXT DEFAULT 'confirmed', -- 'auto', 'confirmed' (user-verified)
     priority INTEGER DEFAULT 0,    -- higher priority wins (for overlapping patterns)
     min_amount REAL,               -- if set, rule only matches when amount >= this
     max_amount REAL,               -- if set, rule only matches when amount <= this
     created_at TEXT DEFAULT (datetime('now')),
-    book_override TEXT,            -- book the rule sets in place of the merchant's (with the type override)
+    book_override TEXT,            -- book the rule sets in place of the merchant's; NULL = the merchant's
     type_override_id INTEGER REFERENCES types(id),  -- type the rule sets in place of the merchant's
-    FOREIGN KEY (service_id) REFERENCES services(id),
-    FOREIGN KEY (category_override_id) REFERENCES categories(id)
+    FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
 CREATE TABLE IF NOT EXISTS accounts (
@@ -56,25 +49,22 @@ CREATE TABLE IF NOT EXISTS transactions (
     amount_sgd REAL NOT NULL,       -- positive = expense, negative = credit/payment
     amount_foreign REAL,           -- original amount if foreign currency
     currency_foreign TEXT,         -- e.g., 'USD', 'AUD', 'INR'
-    category_id INTEGER,
     service_id INTEGER,            -- FK to services table (merchant identity)
     is_one_off INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in table)
-    cat_source TEXT DEFAULT 'auto',  -- 'auto' = rule engine, 'manual' = user resolved
+    cat_source TEXT DEFAULT 'auto',  -- where book and type came from: auto|service_default|rule_override|fallback|manual
     flow_type TEXT,                -- expense|income|transfer|payment|refund (ADR v2)
     flow_type_manual INTEGER DEFAULT 0,  -- 1 = user overrode classifier; preserve on recategorize
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    book TEXT,                     -- whose spending: Household, Moom, Kalesh (declared in book_type.py)
+    book TEXT,                     -- whose spending: Household, Moom, Kalesh (declared in book_type.py); NULL reads as Household
     type_id INTEGER REFERENCES types(id),  -- what kind of spending; NULL = not placed, or not spending
     FOREIGN KEY (statement_id) REFERENCES statements(id),
-    FOREIGN KEY (category_id) REFERENCES categories(id),
     FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service_id INTEGER,             -- FK to services table (source of truth for name)
-    category_id INTEGER,
+    service_id INTEGER,             -- FK to services table (source of truth for name, book and type)
     amount REAL NOT NULL,           -- billed amount per cycle
     currency TEXT DEFAULT 'SGD',    -- 'SGD' or 'USD'
     frequency TEXT NOT NULL,        -- 'monthly', 'yearly', 'quarterly'
@@ -87,30 +77,28 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     notes TEXT,
     match_pattern TEXT,            -- pattern to match against transaction descriptions
     created_at TEXT DEFAULT (datetime('now')),
-    book TEXT,                     -- as on transactions
-    type_id INTEGER REFERENCES types(id),
+    book TEXT,                     -- not read or written: a subscription takes book and type from its merchant.
+    type_id INTEGER REFERENCES types(id),  -- Both hold the label the conversion gave an existing subscription.
     FOREIGN KEY (service_id) REFERENCES services(id),
-    FOREIGN KEY (category_id) REFERENCES categories(id),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 
 CREATE TABLE IF NOT EXISTS services (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,          -- e.g., "Netflix", "SP Gas BGV", "Grab"
-    category_id INTEGER,                -- default category for this service
     is_one_off INTEGER DEFAULT 0,       -- 1 = one-off service (not recurring)
     exclude_from_expense_views INTEGER DEFAULT 0,  -- 1 = keep in ledger but hide from dashboard/expense tables
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     book TEXT,                          -- default book for this merchant's rows
     type_id INTEGER REFERENCES types(id),  -- default type for this merchant's rows
-    FOREIGN KEY (category_id) REFERENCES categories(id)
+    review_each_time INTEGER DEFAULT 0  -- 1 = a mixed merchant: its rows take the default type and are flagged for a look each time
 );
 
 -- The type list: one list for every book, with one level of sub-type, and
 -- the short list of income kinds. Filled from the declaration in book_type.py.
--- Book and type sit beside the category columns until the category tree is
--- retired; an existing database gains them through convert_book_type.py.
+-- An existing database gains it, and the book and type columns, through
+-- convert_book_type.py.
 CREATE TABLE IF NOT EXISTS types (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL DEFAULT 'spending',  -- 'spending' = a type, 'income' = an income kind
@@ -137,8 +125,6 @@ CREATE TABLE IF NOT EXISTS batch_imports (
 
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
-CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_statement ON transactions(statement_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_rules_pattern ON merchant_rules(pattern);
 CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
-CREATE INDEX IF NOT EXISTS idx_services_category ON services(category_id);

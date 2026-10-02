@@ -144,13 +144,12 @@ def _matches_own_alias(description: str, own_aliases: tuple[str, ...]) -> bool:
     return any(a.upper() in up for a in own_aliases if a)
 
 
-def _looks_like_refund(description: str, category_name: str | None) -> bool:
+def _looks_like_refund(description: str) -> bool:
+    """A refund is known by its wording. Nothing a row is filed under makes
+    one: no type is a refund, and a refund the wording does not show is a flow
+    the operator sets by hand."""
     up = description.upper()
-    if any(k in up for k in REFUND_KEYWORDS):
-        return True
-    if category_name and category_name.lower() in ("refund", "refunds", "rebate"):
-        return True
-    return False
+    return any(k in up for k in REFUND_KEYWORDS)
 
 
 def _matches_known_transfer_rail(description: str, owned_bank_refs: tuple[str, ...]) -> bool:
@@ -173,11 +172,10 @@ def _matches_known_transfer_rail(description: str, owned_bank_refs: tuple[str, .
 def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     """Return one of FLOW_TYPES.
 
-    facts: {date, description, amount_sgd, category_name}
+    facts: {date, description, amount_sgd}
     """
     description = facts.get("description", "") or ""
     amount = facts.get("amount_sgd", 0.0) or 0.0
-    category_name = facts.get("category_name")
 
     # 1. Linked-CC payoff (most specific form of own-endpoint movement)
     if _matches_linked_cc(description, ctx.linked_cc_patterns):
@@ -193,7 +191,7 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
 
     # 2. Refund check BEFORE transfer, so a rebate from a known merchant
     #    isn't swallowed as a generic transfer. Refunds are always inflows.
-    if amount < 0 and _looks_like_refund(description, category_name):
+    if amount < 0 and _looks_like_refund(description):
         return "refund"
 
     # 3. Own-counterparty movement (non-CC)

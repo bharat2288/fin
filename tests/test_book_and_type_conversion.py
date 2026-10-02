@@ -10,11 +10,10 @@ from pathlib import Path
 
 import pytest
 
-import app as fin_app
 import book_type
 import conversion
 import convert_book_type
-import db
+import retire_categories
 
 DAY = date(2026, 3, 14)
 OLD_SCHEMA = Path(__file__).parent / "schema_before_book_and_type.sql"
@@ -90,6 +89,8 @@ MARKED_FOR_REVIEW = [
     ("Other", "Household"),
     ("Personal", "Household"),
     ("Moom", "Moom"),
+    # Not in the attachment's table: ruled on ticket 09 to map like bare Moom.
+    ("Kalesh", "Kalesh"),
 ]
 # The table says these are not spending types; they belong to the first axis.
 NOT_SPENDING = [
@@ -104,7 +105,7 @@ NOT_SPENDING = [
     ("Transfers > Misc Transfer", None),
 ]
 # Categories the table does not name.
-UNKNOWN = ["Kalesh", "Hobbies", "Transport > Ferries", "Business > Tools"]
+UNKNOWN = ["Hobbies", "Transport > Ferries", "Business > Tools"]
 
 ALL_PATHS = (
     [p for p, _, _ in TYPED]
@@ -204,13 +205,14 @@ class OldDb:
         service_id: int | None = None,
         cat_source: str = "auto",
         statement_id: int = 1,
+        flow: str | None = None,
     ) -> int:
         return self._run(
             "INSERT INTO transactions (statement_id, date, description, amount_sgd,"
-            " category_id, service_id, cat_source)"
-            " VALUES (?, '2026-01-10', ?, ?, ?, ?, ?)",
+            " category_id, service_id, cat_source, flow_type)"
+            " VALUES (?, '2026-01-10', ?, ?, ?, ?, ?, ?)",
             (statement_id, description, amount,
-             self.categories[category] if category else None, service_id, cat_source),
+             self.categories[category] if category else None, service_id, cat_source, flow),
         )
 
     def convert(self) -> dict:
@@ -336,56 +338,47 @@ def test_a_new_database_has_the_type_list_and_the_new_columns(conn):
     conn.execute("SELECT book_override, type_override_id FROM merchant_rules")
 
 
-def test_a_converted_database_has_the_same_shape_as_a_new_one(old, tmp_path):
+def test_the_step_leaves_the_category_columns_beside_the_new_ones(old):
+    # Expand only. The category columns go in the step after this one
+    # (retire_categories.py), which has its own tests.
     old.convert()
-    fresh = tmp_path / "fresh.db"
-    fresh_conn = sqlite3.connect(str(fresh))
-    fresh_conn.executescript(db.SCHEMA_PATH.read_text())
-    fresh_conn.close()
 
-    for table in ("types", "transactions", "services", "merchant_rules", "subscriptions"):
-        shape = f"SELECT name, type FROM pragma_table_info('{table}') ORDER BY cid"
-        converted = old.query(shape)
-        conn = sqlite3.connect(str(fresh))
-        new = [tuple(r) for r in conn.execute(shape)]
-        conn.close()
-        assert converted == new, table
+    for table, category, added in (
+        ("transactions", "category_id", {"book", "type_id"}),
+        ("services", "category_id", {"book", "type_id"}),
+        ("subscriptions", "category_id", {"book", "type_id"}),
+        ("merchant_rules", "category_override_id", {"book_override", "type_override_id"}),
+    ):
+        present = {r[0] for r in old.query(f"SELECT name FROM pragma_table_info('{table}')")}
+        assert added | {category} <= present, table
+    assert old.query("SELECT COUNT(*) FROM categories")[0][0] == len(old.categories)
 
 
-# --- the old database after the new app has already started on it --------
+# --- the old database the old app had already given a type list ----------
 
 
-def test_an_old_database_the_new_app_has_started_on_converts_the_same(old, monkeypatch):
-    # The state the real database is in: starting the app on this code runs
-    # init_db, which creates and seeds the type list and leaves the four old
-    # tables without their new columns. The conversion starts from there.
+def test_an_old_database_that_already_holds_the_type_list_converts_the_same(old):
+    # The state the real database is in: the app as it stood between the two
+    # halves of the split created and seeded the type list on start, and left
+    # the four old tables without their new columns. The conversion starts
+    # from there.
     typed = old.row("Dining", "SAMPLE CAFE", 12.30)
     marked = old.row("Other", "CORNER STALL", 4.20)
     unknown = old.row("Hobbies", "SAMPLE HOBBY SHOP", 8.00)
-    monkeypatch.setattr(db, "DB_PATH", old.path)
-    db.invalidate_rules_cache()
-    try:
-        db.init_db()
-    finally:
-        db.invalidate_rules_cache()
+    conn = sqlite3.connect(str(old.path))
+    conn.execute(book_type.TYPES_TABLE_SQL)
+    book_type.seed_types(conn)
+    conn.commit()
+    conn.close()
     type_list = old.query("SELECT id, kind, name, parent_id FROM types ORDER BY id")
     assert len(type_list) == 36 + 5
-    for table, cols in (
-        ("transactions", {"book", "type_id"}),
-        ("services", {"book", "type_id"}),
-        ("subscriptions", {"book", "type_id"}),
-        ("merchant_rules", {"book_override", "type_override_id"}),
-    ):
-        present = {r[0] for r in old.query(f"SELECT name FROM pragma_table_info('{table}')")}
-        assert not cols & present, table
-    # init_db seeds merchants and rules of its own; they are old values too.
     before = _old_columns(old)
 
     report = old.convert()
 
     assert report["status"] == "applied"
     assert report["after"] == report["before"]
-    # The type list is the one init_db seeded: nothing added, nothing renumbered.
+    # The type list is the one already there: nothing added, nothing renumbered.
     assert old.query("SELECT id, kind, name, parent_id FROM types ORDER BY id") == type_list
     assert old.label("transactions", typed) == ("Household", "Dining")
     assert old.label("transactions", marked) == ("Household", None)
@@ -476,6 +469,25 @@ def test_a_row_with_no_category_is_listed_for_review(old):
     assert [(r["id"], r["category"], r["reason"]) for r in old.review()] == [
         (row_id, None, "no category")
     ]
+
+
+@pytest.mark.parametrize("flow", ["income", "transfer", "payment"])
+@pytest.mark.parametrize("category", [None, "Other", "Moom", "Hobbies"])
+def test_the_review_list_holds_spending_and_refund_rows_only(old, category, flow):
+    # A type is for spending. A row of another flow that the table leaves
+    # without one is not waiting for a type.
+    not_spending = old.row(category, "SAMPLE TRANSFER", flow=flow)
+    spending = old.row(category, "CORNER STALL", flow="expense")
+    refund = old.row(category, "CORNER STALL REBATE", -1.00, flow="refund")
+    no_flow_yet = old.row(category, "CORNER STALL AGAIN")
+
+    old.convert()
+
+    assert [r["id"] for r in old.review()] == [spending, refund, no_flow_yet]
+    summary = old.summary()
+    assert (summary["review"], summary["not_spending"], summary["unplaced"]) == (3, 1, 0)
+    # The book the table gives is written whatever the flow.
+    assert old.label("transactions", not_spending) == old.label("transactions", spending)
 
 
 def test_every_row_is_typed_or_not_spending_or_listed_and_none_is_left_over(old):
@@ -672,8 +684,8 @@ def test_conversion_run_twice_changes_nothing(old):
 
 
 def test_a_later_run_fills_only_rows_added_since_and_keeps_labels_already_set(old):
-    # The app still writes categories only, so rows arrive unlabelled until
-    # the switch. A later run catches them up and overwrites nothing.
+    # The old app writes categories only, so rows it adds after a first run
+    # arrive unlabelled. A later run catches them up and overwrites nothing.
     first = old.row("Dining")
     old.convert()
     software = old.query("SELECT id FROM types WHERE name = 'Software & AI tools'")[0][0]
@@ -703,125 +715,28 @@ def test_conversion_runs_behind_its_backup_and_refuses_without_one(old):
     assert _dump(Path(report["backup"])) == before
 
 
-# --- nothing reads the new labels yet: the app behaves as before ---------
+# --- after the categories are retired ---------------------------------------
 
 
-def _seed_app_rows(conn) -> None:
-    def cat(name):
-        return conn.execute("SELECT id FROM categories WHERE name = ?", (name,)).fetchone()[0]
+def test_once_the_categories_are_retired_the_step_reads_as_applied(old):
+    old.row("Dining")
+    old.convert()
+    conversion.run_step(old.path, retire_categories.STEP, today=DAY)
+    files = sorted(p.name for p in old.path.parent.iterdir())
 
-    conn.execute(
-        "INSERT INTO accounts (name, short_name, type, last_four)"
-        " VALUES ('Sample Card 0001', 'Sample-0001', 'credit_card', '0001')"
-    )
-    account_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.execute(
-        "INSERT INTO statements (account_id, statement_date, filename)"
-        " VALUES (?, '2026-01-31', 'sample.csv')", (account_id,)
-    )
-    statement_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.execute(
-        "INSERT INTO services (name, category_id) VALUES ('Sample Cafe', ?)", (cat("Dining"),)
-    )
-    service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.execute(
-        "INSERT INTO subscriptions (service_id, category_id, amount, frequency, match_pattern)"
-        " VALUES (?, ?, 12.00, 'monthly', 'SAMPLE CAFE')", (service_id, cat("Subscriptions"))
-    )
-    for name, amount in (("Dining", 12.30), ("Moom", 55.00), ("Kalesh", 20.00), ("Other", 3.10)):
-        conn.execute(
-            "INSERT INTO transactions (statement_id, date, description, amount_sgd,"
-            " category_id, service_id, cat_source, flow_type)"
-            " VALUES (?, '2026-01-10', 'SAMPLE CAFE', ?, ?, ?, 'auto', 'expense')",
-            (statement_id, amount, cat(name), service_id),
-        )
-    conn.commit()
+    report = old.convert()
+
+    assert report["status"] == "already-applied"
+    assert sorted(p.name for p in old.path.parent.iterdir()) == files
 
 
-ENDPOINTS = (
-    "/api/services",
-    "/api/subscriptions",
-    "/api/transactions",
-    "/api/rules",
-    "/api/categories",
-)
+def test_the_command_says_so_on_a_database_with_no_categories_left(old, capsys):
+    old.row("Dining")
+    old.convert()
+    conversion.run_step(old.path, retire_categories.STEP, today=DAY)
 
+    assert convert_book_type.main([str(old.path)]) == 0
 
-@pytest.fixture
-def fixed_rate(monkeypatch: pytest.MonkeyPatch):
-    # The subscriptions screen asks an outside service for a live rate.
-    monkeypatch.setattr(fin_app, "_get_usd_sgd_rate", lambda: 1.35)
-
-
-def _payloads(client) -> dict:
-    out = {}
-    for url in ENDPOINTS:
-        response = client.get(url)
-        assert response.status_code == 200, url
-        out[url] = response.get_json()
-    return out
-
-
-def test_no_endpoint_returns_a_book_or_type_field(client, conn, fixed_rate):
-    _seed_app_rows(conn)
-
-    def keys(value):
-        if isinstance(value, dict):
-            return set(value) | {k for v in value.values() for k in keys(v)}
-        if isinstance(value, list):
-            return {k for v in value for k in keys(v)}
-        return set()
-
-    for url, payload in _payloads(client).items():
-        assert keys(payload) & {"book", "type_id", "book_override", "type_override_id"} == set(), url
-
-
-def test_endpoints_return_the_same_before_and_after_the_conversion(
-    client, conn, temp_db, fixed_rate
-):
-    # Leaves out the one change the conversion does show: a row that names no
-    # merchant under a merchant-named category. The next test covers it.
-    _seed_app_rows(conn)
-    conn.close()
-    before = _payloads(client)
-
-    report = conversion.run_step(temp_db, convert_book_type.STEP, today=DAY)
-
-    assert report["status"] == "applied"
-    assert _payloads(client) == before
-
-
-def test_the_one_visible_change_is_the_merchant_a_merchant_named_category_gives(
-    client, conn, temp_db, fixed_rate
-):
-    _seed_app_rows(conn)
-    moom = conn.execute("SELECT id FROM categories WHERE name = 'Moom'").fetchone()[0]
-    conn.execute("INSERT INTO categories (name, parent_id) VALUES ('Canva', ?)", (moom,))
-    canva = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    statement_id = conn.execute("SELECT id FROM statements").fetchone()[0]
-    conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd,"
-        " category_id, cat_source, flow_type)"
-        " VALUES (?, '2026-01-11', 'CNV SAMPLE CHARGE', 18.00, ?, 'auto', 'expense')",
-        (statement_id, canva),
-    )
-    bare = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.commit()
-    conn.close()
-    before = _payloads(client)
-    assert not [s for s in before["/api/services"] if s["name"] == "Canva"]
-
-    report = conversion.run_step(temp_db, convert_book_type.STEP, today=DAY)
-
-    assert report["status"] == "applied"
-    after = _payloads(client)
-    # The merchant list gains the merchant the category named, holding the row.
-    [merchant] = [s for s in after["/api/services"] if s["name"] == "Canva"]
-    assert (merchant["category_id"], merchant["txn_count"], merchant["rule_count"]) == (canva, 1, 0)
-    # The row now names that merchant.
-    [row] = [t for t in after["/api/transactions"]["transactions"] if t["id"] == bare]
-    assert (row["service_id"], row["service_name"]) == (merchant["id"], "Canva")
-    # Take those two differences out and nothing else has changed.
-    after["/api/services"].remove(merchant)
-    row["service_id"] = row["service_name"] = None
-    assert after == before
+    out = capsys.readouterr().out
+    assert "already-applied" in out
+    assert "categories are retired" in out

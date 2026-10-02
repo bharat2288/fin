@@ -14,7 +14,8 @@ import random
 import sys
 from datetime import date, timedelta
 
-from db import DB_PATH, get_connection, init_db
+import book_type
+from db import DB_PATH, get_connection, init_db, match_merchant
 
 # ---------------------------------------------------------------------------
 # Mock accounts — fictional card numbers, real bank names
@@ -120,9 +121,9 @@ MERCHANTS = {
     ],
 }
 
-# How many transactions per month per category (weight-based distribution).
-# Higher weight = more transactions from that category each month.
-CATEGORY_WEIGHTS = {
+# How many transactions per month per merchant group (weight-based distribution).
+# Higher weight = more transactions from that group each month.
+GROUP_WEIGHTS = {
     "Groceries": 18,
     "Dining": 22,
     "Transport": 20,
@@ -230,16 +231,10 @@ def random_date_in_month(year: int, month: int) -> date:
     return d
 
 
-def create_transactions(conn, categories: dict, services: dict, account_ids: dict):
+def create_transactions(conn, account_ids: dict):
     """Generate ~600-900 mock transactions across 6 months."""
-    # Build lookup: pattern → (service_id, category_id) from merchant rules
-    rules = conn.execute(
-        "SELECT mr.pattern, mr.match_type, mr.service_id, s.category_id "
-        "FROM merchant_rules mr JOIN services s ON mr.service_id = s.id"
-    ).fetchall()
-
-    # Category name → id lookup
-    cat_name_to_id = categories
+    # Type name → id, for a merchant no rule knows
+    type_ids = book_type.spending_type_ids(conn)
 
     # Personal account IDs (exclude business)
     personal_accounts = [
@@ -262,15 +257,15 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
         target_count = random.randint(100, 140)
         month_txns = 0
 
-        # Build weighted pool of (category, merchant_desc, min_amt, max_amt)
+        # Build weighted pool of (group, merchant_desc, min_amt, max_amt)
         pool = []
-        for cat, weight in CATEGORY_WEIGHTS.items():
-            merchants = MERCHANTS.get(cat, [])
+        for group, weight in GROUP_WEIGHTS.items():
+            merchants = MERCHANTS.get(group, [])
             if not merchants:
                 continue
             for _ in range(weight):
                 merchant = random.choice(merchants)
-                pool.append((cat, *merchant))
+                pool.append((group, *merchant))
 
         random.shuffle(pool)
 
@@ -281,7 +276,7 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
             else:
                 entry = pool[i]
 
-            cat_name, description, min_amt, max_amt = entry
+            group, description, min_amt, max_amt = entry
 
             # Generate amount with realistic distribution (slightly right-skewed)
             amount = round(random.uniform(min_amt, max_amt), 2)
@@ -289,29 +284,18 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
             if random.random() < 0.3:
                 amount = round(random.uniform(min_amt, min_amt + (max_amt - min_amt) * 0.3), 2)
 
-            # Determine category_id and service_id via the categorization engine
-            cat_id = cat_name_to_id.get(cat_name)
-            # For subcategories (Insurance → under Admin)
-            if not cat_id:
-                cat_id = cat_name_to_id.get("Other")
-
-            # Find matching service via rules
-            service_id = None
-            desc_upper = description.upper()
-            for rule in rules:
-                pat = rule["pattern"].upper()
-                mt = rule["match_type"]
-                if mt == "contains" and pat in desc_upper:
-                    service_id = rule["service_id"]
-                    cat_id = rule["category_id"]
-                    break
-                elif mt == "startswith" and desc_upper.startswith(pat):
-                    service_id = rule["service_id"]
-                    cat_id = rule["category_id"]
-                    break
+            # Book, type and service via the rule engine; for a merchant no
+            # rule knows, the group's name where it is a type
+            found = match_merchant(description, conn, amount=amount)
+            service_id = found["service_id"]
+            book = found["book"]
+            type_id = found["type_id"]
+            if service_id is None:
+                book = book_type.DEFAULT_BOOK
+                type_id = type_ids.get(group)
 
             # Pick account — business expenses go to business account
-            is_biz = cat_name == "Business"
+            is_biz = group == "Business"
             if is_biz and biz_account:
                 acct_id = biz_account
             else:
@@ -328,15 +312,16 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
 
             conn.execute(
                 "INSERT INTO transactions "
-                "(statement_id, date, description, amount_sgd, category_id, "
+                "(statement_id, date, description, amount_sgd, book, type_id, "
                 "service_id, is_one_off, cat_source, flow_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expense')",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'expense')",
                 (
                     stmt_id,
                     tx_date.isoformat(),
                     description,
                     amount,
-                    cat_id,
+                    book,
+                    type_id,
                     service_id,
                     is_one_off,
                     cat_source,
@@ -344,7 +329,7 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
             )
             month_txns += 1
 
-        # Add 3-8 uncategorized transactions per month
+        # Add 3-8 transactions with no type per month
         uncat_count = random.randint(3, 8)
         uncat_descs = [
             "PAYMENT TO 91234567", "PAYNOW TRANSFER REF123",
@@ -360,7 +345,7 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
             stmt_id = get_statement_id(conn, acct_id, tx_date.isoformat())
             conn.execute(
                 "INSERT INTO transactions "
-                "(statement_id, date, description, amount_sgd, category_id, "
+                "(statement_id, date, description, amount_sgd, type_id, "
                 "service_id, is_one_off, cat_source, flow_type) "
                 "VALUES (?, ?, ?, ?, NULL, NULL, 0, 'auto', 'expense')",
                 (stmt_id, tx_date.isoformat(), desc, amount),
@@ -374,8 +359,9 @@ def create_transactions(conn, categories: dict, services: dict, account_ids: dic
     print(f"  Total: {total_inserted} transactions")
 
 
-def create_subscriptions(conn, services: dict, categories: dict, account_ids: dict):
-    """Create 10 mock subscriptions with real-world prices."""
+def create_subscriptions(conn, account_ids: dict):
+    """Create 10 mock subscriptions with real-world prices. A subscription
+    takes its book and type from its service."""
     # Personal credit card accounts for subscription billing
     cc_accounts = [
         aid for sn, aid in account_ids.items()
@@ -385,23 +371,17 @@ def create_subscriptions(conn, services: dict, categories: dict, account_ids: di
     for svc_pattern, amount, currency, frequency, match_pattern in MOCK_SUBSCRIPTIONS:
         # Find or create the service
         svc = conn.execute(
-            "SELECT id, category_id FROM services WHERE UPPER(name) LIKE ?",
+            "SELECT id FROM services WHERE UPPER(name) LIKE ?",
             (f"%{svc_pattern.upper()}%",),
         ).fetchone()
 
         if svc:
             svc_id = svc["id"]
-            cat_id = svc["category_id"]
         else:
-            # Find category from the merchant rule
-            cat_id = None
-            for cat_name in ["Subscriptions", "Entertainment", "Utilities"]:
-                if cat_name in categories:
-                    cat_id = categories[cat_name]
-                    break
             conn.execute(
-                "INSERT INTO services (name, category_id) VALUES (?, ?)",
-                (svc_pattern, cat_id),
+                "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
+                (svc_pattern, book_type.DEFAULT_BOOK,
+                 book_type.spending_type_ids(conn)["Subscriptions"]),
             )
             svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -416,10 +396,10 @@ def create_subscriptions(conn, services: dict, categories: dict, account_ids: di
 
         conn.execute(
             "INSERT INTO subscriptions "
-            "(service_id, category_id, amount, currency, frequency, periods, "
+            "(service_id, amount, currency, frequency, periods, "
             "account_id, last_paid, renewal_date, status, match_pattern) "
-            "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 'active', ?)",
-            (svc_id, cat_id, amount, currency, frequency, acct_id,
+            "VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'active', ?)",
+            (svc_id, amount, currency, frequency, acct_id,
              last_paid, renewal, match_pattern),
         )
 
@@ -452,7 +432,7 @@ def create_batch_imports(conn):
 def print_summary(conn):
     """Print what was created."""
     counts = {}
-    for table in ["categories", "accounts", "services", "merchant_rules",
+    for table in ["accounts", "services", "merchant_rules",
                    "transactions", "subscriptions", "statements", "batch_imports"]:
         row = conn.execute(f"SELECT COUNT(*) as n FROM {table}").fetchone()
         counts[table] = row["n"]
@@ -462,74 +442,26 @@ def print_summary(conn):
         "SELECT MIN(date) as earliest, MAX(date) as latest FROM transactions"
     ).fetchone()
 
-    # Uncategorized count
-    uncat = conn.execute(
-        "SELECT COUNT(*) as n FROM transactions WHERE category_id IS NULL"
+    # Rows with no type
+    untyped = conn.execute(
+        "SELECT COUNT(*) as n FROM transactions WHERE type_id IS NULL"
     ).fetchone()["n"]
 
     print(f"\n{'='*50}")
     print(f"  fin mock database created successfully!")
     print(f"{'='*50}")
-    print(f"  Categories:    {counts['categories']}")
+    print(f"  Types:         {len(book_type.SPENDING_TYPES)}")
     print(f"  Accounts:      {counts['accounts']}")
     print(f"  Services:      {counts['services']}")
     print(f"  Rules:         {counts['merchant_rules']}")
     print(f"  Transactions:  {counts['transactions']} ({date_range['earliest']} to {date_range['latest']})")
-    print(f"    Uncategorized: {uncat}")
+    print(f"    No type:       {untyped}")
     print(f"  Subscriptions: {counts['subscriptions']}")
     print(f"  Statements:    {counts['statements']}")
     print(f"  Imports:       {counts['batch_imports']}")
     print(f"{'='*50}")
     print(f"\n  Run the app:  python app.py")
     print(f"  Open:         http://localhost:8450\n")
-
-
-def _adapt_categories_for_demo(conn):
-    """Rename Moom → Business and remove personal-specific categories.
-
-    The live codebase seeds all categories via init_db(). For the mock/demo
-    database we want a cleaner, universal set (12 top-level + subcats).
-    This runs AFTER init_db() and modifies only the freshly-created mock DB.
-    """
-    # Rename "Moom" → "Business"
-    conn.execute("UPDATE categories SET name = 'Business' WHERE name = 'Moom'")
-
-    # Remove categories that are too personal for a generic demo
-    remove = [
-        "Health & Beauty", "Medical", "Fitness", "Pet", "Kids",
-        "Education", "Personal", "Loan/EMI", "Rent", "Gifts & Donations",
-        "Government",
-    ]
-    for cat_name in remove:
-        # Move any rules/services/transactions referencing this category
-        # to "Other" before deleting
-        other_id = conn.execute(
-            "SELECT id FROM categories WHERE name = 'Other'"
-        ).fetchone()
-        if other_id:
-            cat_row = conn.execute(
-                "SELECT id FROM categories WHERE name = ?", (cat_name,)
-            ).fetchone()
-            if cat_row:
-                conn.execute(
-                    "UPDATE services SET category_id = ? WHERE category_id = ?",
-                    (other_id[0], cat_row[0]),
-                )
-                conn.execute(
-                    "UPDATE transactions SET category_id = ? WHERE category_id = ?",
-                    (other_id[0], cat_row[0]),
-                )
-                conn.execute("DELETE FROM categories WHERE id = ?", (cat_row[0],))
-
-    # Rename "Kalesh" business account if it exists
-    conn.execute(
-        "UPDATE accounts SET name = 'DBS Business Account', short_name = 'DBS-Biz-Bank' "
-        "WHERE short_name = 'DBS-Kalesh-Bank'"
-    )
-
-    conn.commit()
-    final_count = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
-    print(f"Adapted categories for demo: {final_count} categories")
 
 
 def main():
@@ -542,29 +474,16 @@ def main():
 
     print("Creating mock database for fin...\n")
 
-    # Step 1: Initialize schema + seed categories + default merchant rules
+    # Step 1: Initialize schema + seed the type list + default merchant rules
     init_db()
 
     conn = get_connection()
-
-    # Step 1b: Adapt categories for open-source (rename Moom → Business,
-    # remove personal-specific categories). This keeps the live codebase
-    # untouched while the mock DB uses clean, universal categories.
-    _adapt_categories_for_demo(conn)
 
     # Step 2: Create fictional accounts
     print("Creating accounts...")
     create_accounts(conn)
 
     # Build lookups
-    categories = {
-        r["name"]: r["id"]
-        for r in conn.execute("SELECT id, name FROM categories").fetchall()
-    }
-    services = {
-        r["name"]: {"id": r["id"], "category_id": r["category_id"]}
-        for r in conn.execute("SELECT id, name, category_id FROM services").fetchall()
-    }
     account_ids = {
         r["short_name"]: r["id"]
         for r in conn.execute("SELECT id, short_name FROM accounts").fetchall()
@@ -576,11 +495,11 @@ def main():
 
     # Step 4: Generate mock transactions
     print("Generating transactions...")
-    create_transactions(conn, categories, services, account_ids)
+    create_transactions(conn, account_ids)
 
     # Step 5: Create subscriptions
     print("Creating subscriptions...")
-    create_subscriptions(conn, services, categories, account_ids)
+    create_subscriptions(conn, account_ids)
 
     # Step 6: Create import history
     print("Creating import history...")

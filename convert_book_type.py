@@ -3,8 +3,9 @@ book and a type beside the category they still carry.
 
 This is the expand half of the split. It adds the `types` table and the new
 columns, fills them from the mapping table below, and removes nothing: every
-category column keeps its value and nothing in the app reads the new labels
-yet. It runs only through the conversion runner (conversion.run_step).
+category column keeps its value. The app reads book and type only, and will
+not start on a database until this step and then retire_categories.py have
+run on it. It runs only through the conversion runner (conversion.run_step).
 
 The mapping is by category name, never by row count. A category the table
 does not name is not guessed: its rows get no book and no type and are put on
@@ -100,6 +101,8 @@ CATEGORY_MAP: dict[str, Outcome] = {
     **_typed("Kalesh", "Professional services", "Kalesh > Accounting"),
     **_typed("Kalesh", "Bank & government fees", "Kalesh > Fees"),
     "Kalesh > Refunds": Outcome(NOT_SPENDING, "Kalesh"),
+    # Not in the attachment's table; ruled on ticket 09 to map like bare Moom.
+    "Kalesh": Outcome(REVIEW, "Kalesh"),
     "Moom": Outcome(REVIEW, "Moom"),
     **_typed("Moom", "Software & AI tools", *MERCHANT_NAMED),
     **_typed(
@@ -253,8 +256,16 @@ def _pending(conn: sqlite3.Connection) -> int:
     return count
 
 
+def _categories_retired(conn: sqlite3.Connection) -> bool:
+    """Whether the category tree is gone (retire_categories.py has run, or the
+    database was created after it): there is nothing left to map from."""
+    return not _columns(conn, "categories")
+
+
 def _is_applied(conn: sqlite3.Connection) -> bool:
-    return _has_shape(conn) and book_type.types_are_seeded(conn) and _pending(conn) == 0
+    if not (_has_shape(conn) and book_type.types_are_seeded(conn)):
+        return False
+    return _categories_retired(conn) or _pending(conn) == 0
 
 
 def _apply(conn: sqlite3.Connection) -> None:
@@ -354,8 +365,25 @@ STEP = conversion.Step(
 # --- what the conversion did ----------------------------------------------
 
 
-def _placement(outcome: Outcome | None, has_category: bool, book: str | None) -> tuple[str, str]:
+# The flows a type is for. A row of any other flow (income, a transfer, a
+# payment) is not waiting for a type and is never listed for review. A row
+# with no flow yet is read as spending, as the app reads it.
+SPENDING_FLOWS = ("expense", "refund")
+
+
+def _placement(
+    outcome: Outcome | None, has_category: bool, book: str | None, flow: str | None
+) -> tuple[str, str]:
     """Where a row with no type stands: (bucket, reason)."""
+    bucket, reason = _placement_by_category(outcome, has_category, book)
+    if bucket == "review" and (flow or "expense") not in SPENDING_FLOWS:
+        return "not_spending", ""
+    return bucket, reason
+
+
+def _placement_by_category(
+    outcome: Outcome | None, has_category: bool, book: str | None
+) -> tuple[str, str]:
     if not has_category:
         return "review", "no category"
     if outcome is None:
@@ -379,12 +407,12 @@ def summary(conn: sqlite3.Connection) -> dict:
     counts["typed"] = conn.execute(
         "SELECT COUNT(*) FROM transactions WHERE type_id IS NOT NULL"
     ).fetchone()[0]
-    for cat_id, book, n in conn.execute(
-        "SELECT category_id, book, COUNT(*) FROM transactions WHERE type_id IS NULL"
-        " GROUP BY category_id, book"
+    for cat_id, book, flow, n in conn.execute(
+        "SELECT category_id, book, flow_type, COUNT(*) FROM transactions WHERE type_id IS NULL"
+        " GROUP BY category_id, book, flow_type"
     ):
         path = categories.get(cat_id, (None, None))[0]
-        bucket, _ = _placement(_outcome(path) if path else None, path is not None, book)
+        bucket, _ = _placement(_outcome(path) if path else None, path is not None, book, flow)
         counts[bucket] += n
 
     shopping = [cat_id for cat_id, (path, _) in categories.items() if _key(path) in _SHOPPING]
@@ -397,16 +425,18 @@ def summary(conn: sqlite3.Connection) -> dict:
 
 
 def review_list(conn: sqlite3.Connection) -> list[dict]:
-    """The rows left without a type for the operator to place, oldest id
-    first, each with the reason it is listed."""
+    """The spending and refund rows left without a type for the operator to
+    place, oldest id first, each with the reason it is listed."""
     categories = _categories(conn)
     listed = []
-    for row_id, day, description, amount, cat_id, book in conn.execute(
-        "SELECT id, date, description, amount_sgd, category_id, book FROM transactions"
+    for row_id, day, description, amount, cat_id, book, flow in conn.execute(
+        "SELECT id, date, description, amount_sgd, category_id, book, flow_type FROM transactions"
         " WHERE type_id IS NULL ORDER BY id"
     ):
         path = categories.get(cat_id, (None, None))[0]
-        bucket, reason = _placement(_outcome(path) if path else None, path is not None, book)
+        bucket, reason = _placement(
+            _outcome(path) if path else None, path is not None, book, flow
+        )
         if bucket == "review":
             listed.append({
                 "id": row_id,
@@ -440,6 +470,9 @@ def main(argv: list[str]) -> int:
 
     conn = sqlite3.connect(f"{Path(args[0]).resolve().as_uri()}?mode=ro", uri=True)
     try:
+        if _categories_retired(conn):
+            print("the categories are retired from this database: nothing to convert")
+            return 0
         counts = summary(conn)
         listed = review_list(conn)
     finally:

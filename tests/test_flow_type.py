@@ -35,7 +35,6 @@ def test_canonical_rent_income():
     facts = {
         "description": "Inward Credit-FAST OTHR Other A C J &/OR A C#",
         "amount_sgd": -10200.00,
-        "category_name": "Rental Income",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "income"
 
@@ -44,7 +43,6 @@ def test_canonical_self_transfer():
     facts = {
         "description": "TRANSFER OF FUND TRF SURI BHARAT I-BANK XXXX018277-1",
         "amount_sgd": -25000.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
 
@@ -53,7 +51,6 @@ def test_canonical_aws_expense():
     facts = {
         "description": "BUSINESS ADVANCE CARD TRANSACTION BAT AMAZON WEB SERVICES SI SGP 02NOV",
         "amount_sgd": 87.56,
-        "category_name": "Online",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "expense"
 
@@ -62,7 +59,6 @@ def test_canonical_cash_rebate_refund():
     facts = {
         "description": "BUSINESS ADVANCE CARD TRANSACTION BAT Cash Rebate 15OCT 4096-3620",
         "amount_sgd": -0.88,
-        "category_name": "Refunds",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "refund"
 
@@ -71,7 +67,6 @@ def test_canonical_cc_payoff_payment():
     facts = {
         "description": "DBSC-4119110062437436 : I-BANK REF: 17725077050087806737",
         "amount_sgd": 3200.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
@@ -83,7 +78,6 @@ def test_payment_beats_transfer():
     facts = {
         "description": "DBSC-4119110062437436 SURI BHARAT I-BANK REF: 17741498686319",
         "amount_sgd": 3200.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
@@ -93,7 +87,6 @@ def test_refund_beats_income():
     facts = {
         "description": "Some Merchant Cash Rebate",
         "amount_sgd": -5.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "refund"
 
@@ -103,7 +96,6 @@ def test_transfer_beats_income_for_own_alias_inflow():
     facts = {
         "description": "Inward PayNow OTHER SURI BHARAT SGD 4990",
         "amount_sgd": -4990.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
 
@@ -112,7 +104,6 @@ def test_paylah_topup_classifies_as_transfer():
     facts = {
         "description": "TOP-UP TO PAYLAH! : 97863267 TF635241773149937651",
         "amount_sgd": 120.00,
-        "category_name": "Transfers",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
 
@@ -121,7 +112,6 @@ def test_mep_transfer_classifies_as_transfer():
     facts = {
         "description": "MEP 100172443 0016OI8504497",
         "amount_sgd": 100.00,
-        "category_name": "Transfers",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
 
@@ -130,7 +120,6 @@ def test_mep_charge_stays_expense():
     facts = {
         "description": "MEP CHG 100172443 0016OI8504154",
         "amount_sgd": 20.00,
-        "category_name": "Transfers",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "expense"
 
@@ -139,7 +128,6 @@ def test_known_internal_ib_ref_classifies_as_transfer():
     facts = {
         "description": "TRF FT260209MB29906564 100-018277-1:IB",
         "amount_sgd": 7000.00,
-        "category_name": "Transfers",
     }
     assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
 
@@ -148,7 +136,6 @@ def test_recurring_internal_ib_ref_classifies_as_transfer():
     facts = {
         "description": "FT260329MB39802467 438-59169-9:IB",
         "amount_sgd": 75.00,
-        "category_name": "Transfers",
     }
     assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
 
@@ -163,7 +150,6 @@ def test_local_own_alias_overrides_are_loaded(conn, monkeypatch):
     facts = {
         "description": "Inward PayNow LOCAL PAYNOW ALIAS",
         "amount_sgd": -100.00,
-        "category_name": None,
     }
     assert classify_flow(facts, ctx) == "transfer"
 
@@ -172,7 +158,6 @@ def test_named_paynow_counterparty_stays_expense():
     facts = {
         "description": "PayNow Transfer 6741027 To: Lev OTHR PayNow transfer",
         "amount_sgd": 1710.00,
-        "category_name": "Transfers",
     }
     assert classify_flow(facts, CTX_WITH_RAILS) == "expense"
 
@@ -184,7 +169,6 @@ def test_citi_payoff_from_bank_is_payment():
     facts = {
         "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000",
         "amount_sgd": 850.00,
-        "category_name": "Transfers",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
@@ -194,14 +178,13 @@ def test_uob_payoff_from_bank_mixed_case_is_payment():
     facts = {
         "description": "Bill Payment mBK-UOB Cards 0000000000001111",
         "amount_sgd": 420.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
 
 def test_card_credit_atm_internet_payment_is_payment():
     for description in ("PAYMENT - ATM/INTERNET", "PAYMENT - ATM/INTERNET REF 99999"):
-        facts = {"description": description, "amount_sgd": -850.00, "category_name": None}
+        facts = {"description": description, "amount_sgd": -850.00}
         assert classify_flow(facts, CTX_OWN_ONLY) == "payment", description
 
 
@@ -209,7 +192,6 @@ def test_card_credit_paymt_thru_ebank_is_payment():
     facts = {
         "description": "PAYMT THRU E-BANK/HOMEB/CYBERB (EP00)",
         "amount_sgd": -420.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
@@ -222,7 +204,7 @@ def test_dbs_card_credit_bill_payment_wording_is_payment():
         "BILL  PAYMENT -  DBS INTERNET/WIRELESS",
         "Bill Payment - DBS Internet/Wireless",
     ):
-        facts = {"description": description, "amount_sgd": -850.00, "category_name": None}
+        facts = {"description": description, "amount_sgd": -850.00}
         assert classify_flow(facts, CTX_OWN_ONLY) == "payment", description
 
 
@@ -231,7 +213,6 @@ def test_dbs_card_bill_payment_wording_as_outflow_is_not_payment():
     facts = {
         "description": "BILL PAYMENT - DBS INTERNET/WIRELESS",
         "amount_sgd": 850.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "expense"
 
@@ -241,7 +222,6 @@ def test_dbs_card_bill_payment_wording_mid_description_is_not_payment():
     facts = {
         "description": "SOME MERCHANT BILL PAYMENT - DBS INTERNET/WIRELESS",
         "amount_sgd": -12.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "income"
 
@@ -251,7 +231,6 @@ def test_bank_side_payoff_wording_as_inflow_is_not_payment():
     facts = {
         "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000",
         "amount_sgd": -850.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "income"
 
@@ -260,7 +239,7 @@ def test_card_side_payoff_wording_as_outflow_is_not_payment():
     """A debit with card-credit wording (e.g. a dishonoured payoff, or a
     bank-side internet bill payment to a merchant) is not an own-money credit."""
     for description in ("PAYMENT - ATM/INTERNET", "PAYMT THRU E-BANK/HOMEB/CYBERB (EP00)"):
-        facts = {"description": description, "amount_sgd": 850.00, "category_name": None}
+        facts = {"description": description, "amount_sgd": 850.00}
         assert classify_flow(facts, CTX_OWN_ONLY) == "expense", description
 
 
@@ -269,7 +248,6 @@ def test_card_side_wording_mid_description_is_not_payment():
     facts = {
         "description": "NETS SOME MERCHANT PAYMENT - ATM/INTERNET",
         "amount_sgd": -12.00,
-        "category_name": None,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "income"
 
@@ -281,7 +259,7 @@ def test_other_bill_payment_payees_stay_expense():
         "PAYMENT TO CITYGAS MBKFT00000000000",
         "BILL PAYMENT MBK-UOB INSURANCE 0000000000003333",
     ):
-        facts = {"description": description, "amount_sgd": 120.00, "category_name": None}
+        facts = {"description": description, "amount_sgd": 120.00}
         assert classify_flow(facts, CTX_OWN_ONLY) == "expense", description
 
 
@@ -289,12 +267,11 @@ def test_card_payoff_wording_beats_own_alias_transfer():
     """Same precedence as the DBS linked-card form: payoff beats generic own-transfer."""
     ctx = ClassifierContext(own_aliases=("JANE TESTER",))
     # Control: the alias alone does fire, so the payoff result below is precedence.
-    alias_only = {"description": "FAST PAYMENT JANE TESTER", "amount_sgd": 850.00, "category_name": None}
+    alias_only = {"description": "FAST PAYMENT JANE TESTER", "amount_sgd": 850.00}
     assert classify_flow(alias_only, ctx) == "transfer"
     facts = {
         "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000 JANE TESTER",
         "amount_sgd": 850.00,
-        "category_name": None,
     }
     assert classify_flow(facts, ctx) == "payment"
 
@@ -354,6 +331,12 @@ def test_backfill_populates_all_rows(conn, tmp_path):
     assert by == {"income": 1, "transfer": 1, "expense": 1, "refund": 1, "payment": 1}
 
 
+def _type_id(conn, name):
+    return conn.execute(
+        "SELECT id FROM types WHERE kind = 'spending' AND name = ?", (name,)
+    ).fetchone()[0]
+
+
 def _seed_one_tx(conn, description="x", amount=1.0):
     conn.execute("INSERT INTO accounts (name, short_name, type, last_four, status) "
                  "VALUES ('A', 'A', 'bank', '0000', 'active')")
@@ -363,25 +346,26 @@ def _seed_one_tx(conn, description="x", amount=1.0):
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute("INSERT INTO services (name) VALUES ('Svc')")
     svc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    cat = conn.execute("SELECT id FROM categories WHERE name = 'Shopping'").fetchone()[0]
+    shopping = _type_id(conn, "Shopping")
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
         "VALUES (?, '2025-04-15', ?, ?, 'expense')",
         (stmt, description, amount),
     )
     conn.commit()
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0], svc, cat
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0], svc, shopping
 
 
 def test_resolve_accepts_flow_type_override_and_sets_manual_flag(client, conn):
     """Bullet 9a: POST /api/transactions/resolve with flow_type sets flow_type_manual=1."""
-    tx_id, svc_id, cat_id = _seed_one_tx(conn)
+    tx_id, svc_id, type_id = _seed_one_tx(conn)
     resp = client.post(
         "/api/transactions/resolve",
         json={
             "tx_id": tx_id,
             "service_id": svc_id,
-            "category_id": cat_id,
+            "book": "Household",
+            "type_id": type_id,
             "apply_scope": "transaction",
             "flow_type": "transfer",
         },
@@ -394,14 +378,8 @@ def test_resolve_accepts_flow_type_override_and_sets_manual_flag(client, conn):
     assert row["flow_type_manual"] == 1
 
 
-def test_resolve_recomputes_flow_type_when_category_changes(client, conn):
+def test_resolve_recomputes_flow_type_from_the_wording(client, conn):
     """Resolve without explicit override should refresh classifier-derived flow_type."""
-    conn.execute(
-        "INSERT INTO categories (name, parent_id, is_personal) VALUES ('Refunds', NULL, 1)"
-    )
-    refund_cat = conn.execute(
-        "SELECT id FROM categories WHERE name = 'Refunds'"
-    ).fetchone()[0]
     conn.execute("INSERT INTO services (name) VALUES ('Refund Service')")
     svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -418,7 +396,7 @@ def test_resolve_recomputes_flow_type_when_category_changes(client, conn):
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
-        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ', -20.0, 'income')",
+        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ REBATE', -20.0, 'income')",
         (stmt,),
     )
     tx_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -429,7 +407,8 @@ def test_resolve_recomputes_flow_type_when_category_changes(client, conn):
         json={
             "tx_id": tx_id,
             "service_id": svc_id,
-            "category_id": refund_cat,
+            "book": "Household",
+            "type_id": _type_id(conn, "Shopping"),
             "apply_scope": "transaction",
         },
     )
@@ -463,17 +442,12 @@ def test_recategorize_preserves_flow_type_manual_rows(client, conn):
     assert row["flow_type_manual"] == 1
 
 
-def test_recategorize_recomputes_flow_type_when_rule_changes_category(client, conn):
+def test_recategorize_recomputes_flow_type_on_the_rows_a_rule_relabels(client, conn):
     """Rule-driven recategorization should refresh derived flow_type on non-manual rows."""
+    shopping = _type_id(conn, "Shopping")
     conn.execute(
-        "INSERT INTO categories (name, parent_id, is_personal) VALUES ('Refunds', NULL, 1)"
-    )
-    refund_cat = conn.execute(
-        "SELECT id FROM categories WHERE name = 'Refunds'"
-    ).fetchone()[0]
-    conn.execute(
-        "INSERT INTO services (name, category_id) VALUES ('Refund Service', ?)",
-        (refund_cat,),
+        "INSERT INTO services (name, book, type_id) VALUES ('Refund Service', 'Household', ?)",
+        (shopping,),
     )
     svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
@@ -494,20 +468,21 @@ def test_recategorize_recomputes_flow_type_when_rule_changes_category(client, co
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type, cat_source) "
-        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ', -20.0, 'income', 'auto')",
+        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ REBATE', -20.0, 'income', 'auto')",
         (stmt,),
     )
     tx_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.commit()
+    db.invalidate_rules_cache()
 
     resp = client.post("/api/rules/recategorize")
     assert resp.status_code == 200, resp.get_json()
 
     row = conn.execute(
-        "SELECT flow_type, flow_type_manual, category_id, service_id FROM transactions WHERE id = ?",
+        "SELECT flow_type, flow_type_manual, book, type_id, service_id FROM transactions WHERE id = ?",
         (tx_id,),
     ).fetchone()
-    assert row["category_id"] == refund_cat
+    assert (row["book"], row["type_id"]) == ("Household", shopping)
     assert row["service_id"] == svc_id
     assert row["flow_type"] == "refund"
     assert row["flow_type_manual"] == 0
@@ -544,8 +519,8 @@ def test_dashboard_spend_uses_flow_type_and_preserves_exclude(client, conn):
                  "VALUES (?, '2025-04-01', 't')", (acc,))
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    conn.execute("INSERT INTO services (name, category_id, exclude_from_expense_views) "
-                 "VALUES ('Excluded Loan', NULL, 1)")
+    conn.execute("INSERT INTO services (name, exclude_from_expense_views) "
+                 "VALUES ('Excluded Loan', 1)")
     excluded_svc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     rows = [
@@ -571,12 +546,7 @@ def test_dashboard_spend_uses_flow_type_and_preserves_exclude(client, conn):
 
 def test_dashboard_monthly_excludes_null_flow_type_rows(client, conn):
     """Monthly chart data should only include explicit expense/refund rows."""
-    shopping_cat = conn.execute(
-        "SELECT id FROM categories WHERE name = 'Shopping'"
-    ).fetchone()[0]
-    transfers_cat = conn.execute(
-        "SELECT id FROM categories WHERE name = 'Transfers'"
-    ).fetchone()[0]
+    shopping = _type_id(conn, "Shopping")
     conn.execute("INSERT INTO accounts (name, short_name, type, last_four, status) "
                  "VALUES ('A', 'A', 'bank', '0000', 'active')")
     acc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -584,14 +554,14 @@ def test_dashboard_monthly_excludes_null_flow_type_rows(client, conn):
                  "VALUES (?, '2025-04-01', 't')", (acc,))
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd, category_id, flow_type) "
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd, type_id, flow_type) "
         "VALUES (?, '2025-04-15', 'Expense', 100.0, ?, 'expense')",
-        (stmt, shopping_cat),
+        (stmt, shopping),
     )
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd, category_id) "
-        "VALUES (?, '2025-04-15', 'Legacy Transfer', 50.0, ?)",
-        (stmt, transfers_cat),
+        "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
+        "VALUES (?, '2025-04-15', 'Legacy Transfer', 50.0)",
+        (stmt,),
     )
     conn.commit()
 
@@ -725,7 +695,7 @@ def test_parser_post_parse_classification_sets_flow_type(conn):
     ctx = build_context(conn)
     for t in txns:
         t.flow_type = classify_flow(
-            {"description": t.description, "amount_sgd": t.amount_sgd, "category_name": None},
+            {"description": t.description, "amount_sgd": t.amount_sgd},
             ctx,
         )
 
@@ -782,7 +752,6 @@ def test_transfer_does_not_swallow_refund_with_own_alias_false_positive():
     facts = {
         "description": "Cash Rebate via SOMEONE",
         "amount_sgd": -1.00,
-        "category_name": "Refunds",
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "refund"
 
