@@ -25,6 +25,7 @@
     <nav class="tab-bar">
         <div class="tab-bar-main">
             <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+            <button class="tab-btn" data-tab="balance">Balance sheet</button>
             <button class="tab-btn" data-tab="subs">Subscriptions</button>
             <button class="tab-btn" data-tab="review" id="review-tab-btn">Review list</button>
         </div>
@@ -502,6 +503,44 @@
                     <div class="empty-state-icon">-</div>
                     <div class="empty-state-text">No accounts</div>
                     <div class="empty-state-hint">Add your cards, bank accounts, loans and holdings</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         BALANCE SHEET TAB (what the household owns and owes at a month's end)
+         ============================================================ -->
+    <div id="tab-balance" class="tab-content">
+        <div class="container">
+            <div class="balance-head">
+                <div class="section-label" style="margin-bottom:0;">/ Balance sheet</div>
+                <label class="balance-as-at">As at:
+                    <select id="balance-month" onchange="onBalanceMonth()"></select>
+                </label>
+            </div>
+
+            <div class="card">
+                <div id="balance-net-worth" class="balance-net-worth"></div>
+                <div id="balance-note" class="balance-note hidden"></div>
+                <table class="data-table hidden" id="balance-table">
+                    <thead>
+                        <tr>
+                            <th style="width:26%;">Account</th>
+                            <th style="width:18%;text-align:right;">Balance</th>
+                            <th style="width:24%;">Rests on</th>
+                            <th style="width:20%;">Check</th>
+                            <th style="width:12%;">Since</th>
+                        </tr>
+                    </thead>
+                    <tbody id="balance-body"></tbody>
+                </table>
+                <div id="balance-error" class="empty-state hidden">
+                    <div class="empty-state-text" id="balance-error-text"></div>
+                </div>
+                <div class="balance-actions">
+                    <button class="btn btn-sm" onclick="openFigureModal()">Enter a figure</button>
+                    <a href="#review" id="balance-review-link" onclick="switchTab('review'); return false;">Review list (0)</a>
                 </div>
             </div>
         </div>

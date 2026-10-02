@@ -469,6 +469,7 @@ function switchTab(tabName, {pushHistory = true} = {}) {
     if (tabName === 'rules') loadRules();
     if (tabName === 'types') renderTypesMaster();
     if (tabName === 'services-master') renderServicesMaster();
+    if (tabName === 'balance') loadBalanceSheet();
     if (tabName === 'review') loadReviewList();
     else refreshReviewCount();
 }
@@ -4279,6 +4280,8 @@ async function reloadAccounts() {
     accounts = acctRes;
     populateAccountFilter();
     renderAccountsTab();
+    // A figure entered from the balance sheet shows on it at once.
+    if (document.getElementById('tab-balance')?.classList.contains('active')) await loadBalanceSheet();
 }
 
 
@@ -4427,6 +4430,123 @@ async function saveReviewLabel(txId) {
         accounts = await fetch('/api/accounts').then(r => r.json());
     }
     await loadReviewList();
+}
+
+
+// ============================================================
+// BALANCE SHEET (what the household owns and owes at a month's end)
+// ============================================================
+
+const BALANCE_SHEET_START = '2026-01';   // nothing is shown for an earlier month
+let balanceMonth = null;                 // the month shown, YYYY-MM; null = this month
+
+function thisMonth() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// The last day of a month written YYYY-MM, as YYYY-MM-DD.
+function monthEnd(month) {
+    const [y, m] = month.split('-').map(Number);
+    return `${month}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+}
+
+// The months the sheet can show, newest first: this month back to the start.
+function balanceMonths() {
+    const months = [];
+    let [y, m] = thisMonth().split('-').map(Number);
+    for (;;) {
+        const month = `${y}-${String(m).padStart(2, '0')}`;
+        if (month < BALANCE_SHEET_START) break;
+        months.push(month);
+        m -= 1;
+        if (m === 0) { m = 12; y -= 1; }
+    }
+    return months;
+}
+
+function onBalanceMonth() {
+    balanceMonth = document.getElementById('balance-month').value;
+    loadBalanceSheet();
+}
+
+// What a line rests on: "statement 31 Jul 2026", with its age when the
+// anchor is not from the month shown.
+function balanceRestsOn(line) {
+    if (!line.rests_on) return '<span class="text-muted">no figure</span>';
+    const r = line.rests_on;
+    const age = r.in_month ? '' : ` <span class="text-warning">[${r.age_days} ${r.age_days === 1 ? 'day' : 'days'} old]</span>`;
+    return `${escapeHtml(r.label)} ${formatDate(r.date)}${age}`;
+}
+
+function balanceCheck(line) {
+    if (!line.check) return '';
+    const cls = { ties: 'text-success', off: 'text-warning', not_checked: 'text-muted' }[line.check.status] || '';
+    return `<span class="${cls}">${escapeHtml(line.check.text)}</span>`;
+}
+
+// A balance in a currency the total is not in is marked, and says why.
+function balanceFigure(line) {
+    if (line.balance_minor === null || line.in_total) return escapeHtml(line.balance);
+    return `${escapeHtml(line.balance)} <span class="text-muted" title="${escapeHtml(line.left_out || '')}">*</span>`;
+}
+
+async function loadBalanceSheet() {
+    const month = balanceMonth || thisMonth();
+    const sel = document.getElementById('balance-month');
+    sel.innerHTML = balanceMonths().map(m =>
+        `<option value="${m}"${m === month ? ' selected' : ''}>${formatDate(monthEnd(m))}</option>`
+    ).join('');
+
+    const table = document.getElementById('balance-table');
+    const errorEl = document.getElementById('balance-error');
+    const noteEl = document.getElementById('balance-note');
+    const netEl = document.getElementById('balance-net-worth');
+    let sheet;
+    try {
+        sheet = await fetch(`/api/balance-sheet?month=${encodeURIComponent(month)}`).then(r => r.json());
+    } catch (err) {
+        sheet = { error: 'The balance sheet could not be loaded' };
+    }
+    if (sheet.error) {
+        table.classList.add('hidden');
+        noteEl.classList.add('hidden');
+        netEl.textContent = '';
+        document.getElementById('balance-error-text').textContent = sheet.error;
+        errorEl.classList.remove('hidden');
+        return;
+    }
+    errorEl.classList.add('hidden');
+    table.classList.remove('hidden');
+
+    netEl.innerHTML = `<span class="balance-net-label">Net worth</span>
+        <span class="balance-net-figure">${escapeHtml(sheet.net_worth)}</span>
+        <span class="text-muted">as at ${formatDate(sheet.as_at)}</span>`;
+    noteEl.textContent = sheet.note || '';
+    noteEl.classList.toggle('hidden', !sheet.note);
+
+    document.getElementById('balance-body').innerHTML = sheet.sections.map(section => {
+        const lines = section.lines.map(line => `<tr>
+                <td>${escapeHtml(line.name)}</td>
+                <td class="col-amount${line.balance_minor === null ? ' text-muted' : ''}">${balanceFigure(line)}</td>
+                <td class="text-secondary" style="font-size:12px;">${balanceRestsOn(line)}</td>
+                <td style="font-size:12px;">${balanceCheck(line)}</td>
+                <td class="text-secondary" style="font-size:12px;">${escapeHtml(line.since || '')}</td>
+            </tr>`).join('');
+        const leftOut = section.left_out.length
+            ? `leaves out ${section.left_out.map(l => `${escapeHtml(l.name)} (${escapeHtml(l.why)})`).join('; ')}`
+            : '';
+        const empty = section.lines.length ? '' : '<tr><td colspan="5" class="text-muted" style="font-size:12px;">no accounts</td></tr>';
+        return `<tr class="balance-section"><td colspan="5">${escapeHtml(section.heading)}</td></tr>
+            ${lines}${empty}
+            <tr class="balance-total">
+                <td class="text-muted" style="font-size:12px;">total</td>
+                <td class="col-amount">${escapeHtml(section.total)}</td>
+                <td colspan="3" class="text-muted" style="font-size:12px;">${leftOut}</td>
+            </tr>`;
+    }).join('');
+
+    document.getElementById('balance-review-link').textContent = `Review list (${sheet.review_waiting})`;
 }
 
 

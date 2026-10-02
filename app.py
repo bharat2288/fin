@@ -19,6 +19,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 import account_kind
 import anchors
+import balance_sheet
 import book_type
 import db
 import flow
@@ -2749,6 +2750,30 @@ def api_rules_recategorize():
 
         conn.commit()
     return jsonify({"updated": updated, "unchanged": unchanged, "skipped_manual": skipped})
+
+
+# ---------------------------------------------------------------------------
+# Balance sheet: what the household owns and owes at a month's end
+# ---------------------------------------------------------------------------
+
+@app.route("/api/balance-sheet")
+def api_balance_sheet():
+    """The household's balance sheet at the end of ?month=YYYY-MM (this month
+    when none is given): its bank, card, loan and holding accounts in
+    sections, each line with its balance in its own currency, the anchor it
+    rests on, the rows since and its check; section totals and net worth in
+    SGD, saying what is left out; and how many transfers wait for review.
+    A month before January 2026 is refused: nothing is shown before then."""
+    month = request.args.get("month")
+    if month is None:
+        month = date.today().strftime("%Y-%m")
+    with get_db() as conn:
+        try:
+            shown = balance_sheet.sheet(conn, month, mask_card_number)
+        except balance_sheet.NotShown as e:
+            return jsonify({"error": str(e)}), 400
+        shown["review_waiting"] = _waiting_for_review(conn)[0]
+    return jsonify(shown)
 
 
 # ---------------------------------------------------------------------------
