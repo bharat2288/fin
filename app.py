@@ -22,6 +22,7 @@ import anchors
 import book_type
 import db
 import flow
+import loan_interest
 import money
 import pairing
 import review
@@ -639,6 +640,10 @@ def api_anchors_create():
     what is owed for a loan, what it is worth or the balance otherwise), date
     (YYYY-MM-DD), note. The same amount again for that account and date
     changes nothing; a different amount is refused.
+
+    A figure for a loan that follows or precedes another works the interest
+    out again (loan_interest.py). `worked_out` is the period that ends at the
+    figure, null when there is none; `message` says it in words.
     """
     data = request.get_json(silent=True) or {}
     account_id = data.get("account_id")
@@ -688,9 +693,34 @@ def api_anchors_create():
                          f"{anchors.format_amount(shown, account['currency'])} for "
                          f"{e.existing['date']}; a different amount for the same date is refused"
             }), 409
+        worked_out = message = None
+        if kind == loan_interest.LOAN:
+            loan_interest.derive(conn, account_id)
+            worked_out, message = loan_interest.worked_out(
+                conn, account_id, on, account["currency"]
+            )
         conn.commit()
         row = conn.execute(_ANCHOR_SELECT + "WHERE n.id = ?", (held["id"],)).fetchone()
-    return jsonify({"success": True, "created": created, "anchor": _anchor_payload(row)})
+    return jsonify({
+        "success": True,
+        "created": created,
+        "anchor": _anchor_payload(row),
+        "worked_out": worked_out,
+        "message": message,
+    })
+
+
+@app.route("/api/loan-interest", methods=["POST"])
+def api_loan_interest():
+    """Work the loan interest out again, on demand, for every loan: the same
+    derivation entering a figure runs. Rows that already say what the figures
+    and the instalments give are left as they are.
+
+    Returns changed, the number of loans whose derived rows were replaced."""
+    with get_db() as conn:
+        changed = loan_interest.derive(conn)
+        conn.commit()
+    return jsonify({"changed": changed})
 
 
 # ---------------------------------------------------------------------------
@@ -975,6 +1005,11 @@ def api_dashboard_stat_cards():
       waiting, waiting_total      every transfer waiting, whenever dated: the
                                   review list. untyped counts the month's
                                   spending rows with no type.
+      loan_principal              the month's loan instalments less the
+                                  interest worked out for it (loan_interest.py):
+                                  not spending. loan_instalments and
+                                  loan_interest are its two parts. cash_out is
+                                  household plus loan_principal.
     spend is the View filter's figure (every book, or the one asked for, on
     any account), as the charts and the list show it; no card shows it.
     """
@@ -1100,6 +1135,7 @@ def api_dashboard_stat_cards():
         )
         # Everything waiting, whenever it is dated: the review list's own count.
         waiting, waiting_minor = _waiting_for_review(conn)
+        loan = loan_interest.month_figures(conn, f"{ref_y:04d}-{ref_m:02d}")
 
     # Pick which spend to feature based on filter
     featured = book.lower() if book else "total"
@@ -1123,6 +1159,10 @@ def api_dashboard_stat_cards():
         "waiting_total": money.from_minor(waiting_minor),
         "avg_spend": avg_spend,
         "avg_months": n,
+        "loan_instalments": money.from_minor(loan["instalments_minor"]),
+        "loan_interest": money.from_minor(loan["interest_minor"]),
+        "loan_principal": money.from_minor(loan["principal_minor"]),
+        "cash_out": money.from_minor(ref_data["household"] + loan["principal_minor"]),
     }
     for name, key in books:
         shown = key if name == book_type.DEFAULT_BOOK else f"paid_{key}"
@@ -2340,6 +2380,8 @@ def api_import_confirm():
 
             # Pair the moves between household accounts this import completed.
             pairing.match_pairs(conn)
+            # Rows that name a loan change what was paid between its figures.
+            loan_interest.derive(conn)
 
             # Update batch_imports record
             result_summary = {
@@ -2890,6 +2932,8 @@ def api_review_label(tx_id: int):
             "book = ?, type_id = ?, cat_source = 'manual' WHERE id = ?",
             (flow_name, other_side, book, type_id, tx_id),
         )
+        # A row that now names a loan, or no longer does, changes what was paid.
+        loan_interest.derive(conn)
         conn.commit()
         named = conn.execute("SELECT name FROM accounts WHERE id = ?", (other_side,)).fetchone()
     return jsonify({

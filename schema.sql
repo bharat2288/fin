@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     currency_foreign TEXT,         -- three-letter code, e.g., 'USD', 'AUD', 'INR'
     service_id INTEGER,            -- FK to services table (merchant identity)
     is_one_off INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in table)
-    cat_source TEXT DEFAULT 'auto',  -- where book and type came from: auto|service_default|rule_override|fallback|manual
+    cat_source TEXT DEFAULT 'auto',  -- where book and type came from: auto|service_default|rule_override|fallback|manual|derived (loan interest worked out from figures: loan_interest.py)
     flow_type TEXT,                -- expense|income|transfer|payment|refund|movement|review (declared in flow.py)
     flow_type_manual INTEGER DEFAULT 0,  -- 1 = user overrode classifier; preserve on recategorize
     notes TEXT,

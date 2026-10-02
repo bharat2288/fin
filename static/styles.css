@@ -1860,6 +1860,16 @@ input[type="checkbox"]:focus-visible {
     margin-top: var(--space-1);
 }
 
+/* What fin worked out after a loan figure is saved */
+.figure-result {
+    font-size: 13px;
+    color: var(--text-primary);
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--space-3);
+    margin-top: var(--space-3);
+    line-height: 1.5;
+}
+
 /* Field hints (? tooltip + FX rate) */
 .field-hint {
     font-size: 10px;
