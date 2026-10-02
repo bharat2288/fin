@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+import account_kind
 import book_type
 import db
 import money
@@ -121,20 +122,26 @@ def type_id(conn, name: str) -> int:
     return book_type.spending_type_ids(conn)[name]
 
 
-@pytest.fixture
-def statement(conn) -> int:
-    conn.execute(
-        "INSERT INTO accounts (name, short_name, type, last_four)"
-        " VALUES ('Sample Card 0001', 'Sample-0001', 'credit_card', '0001')"
-    )
-    account_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.execute(
+def statement_on(conn, kind: str, name: str = "Sample Card 0001",
+                 short_name: str = "Sample-0001", last_four: str = "0001") -> int:
+    """A statement on a new account of the given kind."""
+    account_id = conn.execute(
+        "INSERT INTO accounts (name, short_name, type, last_four) VALUES (?, ?, ?, ?)",
+        (name, short_name, kind, last_four),
+    ).lastrowid
+    statement_id = conn.execute(
         "INSERT INTO statements (account_id, statement_date, filename)"
         " VALUES (?, '2026-04-01', 'sample.csv')",
         (account_id,),
-    )
+    ).lastrowid
     conn.commit()
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return statement_id
+
+
+@pytest.fixture
+def statement(conn) -> int:
+    """A statement on a card: the only kind of account whose rows are sent."""
+    return statement_on(conn, "card")
 
 
 def row(conn, statement_id: int, description: str, amount: float = 25.0, *,
@@ -806,6 +813,14 @@ FEE_AND_TAX_LINES = [
     ("late charge", "LATE PAYMENT CHARGE"),
     ("programme admin fee", "PROGRAMME ADMIN FEE"),
     ("programme admin fee", "REWARDS PROGRAMME ADMIN FEE 0042"),
+    ("service fee", "SERVICE FEE"),
+    ("service fee", "SERVICE FEE 0042 SG"),
+    ("fee", "FEE"),
+    ("fee", "FEE 0042"),
+    ("administrative fee", "ADMINISTRATIVE FEE"),
+    ("administrative fee", "CARD ADMINISTRATIVE FEE 0042"),
+    ("foreign currency fee", "FOREIGN CURRENCY TRANSACTION FEE"),
+    ("foreign currency fee", "FOREIGN CURRENCY TRANSACTION FEE 88120457"),
 ]
 
 
@@ -819,6 +834,118 @@ def test_g2_a_bare_fee_or_tax_line_produces_no_request(
     send_with_everything_approved(client, description)
 
     assert wire.sent == []
+
+
+# --- the gate, tightened: only card purchases are ever sent ------------------
+
+
+def other_account(conn, kind: str) -> int:
+    return statement_on(conn, kind, "Sample Other 0002", "Sample-0002", "0002")
+
+
+NOT_A_CARD = [kind for kind in account_kind.KIND_NAMES if kind != "card"] + ["credit_card", ""]
+
+
+@pytest.mark.parametrize("description", [
+    "TFR SAMPLE PERSON",              # transfer abbreviations no list of words knows
+    "TT SAMPLE PERSON 88120457",
+    "ITR SAMPLE PERSON",
+    "SAMPLE PERSON",                  # a name alone
+    "LANTERN NOODLE HOUSE 0042 SG",   # and wording that is sent from a card
+])
+def test_a_spending_row_on_a_bank_account_is_never_sent_whatever_its_wording(
+    client, conn, key, wire, description
+):
+    tx = row(conn, other_account(conn, "bank"), description)
+
+    assert client.post("/api/suggestions/prepare").get_json()["merchants"] == []
+    assert not strings_file().exists()
+    send_with_everything_approved(client, description)
+
+    assert wire.sent == []
+    assert suggestion(client, tx) == {"route": "blank", "types": [], "merchant": None}
+
+
+@pytest.mark.parametrize("kind", NOT_A_CARD)
+def test_only_an_account_whose_kind_is_card_has_its_rows_sent(client, conn, key, wire, kind):
+    row(conn, other_account(conn, kind), "LANTERN NOODLE HOUSE 0042 SG")
+
+    assert client.post("/api/suggestions/prepare").get_json()["merchants"] == []
+    send_with_everything_approved(client, "LANTERN NOODLE HOUSE 0042 SG")
+
+    assert wire.sent == []
+
+
+def test_a_merchant_on_a_card_is_sent_and_the_bank_row_beside_it_is_not(
+    client, conn, statement, key, wire
+):
+    bank = other_account(conn, "bank")
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG")   # the card
+    on_bank = row(conn, bank, "LANTERN NOODLE HOUSE 0077") # the same words, on the bank account
+    row(conn, bank, "TFR SAMPLE PERSON")
+    wire.model.answer("LANTERN NOODLE HOUSE", "Dining", 0.95)
+
+    prepared = client.post("/api/suggestions/prepare").get_json()
+    approve("LANTERN NOODLE HOUSE", "SAMPLE PERSON", "TFR SAMPLE PERSON")
+    result = client.post("/api/suggestions/send").get_json()
+
+    assert prepared["merchants"] == ["LANTERN NOODLE HOUSE"]
+    assert (result["sent"], wire.asked) == (1, ["LANTERN NOODLE HOUSE"])
+    assert all("SAMPLE PERSON" not in body for body in wire.bodies)
+    # The answer the card row earned is not shown on the bank row, and a
+    # choice made on the bank row is not recorded against it.
+    assert suggestion(client, on_bank) == {"route": "blank", "types": [], "merchant": None}
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": on_bank, "service_name": "Lantern Noodle House",
+        "type_id": type_id(conn, "Travel"), "apply_scope": "transaction",
+        "suggestion_visible": False,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    stored = answers(client)["LANTERN NOODLE HOUSE"]
+    assert (stored["chosen_type"], stored["suggestion_visible"]) == (None, None)
+
+
+# --- a strings file older than a day is not an approval ----------------------
+
+
+def test_a_strings_file_older_than_24_hours_is_refused_and_send_says_to_prepare_again(
+    client, conn, statement, key, wire, monkeypatch
+):
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG")
+    assert client.post("/api/suggestions/prepare").status_code == 200
+    written = strings_file().stat().st_mtime
+
+    monkeypatch.setattr(suggest, "clock", lambda: written + 24 * 3600 + 1)
+    stale = client.post("/api/suggestions/send")
+
+    assert stale.status_code == 409
+    assert "prepare" in stale.get_json()["error"].lower()
+    assert "24 hours" in stale.get_json()["error"]
+    assert wire.sent == [] and answers(client) == {}
+
+    # Preparing again is what makes it an approval again.
+    monkeypatch.setattr(suggest, "clock", lambda: written + 30 * 3600)
+    assert client.post("/api/suggestions/prepare").status_code == 200
+    again = strings_file().stat().st_mtime
+    monkeypatch.setattr(suggest, "clock", lambda: again + 60)
+    fresh = client.post("/api/suggestions/send")
+
+    assert (fresh.status_code, fresh.get_json()["sent"]) == (200, 1)
+    assert wire.asked == ["LANTERN NOODLE HOUSE"]
+
+
+def test_a_strings_file_exactly_24_hours_old_is_still_an_approval(
+    client, conn, statement, key, wire, monkeypatch
+):
+    row(conn, statement, "LANTERN NOODLE HOUSE 0042 SG")
+    assert client.post("/api/suggestions/prepare").status_code == 200
+    written = strings_file().stat().st_mtime
+
+    monkeypatch.setattr(suggest, "clock", lambda: written + 24 * 3600)
+    resp = client.post("/api/suggestions/send")
+
+    assert (resp.status_code, resp.get_json()["sent"]) == (200, 1)
+    assert wire.asked == ["LANTERN NOODLE HOUSE"]
 
 
 # --- G3: a row a rule already matches ----------------------------------------

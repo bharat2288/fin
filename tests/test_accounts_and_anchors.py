@@ -7,7 +7,7 @@ the account's currency; nothing here reads a transaction amount.
 
 import pytest
 
-from ingest import ensure_account
+from ingest import ensure_account, ensure_statement
 
 KINDS = ["bank", "card", "loan", "holding", "company", "person"]
 
@@ -328,14 +328,68 @@ def test_a_negative_figure_for_a_loan_is_refused(client):
 
 
 @pytest.mark.parametrize("kind", ["bank", "card"])
-def test_a_bank_account_or_card_takes_no_supplied_figure(client, kind):
+def test_a_bank_account_or_card_that_has_a_statement_takes_no_supplied_figure(client, conn, kind):
     account_id = make_account(client, f"Sample {kind} 0007", kind)
+    ensure_statement(conn, account_id, "2026-07-31", "sample.pdf")
 
     resp = enter(client, account_id, "100.00")
 
     assert resp.status_code == 400
     assert "statement" in resp.get_json()["error"]
     assert anchors(client) == []
+    assert accounts(client)[f"Sample {kind} 0007"]["takes_a_figure"] is False
+
+
+def test_a_card_with_no_statement_still_takes_no_supplied_figure(client):
+    card = make_account(client, "Sample card 0008", "card")
+
+    resp = enter(client, card, "100.00")
+
+    assert resp.status_code == 400
+    assert "statement" in resp.get_json()["error"]
+    assert anchors(client) == []
+    assert accounts(client)["Sample card 0008"]["takes_a_figure"] is False
+
+
+def test_a_bank_account_with_no_statement_takes_a_supplied_figure(client):
+    deposit = make_account(client, "Sample Deposit", "bank")
+    assert accounts(client)["Sample Deposit"]["takes_a_figure"] is True
+
+    resp = enter(client, deposit, "50,000.25", on="2026-01-01", note="from the bank's letter")
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["created"] is True
+    [anchor] = anchors(client, deposit)
+    assert (anchor["kind"], anchor["amount_minor"], anchor["source"], anchor["note"]) == (
+        "bank", 5000025, "supplied", "from the bank's letter",
+    )
+    assert accounts(client)["Sample Deposit"]["anchor"] == {
+        "date": "2026-01-01", "amount_minor": 5000025, "source": "supplied",
+    }
+
+
+def test_a_bank_account_stops_taking_a_figure_once_it_has_a_statement(client, conn):
+    deposit = make_account(client, "Sample Deposit", "bank")
+    assert enter(client, deposit, "50000.00", on="2026-01-01").status_code == 200
+    ensure_statement(conn, deposit, "2026-07-31", "sample.pdf")
+
+    resp = enter(client, deposit, "51000.00", on="2026-08-31")
+
+    assert resp.status_code == 400
+    assert "statement" in resp.get_json()["error"]
+    assert [(a["date"], a["amount_minor"]) for a in anchors(client, deposit)] == [
+        ("2026-01-01", 5000000),
+    ]
+
+
+def test_each_account_says_whether_it_takes_a_figure(client):
+    for kind in KINDS:
+        make_account(client, f"Sample {kind}", kind)
+
+    assert {name: a["takes_a_figure"] for name, a in accounts(client).items()} == {
+        "Sample bank": True, "Sample card": False, "Sample loan": True,
+        "Sample holding": True, "Sample company": True, "Sample person": True,
+    }
 
 
 @pytest.mark.parametrize("account_id", [999, None, "1", True])

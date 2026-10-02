@@ -29,7 +29,12 @@ CREATED = [
     ("Crypto held outside fin", "holding"),
     ("UOB home loan", "loan"),
     ("DBS auto loan", "loan"),
+    ("DBS Home Reno", "bank"),
+    ("DBS fixed deposit (MK)", "bank"),
+    ("Citi time deposit (MK)", "bank"),
 ]
+# The household bank accounts that have no statement fin imports.
+BANKS = [name for name, kind in CREATED if kind == "bank"]
 
 
 def run(path: Path, sql: str, params=()) -> int:
@@ -111,7 +116,7 @@ def test_the_kalesh_account_and_card_are_marked_as_kaleshs(old):
     ]
 
 
-def test_the_companies_holdings_and_loans_are_created_with_no_figure(old):
+def test_the_companies_holdings_loans_and_bank_accounts_are_created_with_no_figure(old):
     convert(old)
 
     made = query(
@@ -136,7 +141,7 @@ def test_nothing_else_about_an_existing_account_changes(old):
     ) == before
     assert query(old, "SELECT * FROM statements ORDER BY id") == statements
     assert report["before"]["rows"]["accounts"] == 6
-    assert report["after"]["rows"]["accounts"] == 14
+    assert report["after"]["rows"]["accounts"] == 17
     for table in ("statements", "transactions", "services", "merchant_rules", "subscriptions"):
         assert report["after"]["rows"][table] == report["before"]["rows"][table], table
     assert report["after"]["account_totals_cents"] == report["before"]["account_totals_cents"]
@@ -184,7 +189,53 @@ def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
     assert query(old, "PRAGMA foreign_key_check") == []
 
 
+def test_the_savings_account_in_rupees_is_not_created_here(old):
+    convert(old)
+
+    assert query(old, "SELECT name FROM accounts WHERE UPPER(name) LIKE '%HDFC%'") == []
+    assert query(old, "SELECT DISTINCT currency FROM accounts") == [("SGD",)]
+
+
 # --- replay and refusal ---------------------------------------------------------
+
+
+def test_a_database_converted_before_the_bank_accounts_gains_them_and_nothing_else(
+    old, monkeypatch
+):
+    # The step as it was: everything but the three bank accounts.
+    with monkeypatch.context() as earlier:
+        earlier.setattr(
+            convert_account_kinds, "CREATED",
+            tuple(pair for pair in CREATED if pair[1] != "bank"),
+        )
+        assert convert(old)["status"] == "applied"
+        assert convert(old)["status"] == "already-applied"
+    # What the operator did since: an owner corrected, a figure entered.
+    run(old, "UPDATE accounts SET owner = 'Household' WHERE id = 6")
+    loan = query(old, "SELECT id FROM accounts WHERE name = 'UOB home loan'")[0][0]
+    run(old, "INSERT INTO anchors (account_id, date, amount, source) VALUES (?, ?, ?, ?)",
+        (loan, "2026-01-01", -90250000, "supplied"))
+    everything = "SELECT * FROM accounts WHERE id <= 14 ORDER BY id"
+    before = query(old, everything)
+    anchors_before = query(old, "SELECT * FROM anchors ORDER BY id")
+    statements = query(old, "SELECT * FROM statements ORDER BY id")
+
+    report = convert(old)
+
+    assert report["status"] == "applied"
+    assert query(old, everything) == before
+    assert query(
+        old, "SELECT name, short_name, type, owner, currency, status FROM accounts"
+             " WHERE id > 14 ORDER BY id"
+    ) == [(name, name, "bank", "Household", "SGD", "active") for name in BANKS]
+    assert query(old, "SELECT * FROM anchors ORDER BY id") == anchors_before
+    assert query(old, "SELECT * FROM statements ORDER BY id") == statements
+    assert report["after"]["rows"]["accounts"] == report["before"]["rows"]["accounts"] + 3
+    assert report["after"]["account_totals_cents"] == report["before"]["account_totals_cents"]
+
+    after = dump(old)
+    assert convert(old)["status"] == "already-applied"
+    assert dump(old) == after
 
 
 def test_run_twice_changes_nothing(old):
@@ -234,7 +285,8 @@ def test_the_command_reports_what_it_did(old, capsys):
     assert "4 credit-card and debit accounts are now cards" in out
     assert "owned by Kalesh: Sample-Biz-0004, Kalesh-Debit-0005, Sample-0006" in out
     assert "created with no figure: Moom, Kalesh, Home, Rented property, Car, " \
-           "Crypto held outside fin, UOB home loan, DBS auto loan" in out
+           "Crypto held outside fin, UOB home loan, DBS auto loan, DBS Home Reno, " \
+           "DBS fixed deposit (MK), Citi time deposit (MK)" in out
 
 
 def test_the_command_run_again_says_so(old, capsys):
@@ -302,6 +354,42 @@ def test_the_app_serves_a_converted_database_and_takes_a_figure(old, started_on)
     assert again["UOB home loan"]["anchor"] == {
         "date": "2026-06-30", "amount_minor": -91000000, "source": "supplied",
     }
+
+
+def test_the_bank_accounts_with_no_statement_take_a_figure_on_a_converted_database(
+    old, started_on
+):
+    convert(old)
+    client = started_on(old)
+    listed = {a["name"]: a for a in client.get("/api/accounts").get_json()}
+    figures = {
+        "DBS Home Reno": ("1234.56", 123456),
+        "DBS fixed deposit (MK)": ("50,000.00", 5000000),
+        "Citi time deposit (MK)": ("20000", 2000000),
+    }
+    assert sorted(figures) == sorted(BANKS)
+
+    for name, (typed, _) in figures.items():
+        assert listed[name]["takes_a_figure"] is True, name
+        resp = client.post("/api/anchors", json={
+            "account_id": listed[name]["id"], "amount": typed, "date": "2026-01-01",
+        })
+        assert resp.status_code == 200, resp.get_json()
+
+    again = {a["name"]: a for a in client.get("/api/accounts").get_json()}
+    for name, (_, minor) in figures.items():
+        assert again[name]["anchor"] == {
+            "date": "2026-01-01", "amount_minor": minor, "source": "supplied",
+        }, name
+    held = client.get("/api/anchors").get_json()
+    assert sum(a["amount_minor"] for a in held) == 123456 + 5000000 + 2000000
+    # A bank account that has a statement still rests on it.
+    refused = client.post("/api/anchors", json={
+        "account_id": listed["Sample Bank 0002"]["id"], "amount": "10.00", "date": "2026-01-01",
+    })
+    assert refused.status_code == 400
+    assert listed["Sample Bank 0002"]["takes_a_figure"] is False
+    assert len(client.get("/api/anchors").get_json()) == 3
 
 
 def test_a_new_database_takes_the_step_and_gains_the_accounts(temp_db):
