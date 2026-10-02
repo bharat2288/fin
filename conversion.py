@@ -6,8 +6,9 @@ how an amount is stored). The runner makes each step cheap to get wrong:
 1. it writes a dated backup copy of the database beside it, and refuses to
    start if the copy is missing or differs in size from the source;
 2. it runs the step in one transaction, schema changes included;
-3. it records row counts and per-account totals before and after, and fails
-   (rolling everything back) if the step's declared invariant does not hold;
+3. it records row counts and per-account totals before and after (or the
+   step's own measure, when it declares one), and fails, rolling everything
+   back, if the step's declared invariant does not hold;
 4. it is safe to run twice: a step that is already applied is not run again
    and no second backup is written.
 
@@ -69,6 +70,42 @@ def unchanged(before: dict, after: dict) -> list[str]:
     return problems
 
 
+def count_rows(conn: sqlite3.Connection) -> dict[str, int]:
+    """The row count of each counted table the database holds."""
+    present = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    rows = {}
+    for table in COUNTED_TABLES:
+        if table in present:
+            rows[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    return rows
+
+
+def measure(conn: sqlite3.Connection) -> dict:
+    """The default measure: row counts per table and the total of each
+    account's rows, in cents, read from the float amount.
+
+    Every transaction row is in exactly one total. A row whose statement is
+    missing, or whose statement names no account, is totalled under the key
+    None, so a change to its amount is seen like any other.
+    """
+    # Each amount is rounded to its cent before summing, so the total is an
+    # exact integer and two measurements compare without float error.
+    totals = {
+        row[0]: row[1]
+        for row in conn.execute(
+            """
+            SELECT s.account_id, SUM(CAST(ROUND(t.amount_sgd * 100) AS INTEGER))
+            FROM transactions t
+            LEFT JOIN statements s ON s.id = t.statement_id
+            GROUP BY s.account_id
+            """
+        )
+    }
+    return {"rows": count_rows(conn), "account_totals_cents": totals}
+
+
 @dataclass(frozen=True)
 class Step:
     """One conversion step.
@@ -86,42 +123,17 @@ class Step:
                  restored from a backup or created fresh in the new shape.
     invariant  — given the measurements before and after, returns a list of
                  problems (empty when it holds). Defaults to `unchanged`.
+    measure    — reads the database and returns the measurements the
+                 invariant is given. Defaults to `measure`, which totals the
+                 float amount; a step that changes how an amount is stored
+                 declares its own, and its invariant reads that.
     """
 
     name: str
     apply: Callable[[sqlite3.Connection], None]
     is_applied: Callable[[sqlite3.Connection], bool]
     invariant: Callable[[dict, dict], list[str]] = unchanged
-
-
-def measure(conn: sqlite3.Connection) -> dict:
-    """Row counts per table and the total of each account's rows, in cents.
-
-    Every transaction row is in exactly one total. A row whose statement is
-    missing, or whose statement names no account, is totalled under the key
-    None, so a change to its amount is seen like any other.
-    """
-    present = {
-        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-    }
-    rows = {}
-    for table in COUNTED_TABLES:
-        if table in present:
-            rows[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-    # Each amount is rounded to its cent before summing, so the total is an
-    # exact integer and two measurements compare without float error.
-    totals = {
-        row[0]: row[1]
-        for row in conn.execute(
-            """
-            SELECT s.account_id, SUM(CAST(ROUND(t.amount_sgd * 100) AS INTEGER))
-            FROM transactions t
-            LEFT JOIN statements s ON s.id = t.statement_id
-            GROUP BY s.account_id
-            """
-        )
-    }
-    return {"rows": rows, "account_totals_cents": totals}
+    measure: Callable[[sqlite3.Connection], dict] = measure
 
 
 def copy_file(source: Path, target: Path) -> None:
@@ -212,7 +224,7 @@ def run_step(
                     f"({copy_size} bytes against {source_size}); the bad copy was removed"
                 )
 
-            before = measure(conn)
+            before = step.measure(conn)
 
             # While the step runs, SQLite refuses any statement that begins or
             # ends a transaction, so the step cannot commit part of its work
@@ -252,7 +264,7 @@ def run_step(
                     f"({', '.join(tried_transaction_control)}), which the runner owns; "
                     "it was refused and the step was rolled back"
                 )
-            after = measure(conn)
+            after = step.measure(conn)
             problems = step.invariant(before, after)
             if problems:
                 raise ConversionFailed(

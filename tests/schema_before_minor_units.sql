@@ -5,11 +5,6 @@
 -- (what kind), declared in book_type.py. The category tree they replaced is
 -- retired; an existing database loses it through retire_categories.py.
 
--- An amount is on its way from a float to a whole number of minor units
--- (cents, for an SGD account). The integer columns sit beside the floats and
--- nothing reads them yet; an existing database gains and fills them through
--- convert_minor_units.py.
-
 CREATE TABLE IF NOT EXISTS merchant_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern TEXT NOT NULL,          -- merchant name pattern (case-insensitive match)
@@ -22,8 +17,6 @@ CREATE TABLE IF NOT EXISTS merchant_rules (
     created_at TEXT DEFAULT (datetime('now')),
     book_override TEXT,            -- book the rule sets in place of the merchant's; NULL = the merchant's
     type_override_id INTEGER REFERENCES types(id),  -- type the rule sets in place of the merchant's
-    min_amount_minor INTEGER,      -- min_amount in whole minor units; filled by convert_minor_units.py, not read yet
-    max_amount_minor INTEGER,      -- max_amount in whole minor units; filled by convert_minor_units.py, not read yet
     FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
@@ -55,7 +48,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     description TEXT NOT NULL,      -- raw merchant description from statement
     amount_sgd REAL NOT NULL,       -- positive = expense, negative = credit/payment
     amount_foreign REAL,           -- original amount if foreign currency
-    currency_foreign TEXT,         -- three-letter code, e.g., 'USD', 'AUD', 'INR'
+    currency_foreign TEXT,         -- e.g., 'USD', 'AUD', 'INR'
     service_id INTEGER,            -- FK to services table (merchant identity)
     is_one_off INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in table)
     cat_source TEXT DEFAULT 'auto',  -- where book and type came from: auto|service_default|rule_override|fallback|manual
@@ -65,7 +58,6 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TEXT DEFAULT (datetime('now')),
     book TEXT,                     -- whose spending: Household, Moom, Kalesh (declared in book_type.py); NULL reads as Household
     type_id INTEGER REFERENCES types(id),  -- what kind of spending; NULL = not placed, or not spending
-    amount_minor INTEGER,          -- amount_sgd in whole minor units of the account's currency; filled by convert_minor_units.py, not read yet
     FOREIGN KEY (statement_id) REFERENCES statements(id),
     FOREIGN KEY (service_id) REFERENCES services(id)
 );
