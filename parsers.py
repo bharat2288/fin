@@ -176,6 +176,10 @@ def _register_builtins():
     from parse_dbs_business import detect_dbs_business_pdf, parse_dbs_business_pdf
     register("DBS Business PDF", ".pdf", detect_fn=detect_dbs_business_pdf, parse_fn=parse_dbs_business_pdf)
 
+    # Citi must sit ahead of the DBS fallback, which otherwise swallows Citi PDFs
+    from parse_citi_pdf import detect_citi_pdf, parse_citi_pdf
+    register("Citi PDF", ".pdf", detect_fn=detect_citi_pdf, parse_fn=parse_citi_pdf)
+
     from parse_dbs import parse_statement as parse_dbs_pdf
     register("DBS PDF", ".pdf", detect_fn=None, parse_fn=parse_dbs_pdf)  # fallback
 

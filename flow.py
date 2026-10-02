@@ -37,6 +37,19 @@ PAYLAH_TOPUP_MARKERS = ("TOP-UP TO PAYLAH", "TOP UP TO PAYLAH")
 # Dashed statement-ref forms of own accounts whose master name stores the
 # number undashed (e.g. Kalesh Inc 0725605300 appears as 072-560530-0:IB).
 CURATED_INTERNAL_BANK_REFS = ("438-59169-9", "072-560530-0")
+# Card payoffs by fixed statement wording, where no DBSC- ref is printed.
+# Sign-gated: the bank side only ever pays out (positive), the card side only
+# ever receives (negative). Bank-side wordings name the card issuer as payee,
+# so they are contains-matched; card-side wordings are generic, so they are
+# prefix-anchored. The DBS card side of an iBanking payoff prints only
+# "BILL PAYMENT - DBS INTERNET/WIRELESS" (its ref sits on the next line), so
+# it carries no card digits for rule 1 to match and lives here instead.
+CARD_PAYOFF_OUTFLOW_MARKERS = ("PAYMENT TO CITI CREDIT CARD", "BILL PAYMENT MBK-UOB CARDS")
+CARD_PAYOFF_INFLOW_PREFIXES = (
+    "PAYMENT - ATM/INTERNET",
+    "PAYMT THRU E-BANK/HOMEB/CYBERB",
+    "BILL PAYMENT - DBS INTERNET/WIRELESS",
+)
 ACCOUNT_REF_RE = re.compile(r"\b\d{3}-\d{5,9}-\d\b")
 LOCAL_ALIAS_SPLIT_RE = re.compile(r"[\n,;]+")
 
@@ -112,6 +125,20 @@ def _matches_linked_cc(description: str, linked_cc_patterns: tuple[str, ...]) ->
     return False
 
 
+def _matches_card_payoff_wording(description: str, amount: float) -> bool:
+    """Detect a card payoff by fixed wording from either side of the movement.
+
+    A reversed or dishonoured payoff carries the same wording with the
+    opposite sign; it is not an own-money credit, so it falls through.
+    """
+    up = " ".join(description.upper().split())
+    if amount > 0:
+        return any(marker in up for marker in CARD_PAYOFF_OUTFLOW_MARKERS)
+    if amount < 0:
+        return up.startswith(CARD_PAYOFF_INFLOW_PREFIXES)
+    return False
+
+
 def _matches_own_alias(description: str, own_aliases: tuple[str, ...]) -> bool:
     up = description.upper()
     return any(a.upper() in up for a in own_aliases if a)
@@ -154,6 +181,14 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
 
     # 1. Linked-CC payoff (most specific form of own-endpoint movement)
     if _matches_linked_cc(description, ctx.linked_cc_patterns):
+        return "payment"
+
+    # 1b. Card payoff by fixed wording (non-DBS cards, and the DBS card-side
+    #     credit that prints no card digits). Sits with rule 1 so payoff
+    #     keeps beating own-alias and transfer rails, as the DBS form does.
+    #     Its sign gate makes it disjoint from rule 2's keyword path: a
+    #     reversal of a payoff has the opposite sign and falls through.
+    if _matches_card_payoff_wording(description, amount):
         return "payment"
 
     # 2. Refund check BEFORE transfer, so a rebate from a known merchant
