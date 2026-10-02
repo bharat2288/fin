@@ -73,3 +73,6 @@ specs/
 
 # Financial records — invoices, contracts, receipts (bank details; never push)
 business/
+
+# Backups the conversion runner writes beside the database (financial data)
+*.bak

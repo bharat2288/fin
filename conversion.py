@@ -1,0 +1,238 @@
+"""The one runner every conversion of existing rows goes through.
+
+A conversion step changes rows that already exist (relabelling them, changing
+how an amount is stored). The runner makes each step cheap to get wrong:
+
+1. it writes a dated backup copy of the database beside it, and refuses to
+   start if the copy is missing or differs in size from the source;
+2. it runs the step in one transaction, schema changes included;
+3. it records row counts and per-account totals before and after, and fails
+   (rolling everything back) if the step's declared invariant does not hold;
+4. it is safe to run twice: a step that is already applied is not run again
+   and no second backup is written.
+
+The runner takes the database path from its caller. It never opens a database
+by a relative name and has no default path.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+import sqlite3
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Callable
+
+# Tables whose row counts are recorded. A frozen list: table names in the
+# count query come from here and nowhere else. A table absent from the
+# database (not created yet, or retired by an earlier step) is left out.
+COUNTED_TABLES = (
+    "accounts",
+    "statements",
+    "transactions",
+    "services",
+    "merchant_rules",
+    "subscriptions",
+    "categories",
+    "batch_imports",
+)
+
+_STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+
+
+class ConversionRefused(Exception):
+    """The runner would not start the step. Nothing was changed."""
+
+
+class ConversionFailed(Exception):
+    """The step ran and was rolled back. The database is as it was."""
+
+
+def unchanged(before: dict, after: dict) -> list[str]:
+    """The default invariant: no row count and no account total moved."""
+    problems = []
+    for table in sorted(set(before["rows"]) | set(after["rows"])):
+        was, now = before["rows"].get(table), after["rows"].get(table)
+        if was != now:
+            problems.append(f"row count of {table} changed: {was} -> {now}")
+    was_totals, now_totals = before["account_totals_cents"], after["account_totals_cents"]
+    for account_id in sorted(set(was_totals) | set(now_totals)):
+        was, now = was_totals.get(account_id), now_totals.get(account_id)
+        if was != now:
+            problems.append(f"total of account {account_id} changed: {was} -> {now} cents")
+    return problems
+
+
+@dataclass(frozen=True)
+class Step:
+    """One conversion step.
+
+    name       — lowercase words joined by hyphens; it goes into the backup's
+                 file name.
+    apply      — does the work on the connection it is given. It must not
+                 commit: the runner owns the transaction.
+    is_applied — reads the database and says whether the step's work is
+                 already there. This is what makes a second run a no-op, and
+                 it reads the data itself, so it stays true for a database
+                 restored from a backup or created fresh in the new shape.
+    invariant  — given the measurements before and after, returns a list of
+                 problems (empty when it holds). Defaults to `unchanged`.
+    """
+
+    name: str
+    apply: Callable[[sqlite3.Connection], None]
+    is_applied: Callable[[sqlite3.Connection], bool]
+    invariant: Callable[[dict, dict], list[str]] = unchanged
+
+
+def measure(conn: sqlite3.Connection) -> dict:
+    """Row counts per table and the total of each account's rows, in cents."""
+    present = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    rows = {}
+    for table in COUNTED_TABLES:
+        if table in present:
+            rows[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    # Each amount is rounded to its cent before summing, so the total is an
+    # exact integer and two measurements compare without float error.
+    totals = {
+        row[0]: row[1]
+        for row in conn.execute(
+            """
+            SELECT s.account_id, SUM(CAST(ROUND(t.amount_sgd * 100) AS INTEGER))
+            FROM transactions t
+            JOIN statements s ON s.id = t.statement_id
+            GROUP BY s.account_id
+            """
+        )
+    }
+    return {"rows": rows, "account_totals_cents": totals}
+
+
+def copy_file(source: Path, target: Path) -> None:
+    """The default backup: a byte copy of the database file."""
+    shutil.copy2(source, target)
+
+
+def _backup_path(db_path: Path, step_name: str, day: date) -> Path:
+    """`<database>.pre-<step>-<YYYYMMDD>.bak`, numbered if that name is taken."""
+    stem = f"{db_path.name}.pre-{step_name}-{day:%Y%m%d}"
+    candidate = db_path.with_name(f"{stem}.bak")
+    n = 2
+    while candidate.exists():
+        candidate = db_path.with_name(f"{stem}-{n}.bak")
+        n += 1
+    return candidate
+
+
+def run_step(
+    db_path: Path | str,
+    step: Step,
+    *,
+    today: date | None = None,
+    backup: Callable[[Path, Path], None] = copy_file,
+) -> dict:
+    """Run one conversion step behind a backup, in one transaction.
+
+    Returns a report: the step's name, `status` ("applied" or
+    "already-applied"), the backup's path (None when nothing was run), and the
+    measurements before and after.
+
+    Raises ConversionRefused when the step was not started, ConversionFailed
+    when it was started and rolled back.
+    """
+    if not _STEP_NAME.fullmatch(step.name):
+        raise ConversionRefused(f"step name {step.name!r} must be lowercase words joined by hyphens")
+    db_path = Path(db_path).resolve()
+    if not db_path.is_file():
+        raise ConversionRefused(f"no database at {db_path}")
+
+    # isolation_level=None: the sqlite3 module opens no transaction of its
+    # own, so the BEGIN below covers schema changes as well as row changes.
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        if step.is_applied(conn):
+            return {
+                "step": step.name,
+                "status": "already-applied",
+                "backup": None,
+                "before": None,
+                "after": None,
+            }
+
+        # In WAL mode committed rows can sit in the -wal file, where a copy of
+        # the main file would miss them. Fold them in, then take the write
+        # lock so nothing can change between the copy and the step.
+        busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        if busy:
+            raise ConversionRefused(
+                "the database is in use by another connection; close it and run again"
+            )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            raise ConversionRefused(
+                "the database is being written by another connection; close it and run again"
+            ) from None
+        try:
+            wal = db_path.with_name(db_path.name + "-wal")
+            if wal.exists() and wal.stat().st_size:
+                raise ConversionRefused(
+                    "the database changed while the backup was being prepared; run again"
+                )
+
+            target = _backup_path(db_path, step.name, today or date.today())
+            backup(db_path, target)
+            if not target.is_file():
+                raise ConversionRefused(f"backup copy is missing: {target.name} was not written")
+            source_size, copy_size = db_path.stat().st_size, target.stat().st_size
+            if copy_size != source_size:
+                raise ConversionRefused(
+                    f"backup copy {target.name} differs in size from the database "
+                    f"({copy_size} bytes against {source_size})"
+                )
+
+            before = measure(conn)
+            try:
+                step.apply(conn)
+            except Exception as exc:
+                # The type only: an exception's text can carry row contents.
+                raise ConversionFailed(
+                    f"step {step.name} raised {type(exc).__name__} and was rolled back"
+                ) from exc
+            if not conn.in_transaction:
+                raise ConversionFailed(
+                    f"step {step.name} ended the runner's transaction; its changes "
+                    f"could not be checked. Restore from {target.name} if they are wrong."
+                )
+            after = measure(conn)
+            problems = step.invariant(before, after)
+            if problems:
+                raise ConversionFailed(
+                    f"step {step.name} broke its invariant and was rolled back: "
+                    + "; ".join(problems)
+                )
+            if not step.is_applied(conn):
+                raise ConversionFailed(
+                    f"step {step.name} ran but does not read as applied, so a second "
+                    "run would repeat it; rolled back"
+                )
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+    return {
+        "step": step.name,
+        "status": "applied",
+        "backup": str(target),
+        "before": before,
+        "after": after,
+    }
