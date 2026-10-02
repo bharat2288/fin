@@ -177,6 +177,124 @@ def test_named_paynow_counterparty_stays_expense():
     assert classify_flow(facts, CTX_WITH_RAILS) == "expense"
 
 
+# ----- Non-DBS card payoffs: fixed bank wordings, sign-gated -----
+
+def test_citi_payoff_from_bank_is_payment():
+    """Bank-side outflow paying a Citi card is own-money, not spend."""
+    facts = {
+        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000012345",
+        "amount_sgd": 850.00,
+        "category_name": "Transfers",
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
+
+
+def test_uob_payoff_from_bank_mixed_case_is_payment():
+    """Source statements print this wording in mixed case."""
+    facts = {
+        "description": "Bill Payment mBK-UOB Cards 0000000000001111",
+        "amount_sgd": 420.00,
+        "category_name": None,
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
+
+
+def test_card_credit_atm_internet_payment_is_payment():
+    for description in ("PAYMENT - ATM/INTERNET", "PAYMENT - ATM/INTERNET REF 99999"):
+        facts = {"description": description, "amount_sgd": -850.00, "category_name": None}
+        assert classify_flow(facts, CTX_OWN_ONLY) == "payment", description
+
+
+def test_card_credit_paymt_thru_ebank_is_payment():
+    facts = {
+        "description": "PAYMT THRU E-BANK/HOMEB/CYBERB (EP00)",
+        "amount_sgd": -420.00,
+        "category_name": None,
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
+
+
+def test_dbs_card_credit_bill_payment_wording_is_payment():
+    """DBS card-side credit for a payoff; trailing digits and spacing vary."""
+    for description in (
+        "BILL PAYMENT - DBS INTERNET/WIRELESS",
+        "BILL PAYMENT - DBS INTERNET/WIRELESS 00000000",
+        "BILL  PAYMENT -  DBS INTERNET/WIRELESS",
+        "Bill Payment - DBS Internet/Wireless",
+    ):
+        facts = {"description": description, "amount_sgd": -850.00, "category_name": None}
+        assert classify_flow(facts, CTX_OWN_ONLY) == "payment", description
+
+
+def test_dbs_card_bill_payment_wording_as_outflow_is_not_payment():
+    """A debit carrying the card-credit wording is not an own-money credit."""
+    facts = {
+        "description": "BILL PAYMENT - DBS INTERNET/WIRELESS",
+        "amount_sgd": 850.00,
+        "category_name": None,
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "expense"
+
+
+def test_dbs_card_bill_payment_wording_mid_description_is_not_payment():
+    """Prefix-anchored like the other card-side wordings."""
+    facts = {
+        "description": "SOME MERCHANT BILL PAYMENT - DBS INTERNET/WIRELESS",
+        "amount_sgd": -12.00,
+        "category_name": None,
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "income"
+
+
+def test_bank_side_payoff_wording_as_inflow_is_not_payment():
+    """An inflow carrying outbound-payoff wording is a return, not a payoff."""
+    facts = {
+        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000012345",
+        "amount_sgd": -850.00,
+        "category_name": None,
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "income"
+
+
+def test_card_side_payoff_wording_as_outflow_is_not_payment():
+    """A debit with card-credit wording (e.g. a dishonoured payoff, or a
+    bank-side internet bill payment to a merchant) is not an own-money credit."""
+    for description in ("PAYMENT - ATM/INTERNET", "PAYMT THRU E-BANK/HOMEB/CYBERB (EP00)"):
+        facts = {"description": description, "amount_sgd": 850.00, "category_name": None}
+        assert classify_flow(facts, CTX_OWN_ONLY) == "expense", description
+
+
+def test_card_side_wording_mid_description_is_not_payment():
+    """Card-side wordings are prefix-anchored; embedded in a longer line they stay as-is."""
+    facts = {
+        "description": "NETS SOME MERCHANT PAYMENT - ATM/INTERNET",
+        "amount_sgd": -12.00,
+        "category_name": None,
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "income"
+
+
+def test_other_bill_payment_payees_stay_expense():
+    """Only the card-issuer payees are payoffs; utility and other bill payments are spend."""
+    for description in (
+        "Bill Payment mBK-SOME UTILITY 0000000000002222",
+        "PAYMENT TO CITYGAS MBKFT00000067890",
+        "BILL PAYMENT MBK-UOB INSURANCE 0000000000003333",
+    ):
+        facts = {"description": description, "amount_sgd": 120.00, "category_name": None}
+        assert classify_flow(facts, CTX_OWN_ONLY) == "expense", description
+
+
+def test_card_payoff_wording_beats_own_alias_transfer():
+    """Same precedence as the DBS linked-card form: payoff beats generic own-transfer."""
+    facts = {
+        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000012345 SURI BHARAT",
+        "amount_sgd": 850.00,
+        "category_name": None,
+    }
+    assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
+
+
 # ----- Bullet 4: backfill script -----
 
 def test_backfill_populates_all_rows(conn, tmp_path):
