@@ -126,6 +126,7 @@ def test_the_import_creates_cards_and_bank_accounts_and_refuses_any_other_word(c
     ensure_account(conn, "Sample Bank 0005", "bank")
     with pytest.raises(ValueError, match="unknown account kind"):
         ensure_account(conn, "Sample Card 0006", "credit_card")
+    conn.commit()  # the helper leaves the commit to its caller, as the import does
 
     listed = accounts(client)
     assert {name: (a["type"], a["owner"]) for name, a in listed.items()} == {

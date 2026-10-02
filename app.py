@@ -25,6 +25,7 @@ import flow
 import money
 import review
 import suggest
+import tie
 from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
 
 
@@ -235,6 +236,35 @@ def _label_for(conn, description: str, amount_minor: int) -> dict:
         if type_id is not None:
             found.update(book=found["book"] or book, type_id=type_id, cat_source="fallback")
     return found
+
+
+def _tie_line(conn, stmt, figures: dict) -> dict:
+    """The tie line of a parsed statement as the import preview shows it:
+    opening, what the rows add up to, closing and the difference, each in
+    whole minor units and as text, and whether it ties."""
+    from ingest import find_account
+    account = stmt.accounts[0] if stmt.accounts else "Unknown"
+    held = conn.execute(
+        "SELECT currency FROM accounts WHERE id = ?", (find_account(conn, account),)
+    ).fetchone()
+    currency = (held["currency"] if held else None) or "SGD"
+    return {
+        "file": stmt.filename,
+        "account": mask_card_number(account),
+        "opening_date": stmt.opening_date,
+        "closing_date": stmt.closing_date,
+        "status": "ties" if figures["difference_minor"] == 0 else "off",
+        **figures,
+        "opening": anchors.format_amount(figures["opening_minor"], currency),
+        "rows_sum": anchors.format_amount(figures["rows_minor"], currency),
+        "closing": anchors.format_amount(figures["closing_minor"], currency),
+        "difference": anchors.format_amount(abs(figures["difference_minor"]), currency),
+    }
+
+
+class AnchorRefused(Exception):
+    """A statement's closing balance differs from the anchor already held for
+    its account and date."""
 
 
 def _kind_from_account_name(account_name: str) -> str:
@@ -1700,6 +1730,14 @@ def api_import_upload():
 
     Accepts multipart form data with one or more files.
     Returns grouped preview by account with each row's label status.
+
+    A statement whose source states its balances is checked: opening less the
+    sum of its rows must equal closing, exactly. One that ties puts its tie
+    line (opening, what the rows add up to, closing) in its account group's
+    `statements`, and each of its rows names it by position in `statement`.
+    One that does not is refused: none of its rows is in the preview, and its
+    entry in `errors` carries the same line under `tie`, with the difference.
+    A source with no balance is not checked. No row is skipped by default.
     """
     if "files" not in request.files:
         return jsonify({"error": "No files uploaded"}), 400
@@ -1730,9 +1768,24 @@ def api_import_upload():
         for save_path, filename in saved_paths:
             try:
                 stmts = auto_detect_and_parse(save_path)
-                parsed_statements.extend(stmts)
             except Exception as e:
                 errors.append({"file": filename, "error": str(e)})
+                continue
+            # The one check of rows against the statement's own balances. A
+            # statement that does not tie goes no further.
+            for stmt in stmts:
+                try:
+                    tie.check(stmt)
+                except tie.DoesNotTie as e:
+                    errors.append({
+                        "file": filename,
+                        "error": str(e),
+                        "tie": _tie_line(conn, stmt, e.figures),
+                    })
+                except ValueError as e:
+                    errors.append({"file": filename, "error": str(e)})
+                else:
+                    parsed_statements.append(stmt)
 
         # Handle Vantage MK/BS split if both exports present
         parsed_statements = handle_vantage_split(parsed_statements)
@@ -1746,10 +1799,25 @@ def api_import_upload():
         # Group transactions by account and label each with book and type
         type_names = book_type.spending_type_names(conn)
         svcs = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM services").fetchall()}
+        statement_lines = {}  # account name -> tie lines of its statements that carry balances
 
         for stmt in parsed_statements:
+            # A statement with balances is one account's: its tie line goes on
+            # that account's group, which exists even when it has no rows.
+            statement_ref = None
+            statement_account = None
+            ties = tie.check(stmt)
+            if ties is not None:
+                statement_account = stmt.accounts[0] if stmt.accounts else "Unknown"
+                lines = statement_lines.setdefault(statement_account, [])
+                statement_ref = len(lines)
+                lines.append(_tie_line(conn, stmt, ties))
+                all_groups.setdefault(statement_account, [])
+
             for tx in stmt.transactions:
                 account = tx.card_info or stmt.accounts[0] if stmt.accounts else "Unknown"
+                if statement_account is not None:
+                    account = statement_account
 
                 # Merchant rules first; for bank statements, then the PayNow wording
                 found = _label_for(conn, tx.description, tx.amount_minor)
@@ -1804,8 +1872,11 @@ def api_import_upload():
                         if tx.flow_type in ("transfer", "payment", flow.MOVEMENT, flow.REVIEW)
                         else "untyped"
                     ),
-                    # Default-skip: transfers + CC payments (non-spend events)
-                    "_skip": tx.flow_type in ("transfer", "payment"),
+                    # Every row is imported: nothing is skipped by default.
+                    "_skip": False,
+                    # Which of its account's statements (by position in the
+                    # group's `statements`) the row was checked against.
+                    "statement": statement_ref,
                 }
 
                 if account not in all_groups:
@@ -1832,6 +1903,13 @@ def api_import_upload():
             "untyped": group_untyped,
             "skipped": group_skip,
             "total": len(txns),
+            "statements": statement_lines.get(account_name, []),
+            "tie": (
+                "ties"
+                if account_name in statement_lines
+                and all(t["statement"] is not None for t in txns)
+                else "not_checked"
+            ),
         })
 
         total += len(txns)
@@ -1908,8 +1986,13 @@ def api_import_confirm():
                         "type_id": 5,
                         "flow_type": "expense",
                         "other_side_id": null,
-                        "_skip": false
+                        "_skip": false,
+                        "statement": 0
                     }, ...
+                ],
+                "statements": [
+                    {"opening_minor": 5210000, "closing_minor": 4120050,
+                     "closing_date": "YYYY-MM-DD"}, ...
                 ]
             }, ...
         ],
@@ -1926,6 +2009,16 @@ def api_import_confirm():
     and so does an amount that is missing or is not a whole number of cents.
     The amount arrives as the decimal the preview showed and is stored as
     whole minor units.
+
+    A group's `statements` are the tie lines the upload gave it. Each is
+    checked again over the rows that name it and are about to be written:
+    opening less their sum must equal closing, exactly, so a row of such a
+    statement cannot be left out. Its closing balance is then written as a
+    statement anchor; the same balance already held changes nothing, and a
+    different one for that account and date refuses the import (409).
+
+    All or nothing: every write of one confirm is one transaction, and any
+    failure rolls all of it back.
     """
     data = request.get_json()
     if not data:
@@ -1956,20 +2049,43 @@ def api_import_confirm():
         except (UnknownLabel, BookNeeded, BadAmount, flow.UnknownFlow) as e:
             return jsonify({"error": str(e)}), 400
 
+    # The shared check, over the rows as they will be written.
+    try:
+        for g in groups:
+            lines = g.get("statements") or []
+            if not isinstance(lines, list) or not all(isinstance(line, dict) for line in lines):
+                raise ValueError("statements must be a list of tie lines")
+            rows_of = [[] for _ in lines]
+            for tx in g.get("transactions", []):
+                ref = tx.get("statement")
+                if ref is None:
+                    continue
+                if isinstance(ref, bool) or not isinstance(ref, int) or not 0 <= ref < len(lines):
+                    raise ValueError("a row names a statement its account does not have")
+                if not tx.get("_skip", False):
+                    rows_of[ref].append(minor_of[id(tx)])
+            for line, amounts in zip(lines, rows_of):
+                anchors.checked_date(line.get("closing_date"))
+                tie.checked(line.get("opening_minor"), line.get("closing_minor"), amounts)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     total_saved = 0
     total_duplicates = 0
     accounts_created = []
     rules_skipped_generic = 0
+    anchors_written = 0
 
     with get_db() as conn:
         try:
             for group in groups:
                 account_name = group["account"]
                 txns = group["transactions"]
+                statement_lines = group.get("statements") or []
 
                 # Filter out skipped transactions
                 active_txns = [t for t in txns if not t.get("_skip", False)]
-                if not active_txns:
+                if not active_txns and not statement_lines:
                     continue
 
                 # Ensure account exists
@@ -2056,7 +2172,28 @@ def api_import_confirm():
                         total_saved += 1
 
                 total_duplicates += duplicates_skipped
-                conn.commit()
+
+                # Each statement that tied anchors the account at its closing
+                # balance. The same balance again is no second anchor.
+                for line in statement_lines:
+                    try:
+                        _, written = anchors.record(
+                            conn, account_id, line["closing_date"], line["closing_minor"],
+                            anchors.STATEMENT,
+                            f"import {import_id}" if import_id is not None else None,
+                        )
+                    except anchors.AnchorConflict as e:
+                        currency = conn.execute(
+                            "SELECT currency FROM accounts WHERE id = ?", (account_id,)
+                        ).fetchone()["currency"]
+                        raise AnchorRefused(
+                            f"{mask_card_number(account_name)} already has a balance of "
+                            f"{anchors.format_amount(e.existing['amount'], currency)} for "
+                            f"{e.existing['date']}; this statement states "
+                            f"{anchors.format_amount(line['closing_minor'], currency)}. "
+                            "A different amount for the same date is refused; nothing was imported."
+                        ) from None
+                    anchors_written += 1 if written else 0
 
             # Create new services submitted from the preview
             # Each entry: {name, book, type_id, description} — description becomes the merchant rule
@@ -2103,7 +2240,6 @@ def api_import_confirm():
                     "UPDATE transactions SET service_id = ? WHERE UPPER(description) = ? AND service_id IS NULL",
                     (svc_id, desc.upper()),
                 )
-            conn.commit()
 
             # Save new merchant rules
             rules_added = 0
@@ -2124,8 +2260,6 @@ def api_import_confirm():
                     rules_added += 1
                 except Exception as e:
                     app.logger.warning("Failed to insert rule '%s': %s", rule.get("pattern"), e)
-            conn.commit()
-            invalidate_rules_cache()
 
             # Update batch_imports record
             result_summary = {
@@ -2135,12 +2269,16 @@ def api_import_confirm():
                 "rules_added": rules_added,
                 "services_created": services_created,
                 "rules_skipped_generic": rules_skipped_generic,
+                "anchors_written": anchors_written,
             }
             conn.execute(
                 "UPDATE batch_imports SET status = 'committed', result_json = ? WHERE id = ?",
                 (json.dumps(result_summary), import_id),
             )
+            # The one commit: rows, accounts, statement records, anchors,
+            # merchants and rules land together or not at all.
             conn.commit()
+            invalidate_rules_cache()
 
             return jsonify({
                 "success": True,
@@ -2149,9 +2287,20 @@ def api_import_confirm():
                 "rules_added": rules_added,
                 "accounts": accounts_created,
                 "rules_skipped_generic": rules_skipped_generic,
+                "anchors_written": anchors_written,
             })
 
+        except AnchorRefused as e:
+            conn.rollback()
+            conn.execute(
+                "UPDATE batch_imports SET status = 'failed', result_json = ? WHERE id = ?",
+                (json.dumps({"error": str(e)}), import_id),
+            )
+            conn.commit()
+            return jsonify({"error": str(e)}), 409
+
         except Exception as e:
+            conn.rollback()
             conn.execute(
                 "UPDATE batch_imports SET status = 'failed', result_json = ? WHERE id = ?",
                 (json.dumps({"error": str(e)}), import_id),

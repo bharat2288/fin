@@ -33,6 +33,14 @@ class ParsedStatement:
     accounts: list[str] = field(default_factory=list)
     transactions: list[ParsedTransaction] = field(default_factory=list)
     filename: str = ""
+    # The balances the source states, in whole minor units, signed as the
+    # household sees them: cash positive, anything owed negative (a card's
+    # amount owed is handed over negated). None where the source states none;
+    # the import path checks the rows against them (tie.py), never the parser.
+    opening_minor: int | None = None
+    closing_minor: int | None = None
+    opening_date: str | None = None   # YYYY-MM-DD, where the source gives it
+    closing_date: str | None = None   # YYYY-MM-DD; always given with the balances
 
 
 # Month abbreviation → number
@@ -280,6 +288,12 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     - Date: DD/MM/YYYY
     - Multi-line descriptions (PayNow has TO: lines, etc.)
     - Amount columns are positional
+
+    A statement of one account hands over its first "Balance Brought Forward"
+    and last "Balance Carried Forward" as its opening and closing balance, the
+    closing dated by the statement date; the import path checks the rows
+    against them (tie.py). With more than one account number in the file, a
+    balance line missing or no statement date, it states no balance.
     """
     path = Path(pdf_path)
     pdf = pdfplumber.open(str(path))
@@ -308,6 +322,8 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     current_withdrawal = None
     current_deposit = None
     prev_balance = None
+    opening = None   # the first balance brought forward
+    closing = None   # the last balance carried forward
 
     while i < len(lines):
         line = lines[i].strip()
@@ -318,8 +334,16 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
         )
         if bf_match:
             prev_balance = money.parse_minor(bf_match.group(1))
+            if opening is None:
+                opening = prev_balance
             i += 1
             continue
+
+        cf_match = re.search(
+            r"Balance Carried Forward(?:\s+SGD)?\s+([\d,]+\.\d{2})", line
+        )
+        if cf_match:
+            closing = money.parse_minor(cf_match.group(1))
 
         # Match transaction start: DD/MM/YYYY Description [amount] [amount] balance
         tx_match = re.match(
@@ -380,6 +404,16 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
         )
 
     pdf.close()
+
+    try:
+        closing_date = date.fromisoformat(statement.statement_date).isoformat()
+    except ValueError:
+        closing_date = None
+    one_account = len(set(re.findall(r"Account No\.\s*([\d-]+)", all_text))) == 1
+    if one_account and opening is not None and closing is not None and closing_date:
+        statement.opening_minor = opening
+        statement.closing_minor = closing
+        statement.closing_date = closing_date
     return statement
 
 

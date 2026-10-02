@@ -24,8 +24,12 @@ Text is extracted with x_tolerance=1.5: pdfplumber's default (3) glues Citi's
 tightly-kerned words together ("BALANCEPREVIOUSSTATEMENT"), which would make
 descriptions differ from the Citi CSV export and break merchant rules.
 
-Both parsers check the parsed rows against the statement's own totals and
-raise ValueError when they disagree — a short import is worse than none.
+Both parsers hand over the statement's opening and closing balance, signed as
+the household sees them (a card's balance owed is negative). Whether the rows
+carry the one to the other is checked by the import path (tie.py), which
+refuses a statement that does not reconcile — a short import is worse than
+none. The checking parser still raises ValueError itself when a row disagrees
+with its running balance or the rows disagree with the statement's TOTAL line.
 """
 
 import re
@@ -217,20 +221,17 @@ def parse_citi_card_pages(pages: list[str], filename: str = "") -> ParsedStateme
         ))
 
     # Previous balance + every billed row must land on the current balance,
-    # to the cent.
-    parsed_total = summary["previous"] + sum(t.amount_minor for t in transactions)
-    if parsed_total != summary["current"]:
-        raise ValueError(
-            f"Citi card statement does not reconcile: {len(transactions)} parsed rows "
-            "do not add up to the statement's current balance"
-        )
-
+    # to the cent: the import path checks it (tie.py). Citi prints what is
+    # owed as a positive figure; a balance owed is stored negative.
     return ParsedStatement(
         statement_type="credit_card",
         statement_date=stmt_date,
         accounts=[account_name],
         filename=filename,
         transactions=transactions,
+        opening_minor=-summary["previous"],
+        closing_minor=-summary["current"],
+        closing_date=stmt_date,
     )
 
 
@@ -281,6 +282,7 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
 
     account_number = ""
     opening = closing = None
+    opening_date = closing_date = None
     totals = None
     balance = None
     transactions = []
@@ -295,10 +297,12 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
 
         if (m := CHK_OPENING_RE.match(line)):
             opening = balance = _amount(m.group(7))
+            opening_date = _chk_date(m.group(1), m.group(2), m.group(3))
             continuing = False
             continue
         if (m := CHK_CLOSING_RE.match(line)):
             closing = _amount(m.group(4))
+            closing_date = _chk_date(m.group(1), m.group(2), m.group(3))
             continuing = False
             continue
         if (m := CHK_TOTAL_RE.match(line)):
@@ -343,7 +347,9 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
 
     debits = sum(t.amount_minor for t in transactions if t.amount_minor > 0)
     credits = -sum(t.amount_minor for t in transactions if t.amount_minor < 0)
-    if debits != totals[0] or credits != totals[1] or opening - debits + credits != closing:
+    # Opening less the rows against the closing balance is the import path's
+    # check (tie.py); the TOTAL line is this statement's own second witness.
+    if debits != totals[0] or credits != totals[1]:
         raise ValueError(
             f"Citi Plus statement does not reconcile: {len(transactions)} parsed rows "
             "do not match the statement's totals"
@@ -359,6 +365,10 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
         accounts=[account_name],
         filename=filename,
         transactions=transactions,
+        opening_minor=opening,
+        closing_minor=closing,
+        opening_date=opening_date,
+        closing_date=closing_date,
     )
 
 

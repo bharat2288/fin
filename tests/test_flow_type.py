@@ -623,11 +623,10 @@ def test_transactions_api_expense_only_excludes_transfer_and_null_rows(client, c
     assert set(descriptions) == {"Expense", "Refund"}
 
 
-def test_import_preview_kept_default_for_income_skipped_default_for_transfer(client, conn):
-    """Bullet 6: Preview entry _skip is driven by flow_type, not is_transfer.
-
-    Rent received (income) must NOT be skipped; self-transfer must be skipped.
-    This is the slice that closes the motivating failure mode.
+def test_import_preview_skips_neither_income_nor_a_transfer_by_default(client, conn):
+    """The preview classifies each row by flow_type, not is_transfer, and
+    skips none by default: every row of a statement is imported (ticket 14
+    retired the default skipping of transfers and payments).
     """
     import io, json, parsers
 
@@ -673,7 +672,7 @@ def test_import_preview_kept_default_for_income_skipped_default_for_transfer(cli
         assert rent["flow_type"] == "income"
         assert rent["_skip"] is False       # rent must NOT be default-skipped
         assert self_xfer["flow_type"] == "transfer"
-        assert self_xfer["_skip"] is True   # self-transfer must be default-skipped
+        assert self_xfer["_skip"] is False  # a self-transfer is imported too
     finally:
         # Clean up fake parser
         parsers._PARSERS = [p for p in parsers._PARSERS if p["name"] != "Fake Test CSV"]

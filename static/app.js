@@ -1639,7 +1639,33 @@ function renderImportPreview(data) {
     const groupsEl = document.getElementById('preview-groups');
     groupsEl.innerHTML = '';
 
+    // Files that could not be imported. A statement whose rows do not add up
+    // to its own closing balance is shown with its tie line.
+    data.errors.forEach(err => {
+        const div = document.createElement('div');
+        div.className = 'account-group';
+        div.innerHTML = err.tie ? `
+            <div class="account-group-header">
+                <span class="account-group-name">${escapeHtml(err.tie.account)} · ${escapeHtml(err.tie.closing_date || '')} · ${err.tie.rows} rows</span>
+            </div>
+            ${tieLineHtml(err.tie)}
+            <div class="text-error" style="padding:4px 16px 12px;font-size:13px;">
+                This statement cannot be imported: its rows do not add up to its own closing balance.
+                A row was probably missed when the file was read. <span class="text-muted">(${escapeHtml(err.file)})</span>
+            </div>
+        ` : `
+            <div class="account-group-header">
+                <span class="account-group-name">${escapeHtml(err.file)}</span>
+            </div>
+            <div class="text-error" style="padding:4px 16px 12px;font-size:13px;">${escapeHtml(err.error)}</div>
+        `;
+        groupsEl.appendChild(div);
+    });
+
     data.groups.forEach((group, gi) => {
+        const statements = group.statements || [];
+        // A group whose rows were all checked against a statement has no skip control.
+        const allChecked = statements.length > 0 && group.transactions.every(tx => tx.statement != null);
         const div = document.createElement('div');
         div.className = 'account-group';
         div.innerHTML = `
@@ -1649,13 +1675,16 @@ function renderImportPreview(data) {
                     <span>${group.total} transactions</span>
                     <span class="text-success">${group.typed} typed</span>
                     <span class="text-warning">${group.untyped} no type</span>
+                    ${group.tie === 'ties' ? '' : '<span class="text-muted">not checked</span>'}
                 </div>
             </div>
+            ${statements.map(tieLineHtml).join('')}
+            ${statements.length ? '<div class="text-muted" style="padding:0 16px 8px;font-size:12px;">every row is imported; none is skipped</div>' : ''}
             <div class="preview-table-wrap">
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th style="width:40px;"><input type="checkbox" checked onchange="toggleGroupSkip(${gi}, this.checked)"></th>
+                            <th style="width:40px;">${allChecked ? '' : `<input type="checkbox" checked onchange="toggleGroupSkip(${gi}, this.checked)">`}</th>
                             <th>Date</th>
                             <th>Description</th>
                             <th style="text-align:right">Amount</th>
@@ -1676,7 +1705,7 @@ function renderImportPreview(data) {
             const tr = document.createElement('tr');
             if (tx._skip) tr.style.opacity = '0.4';
             tr.innerHTML = `
-                <td><input type="checkbox" ${tx._skip ? '' : 'checked'} data-gi="${gi}" data-ti="${ti}" onchange="toggleTxSkip(${gi}, ${ti}, this.checked)"></td>
+                <td>${tx.statement != null ? '' : `<input type="checkbox" ${tx._skip ? '' : 'checked'} data-gi="${gi}" data-ti="${ti}" onchange="toggleTxSkip(${gi}, ${ti}, this.checked)">`}</td>
                 <td class="col-date">${tx.date}</td>
                 <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
                 <td class="col-amount">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
@@ -1718,6 +1747,23 @@ function renderImportPreview(data) {
     document.body.appendChild(datalist);
 
     updateConfirmBar();
+}
+
+// The tie line of a statement in the import preview: opening, what the rows
+// add up to, closing, and whether they tie.
+function tieLineHtml(line) {
+    const verdict = line.status === 'ties'
+        ? '<strong class="text-success">TIES</strong>'
+        : `<strong class="text-error">OFF BY ${escapeHtml(line.difference)}</strong>`;
+    return `
+        <div style="padding:4px 16px 8px;font-size:13px;color:var(--text-secondary);">
+            Opening <strong>${escapeHtml(line.opening)}</strong>
+            &nbsp; rows add up to <strong>${escapeHtml(line.rows_sum)}</strong>
+            &nbsp; closing <strong>${escapeHtml(line.closing)}</strong>
+            &nbsp; ${verdict}
+            <span class="text-muted">&nbsp; ${line.rows} rows${line.closing_date ? ' · to ' + escapeHtml(line.closing_date) : ''}</span>
+        </div>
+    `;
 }
 
 // Status badge colour and wording for an import preview row.
@@ -1788,6 +1834,7 @@ function updateStatusBadge(gi, ti, status) {
 
 function toggleGroupSkip(gi, checked) {
     currentImportData.groups[gi].transactions.forEach((tx, ti) => {
+        if (tx.statement != null) return;  // a row checked against its statement is always imported
         tx._skip = !checked;
         const cb = document.querySelector(`[data-gi="${gi}"][data-ti="${ti}"]`);
         if (cb && cb.type === 'checkbox') cb.checked = checked;
@@ -1840,6 +1887,9 @@ function updateConfirmBar() {
     });
     document.getElementById('confirm-info').innerHTML =
         `<strong>${active}</strong> of ${total} transactions will be committed`;
+    // Nothing to import (every statement was refused): Confirm is off.
+    const confirmBtn = document.querySelector('.confirm-bar .btn-primary');
+    if (confirmBtn) confirmBtn.disabled = currentImportData.groups.length === 0;
 }
 
 function discardImport() {
@@ -1899,6 +1949,7 @@ async function confirmImport() {
         groups: currentImportData.groups.map(g => ({
             account: g.account,
             transactions: g.transactions,
+            statements: g.statements || [],
         })),
         new_rules: [],
         new_services: Object.values(newServicesMap),
@@ -1913,11 +1964,14 @@ async function confirmImport() {
         if (!result) return;
 
         const dupMsg = result.duplicates_skipped ? ` (${result.duplicates_skipped} duplicates skipped)` : '';
+        const anchorMsg = result.anchors_written
+            ? ` ${result.anchors_written} closing balance${result.anchors_written === 1 ? '' : 's'} anchored.`
+            : '';
         const svcMsg = result.services_created ? ` ${result.services_created} new services created.` : '';
         const guardrailMsg = result.rules_skipped_generic
             ? ` ${result.rules_skipped_generic} generic transfer rule${result.rules_skipped_generic === 1 ? '' : 's'} skipped.`
             : '';
-        showToast(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${svcMsg}${guardrailMsg}`, 'success', 6000);
+        showToast(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${anchorMsg}${svcMsg}${guardrailMsg}`, 'success', 6000);
         discardImport();
         await loadReferenceData();
     } catch (err) {
@@ -1925,6 +1979,7 @@ async function confirmImport() {
     } finally {
         confirmBtn.textContent = 'Confirm & Commit';
         confirmBtn.disabled = false;
+        updateConfirmBar();
     }
 }
 

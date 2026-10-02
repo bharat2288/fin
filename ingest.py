@@ -92,7 +92,8 @@ def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
 
 def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> int:
     """Find or create an account from card info string: the account
-    `find_account` gives, or a new one of the kind given."""
+    `find_account` gives, or a new one of the kind given. Does not commit:
+    the caller owns the transaction."""
     if not card_info:
         card_info = "Unknown Account"
 
@@ -108,7 +109,6 @@ def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> 
         "INSERT INTO accounts (name, short_name, type, last_four) VALUES (?, ?, ?, ?)",
         (card_info, card_info, stmt_type, last_four),
     )
-    conn.commit()
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
@@ -121,7 +121,8 @@ def ensure_statement(
     """Get or create a statement record.
 
     Returns (statement_id, is_new). If a record already exists for this
-    account + date, returns the existing ID with is_new=False.
+    account + date, returns the existing ID with is_new=False. Does not
+    commit: the caller owns the transaction.
     """
     existing = conn.execute(
         "SELECT id FROM statements WHERE account_id = ? AND statement_date = ?",
@@ -134,5 +135,4 @@ def ensure_statement(
         "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, ?)",
         (account_id, statement_date, filename),
     )
-    conn.commit()
     return (cur.lastrowid, True)

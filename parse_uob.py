@@ -5,6 +5,9 @@ UOB Bank Statement format:
   - Account on page 2: "One Account 380-344-339-2"
   - Transactions: Date | Description | Withdrawals | Deposits | Balance
   - Multi-line descriptions (continuation lines have no date)
+  - The first "BALANCE B/F" is handed over as the opening balance and the
+    balance printed on the last row as the closing balance, dated by the
+    period's end; the import path checks the rows against them (tie.py)
 
 UOB Credit Card Statement format:
   - Statement Date on page 1: "Statement Date DD MMM YYYY"
@@ -106,6 +109,8 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
 
     account_number = ""
     transactions = []
+    opening = None        # the first balance brought forward
+    last_balance = None   # the balance printed on the last line read
 
     for page in pdf.pages:
         text = page.extract_text() or ""
@@ -183,6 +188,9 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                 # If BALANCE B/F, anchor the running balance and skip
                 if "BALANCE B/F" in rest:
                     prev_balance = _parse_amount(amounts[-1])
+                    last_balance = prev_balance
+                    if opening is None:
+                        opening = prev_balance
                     continue
 
                 # Extract description (everything before the first amount)
@@ -210,6 +218,7 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                     # Fallback default: positive = expense
                     amount_minor = _parse_amount(amounts[0])
                 prev_balance = balance
+                last_balance = balance
 
                 desc_upper = description.upper()
                 is_payment = "BILL PAYMENT" in desc_upper
@@ -232,6 +241,9 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                 transactions.append(tx)
             elif len(amounts) == 1 and "BALANCE B/F" in rest:
                 prev_balance = _parse_amount(amounts[0])
+                last_balance = prev_balance
+                if opening is None:
+                    opening = prev_balance
                 continue
 
     pdf.close()
@@ -247,12 +259,18 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
             mon = MONTH_MAP.get(m.group(2).upper()[:3], "01")
             stmt_date = f"{m.group(3)}-{mon}-{day}"
 
+    # Balances only with a brought-forward balance and a day to anchor on.
+    stated = opening is not None and bool(stmt_date)
+
     return ParsedStatement(
         statement_type="bank",
         statement_date=stmt_date,
         accounts=[account_name],
         filename=path.name,
         transactions=transactions,
+        opening_minor=opening if stated else None,
+        closing_minor=last_balance if stated else None,
+        closing_date=stmt_date if stated else None,
     )
 
 
