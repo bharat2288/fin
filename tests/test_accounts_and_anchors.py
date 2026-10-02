@@ -331,6 +331,7 @@ def test_a_negative_figure_for_a_loan_is_refused(client):
 def test_a_bank_account_or_card_that_has_a_statement_takes_no_supplied_figure(client, conn, kind):
     account_id = make_account(client, f"Sample {kind} 0007", kind)
     ensure_statement(conn, account_id, "2026-07-31", "sample.pdf")
+    conn.commit()
 
     resp = enter(client, account_id, "100.00")
 
@@ -372,6 +373,7 @@ def test_a_bank_account_stops_taking_a_figure_once_it_has_a_statement(client, co
     deposit = make_account(client, "Sample Deposit", "bank")
     assert enter(client, deposit, "50000.00", on="2026-01-01").status_code == 200
     ensure_statement(conn, deposit, "2026-07-31", "sample.pdf")
+    conn.commit()
 
     resp = enter(client, deposit, "51000.00", on="2026-08-31")
 
