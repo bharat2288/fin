@@ -47,8 +47,8 @@ def test_real_citi_statements_parse_and_reconcile(prefix, kind):
         if kind == "credit_card":
             text = "\n".join(parse_citi_pdf._read_pages(str(pdf)))
             summary = parse_citi_pdf._card_summary(text)
-            total = summary["previous"] + sum(t.amount_sgd for t in stmt.transactions)
-            assert abs(total - summary["current"]) < 0.005
+            total = summary["previous"] + sum(t.amount_minor for t in stmt.transactions)
+            assert total == summary["current"]
 
 
 @pytest.mark.parametrize("prefix", ["UOB", "DBS"])

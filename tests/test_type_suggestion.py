@@ -20,6 +20,7 @@ import pytest
 
 import book_type
 import db
+import money
 import parsers
 import suggest
 from parse_dbs import ParsedStatement, ParsedTransaction
@@ -139,9 +140,9 @@ def statement(conn) -> int:
 def row(conn, statement_id: int, description: str, amount: float = 25.0, *,
         flow: str = "expense", service_id: int | None = None) -> int:
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd,"
+        "INSERT INTO transactions (statement_id, date, description, amount_minor,"
         " service_id, flow_type) VALUES (?, '2026-04-10', ?, ?, ?, ?)",
-        (statement_id, description, amount, service_id, flow),
+        (statement_id, description, money.to_minor(amount), service_id, flow),
     )
     conn.commit()
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -179,7 +180,8 @@ def fake_statement():
                 accounts=["Sample Card 0001"],
                 filename="sample.csv",
                 transactions=[
-                    ParsedTransaction(date=day, description=description, amount_sgd=amount)
+                    ParsedTransaction(date=day, description=description,
+                                      amount_minor=money.to_minor(amount))
                     for day, description, amount in rows
                 ],
             )]
@@ -689,9 +691,9 @@ def test_g1_the_serialised_body_holds_only_the_merchant_string_the_model_id_and_
         ("2026-04-19", "MOSSY BOOKS 19/04 77003131", 12.34),
     ):
         conn.execute(
-            "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type)"
+            "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type)"
             " VALUES (?, ?, ?, ?, 'expense')",
-            (statement, day, description, amount),
+            (statement, day, description, money.to_minor(amount)),
         )
     conn.commit()
 

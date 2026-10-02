@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
+import money
 from parse_dbs import ParsedTransaction, ParsedStatement, MONTH_MAP
 
 
@@ -130,10 +131,10 @@ def parse_uob_xls(filepath: str) -> ParsedStatement:
         if local_amount_val is None:
             continue
 
-        amount_sgd = float(local_amount_val)
+        amount_minor = money.exact_minor(float(local_amount_val))
 
         # Negative = payment/credit in UOB convention
-        is_payment = amount_sgd < 0 and "PAYMT" in description.upper()
+        is_payment = amount_minor < 0 and "PAYMT" in description.upper()
 
         # Foreign currency handling
         amount_foreign = None
@@ -145,7 +146,7 @@ def parse_uob_xls(filepath: str) -> ParsedStatement:
         tx = ParsedTransaction(
             date=tx_date,
             description=description,
-            amount_sgd=abs(amount_sgd) if amount_sgd >= 0 else amount_sgd,
+            amount_minor=amount_minor,
             amount_foreign=amount_foreign,
             currency_foreign=currency_foreign,
             is_payment=is_payment,

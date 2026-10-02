@@ -207,7 +207,7 @@ def _matches_linked_cc(description: str, linked_cc_patterns: tuple[str, ...]) ->
     return False
 
 
-def _matches_card_payoff_wording(description: str, amount: float) -> bool:
+def _matches_card_payoff_wording(description: str, amount: int) -> bool:
     """Detect a card payoff by fixed wording from either side of the movement.
 
     A reversed or dishonoured payoff carries the same wording with the
@@ -311,14 +311,15 @@ def classify_row(facts: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
 def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     """Return one of FLOW_TYPES.
 
-    facts: {date, description, amount_sgd} and, where the caller knows them:
+    facts: {date, description, amount_minor} and, where the caller knows them:
       account_kind, account_owner — the account the row is on;
       service_id — the merchant a rule gave the row;
       labelled — whether a rule or the payee wording gave it a merchant or a type.
-    Without these the rules that need them do not apply.
+    Without these the rules that need them do not apply. The amount is in
+    whole minor units; only its sign is read.
     """
     description = facts.get("description", "") or ""
-    amount = facts.get("amount_sgd", 0.0) or 0.0
+    amount = facts["amount_minor"] or 0
 
     # 1. Linked-CC payoff (most specific form of own-endpoint movement)
     if _matches_linked_cc(description, ctx.linked_cc_patterns):

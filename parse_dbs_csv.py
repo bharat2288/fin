@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import money
 from parse_dbs import ParsedTransaction, ParsedStatement, MONTH_MAP
 
 
@@ -89,12 +90,12 @@ def _parse_cc_section(lines: list[str], account_name: str, filename: str) -> lis
         # Parse amount — debit is expense (positive), credit is refund (negative)
         if debit:
             try:
-                amount_sgd = float(debit.replace(",", ""))
+                amount_minor = money.parse_minor(debit)
             except ValueError:
                 continue
         elif credit:
             try:
-                amount_sgd = -float(credit.replace(",", ""))
+                amount_minor = -money.parse_minor(credit)
             except ValueError:
                 continue
         else:
@@ -108,7 +109,7 @@ def _parse_cc_section(lines: list[str], account_name: str, filename: str) -> lis
         tx = ParsedTransaction(
             date=tx_date,
             description=description,
-            amount_sgd=amount_sgd,
+            amount_minor=amount_minor,
             amount_foreign=amount_foreign,
             currency_foreign=currency_foreign,
             is_payment=is_payment,
@@ -266,9 +267,9 @@ def parse_bank_csv(filepath: str) -> ParsedStatement:
         credit = row.get("Credit Amount", "").strip()
 
         if debit:
-            amount_sgd = float(debit.replace(",", ""))
+            amount_minor = money.parse_minor(debit)
         elif credit:
-            amount_sgd = -float(credit.replace(",", ""))
+            amount_minor = -money.parse_minor(credit)
         else:
             continue
 
@@ -287,13 +288,13 @@ def parse_bank_csv(filepath: str) -> ParsedStatement:
             or "MEP " in desc_upper  # fixed deposit / money market placement
             or "ICT CSL:" in desc_upper  # bank-to-bank (Citi)
             or "ICT UOB:" in desc_upper  # bank-to-bank (UOB)
-            or (amount_sgd < 0 and "ICT" not in desc_upper and "GIRO" not in desc_upper)  # credits/deposits
+            or (amount_minor < 0 and "ICT" not in desc_upper and "GIRO" not in desc_upper)  # credits/deposits
         )
 
         tx = ParsedTransaction(
             date=tx_date,
             description=description,
-            amount_sgd=amount_sgd,
+            amount_minor=amount_minor,
             is_payment=is_payment,
             is_transfer=is_transfer,
             card_info=account_name,

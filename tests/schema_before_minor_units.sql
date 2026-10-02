@@ -5,12 +5,6 @@
 -- (what kind), declared in book_type.py. The category tree they replaced is
 -- retired; an existing database loses it through retire_categories.py.
 
--- An amount is a whole number of minor units of its account's currency
--- (cents, for an SGD account); positive is money out. No float amount is
--- stored for a row or a rule threshold. An existing database gains and fills
--- the integers through convert_minor_units.py and loses the floats through
--- retire_float_amounts.py.
-
 CREATE TABLE IF NOT EXISTS merchant_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern TEXT NOT NULL,          -- merchant name pattern (case-insensitive match)
@@ -18,11 +12,11 @@ CREATE TABLE IF NOT EXISTS merchant_rules (
     match_type TEXT DEFAULT 'contains',  -- 'contains', 'startswith', 'exact'
     confidence TEXT DEFAULT 'confirmed', -- 'auto', 'confirmed' (user-verified)
     priority INTEGER DEFAULT 0,    -- higher priority wins (for overlapping patterns)
+    min_amount REAL,               -- if set, rule only matches when amount >= this
+    max_amount REAL,               -- if set, rule only matches when amount <= this
     created_at TEXT DEFAULT (datetime('now')),
     book_override TEXT,            -- book the rule sets in place of the merchant's; NULL = the merchant's
     type_override_id INTEGER REFERENCES types(id),  -- type the rule sets in place of the merchant's
-    min_amount_minor INTEGER,      -- if set, rule only matches when the row's amount_minor >= this
-    max_amount_minor INTEGER,      -- if set, rule only matches when the row's amount_minor <= this
     FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
@@ -30,27 +24,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,           -- e.g., "DBS Altitude Visa 1229"
     short_name TEXT NOT NULL,    -- e.g., "DBS-Altitude-5054"
-    type TEXT NOT NULL,          -- the account's kind: bank, card, loan, holding, company, person (declared in account_kind.py)
+    type TEXT NOT NULL,          -- 'credit_card', 'bank', 'debit'
     last_four TEXT,              -- last 4 digits
     currency TEXT DEFAULT 'SGD',
     status TEXT DEFAULT 'active', -- 'active', 'archived'
-    created_at TEXT DEFAULT (datetime('now')),
-    owner TEXT NOT NULL DEFAULT 'Household'  -- whose sheet it is on: Household, or a company (declared in account_kind.py)
-);
-
--- An anchor: one account's balance on one date, from a statement or supplied
--- by the operator. One per account and date. An existing database gains this
--- table, and the owner column above, through convert_account_kinds.py.
-CREATE TABLE IF NOT EXISTS anchors (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id INTEGER NOT NULL,
-    date TEXT NOT NULL,             -- YYYY-MM-DD
-    amount INTEGER NOT NULL,        -- whole minor units of the account's currency; cash positive, anything owed negative
-    source TEXT NOT NULL,           -- 'statement' or 'supplied' (declared in anchors.py)
-    note TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (account_id) REFERENCES accounts(id),
-    UNIQUE (account_id, date)
+    created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS statements (
@@ -68,19 +46,18 @@ CREATE TABLE IF NOT EXISTS transactions (
     statement_id INTEGER NOT NULL,
     date TEXT NOT NULL,             -- YYYY-MM-DD
     description TEXT NOT NULL,      -- raw merchant description from statement
+    amount_sgd REAL NOT NULL,       -- positive = expense, negative = credit/payment
     amount_foreign REAL,           -- original amount if foreign currency
-    currency_foreign TEXT,         -- three-letter code, e.g., 'USD', 'AUD', 'INR'
+    currency_foreign TEXT,         -- e.g., 'USD', 'AUD', 'INR'
     service_id INTEGER,            -- FK to services table (merchant identity)
     is_one_off INTEGER DEFAULT 0,  -- 1 = one-time/exceptional expense (toggle in table)
     cat_source TEXT DEFAULT 'auto',  -- where book and type came from: auto|service_default|rule_override|fallback|manual
-    flow_type TEXT,                -- expense|income|transfer|payment|refund|movement|review (declared in flow.py)
+    flow_type TEXT,                -- expense|income|transfer|payment|refund (ADR v2)
     flow_type_manual INTEGER DEFAULT 0,  -- 1 = user overrode classifier; preserve on recategorize
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     book TEXT,                     -- whose spending: Household, Moom, Kalesh (declared in book_type.py); NULL reads as Household
-    type_id INTEGER REFERENCES types(id),  -- what kind of spending, or for income its kind; NULL = not placed
-    amount_minor INTEGER,          -- the amount in whole minor units of the account's currency: positive = money out, negative = money in
-    other_side_id INTEGER REFERENCES accounts(id),  -- the account a movement, transfer or payment names as its other side; NULL = none named. An existing database gains it through convert_movements.py
+    type_id INTEGER REFERENCES types(id),  -- what kind of spending; NULL = not placed, or not spending
     FOREIGN KEY (statement_id) REFERENCES statements(id),
     FOREIGN KEY (service_id) REFERENCES services(id)
 );
@@ -133,30 +110,6 @@ CREATE TABLE IF NOT EXISTS types (
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (parent_id) REFERENCES types(id),
     UNIQUE (kind, name)
-);
-
--- Answers from the outside judgment model to "which type is this merchant?",
--- one per cleaned merchant string, model and version (suggest.py). A
--- suggestion only: nothing here labels a row. A new table, made empty by
--- CREATE IF NOT EXISTS on start; no existing row is converted.
-CREATE TABLE IF NOT EXISTS suggestion_answers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    merchant TEXT NOT NULL,           -- the cleaned merchant string that was sent
-    model_id TEXT NOT NULL,           -- the model id asked for
-    returned_model_id TEXT NOT NULL,  -- the id that answered; only the pinned one is ever shown
-    cleaning_version TEXT NOT NULL,   -- version of the cleaning that made the string
-    question_version TEXT NOT NULL,   -- version of the question text
-    pick TEXT NOT NULL,               -- the option picked: a type's display name, or none_of_these
-    probabilities TEXT NOT NULL,      -- JSON: the probability of every option
-    confidence REAL,
-    input_tokens INTEGER,
-    cost_usd TEXT,                    -- decimal text, US dollars
-    latency_ms INTEGER,
-    asked_at TEXT DEFAULT (datetime('now')),
-    chosen_type_id INTEGER REFERENCES types(id),  -- afterwards: the type the operator chose
-    suggestion_visible INTEGER,       -- afterwards: 1 = the suggestion was on screen when they chose
-    chosen_at TEXT,
-    UNIQUE (merchant, model_id, returned_model_id, cleaning_version, question_version)
 );
 
 CREATE TABLE IF NOT EXISTS batch_imports (

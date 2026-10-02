@@ -109,7 +109,7 @@ def handle_vantage_split(statements: list) -> list:
             bs_fingerprints = set()
             for stmt in by_card[bs_card]:
                 for tx in stmt.transactions:
-                    bs_fingerprints.add((tx.date, tx.description, tx.amount_sgd))
+                    bs_fingerprints.add((tx.date, tx.description, tx.amount_minor))
 
             # Tag combined transactions
             from parse_dbs import ParsedTransaction, ParsedStatement
@@ -118,7 +118,7 @@ def handle_vantage_split(statements: list) -> list:
 
             for stmt in by_card[combined_card]:
                 for tx in stmt.transactions:
-                    fp = (tx.date, tx.description, tx.amount_sgd)
+                    fp = (tx.date, tx.description, tx.amount_minor)
                     if fp in bs_fingerprints:
                         bs_txns.append(tx)
                         bs_fingerprints.discard(fp)

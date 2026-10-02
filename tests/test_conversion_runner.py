@@ -11,17 +11,18 @@ from pathlib import Path
 import pytest
 
 import conversion
-import db
 
 DAY = date(2026, 3, 14)
+OLD_SCHEMA = Path(__file__).parent / "schema_before_minor_units.sql"
 
 
 @pytest.fixture
 def old_db(tmp_path: Path) -> Path:
-    """A database in the old shape (today's schema.sql) with two accounts."""
+    """A database in the old shape, where an amount is a float (the frozen
+    schema_before_minor_units.sql), with two accounts."""
     path = tmp_path / "ledger.db"
     conn = sqlite3.connect(str(path))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(OLD_SCHEMA.read_text())
     conn.executemany(
         "INSERT INTO accounts (id, name, short_name, type) VALUES (?, ?, ?, ?)",
         [(1, "Sample Card 0001", "Sample-0001", "credit_card"),
@@ -418,6 +419,65 @@ def test_step_that_does_not_reach_its_applied_state_fails(old_db):
     step = conversion.Step(name="noop", apply=lambda conn: None, is_applied=_rows_marked)
 
     with pytest.raises(conversion.ConversionFailed, match="applied"):
+        conversion.run_step(old_db, step, today=DAY)
+
+    assert _dump(old_db) == before
+
+
+# --- a step may declare its own measure ----------------------------------
+
+
+def test_step_is_measured_by_the_measure_it_declares(old_db):
+    """A step that changes how an amount is stored says how its rows are
+    counted and totalled; the runner hands those measurements to the step's
+    invariant and puts them in the report."""
+    seen = []
+
+    def count_notes(conn):
+        return {
+            "noted": conn.execute(
+                "SELECT COUNT(*) FROM transactions WHERE notes IS NOT NULL"
+            ).fetchone()[0]
+        }
+
+    def every_row_noted(before, after):
+        seen.append((before, after))
+        return [] if after["noted"] == 4 else ["a row has no note"]
+
+    step = conversion.Step(
+        name="mark-rows",
+        apply=_mark_rows,
+        is_applied=_rows_marked,
+        invariant=every_row_noted,
+        measure=count_notes,
+    )
+
+    report = conversion.run_step(old_db, step, today=DAY)
+
+    assert seen == [({"noted": 0}, {"noted": 4})]
+    assert report["before"] == {"noted": 0}
+    assert report["after"] == {"noted": 4}
+
+
+def test_step_fails_on_its_own_measure_when_its_invariant_does_not_hold(old_db):
+    before = _dump(old_db)
+
+    def count_notes(conn):
+        return {
+            "noted": conn.execute(
+                "SELECT COUNT(*) FROM transactions WHERE notes IS NOT NULL"
+            ).fetchone()[0]
+        }
+
+    step = conversion.Step(
+        name="mark-rows",
+        apply=_mark_rows,
+        is_applied=_rows_marked,
+        invariant=lambda was, now: [f"{now['noted']} rows noted, 5 wanted"],
+        measure=count_notes,
+    )
+
+    with pytest.raises(conversion.ConversionFailed, match="4 rows noted, 5 wanted"):
         conversion.run_step(old_db, step, today=DAY)
 
     assert _dump(old_db) == before

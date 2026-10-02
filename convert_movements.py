@@ -61,9 +61,19 @@ def planned(conn: sqlite3.Connection) -> list[tuple[int, str, str, int | None]]:
     conn.row_factory = sqlite3.Row
     ctx = flow.build_context(conn)
     other_side = "t.other_side_id" if has_shape(conn) else "NULL"
+    # The classifier reads the sign of a row's whole minor units. This step
+    # runs after the two money steps, so the integer is what a row carries;
+    # a database that reached this step before them still holds only the
+    # float, and its cents are read from that, as conversion.measure does.
+    if "amount_minor" in _columns(conn, "transactions") and "amount_sgd" not in _columns(
+        conn, "transactions"
+    ):
+        amount = "t.amount_minor"
+    else:
+        amount = "CAST(ROUND(t.amount_sgd * 100) AS INTEGER)"
     rows = conn.execute(
         f"""
-        SELECT t.id, t.description, t.amount_sgd, t.service_id, t.type_id, t.book,
+        SELECT t.id, t.description, {amount} AS amount_minor, t.service_id, t.type_id, t.book,
                COALESCE(t.flow_type, 'expense') AS flow_type, {other_side} AS other_side_id,
                a.type AS account_kind, a.owner AS account_owner
         FROM transactions t
@@ -80,7 +90,7 @@ def planned(conn: sqlite3.Connection) -> list[tuple[int, str, str, int | None]]:
         # A company's cost keeps its flow as spending: its book says whose it is.
         if held[0] in ("expense", "refund") and r["book"] not in (None, book_type.DEFAULT_BOOK):
             continue
-        wording = {"description": r["description"], "amount_sgd": r["amount_sgd"]}
+        wording = {"description": r["description"], "amount_minor": r["amount_minor"]}
         new = flow.classify_row(
             {
                 **wording,

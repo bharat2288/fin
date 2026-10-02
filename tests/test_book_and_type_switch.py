@@ -14,6 +14,7 @@ import pytest
 import app as fin_app
 import book_type
 import db
+import money
 import parsers
 from flow import ClassifierContext, classify_flow
 from parse_dbs import ParsedStatement, ParsedTransaction
@@ -76,11 +77,12 @@ def row(
     flow: str = "expense",
     day: str = "2026-04-10",
 ) -> int:
+    """A row of `amount` dollars, stored as its whole cents."""
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd,"
+        "INSERT INTO transactions (statement_id, date, description, amount_minor,"
         " book, type_id, service_id, cat_source, flow_type)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (statement_id, day, description, amount, book,
+        (statement_id, day, description, money.exact_minor(amount), book,
          type_id(conn, type_name) if type_name else None, service_id, cat_source, flow),
     )
     conn.commit()
@@ -648,7 +650,9 @@ def fake_statement():
                 accounts=["Sample Card 0001"],
                 filename="sample.csv",
                 transactions=[
-                    ParsedTransaction(date=day, description=description, amount_sgd=amount)
+                    ParsedTransaction(
+                        date=day, description=description, amount_minor=money.exact_minor(amount)
+                    )
                     for day, description, amount in rows
                 ],
             )]
@@ -1116,11 +1120,11 @@ def test_a_new_databases_seeded_merchants_carry_book_and_type(client):
 def test_a_refund_is_known_by_its_wording_and_no_category_name_makes_one():
     ctx = ClassifierContext()
 
-    assert classify_flow({"description": "SAMPLE SHOP CASH REBATE", "amount_sgd": -3.0}, ctx) == "refund"
-    assert classify_flow({"description": "SAMPLE SHOP REFUND", "amount_sgd": -3.0}, ctx) == "refund"
+    assert classify_flow({"description": "SAMPLE SHOP CASH REBATE", "amount_minor": -300}, ctx) == "refund"
+    assert classify_flow({"description": "SAMPLE SHOP REFUND", "amount_minor": -300}, ctx) == "refund"
     # An inflow whose wording says nothing is income, whatever it was filed under.
     assert classify_flow(
-        {"description": "OBSCURE CREDIT ADJ", "amount_sgd": -3.0, "category_name": "Refunds"}, ctx
+        {"description": "OBSCURE CREDIT ADJ", "amount_minor": -300, "category_name": "Refunds"}, ctx
     ) == "income"
 
 

@@ -8,13 +8,15 @@ from pathlib import Path
 
 import pdfplumber
 
+import money
+
 
 @dataclass
 class ParsedTransaction:
     """A single parsed transaction from a statement."""
     date: str              # YYYY-MM-DD
     description: str       # raw merchant/description text
-    amount_sgd: float      # positive = expense, negative = credit
+    amount_minor: int      # whole minor units (cents); positive = expense, negative = credit
     amount_foreign: float | None = None
     currency_foreign: str | None = None
     is_payment: bool = False        # DEPRECATED — use flow_type (ADR v2)
@@ -192,7 +194,7 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
             day = tx_match.group(1)
             month = MONTH_MAP[tx_match.group(2)]
             description = tx_match.group(3).strip()
-            amount = float(tx_match.group(4).replace(",", ""))
+            amount = money.parse_minor(tx_match.group(4))
             is_credit = tx_match.group(5) == "CR"
 
             if is_credit:
@@ -229,7 +231,7 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
             tx = ParsedTransaction(
                 date=_infer_tx_date(day, month, statement.statement_date),
                 description=description,
-                amount_sgd=amount,
+                amount_minor=amount,
                 amount_foreign=amount_foreign,
                 currency_foreign=currency_foreign,
                 is_payment=is_payment,
@@ -243,21 +245,27 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
     return statement
 
 
+# How far, in whole minor units, a balance movement may sit from the amount
+# printed on its line and still be read as that line's movement.
+BALANCE_MATCH_WITHIN = 1
+
+
 def _direction_from_balance(
-    prev_balance: float | None,
-    new_balance: float,
-    candidate_amounts: list[float],
-) -> tuple[float | None, float | None]:
+    prev_balance: int | None,
+    new_balance: int,
+    candidate_amounts: list[int],
+) -> tuple[int | None, int | None]:
     """Resolve (withdrawal, deposit) from a running-balance delta.
 
-    Returns (withdrawal, deposit) where exactly one is set, or (None, None)
-    when the delta doesn't reconcile against any amount printed on the line
-    (caller falls back to its keyword heuristic).
+    Every figure is in whole minor units. Returns (withdrawal, deposit) where
+    exactly one is set, or (None, None) when the delta doesn't reconcile
+    against any amount printed on the line (caller falls back to its keyword
+    heuristic).
     """
     if prev_balance is None:
         return None, None
-    delta = round(new_balance - prev_balance, 2)
-    if not any(abs(abs(delta) - amt) < 0.011 for amt in candidate_amounts):
+    delta = new_balance - prev_balance
+    if not any(abs(abs(delta) - amt) <= BALANCE_MATCH_WITHIN for amt in candidate_amounts):
         return None, None
     if delta < 0:
         return -delta, None
@@ -309,7 +317,7 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             r"Balance Brought Forward(?:\s+SGD)?\s+([\d,]+\.\d{2})", line
         )
         if bf_match:
-            prev_balance = float(bf_match.group(1).replace(",", ""))
+            prev_balance = money.parse_minor(bf_match.group(1))
             i += 1
             continue
 
@@ -346,8 +354,8 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
                 # Last amount is always the running balance. Direction comes
                 # from the balance delta — the printed columns merge under
                 # pdfplumber, so keyword guessing mis-signs deposits.
-                balance = float(amounts[-1].replace(",", ""))
-                candidates = [float(a.replace(",", "")) for a in amounts[:-1]]
+                balance = money.parse_minor(amounts[-1])
+                candidates = [money.parse_minor(a) for a in amounts[:-1]]
                 current_withdrawal, current_deposit = _direction_from_balance(
                     prev_balance, balance, candidates
                 )
@@ -379,8 +387,8 @@ def _save_bank_tx(
     statement: ParsedStatement,
     date: str,
     desc_lines: list[str],
-    withdrawal: float | None,
-    deposit: float | None,
+    withdrawal: int | None,
+    deposit: int | None,
 ) -> None:
     """Helper to save a bank transaction."""
     description = " ".join(line.strip() for line in desc_lines if line.strip())
@@ -404,7 +412,7 @@ def _save_bank_tx(
     tx = ParsedTransaction(
         date=date,
         description=description,
-        amount_sgd=amount,
+        amount_minor=amount,
         is_payment=is_payment,
         is_transfer=is_transfer,
         card_info=statement.accounts[0] if statement.accounts else "",
@@ -443,12 +451,12 @@ def print_summary(statement: ParsedStatement) -> None:
     print(f"Transactions: {len(statement.transactions)}")
 
     # Separate payments/transfers from expenses
-    expenses = [t for t in statement.transactions if not t.is_payment and not t.is_transfer and t.amount_sgd > 0]
-    credits = [t for t in statement.transactions if t.amount_sgd < 0]
+    expenses = [t for t in statement.transactions if not t.is_payment and not t.is_transfer and t.amount_minor > 0]
+    credits = [t for t in statement.transactions if t.amount_minor < 0]
     payments = [t for t in statement.transactions if t.is_payment]
 
-    total_expenses = sum(t.amount_sgd for t in expenses)
-    total_credits = sum(abs(t.amount_sgd) for t in credits)
+    total_expenses = money.from_minor(sum(t.amount_minor for t in expenses))
+    total_credits = money.from_minor(sum(abs(t.amount_minor) for t in credits))
 
     print(f"\nExpenses: {len(expenses)} transactions, SGD {total_expenses:,.2f}")
     print(f"Credits/Refunds: {len(credits)} transactions, SGD {total_credits:,.2f}")
@@ -459,12 +467,12 @@ def print_summary(statement: ParsedStatement) -> None:
     print("-" * 70)
     for tx in expenses:
         fx = f" ({tx.currency_foreign} {tx.amount_foreign:,.2f})" if tx.amount_foreign else ""
-        print(f"{tx.date:<12} {tx.amount_sgd:>10,.2f} {tx.description[:45]}{fx}")
+        print(f"{tx.date:<12} {money.from_minor(tx.amount_minor):>10,.2f} {tx.description[:45]}{fx}")
 
     if credits:
         print(f"\n--- Credits/Refunds ---")
         for tx in credits:
-            print(f"{tx.date:<12} {tx.amount_sgd:>10,.2f} {tx.description[:45]}")
+            print(f"{tx.date:<12} {money.from_minor(tx.amount_minor):>10,.2f} {tx.description[:45]}")
 
 
 if __name__ == "__main__":

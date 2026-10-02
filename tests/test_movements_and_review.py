@@ -9,6 +9,7 @@ import io
 
 import pytest
 
+import money
 import parsers
 from parse_dbs import ParsedStatement, ParsedTransaction
 
@@ -57,7 +58,8 @@ def upload(client, account: str, rows: list[tuple], kind: str = "bank") -> dict:
             accounts=[account],
             filename="sample.csv",
             transactions=[
-                ParsedTransaction(date=f"{MONTH}-{day:02d}", description=description, amount_sgd=amount)
+                ParsedTransaction(date=f"{MONTH}-{day:02d}", description=description,
+                                  amount_minor=money.to_minor(amount))
                 for day, description, amount in rows
             ],
         )]

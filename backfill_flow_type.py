@@ -30,7 +30,7 @@ def backfill(conn: sqlite3.Connection, review_csv_path: Path | None = None) -> d
     legacy_sel = "t.is_payment, t.is_transfer," if has_legacy else "0 as is_payment, 0 as is_transfer,"
     rows = conn.execute(
         f"""
-        SELECT t.id, t.description, t.amount_sgd, {legacy_sel}
+        SELECT t.id, t.description, t.amount_minor, {legacy_sel}
                ty.name AS type_name
         FROM transactions t
         LEFT JOIN types ty ON t.type_id = ty.id
@@ -45,7 +45,7 @@ def backfill(conn: sqlite3.Connection, review_csv_path: Path | None = None) -> d
     for r in rows:
         facts = {
             "description": r["description"],
-            "amount_sgd": r["amount_sgd"],
+            "amount_minor": r["amount_minor"],
         }
         ft = classify_flow(facts, ctx)
         counts[ft] = counts.get(ft, 0) + 1
@@ -63,7 +63,7 @@ def backfill(conn: sqlite3.Connection, review_csv_path: Path | None = None) -> d
                 review.append({
                     "id": r["id"],
                     "description": r["description"],
-                    "amount_sgd": r["amount_sgd"],
+                    "amount_minor": r["amount_minor"],
                     "type_name": r["type_name"] or "",
                     "classifier_says": ft,
                     "legacy_is_payment": int(legacy_says_payment),

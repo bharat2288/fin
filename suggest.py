@@ -275,12 +275,12 @@ def unanswered(conn: sqlite3.Connection) -> list[str]:
     alphabetical order. The rules are asked here, not read off the row: a rule
     made since the row arrived knows it all the same."""
     rows = conn.execute(
-        "SELECT description, flow_type, amount_sgd FROM transactions"
+        "SELECT description, flow_type, amount_minor FROM transactions"
         " WHERE type_id IS NULL AND service_id IS NULL"
     ).fetchall()
     merchants = {
         merchant_string(r["description"], r["flow_type"]) for r in rows
-        if db.match_merchant(r["description"] or "", conn, r["amount_sgd"])["service_id"] is None
+        if db.match_merchant(r["description"] or "", conn, r["amount_minor"])["service_id"] is None
     }
     merchants.discard(None)
     held = {

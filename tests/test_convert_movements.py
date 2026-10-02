@@ -16,6 +16,7 @@ import app as fin_app
 import conversion
 import convert_movements
 import db
+import money
 
 DAY = date(2026, 3, 14)
 
@@ -126,10 +127,11 @@ def old(tmp_path: Path) -> Path:
         "INSERT INTO types (id, kind, name, covers) VALUES (900, 'spending', 'Sample type', 'a stand-in')"
     )
     conn.executemany(
-        "INSERT INTO transactions (id, statement_id, date, description, amount_sgd, flow_type, "
+        "INSERT INTO transactions (id, statement_id, date, description, amount_minor, flow_type, "
         "flow_type_manual, service_id, type_id, book, cat_source) VALUES (?, ?, '2026-08-15', ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            (i, account, description, amount, flow, manual, service, 900 if typed else None, book,
+            (i, account, description, money.to_minor(amount), flow, manual, service,
+             900 if typed else None, book,
              "manual" if manual else "auto")
             for (i, account, description, amount, flow, manual, service, typed, book), _ in ROWS
         ],
@@ -174,7 +176,7 @@ def test_a_row_with_a_manual_flow_is_never_touched(old):
 
 def test_nothing_but_the_flow_and_the_other_side_changes(old):
     everything_else = (
-        "SELECT id, statement_id, date, description, amount_sgd, service_id, type_id, book, "
+        "SELECT id, statement_id, date, description, amount_minor, service_id, type_id, book, "
         "cat_source, flow_type_manual, is_one_off, notes FROM transactions ORDER BY id"
     )
     before = query(old, everything_else)
@@ -186,7 +188,7 @@ def test_nothing_but_the_flow_and_the_other_side_changes(old):
 
 def test_no_row_is_lost_and_every_account_total_is_the_same_to_the_cent(old):
     totals = (
-        "SELECT s.account_id, COUNT(*), SUM(CAST(ROUND(t.amount_sgd * 100) AS INTEGER)) "
+        "SELECT s.account_id, COUNT(*), SUM(t.amount_minor) "
         "FROM transactions t JOIN statements s ON s.id = t.statement_id GROUP BY s.account_id"
     )
     before = query(old, totals)
@@ -239,8 +241,8 @@ def test_it_runs_behind_its_backup_and_refuses_without_one(old):
 
 def test_a_row_that_arrives_later_is_picked_up_by_a_second_run(old):
     convert(old)
-    run(old, "INSERT INTO transactions (id, statement_id, date, description, amount_sgd, flow_type) "
-             "VALUES (50, 1, '2026-09-02', 'INWARD CREDIT INDEPENDENT RESERVE SG REF 3050', -900.00, 'transfer')")
+    run(old, "INSERT INTO transactions (id, statement_id, date, description, amount_minor, flow_type) "
+             "VALUES (50, 1, '2026-09-02', 'INWARD CREDIT INDEPENDENT RESERVE SG REF 3050', -90000, 'transfer')")
 
     report = convert(old)
 

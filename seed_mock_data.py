@@ -278,15 +278,16 @@ def create_transactions(conn, account_ids: dict):
 
             group, description, min_amt, max_amt = entry
 
-            # Generate amount with realistic distribution (slightly right-skewed)
-            amount = round(random.uniform(min_amt, max_amt), 2)
+            # Generate amount with realistic distribution (slightly right-skewed),
+            # in whole cents
+            amount = round(random.uniform(min_amt, max_amt) * 100)
             # 30% chance of being near the lower end
             if random.random() < 0.3:
-                amount = round(random.uniform(min_amt, min_amt + (max_amt - min_amt) * 0.3), 2)
+                amount = round(random.uniform(min_amt, min_amt + (max_amt - min_amt) * 0.3) * 100)
 
             # Book, type and service via the rule engine; for a merchant no
             # rule knows, the group's name where it is a type
-            found = match_merchant(description, conn, amount=amount)
+            found = match_merchant(description, conn, amount_minor=amount)
             service_id = found["service_id"]
             book = found["book"]
             type_id = found["type_id"]
@@ -312,7 +313,7 @@ def create_transactions(conn, account_ids: dict):
 
             conn.execute(
                 "INSERT INTO transactions "
-                "(statement_id, date, description, amount_sgd, book, type_id, "
+                "(statement_id, date, description, amount_minor, book, type_id, "
                 "service_id, is_one_off, cat_source, flow_type) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'expense')",
                 (
@@ -339,13 +340,13 @@ def create_transactions(conn, account_ids: dict):
         ]
         for _ in range(uncat_count):
             desc = random.choice(uncat_descs)
-            amount = round(random.uniform(5, 200), 2)
+            amount = round(random.uniform(5, 200) * 100)  # whole cents
             tx_date = random_date_in_month(year, month)
             acct_id = random.choice(personal_accounts)
             stmt_id = get_statement_id(conn, acct_id, tx_date.isoformat())
             conn.execute(
                 "INSERT INTO transactions "
-                "(statement_id, date, description, amount_sgd, type_id, "
+                "(statement_id, date, description, amount_minor, type_id, "
                 "service_id, is_one_off, cat_source, flow_type) "
                 "VALUES (?, ?, ?, ?, NULL, NULL, 0, 'auto', 'expense')",
                 (stmt_id, tx_date.isoformat(), desc, amount),

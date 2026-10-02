@@ -36,7 +36,7 @@ def test_match_merchant_uses_service_default_provenance(conn):
     conn.commit()
     db.invalidate_rules_cache()
 
-    found = db.match_merchant("Mixed Merchant Orchard", conn, amount=12.0)
+    found = db.match_merchant("Mixed Merchant Orchard", conn, amount_minor=1200)
 
     assert (found["book"], found["type_id"]) == ("Household", dining_id)
     assert found["service_id"] == service_id
@@ -62,7 +62,7 @@ def test_match_merchant_uses_rule_override_provenance(conn):
     conn.commit()
     db.invalidate_rules_cache()
 
-    found = db.match_merchant("Mixed Override Apparel", conn, amount=80.0)
+    found = db.match_merchant("Mixed Override Apparel", conn, amount_minor=8000)
 
     # The rule overrides the type; the book is still the merchant's.
     assert (found["book"], found["type_id"]) == ("Household", shopping_id)
@@ -71,7 +71,7 @@ def test_match_merchant_uses_rule_override_provenance(conn):
 
 
 def test_match_merchant_with_no_rule_gives_nothing(conn):
-    found = db.match_merchant("NO SUCH SAMPLE MERCHANT", conn, amount=5.0)
+    found = db.match_merchant("NO SUCH SAMPLE MERCHANT", conn, amount_minor=500)
 
     assert found == {
         "book": None, "type_id": None, "service_id": None,
@@ -102,8 +102,8 @@ def test_service_type_update_only_relabels_service_default_rows(client):
             conn.execute(
                 """
                 INSERT INTO transactions
-                    (statement_id, date, description, amount_sgd, book, type_id, service_id, cat_source)
-                VALUES (?, ?, ?, 25.0, 'Household', ?, ?, ?)
+                    (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
+                VALUES (?, ?, ?, 2500, 'Household', ?, ?, ?)
                 """,
                 (statement_id, tx_date, description, type_id, service_id, cat_source),
             )
@@ -150,8 +150,8 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
         conn.execute(
             """
             INSERT INTO transactions
-                (statement_id, date, description, amount_sgd, type_id, service_id, cat_source)
-            VALUES (?, '2026-04-04', 'Scoped Resolve Merchant Apparel', 88.0, NULL, NULL, 'auto')
+                (statement_id, date, description, amount_minor, type_id, service_id, cat_source)
+            VALUES (?, '2026-04-04', 'Scoped Resolve Merchant Apparel', 8800, NULL, NULL, 'auto')
             """,
             (statement_id,),
         )
@@ -233,8 +233,8 @@ def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
             conn.execute(
                 """
                 INSERT INTO transactions
-                    (statement_id, date, description, amount_sgd, book, type_id, service_id, cat_source)
-                VALUES (?, ?, ?, 42.0, 'Household', ?, ?, ?)
+                    (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
+                VALUES (?, ?, ?, 4200, 'Household', ?, ?, ?)
                 """,
                 (statement_id, tx_date, description, type_id, tx_service_id, cat_source),
             )
@@ -300,8 +300,8 @@ def test_rule_update_can_apply_type_override_and_relabel(client):
         conn.execute(
             """
             INSERT INTO transactions
-                (statement_id, date, description, amount_sgd, book, type_id, service_id, cat_source)
-            VALUES (?, '2026-04-07', 'Rule Update Merchant Apparel', 51.0, 'Household', ?, ?, 'service_default')
+                (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
+            VALUES (?, '2026-04-07', 'Rule Update Merchant Apparel', 5100, 'Household', ?, ?, 'service_default')
             """,
             (statement_id, dining_id, service_id),
         )
