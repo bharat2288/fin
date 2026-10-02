@@ -24,11 +24,27 @@ CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,           -- e.g., "DBS Altitude Visa 1229"
     short_name TEXT NOT NULL,    -- e.g., "DBS-Altitude-5054"
-    type TEXT NOT NULL,          -- 'credit_card', 'bank', 'debit'
+    type TEXT NOT NULL,          -- the account's kind: bank, card, loan, holding, company, person (declared in account_kind.py)
     last_four TEXT,              -- last 4 digits
     currency TEXT DEFAULT 'SGD',
     status TEXT DEFAULT 'active', -- 'active', 'archived'
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    owner TEXT NOT NULL DEFAULT 'Household'  -- whose sheet it is on: Household, or a company (declared in account_kind.py)
+);
+
+-- An anchor: one account's balance on one date, from a statement or supplied
+-- by the operator. One per account and date. An existing database gains this
+-- table, and the owner column above, through convert_account_kinds.py.
+CREATE TABLE IF NOT EXISTS anchors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    date TEXT NOT NULL,             -- YYYY-MM-DD
+    amount INTEGER NOT NULL,        -- whole minor units of the account's currency; cash positive, anything owed negative
+    source TEXT NOT NULL,           -- 'statement' or 'supplied' (declared in anchors.py)
+    note TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
+    UNIQUE (account_id, date)
 );
 
 CREATE TABLE IF NOT EXISTS statements (

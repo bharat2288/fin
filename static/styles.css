@@ -1846,9 +1846,19 @@ input[type="checkbox"]:focus-visible {
     background: var(--bg-elevated);
     color: var(--text-secondary);
 }
-.acct-type-credit_card { color: var(--accent-camel); }
-.acct-type-debit { color: var(--semantic-success); }
+.acct-type-card { color: var(--accent-camel); }
 .acct-type-bank { color: var(--chart-6); }
+.acct-type-loan { color: var(--accent-pop); }
+.acct-type-holding { color: var(--semantic-success); }
+.acct-type-company,
+.acct-type-person { color: var(--text-secondary); }
+
+/* Enter a figure dialog */
+.figure-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: var(--space-1);
+}
 
 /* Field hints (? tooltip + FX rate) */
 .field-hint {

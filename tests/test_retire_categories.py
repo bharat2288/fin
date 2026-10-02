@@ -13,6 +13,7 @@ import pytest
 
 import app as fin_app
 import conversion
+import convert_account_kinds
 import convert_book_type
 import db
 import retire_categories
@@ -232,6 +233,8 @@ def test_an_id_already_handed_out_is_not_given_to_a_new_row(old):
 def test_a_database_through_both_steps_has_the_shape_of_a_new_one(old, tmp_path):
     expand(old)
     retire(old)
+    # And through the step that came after them, which adds to the shape.
+    conversion.run_step(old, convert_account_kinds.STEP, today=DAY)
     fresh = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(fresh))
     conn.executescript(db.SCHEMA_PATH.read_text())
@@ -407,6 +410,7 @@ def test_the_app_serves_a_converted_database_by_book_and_type(old, started_on, m
     monkeypatch.setattr(fin_app, "_get_usd_sgd_rate", lambda: 1.35)
     expand(old)
     retire(old)
+    conversion.run_step(old, convert_account_kinds.STEP, today=DAY)
 
     client = started_on(old)
 

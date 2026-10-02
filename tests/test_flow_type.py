@@ -306,7 +306,7 @@ def test_backfill_populates_all_rows(conn, tmp_path):
     # Add the CC account so build_context picks up last_four 4777 as linked_cc
     conn.execute(
         "INSERT INTO accounts (name, short_name, type, last_four, status) "
-        "VALUES ('Womans Card', 'Test-4777', 'credit_card', '4777', 'active')"
+        "VALUES ('Womans Card', 'Test-4777', 'card', '4777', 'active')"
     )
     for desc, amt in zip(seed, amounts):
         conn.execute(

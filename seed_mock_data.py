@@ -21,10 +21,10 @@ from db import DB_PATH, get_connection, init_db, match_merchant
 # Mock accounts — fictional card numbers, real bank names
 # ---------------------------------------------------------------------------
 MOCK_ACCOUNTS = [
-    ("DBS Visa Platinum 4521", "DBS-Visa-4521", "credit_card", "4521", "SGD"),
+    ("DBS Visa Platinum 4521", "DBS-Visa-4521", "card", "4521", "SGD"),
     ("DBS Savings Account 8834", "DBS-Savings-8834", "bank", "8834", "SGD"),
-    ("Citi Rewards Card 7293", "Citi-Rewards-7293", "credit_card", "7293", "SGD"),
-    ("UOB One Card 3156", "UOB-One-3156", "credit_card", "3156", "SGD"),
+    ("Citi Rewards Card 7293", "Citi-Rewards-7293", "card", "7293", "SGD"),
+    ("UOB One Card 3156", "UOB-One-3156", "card", "3156", "SGD"),
     ("UOB Savings Account 6602", "UOB-Savings-6602", "bank", "6602", "SGD"),
 ]
 

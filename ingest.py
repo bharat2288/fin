@@ -7,6 +7,8 @@ imported by app.py for the import-confirm workflow.
 import re
 import sqlite3
 
+import account_kind
+
 
 # Bank statement PayNow payee → type mapping
 # These are identified by the "To:" field in bank statement descriptions
@@ -87,6 +89,7 @@ def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> 
             return match[0]
 
     # 4. Create new account
+    account_kind.checked_kind(stmt_type)
     conn.execute(
         "INSERT INTO accounts (name, short_name, type, last_four) VALUES (?, ?, ?, ?)",
         (card_info, card_info, stmt_type, last_four),

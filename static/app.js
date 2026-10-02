@@ -10,6 +10,7 @@
 let types = [];               // The type list: [{id, name, parent_id, parent_name, display_name, default_one_off, covers, not_for, proposed_book}, ...]
 let books = [];               // [{name, description}, ...] — Household, Moom, Kalesh
 let accounts = [];            // [{id, name, ...}, ...]
+let accountKinds = { kinds: [], owners: [] };  // the declared account kinds and owners, each with a description
 let currentImportId = null;   // Active import preview
 let currentImportData = null; // Preview data from upload
 let importServices = [];      // [{id, name, book, type_id, type_name}, ...] from upload response
@@ -311,14 +312,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function loadReferenceData() {
-    const [typeRes, bookRes, acctRes] = await Promise.all([
+    const [typeRes, bookRes, acctRes, kindRes] = await Promise.all([
         fetch('/api/types').then(r => r.json()),
         fetch('/api/books').then(r => r.json()),
         fetch('/api/accounts').then(r => r.json()),
+        fetch('/api/account-kinds').then(r => r.json()),
     ]);
     types = typeRes;
     books = bookRes;
     accounts = acctRes;
+    accountKinds = kindRes;
 
     populateTypeMultiSelect();
     populateAccountFilter();
@@ -331,14 +334,14 @@ function populateAccountFilter() {
     if (dashSel) {
         const current = dashSel.value;
         dashSel.innerHTML = '<option value="">All Accounts</option>';
-        accounts.forEach(a => {
+        accounts.filter(hasStatements).forEach(a => {
             dashSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         });
         if (current) dashSel.value = current;
     }
 
     // Subscription card dropdowns (add form + edit modal)
-    const activeAccounts = accounts.filter(a => a.status !== 'archived');
+    const activeAccounts = accounts.filter(a => a.status !== 'archived' && hasStatements(a));
     ['sub-card', 'edit-sub-card'].forEach(id => {
         const sel = document.getElementById(id);
         if (!sel) return;
@@ -1142,6 +1145,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'note-modal': closeNoteModal,
         'resolve-modal': closeResolveModal,
         'edit-rule-modal': closeEditRuleModal,
+        'figure-modal': closeFigureModal,
     };
     document.addEventListener('keydown', e => {
         if (e.key !== 'Escape') return;
@@ -3695,7 +3699,7 @@ async function openAddSubModal() {
     // Populate card dropdown from active accounts only
     const cardSel = document.getElementById('sub-card');
     cardSel.innerHTML = '<option value="">—</option>';
-    accounts.filter(a => a.status !== 'archived').forEach(a => {
+    accounts.filter(a => a.status !== 'archived' && hasStatements(a)).forEach(a => {
         cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
     });
 
@@ -3828,7 +3832,7 @@ async function openEditSubModal(subId) {
     const cardSel = document.getElementById('edit-sub-card');
     cardSel.innerHTML = '<option value="">—</option>';
     accounts.forEach(a => {
-        if (a.status !== 'archived' || a.id === sub.account_id) {
+        if ((a.status !== 'archived' && hasStatements(a)) || a.id === sub.account_id) {
             cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         }
     });
@@ -3890,11 +3894,49 @@ async function deleteSubFromModal() {
 // ACCOUNTS TAB
 // ============================================================
 
-const ACCT_TYPE_LABELS = {
-    credit_card: 'Credit Card',
-    debit: 'Debit Card',
-    bank: 'Bank Account',
-};
+// An account's kind and owner come from one declaration, served by
+// /api/account-kinds and held in accountKinds.
+function kindInfo(kind) {
+    return accountKinds.kinds.find(k => k.name === kind) || {};
+}
+
+// Whether an account's rows come from imported statements (a bank account or a card).
+function hasStatements(a) {
+    return !!kindInfo(a.type).has_statements;
+}
+
+function acctKindOptions(selected) {
+    return accountKinds.kinds.map(k =>
+        `<option value="${k.name}" title="${escapeHtml(k.description)}" ${k.name === selected ? 'selected' : ''}>${k.name}</option>`
+    ).join('');
+}
+
+function acctOwnerOptions(selected) {
+    return accountKinds.owners.map(o =>
+        `<option value="${escapeHtml(o.name)}" title="${escapeHtml(o.description)}" ${o.name === selected ? 'selected' : ''}>${escapeHtml(o.name)}</option>`
+    ).join('');
+}
+
+const CURRENCY_SIGNS = { SGD: 'S$', INR: 'Rs' };
+
+// A stored amount (whole minor units) as text: "S$ -902,500.00". Integer
+// arithmetic only.
+function formatMinorUnits(minor, currency) {
+    const abs = Math.abs(minor);
+    const units = Math.floor(abs / 100).toLocaleString('en-US');
+    const cents = String(abs % 100).padStart(2, '0');
+    const code = currency || 'SGD';
+    return `${CURRENCY_SIGNS[code] || code} ${minor < 0 ? '-' : ''}${units}.${cents}`;
+}
+
+// What an account's balance rests on: its latest anchor, or that it has none.
+function acctRestsOn(a) {
+    if (!a.anchor) {
+        return kindInfo(a.type).takes_a_figure ? '<span style="color:var(--text-muted);">no figure</span>' : '—';
+    }
+    const source = a.anchor.source === 'supplied' ? 'your figure' : 'statement';
+    return `${formatMinorUnits(a.anchor.amount_minor, a.currency)}<br><span style="color:var(--text-muted);">${source} ${formatDate(a.anchor.date)}</span>`;
+}
 
 let editingAcctId = null;  // Track which account row is being edited
 
@@ -3928,9 +3970,11 @@ function renderAccountsTab() {
         return `<tr${isArchived ? ' style="opacity:0.5;"' : ''}>
             <td style="font-size:13px;">${escapeHtml(a.name)}${isArchived ? ' <span class="badge badge-muted" style="font-size:10px;margin-left:6px;">archived</span>' : ''}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.short_name)}</td>
-            <td><span class="acct-type-badge acct-type-${a.type}">${ACCT_TYPE_LABELS[a.type] || a.type}</span></td>
+            <td><span class="acct-type-badge acct-type-${a.type}" title="${escapeHtml(kindInfo(a.type).description || '')}">${escapeHtml(a.type)}</span></td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.owner || '')}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${a.last_four || '—'}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${a.currency || 'SGD'}</td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${acctRestsOn(a)}</td>
             <td style="text-align:right;white-space:nowrap;">
                 <button class="btn btn-sm" onclick="startEditAcct(${a.id})">Edit</button>
                 ${archiveBtn}
@@ -3945,14 +3989,14 @@ function renderAcctEditRow(a) {
         <td><input type="text" id="edit-acct-name" value="${escapeHtml(a.name)}" style="width:100%;font-size:13px;"></td>
         <td><input type="text" id="edit-acct-short" value="${escapeHtml(a.short_name)}" style="width:100%;font-size:12px;"></td>
         <td>
-            <select id="edit-acct-type" style="width:100%;font-size:12px;">
-                <option value="credit_card" ${a.type === 'credit_card' ? 'selected' : ''}>Credit Card</option>
-                <option value="debit" ${a.type === 'debit' ? 'selected' : ''}>Debit Card</option>
-                <option value="bank" ${a.type === 'bank' ? 'selected' : ''}>Bank Account</option>
-            </select>
+            <select id="edit-acct-type" style="width:100%;font-size:12px;">${acctKindOptions(a.type)}</select>
+        </td>
+        <td>
+            <select id="edit-acct-owner" style="width:100%;font-size:12px;">${acctOwnerOptions(a.owner)}</select>
         </td>
         <td><input type="text" id="edit-acct-last4" value="${a.last_four || ''}" maxlength="4" style="width:100%;font-size:12px;"></td>
         <td><input type="text" id="edit-acct-currency" value="${a.currency || 'SGD'}" style="width:60px;font-size:12px;"></td>
+        <td style="font-size:12px;color:var(--text-tertiary);">${acctRestsOn(a)}</td>
         <td style="text-align:right;white-space:nowrap;">
             <button class="btn btn-sm btn-primary" onclick="saveEditAcct(${a.id})">Save</button>
             <button class="btn btn-sm" onclick="cancelEditAcct()">Cancel</button>
@@ -3961,6 +4005,11 @@ function renderAcctEditRow(a) {
 }
 
 function toggleAcctForm() {
+    const kindSel = document.getElementById('acct-type');
+    if (!kindSel.options.length) {
+        kindSel.innerHTML = acctKindOptions('card');
+        document.getElementById('acct-owner').innerHTML = acctOwnerOptions('Household');
+    }
     document.getElementById('acct-form').classList.toggle('hidden');
 }
 
@@ -3972,6 +4021,7 @@ async function addAccount() {
         name,
         short_name: document.getElementById('acct-short').value.trim() || name,
         type: document.getElementById('acct-type').value,
+        owner: document.getElementById('acct-owner').value,
         last_four: document.getElementById('acct-last4').value.trim() || null,
         currency: document.getElementById('acct-currency').value.trim() || 'SGD',
     };
@@ -4005,6 +4055,7 @@ async function saveEditAcct(id) {
         name: document.getElementById('edit-acct-name').value.trim(),
         short_name: document.getElementById('edit-acct-short').value.trim(),
         type: document.getElementById('edit-acct-type').value,
+        owner: document.getElementById('edit-acct-owner').value,
         last_four: document.getElementById('edit-acct-last4').value.trim() || null,
         currency: document.getElementById('edit-acct-currency').value.trim() || 'SGD',
     };
@@ -4045,4 +4096,86 @@ async function reloadAccounts() {
     accounts = acctRes;
     populateAccountFilter();
     renderAccountsTab();
+}
+
+
+// ============================================================
+// ENTER A FIGURE (a supplied anchor: an account's balance on a date)
+// ============================================================
+
+function figureAccounts() {
+    return accounts.filter(a => a.status !== 'archived' && kindInfo(a.type).takes_a_figure);
+}
+
+function openFigureModal() {
+    const offered = figureAccounts();
+    if (!offered.length) {
+        alert('No loan, holding, company or person account yet. Add one first.');
+        return;
+    }
+    const sel = document.getElementById('figure-account');
+    sel.innerHTML = offered.map(a =>
+        `<option value="${a.id}">${escapeHtml(a.name)} (${escapeHtml(a.type)})</option>`
+    ).join('');
+    document.getElementById('figure-amount').value = '';
+    document.getElementById('figure-note').value = '';
+    const now = new Date();
+    document.getElementById('figure-date').value =
+        `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    updateFigureHint();
+    document.getElementById('figure-modal').style.display = 'flex';
+    document.getElementById('figure-amount').focus();
+}
+
+function closeFigureModal() {
+    document.getElementById('figure-modal').style.display = 'none';
+}
+
+function updateFigureHint() {
+    const acct = accounts.find(a => a.id === parseInt(document.getElementById('figure-account').value));
+    const hints = {
+        loan: 'what is owed',
+        holding: 'what it is worth',
+        company: 'our money in it on that date (its opening amount)',
+        person: 'what they owe us on that date',
+    };
+    const sign = acct ? (CURRENCY_SIGNS[acct.currency || 'SGD'] || acct.currency) : '';
+    document.getElementById('figure-amount-hint').textContent =
+        `${(acct && hints[acct.type]) || 'what is owed, or what it is worth'}${sign ? ', in ' + sign : ''}`;
+}
+
+async function saveFigure() {
+    const accountId = parseInt(document.getElementById('figure-account').value);
+    const acct = accounts.find(a => a.id === accountId);
+    // The amount goes as the text typed, less any currency sign and spaces:
+    // the server reads it exactly and refuses what is not a plain figure.
+    const amount = document.getElementById('figure-amount').value.replace(/[^0-9.,-]/g, '');
+    const date = document.getElementById('figure-date').value;
+    if (!amount) { alert('Amount is required'); return; }
+    if (!date) { alert('The date the figure is as of is required'); return; }
+
+    const btn = document.getElementById('figure-save');
+    btn.disabled = true;
+    const data = await apiFetch('/api/anchors', {
+        method: 'POST',
+        body: {
+            account_id: accountId,
+            amount,
+            date,
+            note: document.getElementById('figure-note').value.trim() || null,
+        },
+    });
+    btn.disabled = false;
+    if (!data) return;
+
+    closeFigureModal();
+    const shown = formatMinorUnits(data.anchor.amount_minor, data.anchor.currency);
+    const name = acct ? acct.name : data.anchor.account_name;
+    showToast(
+        data.created
+            ? `Saved: ${name} ${shown} as of ${formatDate(data.anchor.date)}`
+            : `${name} already had ${shown} for ${formatDate(data.anchor.date)}; nothing changed`,
+        data.created ? 'success' : 'info', 6000
+    );
+    await reloadAccounts();
 }

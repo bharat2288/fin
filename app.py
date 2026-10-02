@@ -17,6 +17,8 @@ from datetime import date, datetime, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
 
+import account_kind
+import anchors
 import book_type
 from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
 
@@ -343,18 +345,53 @@ def api_books():
     ])
 
 
+@app.route("/api/account-kinds")
+def api_account_kinds():
+    """The account kinds, the owners and the anchor sources, each from its
+    one declaration."""
+    return jsonify({
+        "kinds": [
+            {
+                "name": name,
+                "description": description,
+                # Whether the enter-a-figure dialog offers accounts of this kind.
+                "takes_a_figure": name in account_kind.SUPPLIED_FIGURE_KINDS,
+                "has_statements": name in account_kind.STATEMENT_KINDS,
+            }
+            for name, description in account_kind.KINDS
+        ],
+        "owners": [
+            {"name": name, "description": description}
+            for name, description in account_kind.OWNERS
+        ],
+        "anchor_sources": [
+            {"name": name, "description": description}
+            for name, description in anchors.SOURCES
+        ],
+    })
+
+
 @app.route("/api/accounts")
 def api_accounts():
-    """List all accounts."""
+    """List all accounts. `type` is the account's kind; `anchor` is the latest
+    anchor the account rests on, or null when it has no figure."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, name, short_name, type, last_four, currency, status FROM accounts ORDER BY name"
+            "SELECT id, name, short_name, type, last_four, currency, status, owner FROM accounts ORDER BY name"
         ).fetchall()
+        latest = {
+            r["account_id"]: {"date": r["date"], "amount_minor": r["amount"], "source": r["source"]}
+            for r in conn.execute(
+                "SELECT a.account_id, a.date, a.amount, a.source FROM anchors a "
+                "WHERE a.date = (SELECT MAX(b.date) FROM anchors b WHERE b.account_id = a.account_id)"
+            )
+        }
     result = []
     for r in rows:
         d = dict(r)
         d["name"] = mask_card_number(d["name"])
         d["short_name"] = mask_card_number(d["short_name"])
+        d["anchor"] = latest.get(d["id"])
         result.append(d)
     return jsonify(result)
 
@@ -366,17 +403,24 @@ def api_accounts_create():
     if not data or not data.get("name"):
         return jsonify({"error": "Account name is required"}), 400
 
+    try:
+        kind = account_kind.checked_kind(data.get("type", account_kind.DEFAULT_KIND))
+        owner = account_kind.checked_owner(data.get("owner", account_kind.DEFAULT_OWNER))
+    except account_kind.UnknownAccountValue as e:
+        return jsonify({"error": str(e)}), 400
+
     with get_db() as conn:
         return _crud_insert(
             conn,
-            "INSERT INTO accounts (name, short_name, type, last_four, currency) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 data["name"],
                 data.get("short_name", data["name"]),
-                data.get("type", "credit_card"),
+                kind,
                 data.get("last_four"),
                 data.get("currency", "SGD"),
+                owner,
             ),
             "account",
         )
@@ -385,13 +429,21 @@ def api_accounts_create():
 @app.route("/api/accounts/<int:acct_id>", methods=["PUT"])
 def api_accounts_update(acct_id):
     """Update an account."""
-    return _crud_update("accounts", acct_id, request.get_json(),
-                        ["name", "short_name", "type", "last_four", "currency", "status"])
+    data = request.get_json()
+    try:
+        if data and "type" in data:
+            account_kind.checked_kind(data["type"])
+        if data and "owner" in data:
+            account_kind.checked_owner(data["owner"])
+    except account_kind.UnknownAccountValue as e:
+        return jsonify({"error": str(e)}), 400
+    return _crud_update("accounts", acct_id, data,
+                        ["name", "short_name", "type", "last_four", "currency", "status", "owner"])
 
 
 @app.route("/api/accounts/<int:acct_id>", methods=["DELETE"])
 def api_accounts_delete(acct_id):
-    """Delete an account. Refuses if statements reference it."""
+    """Delete an account. Refuses if statements or anchors reference it."""
     with get_db() as conn:
         stmt_count = conn.execute(
             "SELECT COUNT(*) FROM statements WHERE account_id = ?", (acct_id,)
@@ -400,10 +452,118 @@ def api_accounts_delete(acct_id):
             return jsonify({
                 "error": f"Cannot delete: {stmt_count} statement(s) reference this account"
             }), 400
+        anchor_count = conn.execute(
+            "SELECT COUNT(*) FROM anchors WHERE account_id = ?", (acct_id,)
+        ).fetchone()[0]
+        if anchor_count > 0:
+            return jsonify({
+                "error": f"Cannot delete: {anchor_count} figure(s) are held for this account"
+            }), 400
 
         conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
         conn.commit()
     return jsonify({"success": True})
+
+
+# ---------------------------------------------------------------------------
+# Anchors: an account's balance on a date
+# ---------------------------------------------------------------------------
+
+def _anchor_payload(row) -> dict:
+    return {
+        "id": row["id"],
+        "account_id": row["account_id"],
+        "account_name": mask_card_number(row["account_name"]),
+        "kind": row["kind"],
+        "currency": row["currency"] or "SGD",
+        "date": row["date"],
+        "amount_minor": row["amount"],
+        "source": row["source"],
+        "note": row["note"],
+    }
+
+
+_ANCHOR_SELECT = (
+    "SELECT n.id, n.account_id, a.name AS account_name, a.type AS kind, a.currency, "
+    "n.date, n.amount, n.source, n.note "
+    "FROM anchors n JOIN accounts a ON a.id = n.account_id "
+)
+
+
+@app.route("/api/anchors")
+def api_anchors():
+    """Every anchor, newest first; with ?account_id= those of one account.
+    `amount_minor` is whole minor units of the account's currency, signed as
+    the household sees it: owned positive, owed negative."""
+    account_id = request.args.get("account_id", type=int)
+    with get_db() as conn:
+        if account_id is None:
+            rows = conn.execute(_ANCHOR_SELECT + "ORDER BY n.date DESC, n.id DESC").fetchall()
+        else:
+            rows = conn.execute(
+                _ANCHOR_SELECT + "WHERE n.account_id = ? ORDER BY n.date DESC, n.id DESC",
+                (account_id,),
+            ).fetchall()
+    return jsonify([_anchor_payload(r) for r in rows])
+
+
+@app.route("/api/anchors", methods=["POST"])
+def api_anchors_create():
+    """Enter a figure: a supplied anchor for a loan, a holding, a company or a
+    person.
+
+    Body: account_id, amount (text, in whole units of the account's currency:
+    what is owed for a loan, what it is worth or the balance otherwise), date
+    (YYYY-MM-DD), note. The same amount again for that account and date
+    changes nothing; a different amount is refused.
+    """
+    data = request.get_json(silent=True) or {}
+    account_id = data.get("account_id")
+    if isinstance(account_id, bool) or not isinstance(account_id, int):
+        return jsonify({"error": "account_id is required: the account the figure is for"}), 400
+    note = data.get("note")
+    if note is not None and not isinstance(note, str):
+        return jsonify({"error": "note must be text"}), 400
+    note = (note or "").strip() or None
+
+    with get_db() as conn:
+        account = conn.execute(
+            "SELECT id, name, type, currency FROM accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        if account is None:
+            return jsonify({"error": "no such account"}), 404
+        kind = account["type"]
+        if kind not in account_kind.SUPPLIED_FIGURE_KINDS:
+            return jsonify({
+                "error": f"a {kind} account rests on its statement; a figure can be entered "
+                         "for a loan, a holding, a company or a person"
+            }), 400
+        try:
+            amount_minor = anchors.to_minor_units(data.get("amount"))
+            on = anchors.checked_date(data.get("date"))
+            if kind in account_kind.OWED_KINDS:
+                if amount_minor < 0:
+                    raise anchors.InvalidAnchor(
+                        "amount for a loan is what is owed, entered as a positive figure"
+                    )
+                amount_minor = -amount_minor
+            held, created = anchors.record(
+                conn, account_id, on, amount_minor, anchors.SUPPLIED, note
+            )
+        except anchors.InvalidAnchor as e:
+            return jsonify({"error": str(e)}), 400
+        except anchors.AnchorConflict as e:
+            shown = e.existing["amount"]
+            if kind in account_kind.OWED_KINDS:
+                shown = -shown
+            return jsonify({
+                "error": f"{mask_card_number(account['name'])} already has a figure of "
+                         f"{anchors.format_amount(shown, account['currency'])} for "
+                         f"{e.existing['date']}; a different amount for the same date is refused"
+            }), 409
+        conn.commit()
+        row = conn.execute(_ANCHOR_SELECT + "WHERE n.id = ?", (held["id"],)).fetchone()
+    return jsonify({"success": True, "created": created, "anchor": _anchor_payload(row)})
 
 
 # ---------------------------------------------------------------------------
@@ -1513,7 +1673,7 @@ def api_import_confirm():
 
                 # Ensure account exists
                 from ingest import ensure_account, ensure_statement
-                stmt_type = "credit_card"  # default; could detect from account name
+                stmt_type = "card"  # default; could detect from account name
                 if "bank" in account_name.lower() or "one account" in account_name.lower() or "home" in account_name.lower():
                     stmt_type = "bank"
 
@@ -1750,8 +1910,9 @@ def api_statements_coverage():
         # Get active accounts
         accounts = conn.execute(
             "SELECT id, short_name, type FROM accounts "
-            "WHERE status = 'active' OR status IS NULL "
-            "ORDER BY type, short_name"
+            "WHERE (status = 'active' OR status IS NULL) AND type IN (?, ?) "
+            "ORDER BY type, short_name",
+            account_kind.STATEMENT_KINDS,
         ).fetchall()
         accounts = [dict(a) for a in accounts]
 
@@ -1762,9 +1923,10 @@ def api_statements_coverage():
             "FROM statements s "
             "JOIN accounts a ON s.account_id = a.id "
             "WHERE (a.status = 'active' OR a.status IS NULL) "
+            "  AND a.type IN (?, ?) "
             "  AND s.statement_date >= ? "
             "ORDER BY s.statement_date",
-            (min_month,),
+            (*account_kind.STATEMENT_KINDS, min_month),
         ).fetchall()
 
     # Build matrix: {account_id: {month: {imported, date, filename}}}

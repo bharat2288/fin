@@ -91,7 +91,7 @@ def build_context(conn) -> ClassifierContext:
         if short:
             aliases.append(short)
         last4 = (row["last_four"] or "").strip()
-        if row["type"] == "credit_card" and last4:
+        if row["type"] == "card" and last4:
             # e.g., "DBSC-{16-digit}" where last 4 == last_four
             linked.append(f"DBSC-%{last4}")  # placeholder; real match via fn
             linked.append(last4)  # bare last_four is also useful
