@@ -65,8 +65,21 @@ def _amount(text: str) -> float:
 
 
 def _read_pages(filepath: str) -> list[str]:
-    with pdfplumber.open(filepath) as pdf:
-        return [(p.extract_text(x_tolerance=TEXT_X_TOLERANCE) or "") for p in pdf.pages]
+    """Every page's text. Any failure becomes one fixed-message ValueError.
+
+    The upload route echoes str(e), and pdfminer messages can quote raw tokens
+    from the file. The raise sits outside the except block so the original
+    exception is not kept on __context__ either.
+    """
+    unreadable = False
+    try:
+        with pdfplumber.open(filepath) as pdf:
+            pages = [(p.extract_text(x_tolerance=TEXT_X_TOLERANCE) or "") for p in pdf.pages]
+    except Exception:
+        unreadable = True
+    if unreadable:
+        raise ValueError("Citi PDF: could not read page text")
+    return pages
 
 
 def _compact(text: str) -> str:
@@ -241,7 +254,12 @@ CHK_FURNITURE_RES = (
 
 
 def _chk_date(mon: str, day: str, year: str) -> str:
-    return f"{year}-{MONTH_MAP.get(mon.upper(), '01')}-{day.zfill(2)}"
+    # No fallback month: reconciliation never checks dates, so a guessed
+    # month would be saved silently.
+    month = MONTH_MAP.get(mon.upper())
+    if month is None:
+        raise ValueError("Citi PDF: unrecognised month in transaction date")
+    return f"{year}-{month}-{day.zfill(2)}"
 
 
 def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedStatement:

@@ -182,7 +182,7 @@ def test_named_paynow_counterparty_stays_expense():
 def test_citi_payoff_from_bank_is_payment():
     """Bank-side outflow paying a Citi card is own-money, not spend."""
     facts = {
-        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000012345",
+        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000",
         "amount_sgd": 850.00,
         "category_name": "Transfers",
     }
@@ -249,7 +249,7 @@ def test_dbs_card_bill_payment_wording_mid_description_is_not_payment():
 def test_bank_side_payoff_wording_as_inflow_is_not_payment():
     """An inflow carrying outbound-payoff wording is a return, not a payoff."""
     facts = {
-        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000012345",
+        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000",
         "amount_sgd": -850.00,
         "category_name": None,
     }
@@ -278,7 +278,7 @@ def test_other_bill_payment_payees_stay_expense():
     """Only the card-issuer payees are payoffs; utility and other bill payments are spend."""
     for description in (
         "Bill Payment mBK-SOME UTILITY 0000000000002222",
-        "PAYMENT TO CITYGAS MBKFT00000067890",
+        "PAYMENT TO CITYGAS MBKFT00000000000",
         "BILL PAYMENT MBK-UOB INSURANCE 0000000000003333",
     ):
         facts = {"description": description, "amount_sgd": 120.00, "category_name": None}
@@ -287,12 +287,16 @@ def test_other_bill_payment_payees_stay_expense():
 
 def test_card_payoff_wording_beats_own_alias_transfer():
     """Same precedence as the DBS linked-card form: payoff beats generic own-transfer."""
+    ctx = ClassifierContext(own_aliases=("JANE TESTER",))
+    # Control: the alias alone does fire, so the payoff result below is precedence.
+    alias_only = {"description": "FAST PAYMENT JANE TESTER", "amount_sgd": 850.00, "category_name": None}
+    assert classify_flow(alias_only, ctx) == "transfer"
     facts = {
-        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000012345 SURI BHARAT",
+        "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000 JANE TESTER",
         "amount_sgd": 850.00,
         "category_name": None,
     }
-    assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
+    assert classify_flow(facts, ctx) == "payment"
 
 
 # ----- Bullet 4: backfill script -----

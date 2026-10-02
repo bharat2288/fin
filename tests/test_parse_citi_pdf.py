@@ -8,12 +8,15 @@ an env var points at a statements folder.
 
 import pytest
 
+import parse_citi_pdf
 import parsers
 from ingest import ensure_account
 from parse_citi_pdf import (
+    _chk_date,
     classify_citi_text,
     parse_citi_card_pages,
     parse_citi_checking_pages,
+    parse_citi_pdf as parse_citi_pdf_file,
 )
 
 
@@ -279,3 +282,68 @@ def test_checking_that_does_not_reconcile_raises():
 def test_checking_bill_payment_to_card_is_emitted():
     stmt = parse_citi_checking_pages(CHK_PAGES)
     assert any(t.is_payment and t.amount_sgd > 0 for t in stmt.transactions)
+
+
+def test_checking_known_month_abbreviation_maps():
+    assert _chk_date("Sep", "3", "2026") == "2026-09-03"
+
+
+def test_checking_unknown_month_raises_instead_of_defaulting_to_january():
+    # The reconciliation check never looks at dates, so a silent '01'
+    # fallback would save a wrong date.
+    with pytest.raises(ValueError) as excinfo:
+        _chk_date("Xyz", "3", "2026")
+    assert str(excinfo.value) == "Citi PDF: unrecognised month in transaction date"
+
+
+# ---------------------------------------------------------------------------
+# Unreadable files — no third-party exception text may escape
+# ---------------------------------------------------------------------------
+
+SENTINEL = "SENTINEL-RAW-TOKEN-0000"
+
+
+class _FakePage:
+    def __init__(self, text=None, fail=False):
+        self._text, self._fail = text, fail
+
+    def extract_text(self, **_kwargs):
+        if self._fail:
+            raise RuntimeError(f"pdfminer choked on {SENTINEL}")
+        return self._text
+
+
+class _FakePdf:
+    def __init__(self, pages):
+        self.pages = pages
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _assert_fixed_read_error(excinfo):
+    # The upload route echoes str(e); a chained original would also carry it.
+    exc = excinfo.value
+    assert str(exc) == "Citi PDF: could not read page text"
+    assert SENTINEL not in str(exc)
+    assert exc.__context__ is None and exc.__cause__ is None
+
+
+def test_unreadable_later_page_raises_fixed_message(monkeypatch):
+    pdf = _FakePdf([_FakePage(CARD_PAGE1), _FakePage(fail=True)])
+    monkeypatch.setattr(parse_citi_pdf.pdfplumber, "open", lambda _path: pdf)
+    with pytest.raises(ValueError) as excinfo:
+        parse_citi_pdf_file("statement.pdf")
+    _assert_fixed_read_error(excinfo)
+
+
+def test_unopenable_pdf_raises_fixed_message(monkeypatch):
+    def fail_open(_path):
+        raise RuntimeError(f"bad xref near {SENTINEL}")
+    monkeypatch.setattr(parse_citi_pdf.pdfplumber, "open", fail_open)
+    with pytest.raises(ValueError) as excinfo:
+        parse_citi_pdf_file("statement.pdf")
+    _assert_fixed_read_error(excinfo)
