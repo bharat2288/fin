@@ -23,6 +23,7 @@ import book_type
 import db
 import flow
 import money
+import pairing
 import review
 import suggest
 from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
@@ -2127,6 +2128,9 @@ def api_import_confirm():
             conn.commit()
             invalidate_rules_cache()
 
+            # Pair the moves between household accounts this import completed.
+            pairing.match_pairs(conn)
+
             # Update batch_imports record
             result_summary = {
                 "transactions_saved": total_saved,
@@ -2672,6 +2676,23 @@ def api_review_label(tx_id: int):
         "other_side_name": mask_card_number(named["name"]) if named else None,
         "created_account": new_person is not None,
     })
+
+
+@app.route("/api/pair-matching", methods=["POST"])
+def api_pair_matching():
+    """Pair the moves between household accounts, on demand: the same match
+    the import runs (pairing.py). A row set by hand is never changed, and a
+    second run pairs nothing more.
+
+    Returns paired, the number of pairs made, and waiting, the transfers
+    still on the review list."""
+    with get_db() as conn:
+        paired = pairing.match_pairs(conn)
+        conn.commit()
+        waiting = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE flow_type = ?", (flow.REVIEW,)
+        ).fetchone()[0]
+    return jsonify({"paired": paired, "waiting": waiting})
 
 
 # ---------------------------------------------------------------------------
