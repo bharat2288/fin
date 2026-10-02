@@ -25,6 +25,7 @@ import db
 import flow
 import loan_interest
 import money
+import month_check
 import pairing
 import rates
 import review
@@ -2923,8 +2924,12 @@ def api_balance_sheet():
     its SGD value and the saved rate that gives it; then the household's money
     in each company and with each person, each line with what it is made of
     (opening figure, paid for it, capital, paid back); section totals and net
-    worth in SGD, saying what is left out; the month's currency change; and
-    how many transfers wait for review.
+    worth in SGD, saying what is left out; the month's currency change; how
+    many transfers wait for review; and the month check (month_check.py):
+    net worth at the previous month-end, plus income, less spending, plus
+    currency change, against net worth at the month-end, the difference
+    unexplained, beside the month's transfers waiting for review and the
+    lines whose check is not "ties".
     A month before January 2026 is refused: nothing is shown before then."""
     month = request.args.get("month")
     if month is None:
@@ -2935,6 +2940,10 @@ def api_balance_sheet():
         except balance_sheet.NotShown as e:
             return jsonify({"error": str(e)}), 400
         shown["review_waiting"] = _waiting_for_review(conn)[0]
+        # The transfers dated in the month that wait for a label: what the
+        # month's unexplained figure may be made of.
+        waiting = _waiting_sides(conn, " AND strftime('%Y-%m', t.date) = ?", [month])
+        shown["month_check"] = month_check.check(conn, month, shown, mask_card_number, waiting)
     return jsonify(shown)
 
 

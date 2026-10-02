@@ -4557,6 +4557,49 @@ function balanceCurrencyChange(sheet) {
         <div style="display:flex;gap:var(--space-3);margin-top:var(--space-3);">${controls}</div>`;
 }
 
+// The month check: net worth at the previous month-end, plus income, less
+// spending, plus currency change, against net worth at the month-end. The
+// difference is unexplained, shown beside the month's transfers waiting for
+// review and the lines whose check is not "ties".
+function balanceMonthCheck(sheet) {
+    const c = sheet.month_check;
+    if (!c) return '';
+    const [y, m] = c.month.split('-').map(Number);
+    const monthName = new Date(y, m - 1, 1).toLocaleString('en-GB', { month: 'long', year: 'numeric' });
+    const row = (label, figure, aside = '', cls = '') => `<tr class="${cls}">
+            <td>${label}</td>
+            <td class="col-amount">${figure === null ? '<span class="text-muted">-</span>' : escapeHtml(figure)}</td>
+            <td class="text-secondary">${aside}</td>
+        </tr>`;
+    const interest = c.interest_minor ? `(interest ${escapeHtml(c.interest)} inside)` : '';
+    const review = c.review.count
+        ? `${c.review.count} ${c.review.count === 1 ? 'transfer' : 'transfers'} dated in ${escapeHtml(monthName)} waiting in the review list
+           (out ${escapeHtml(c.review.out)}${c.review.in_count ? ` · in ${escapeHtml(c.review.in)}` : ''})`
+        : `no transfer dated in ${escapeHtml(monthName)} is waiting for review`;
+    const notTying = c.not_tying.map(l =>
+        `<div>${escapeHtml(l.name)}: ${escapeHtml(l.text)}${l.date ? ` (${formatDate(l.date)})` : ''}</div>`
+    ).join('');
+    const unexplained = c.available
+        ? row('<strong>Unexplained</strong>', c.unexplained, `<div>${review}</div>${notTying}`, 'balance-total')
+        : row('Unexplained', null, `<span class="text-warning">${escapeHtml(c.why)}</span><div>${review}</div>${notTying}`);
+    const note = c.note ? `<div class="balance-note">${escapeHtml(c.note)}</div>` : '';
+    return `<div style="margin-top:var(--space-5);">
+            <div class="balance-net-label">Month check · ${escapeHtml(monthName)}</div>
+            ${note}
+            <table class="data-table" style="font-size:12px;">
+                <tbody>
+                    ${row(`Net worth, ${formatDate(c.from)}`, c.opening)}
+                    ${row('+ income', c.income)}
+                    ${row('- spending', c.spending, interest)}
+                    ${row('+ currency change', c.currency_change)}
+                    ${row(`= expected, ${formatDate(c.to)}`, c.expected)}
+                    ${row(`actual, ${formatDate(c.to)}`, c.actual)}
+                    ${unexplained}
+                </tbody>
+            </table>
+        </div>`;
+}
+
 // Fetch the reference rate for a day and save it; a rate already saved is kept.
 async function fetchRate(currency, day) {
     const resp = await fetch('/api/rates/fetch', {
@@ -4605,6 +4648,7 @@ async function loadBalanceSheet() {
         noteEl.classList.add('hidden');
         netEl.textContent = '';
         document.getElementById('balance-currency-change').innerHTML = '';
+        document.getElementById('balance-month-check').innerHTML = '';
         document.getElementById('balance-error-text').textContent = sheet.error;
         errorEl.classList.remove('hidden');
         return;
@@ -4640,6 +4684,7 @@ async function loadBalanceSheet() {
     }).join('');
 
     document.getElementById('balance-currency-change').innerHTML = balanceCurrencyChange(sheet);
+    document.getElementById('balance-month-check').innerHTML = balanceMonthCheck(sheet);
     document.getElementById('balance-review-link').textContent = `Review list (${sheet.review_waiting})`;
 }
 

@@ -8,9 +8,11 @@ of the period, in whole minor units whose parts add up exactly to the whole.
 Where the derived rows live: on the loan account itself, under a statement
 record named DERIVED_STATEMENT and dated the period's closing figure. They are
 on no bank account or card, so they are in no statement's tie and no bank
-balance. A loan's own balance is its figure and the instalments naming it, so
-anything that adds up a loan's balance leaves these rows out: every row under
-a DERIVED_STATEMENT record, each also marked cat_source = DERIVED.
+balance. They are not rows of the loan's own statement either: every row under
+a DERIVED_STATEMENT record is marked cat_source = DERIVED, and nothing adds them
+up as the loan's rows. A loan's balance is its figure and the instalments naming
+it since, less the interest dated since (`interest_between`): between two
+figures what is owed falls by the principal repaid, as the principal card says.
 
 Instalments are movement rows on the household's bank accounts and cards that
 name the loan as their other side; positive is money out.
@@ -191,6 +193,18 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
             )
         changed += 1
     return changed
+
+
+def interest_between(conn: sqlite3.Connection, loan_id: int, after: str, upto: str) -> int:
+    """The interest worked out for one loan dated after one day up to
+    another, in whole minor units. Between two figures it is what has been
+    added to what is owed since the earlier one; after the latest figure
+    there is none yet."""
+    return conn.execute(
+        "SELECT COALESCE(SUM(t.amount_minor), 0) " + _DERIVED_FROM
+        + "AND l.id = ? AND t.date > ? AND t.date <= ?",
+        (*_DERIVED_PARAMS, loan_id, after, upto),
+    ).fetchone()[0]
 
 
 def month_figures(conn: sqlite3.Connection, month: str) -> dict:

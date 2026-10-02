@@ -9,7 +9,10 @@ owed negative. A row's amount is positive for money out.
     bank, card   the anchor less the account's own rows since
     loan         the supplied figure plus the movement rows naming the loan
                  since (an instalment is money out, and brings what is owed
-                 toward zero)
+                 toward zero), less the interest worked out for those days
+                 when a later figure has worked it out (loan_interest.py):
+                 between two figures what is owed falls by the principal
+                 repaid, and after the latest by the instalments in full
     holding      the supplied figure plus the movement rows naming the holding
                  since (a sale is money in to the bank, and reduces it)
     company      the household's money in it: its opening figure if it has
@@ -45,6 +48,7 @@ import account_kind
 import anchors
 import book_type
 import flow
+import loan_interest
 import money
 import rates
 
@@ -174,7 +178,8 @@ def _check(conn: sqlite3.Connection, account_id: int, kind: str, currency: str, 
     }
 
 
-def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: str):
+def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: str,
+           currency: str | None = None):
     """An anchor carried to a day by the rows since: (the balance, how many
     rows, how they are worded)."""
     if kind in OWN_ROW_KINDS:
@@ -183,7 +188,13 @@ def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: s
     count, total, money_in = _naming_rows(conn, account_id, anchor["date"], upto)
     if kind == "loan":
         since = _counted(count, "instalment", "instalments")
-    elif money_in == count:
+        # Between two figures the later one has worked out the interest, and
+        # what is owed falls only by the principal repaid.
+        interest = loan_interest.interest_between(conn, account_id, anchor["date"], upto)
+        if interest:
+            since += f", less {anchors.format_amount(interest, currency)} interest worked out"
+        return anchor["amount"] + total - interest, count, since
+    if money_in == count:
         since = _counted(count, "sale", "sales")
     else:
         since = _counted(count, "row", "rows")
@@ -196,7 +207,7 @@ def balance_on(conn: sqlite3.Connection, account, on: str) -> int | None:
     anchor = _anchor_before(conn, account["id"], on, inclusive=True)
     if anchor is None:
         return None
-    return _moved(conn, account["id"], account["type"], anchor, on)[0]
+    return _moved(conn, account["id"], account["type"], anchor, on, account["currency"])[0]
 
 
 def _no_rate(currency: str, on: str) -> str:
@@ -247,7 +258,7 @@ def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -
     if anchor is None:
         return line
 
-    balance, count, since = _moved(conn, account["id"], kind, anchor, upto)
+    balance, count, since = _moved(conn, account["id"], kind, anchor, upto, currency)
     line.update(
         _valued(conn, balance, currency, upto),
         rests_on=_rests_on(anchor, as_at, month),
