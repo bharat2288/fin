@@ -987,7 +987,7 @@ function renderTransactions(data) {
             <td>${renderTypeBadges(tx)}</td>
             <td class="text-secondary" style="font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}${noteIcon}</td>
             <td class="text-secondary" style="font-size:12px;">${tx.account_name || ''}</td>
-            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
             <td style="text-align:center;"><span class="${oneOffClass}" title="${oneOffTitle}" onclick="toggleTxOneOff(${tx.id}, this)">1x</span></td>
             <td style="text-align:center;"><span class="tx-edit-icon" title="Resolve / edit transaction" onclick="showTypePicker(${tx.id}, this)">&#9998;</span></td>
         `;
@@ -1717,7 +1717,7 @@ function renderImportPreview(data) {
                 <td>${tx.statement != null ? '' : `<input type="checkbox" ${tx._skip ? '' : 'checked'} data-gi="${gi}" data-ti="${ti}" onchange="toggleTxSkip(${gi}, ${ti}, this.checked)">`}</td>
                 <td class="col-date">${tx.date}</td>
                 <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
-                <td class="col-amount">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+                <td class="col-amount">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(group.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
                 <td class="col-service">
                     <input type="text" class="svc-input" list="svc-datalist"
                         value="${escapeHtml(tx.service_name || '')}"
@@ -1957,6 +1957,8 @@ async function confirmImport() {
         import_id: currentImportId,
         groups: currentImportData.groups.map(g => ({
             account: g.account,
+            // The currency the upload stated: a new account is created in it.
+            currency: g.currency,
             transactions: g.transactions,
             statements: g.statements || [],
         })),
@@ -2771,7 +2773,7 @@ function renderAccordionTxRow(tx) {
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
         <td>${renderTypeBadges(tx)}</td>
         <td class="text-secondary">${tx.account_name || ''}</td>
-        <td style="text-align:right;" class="${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+        <td style="text-align:right;" class="${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
         <td style="width:28px;text-align:center;"><span class="${oneOffClass}" title="${oneOffTitle}" onclick="toggleTxOneOff(${tx.id}, this)">1x</span></td>
         <td style="width:28px;text-align:center;"><span class="tx-edit-icon" title="Resolve / edit" onclick="showTypePicker(${tx.id}, this)">&#9998;</span></td>
     </tr>`;
@@ -4103,6 +4105,13 @@ function acctOwnerOptions(selected) {
 
 const CURRENCY_SIGNS = { SGD: 'S$', INR: 'Rs' };
 
+// The sign a row's amount is shown with: its account's currency. A row's
+// amount_sgd key is the old name; for a rupee account it holds rupees.
+function amountSign(currency) {
+    if (!currency || currency === 'SGD') return 'S$';
+    return `${CURRENCY_SIGNS[currency] || currency} `;
+}
+
 // A stored amount (whole minor units) as text: "S$ -902,500.00". Integer
 // arithmetic only.
 function formatMinorUnits(minor, currency) {
@@ -4328,7 +4337,7 @@ async function loadReviewList() {
             <td class="col-date">${formatDate(tx.date)}</td>
             <td class="text-secondary" style="font-size:12px;">${escapeHtml(tx.account_name || '')}</td>
             <td class="text-secondary" style="font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
-            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
             <td style="white-space:nowrap;">
                 <select id="review-choice-${tx.id}" style="font-size:12px;" onchange="onReviewChoice(${tx.id})">
                     <option value="">choose</option>
@@ -4485,10 +4494,64 @@ function balanceCheck(line) {
     return `<span class="${cls}">${escapeHtml(line.check.text)}</span>`;
 }
 
-// A balance in a currency the total is not in is marked, and says why.
+// A balance in another currency shows its SGD value and the rate that gives
+// it; one left out of the total is marked, and says why.
 function balanceFigure(line) {
-    if (line.balance_minor === null || line.in_total) return escapeHtml(line.balance);
+    if (line.balance_minor === null) return escapeHtml(line.balance);
+    if (line.rate) {
+        return `${escapeHtml(line.balance)}
+            <div class="text-secondary" style="font-size:12px;" title="${escapeHtml(line.rate.source)}">${escapeHtml(line.value)}</div>
+            <div class="text-muted" style="font-size:11px;">${escapeHtml(line.rate.text)}</div>`;
+    }
+    if (line.in_total) return escapeHtml(line.balance);
     return `${escapeHtml(line.balance)} <span class="text-muted" title="${escapeHtml(line.left_out || '')}">*</span>`;
+}
+
+// The month's currency change, and the rate controls for the currencies the
+// sheet holds besides SGD.
+function balanceCurrencyChange(sheet) {
+    const change = sheet.currency_change;
+    if (!change || !change.lines.length) return '';
+    const currencies = [...new Set(change.lines.map(l => l.currency))];
+    const figure = change.minor === null
+        ? `<span class="text-warning">${escapeHtml(change.note)}</span>`
+        : `<span style="font-family:var(--font-mono);">${escapeHtml(change.text)}</span>
+           <span class="text-muted">${change.lines.map(l =>
+               `${escapeHtml(l.name)}: ${escapeHtml(l.opening)} at ${escapeHtml(l.end.rate)} less at ${escapeHtml(l.start.rate)}`
+           ).join('; ')}</span>`;
+    const controls = currencies.map(c => `
+        <button class="btn btn-sm" onclick="fetchRate('${escapeHtml(c)}', '${escapeHtml(sheet.as_at)}')">Fetch ${escapeHtml(c)} rate for ${formatDate(sheet.as_at)}</button>
+        <button class="btn btn-sm" onclick="enterRate('${escapeHtml(c)}', '${escapeHtml(sheet.as_at)}')">Enter it</button>`).join('');
+    return `<div style="font-size:12px;margin-top:var(--space-3);">
+            <span class="balance-net-label">Currency change</span> ${figure}
+        </div>
+        <div style="display:flex;gap:var(--space-3);margin-top:var(--space-3);">${controls}</div>`;
+}
+
+// Fetch the reference rate for a day and save it; a rate already saved is kept.
+async function fetchRate(currency, day) {
+    const resp = await fetch('/api/rates/fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currency, date: day }),
+    });
+    const result = await resp.json();
+    if (!resp.ok) { alert(result.error || 'The rate could not be fetched'); return; }
+    loadBalanceSheet();
+}
+
+// Enter a rate for a day by hand, in place of any saved for it.
+async function enterRate(currency, day) {
+    const rate = prompt(`SGD for 1 ${currency} on ${day} (for example 0.0153):`);
+    if (rate === null || !rate.trim()) return;
+    const resp = await fetch('/api/rates', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currency, date: day, rate: rate.trim() }),
+    });
+    const result = await resp.json();
+    if (!resp.ok) { alert(result.error || 'The rate could not be saved'); return; }
+    loadBalanceSheet();
 }
 
 async function loadBalanceSheet() {
@@ -4512,6 +4575,7 @@ async function loadBalanceSheet() {
         table.classList.add('hidden');
         noteEl.classList.add('hidden');
         netEl.textContent = '';
+        document.getElementById('balance-currency-change').innerHTML = '';
         document.getElementById('balance-error-text').textContent = sheet.error;
         errorEl.classList.remove('hidden');
         return;
@@ -4546,6 +4610,7 @@ async function loadBalanceSheet() {
             </tr>`;
     }).join('');
 
+    document.getElementById('balance-currency-change').innerHTML = balanceCurrencyChange(sheet);
     document.getElementById('balance-review-link').textContent = `Review list (${sheet.review_waiting})`;
 }
 

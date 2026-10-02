@@ -90,10 +90,12 @@ def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
     return None
 
 
-def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> int:
+def ensure_account(
+    conn: sqlite3.Connection, card_info: str, stmt_type: str, currency: str = "SGD",
+) -> int:
     """Find or create an account from card info string: the account
-    `find_account` gives, or a new one of the kind given. Does not commit:
-    the caller owns the transaction."""
+    `find_account` gives, or a new one of the kind given, kept in the
+    currency given. Does not commit: the caller owns the transaction."""
     if not card_info:
         card_info = "Unknown Account"
 
@@ -106,8 +108,8 @@ def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> 
 
     account_kind.checked_kind(stmt_type)
     conn.execute(
-        "INSERT INTO accounts (name, short_name, type, last_four) VALUES (?, ?, ?, ?)",
-        (card_info, card_info, stmt_type, last_four),
+        "INSERT INTO accounts (name, short_name, type, last_four, currency) VALUES (?, ?, ?, ?, ?)",
+        (card_info, card_info, stmt_type, last_four, currency),
     )
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 

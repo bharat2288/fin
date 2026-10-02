@@ -15,6 +15,8 @@ import sqlite3
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+import money
+
 # (name, description). Declared once; `record` validates against it.
 SOURCES = (
     ("statement", "the closing balance a statement states"),
@@ -25,11 +27,9 @@ SOURCE_NAMES = tuple(name for name, _ in SOURCES)
 STATEMENT = "statement"
 SUPPLIED = "supplied"
 
-# Every currency fin holds counts in hundredths.
-MINOR_UNITS_PER_UNIT = 100
-
 # The currency sign a figure is shown with; any other code is shown as itself.
 CURRENCY_SIGNS = {"SGD": "S$", "INR": "Rs"}
+DEFAULT_CURRENCY = "SGD"
 
 
 class InvalidAnchor(ValueError):
@@ -47,11 +47,14 @@ class AnchorConflict(Exception):
         self.existing = existing
 
 
-def to_minor_units(amount) -> int:
-    """An amount typed in whole units ("902,500.00") as whole minor units.
+def to_minor_units(amount, currency: str | None = None) -> int:
+    """An amount typed in whole units ("902,500.00") as whole minor units of
+    the account's currency.
 
     Exact or refused: text or a whole number only, never a float, and nothing
-    finer than one minor unit.
+    finer than one minor unit. The reading is money.parse_minor's, the one a
+    figure printed on a statement gets, so a typed figure and a printed one
+    are the same number.
     """
     if isinstance(amount, bool) or not isinstance(amount, (str, int)):
         raise InvalidAnchor("amount must be a figure written as text, such as 902500.00")
@@ -62,18 +65,21 @@ def to_minor_units(amount) -> int:
         raise InvalidAnchor("amount must be a figure written as text, such as 902500.00") from None
     if not value.is_finite() or "E" in text.upper():
         raise InvalidAnchor("amount must be a plain figure, such as 902500.00")
-    minor = value * MINOR_UNITS_PER_UNIT
-    if minor != minor.to_integral_value():
-        raise InvalidAnchor("amount has more decimal places than the currency has")
-    return int(minor)
+    try:
+        return money.parse_minor(text, currency or DEFAULT_CURRENCY)
+    except money.UnknownCurrency:
+        raise InvalidAnchor(f"the account's currency, {currency}, has no declared minor unit") from None
+    except ValueError:
+        raise InvalidAnchor("amount has more decimal places than the currency has") from None
 
 
 def format_amount(amount_minor: int, currency: str | None) -> str:
     """A stored amount as the operator reads it: "S$ -902,500.00"."""
-    units, minor = divmod(abs(amount_minor), MINOR_UNITS_PER_UNIT)
+    code = currency or DEFAULT_CURRENCY
+    digits = money.MINOR_UNIT_DIGITS.get(code, 2)
+    units, minor = divmod(abs(amount_minor), 10 ** digits)
     sign = "-" if amount_minor < 0 else ""
-    code = currency or "SGD"
-    return f"{CURRENCY_SIGNS.get(code, code)} {sign}{units:,}.{minor:02d}"
+    return f"{CURRENCY_SIGNS.get(code, code)} {sign}{units:,}.{minor:0{digits}d}"
 
 
 def checked_date(value) -> str:

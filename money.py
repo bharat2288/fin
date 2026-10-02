@@ -11,8 +11,12 @@ import re
 from decimal import ROUND_HALF_EVEN, Decimal
 
 # How many decimal places the minor unit of each currency an account may be
-# kept in has. A currency not listed here is not converted by guessing.
-MINOR_UNIT_DIGITS = {"SGD": 2}
+# kept in has: cents for SGD, paise for INR. A currency not listed here is not
+# converted by guessing.
+MINOR_UNIT_DIGITS = {"SGD": 2, "INR": 2}
+
+# What the minor unit of each is called, where a refusal has to name it.
+MINOR_UNIT_NAMES = {"SGD": "cents", "INR": "paise"}
 
 # A float this far from a whole minor unit carries a real fraction of one, and
 # is not just the noise float arithmetic leaves behind.
@@ -78,6 +82,24 @@ def mean_minor(total: int, count: int) -> int:
     """The average of `count` amounts adding up to `total`, in whole minor
     units, rounded half-even."""
     return int((Decimal(total) / Decimal(count)).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
+def convert_minor(amount_minor: int, rate: Decimal, source: str, target: str) -> int:
+    """An amount in one currency as whole minor units of another, at a rate
+    that says how many units of the target one unit of the source is worth.
+    The arithmetic is decimal and the result is rounded half-even to the
+    target's minor unit. `rate` is a Decimal, never a float."""
+    if source not in MINOR_UNIT_DIGITS:
+        raise UnknownCurrency(source)
+    if target not in MINOR_UNIT_DIGITS:
+        raise UnknownCurrency(target)
+    if isinstance(amount_minor, bool) or not isinstance(amount_minor, int):
+        raise ValueError("an amount is a whole number of minor units")
+    if not isinstance(rate, Decimal):
+        raise ValueError("a rate is a decimal, never a float")
+    units = Decimal(amount_minor).scaleb(-MINOR_UNIT_DIGITS[source])
+    exact = (units * rate).scaleb(MINOR_UNIT_DIGITS[target])
+    return int(exact.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
 
 
 # --- currency codes ---------------------------------------------------------

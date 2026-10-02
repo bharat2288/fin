@@ -25,6 +25,7 @@ import db
 import flow
 import money
 import pairing
+import rates
 import review
 import suggest
 import tie
@@ -213,19 +214,55 @@ class BadAmount(ValueError):
     """An amount sent to the API is not a number of whole minor units."""
 
 
-def _minor_from_request(value, what: str = "amount") -> int:
-    """A decimal amount from a request body as whole minor units. Refuses
-    anything that is not a number, and a number finer than the minor unit:
-    an amount is never rounded on its way in."""
+def _minor_from_request(value, what: str = "amount", currency: str = "SGD") -> int:
+    """A decimal amount from a request body as whole minor units of the
+    currency its account is kept in. Refuses anything that is not a number,
+    and a number finer than the minor unit: an amount is never rounded on its
+    way in."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise BadAmount(f"{what} must be a number")
     try:
-        whole = money.is_whole_minor(value)
+        whole = money.is_whole_minor(value, currency)
     except ArithmeticError:
         whole = False
     if not whole:
-        raise BadAmount(f"{what} must be a whole number of cents")
-    return money.to_minor(value)
+        raise BadAmount(f"{what} must be a whole number of {money.MINOR_UNIT_NAMES[currency]}")
+    return money.to_minor(value, currency)
+
+
+class CurrencyRefused(ValueError):
+    """A currency is not one fin holds, or is not the one the account is kept in."""
+
+
+def _checked_currency(value) -> str:
+    """A currency as an account may be kept in: one with a declared minor unit."""
+    if not isinstance(value, str) or value not in money.MINOR_UNIT_DIGITS:
+        raise CurrencyRefused(
+            f"unknown currency: {value!r}; an account is kept in one of "
+            + ", ".join(sorted(money.MINOR_UNIT_DIGITS))
+        )
+    return value
+
+
+def _account_currency(conn, account_name: str, stated=None) -> str:
+    """The currency the rows of an import land in: the account's own when the
+    name finds one, else the one the statement states, else SGD. A statement
+    in a currency other than its account's is refused."""
+    from ingest import find_account
+    if stated is not None:
+        _checked_currency(stated)
+    held = conn.execute(
+        "SELECT currency FROM accounts WHERE id = ?", (find_account(conn, account_name),)
+    ).fetchone()
+    if held is None:
+        return stated or "SGD"
+    own = held["currency"] or "SGD"
+    if stated is not None and stated != own:
+        raise CurrencyRefused(
+            f"{mask_card_number(account_name)} is kept in {own}; the statement is in "
+            f"{stated}. Nothing was imported."
+        )
+    return own
 
 
 def _label_for(conn, description: str, amount_minor: int) -> dict:
@@ -244,12 +281,11 @@ def _tie_line(conn, stmt, figures: dict) -> dict:
     """The tie line of a parsed statement as the import preview shows it:
     opening, what the rows add up to, closing and the difference, each in
     whole minor units and as text, and whether it ties."""
-    from ingest import find_account
     account = stmt.accounts[0] if stmt.accounts else "Unknown"
-    held = conn.execute(
-        "SELECT currency FROM accounts WHERE id = ?", (find_account(conn, account),)
-    ).fetchone()
-    currency = (held["currency"] if held else None) or "SGD"
+    try:
+        currency = _account_currency(conn, account, stmt.currency)
+    except CurrencyRefused:
+        currency = stmt.currency
     return {
         "file": stmt.filename,
         "account": mask_card_number(account),
@@ -521,7 +557,8 @@ def api_accounts_create():
     try:
         kind = account_kind.checked_kind(data.get("type", account_kind.DEFAULT_KIND))
         owner = account_kind.checked_owner(data.get("owner", account_kind.DEFAULT_OWNER))
-    except account_kind.UnknownAccountValue as e:
+        currency = _checked_currency(data.get("currency", "SGD"))
+    except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
         return jsonify({"error": str(e)}), 400
 
     with get_db() as conn:
@@ -534,7 +571,7 @@ def api_accounts_create():
                 data.get("short_name", data["name"]),
                 kind,
                 data.get("last_four"),
-                data.get("currency", "SGD"),
+                currency,
                 owner,
             ),
             "account",
@@ -550,7 +587,9 @@ def api_accounts_update(acct_id):
             account_kind.checked_kind(data["type"])
         if data and "owner" in data:
             account_kind.checked_owner(data["owner"])
-    except account_kind.UnknownAccountValue as e:
+        if data and "currency" in data:
+            _checked_currency(data["currency"])
+    except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
         return jsonify({"error": str(e)}), 400
     return _crud_update("accounts", acct_id, data,
                         ["name", "short_name", "type", "last_four", "currency", "status", "owner"])
@@ -667,7 +706,7 @@ def api_anchors_create():
                          "that has no statement"
             }), 400
         try:
-            amount_minor = anchors.to_minor_units(data.get("amount"))
+            amount_minor = anchors.to_minor_units(data.get("amount"), account["currency"])
             on = anchors.checked_date(data.get("date"))
             if kind in account_kind.OWED_KINDS:
                 if amount_minor < 0:
@@ -941,12 +980,23 @@ def api_service_transactions(svc_id):
 # Dashboard API
 # ---------------------------------------------------------------------------
 
+# Rows on an account kept in the currency the dashboard's figures are in. A
+# row on an account in another currency (the rupee account) is whole minor
+# units of that currency, and is never added to SGD cents as if it were SGD:
+# it is held out of these sums. `s` is the row's statement.
+_SGD_ACCOUNT = (
+    "s.account_id IN (SELECT id FROM accounts WHERE COALESCE(currency, 'SGD') = 'SGD')"
+)
+
+
 def _waiting_for_review(conn, filters: str = "", params: tuple | list = ()) -> tuple[int, int]:
     """How many transfers are waiting for review, and what they add up to in
     whole minor units: money out less money in. `filters` narrows them by the
-    row (t) or its statement (s)."""
+    row (t) or its statement (s). Every waiting row is counted; the total is
+    of the rows on SGD accounts."""
     row = conn.execute(
-        "SELECT COUNT(*), SUM(t.amount_minor) FROM transactions t "
+        f"SELECT COUNT(*), SUM(CASE WHEN {_SGD_ACCOUNT} THEN t.amount_minor ELSE 0 END) "
+        "FROM transactions t "
         f"LEFT JOIN statements s ON t.statement_id = s.id WHERE t.flow_type = ? {filters}",
         [flow.REVIEW, *params],
     ).fetchone()
@@ -1067,6 +1117,7 @@ def api_dashboard_stat_cards():
                 JOIN statements s ON t.statement_id = s.id
                 LEFT JOIN accounts a ON s.account_id = a.id
                 WHERE t.flow_type IN ('expense', 'refund')
+                  AND {_SGD_ACCOUNT}
                   AND t.date >= ? AND t.date <= ?
                   {extra_filters}
             """, params).fetchone()
@@ -1171,7 +1222,7 @@ def api_dashboard_monthly():
             {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
-            WHERE t.flow_type IN ('expense', 'refund') {filters}
+            WHERE t.flow_type IN ('expense', 'refund') AND {_SGD_ACCOUNT} {filters}
             GROUP BY period, type
             ORDER BY period, total DESC
         """, params).fetchall()
@@ -1210,7 +1261,7 @@ def api_dashboard_types():
             {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
-            WHERE t.flow_type IN ('expense', 'refund') {filters}
+            WHERE t.flow_type IN ('expense', 'refund') AND {_SGD_ACCOUNT} {filters}
             GROUP BY type
             ORDER BY total DESC
         """, params).fetchall()
@@ -1336,6 +1387,7 @@ def api_transactions():
                 t.notes,
                 t.other_side_id, oa.name as other_side_name,
                 a.name as account_name,
+                COALESCE(a.currency, 'SGD') as currency,
                 t.service_id,
                 svc.name as service_name,
                 COALESCE(svc.review_each_time, 0) as review_each_time
@@ -1355,7 +1407,9 @@ def api_transactions():
     txns = []
     for r in rows:
         tx = dict(r)
-        tx["amount_sgd"] = money.from_minor(tx.pop("amount_minor"))
+        # The amount in the account's own currency, which `currency` names:
+        # the key is the old one, and holds rupees for a rupee account.
+        tx["amount_sgd"] = money.from_minor(tx.pop("amount_minor"), tx["currency"])
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])
         if tx.get("account_name"):
             tx["account_name"] = mask_card_number(tx["account_name"])
@@ -1853,6 +1907,10 @@ def api_import_upload():
             # statement that does not tie goes no further.
             for stmt in stmts:
                 try:
+                    # A statement in a currency its account is not kept in
+                    # goes no further either.
+                    for name in stmt.accounts[:1]:
+                        _account_currency(conn, name, stmt.currency)
                     tie.check(stmt)
                 except tie.DoesNotTie as e:
                     errors.append({
@@ -1878,6 +1936,7 @@ def api_import_upload():
         type_names = book_type.spending_type_names(conn)
         svcs = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM services").fetchall()}
         statement_lines = {}  # account name -> tie lines of its statements that carry balances
+        currencies = {}  # account name -> the currency its rows are in
 
         for stmt in parsed_statements:
             # A statement with balances is one account's: its tie line goes on
@@ -1891,6 +1950,9 @@ def api_import_upload():
                 statement_ref = len(lines)
                 lines.append(_tie_line(conn, stmt, ties))
                 all_groups.setdefault(statement_account, [])
+                currencies.setdefault(
+                    statement_account, _account_currency(conn, statement_account, stmt.currency)
+                )
 
             for tx in stmt.transactions:
                 account = tx.card_info or stmt.accounts[0] if stmt.accounts else "Unknown"
@@ -1913,6 +1975,11 @@ def api_import_upload():
                         "account_kind": held["type"] if held else _kind_from_account_name(account),
                         "account_owner": held["owner"] if held else account_kind.DEFAULT_OWNER,
                     }
+                if account not in currencies:
+                    try:
+                        currencies[account] = _account_currency(conn, account, stmt.currency)
+                    except CurrencyRefused:
+                        currencies[account] = stmt.currency
 
                 # Classify flow_type post-parse, from the row's own wording,
                 # the account it is on and what the merchant rules made of it
@@ -1930,7 +1997,7 @@ def api_import_upload():
                 entry = {
                     "date": tx.date,
                     "description": tx.description,
-                    "amount_sgd": money.from_minor(tx.amount_minor),
+                    "amount_sgd": money.from_minor(tx.amount_minor, currencies[account]),
                     "amount_foreign": tx.amount_foreign,
                     "currency_foreign": tx.currency_foreign,
                     "book": found["book"],
@@ -1976,6 +2043,9 @@ def api_import_upload():
 
         groups.append({
             "account": mask_card_number(account_name),
+            # The currency the account is kept in: the rows' amounts, under
+            # their old key amount_sgd, and the balances are in it.
+            "currency": currencies.get(account_name, "SGD"),
             "transactions": txns,
             "typed": group_typed,
             "untyped": group_untyped,
@@ -2115,16 +2185,23 @@ def api_import_confirm():
                 if tx.get("flow_type") is not None:
                     flow.checked_flow(tx["flow_type"])
                 _checked_other_side(conn, tx.get("other_side_id"), tx.get("flow_type"))
+            # The currency each group's account is kept in, by the group
+            # itself: the account's own, or for a new account the one the
+            # upload stated.
+            currency_of = {
+                id(g): _account_currency(conn, g.get("account") or "", g.get("currency"))
+                for g in groups
+            }
             # Each row's amount in whole minor units, keyed by the row itself.
             minor_of = {
-                id(tx): _minor_from_request(tx.get("amount_sgd"))
+                id(tx): _minor_from_request(tx.get("amount_sgd"), currency=currency_of[id(g)])
                 for g in groups for tx in g.get("transactions", [])
             }
             # A new merchant's book is the one given, or the one its type
             # proposes; a type that proposes none has to be given one.
             for ns in new_services:
                 _book_or_proposed(conn, ns.get("book") or None, ns.get("type_id") or None)
-        except (UnknownLabel, BookNeeded, BadAmount, flow.UnknownFlow) as e:
+        except (UnknownLabel, BookNeeded, BadAmount, CurrencyRefused, flow.UnknownFlow) as e:
             return jsonify({"error": str(e)}), 400
 
     # The shared check, over the rows as they will be written.
@@ -2170,7 +2247,7 @@ def api_import_confirm():
                 from ingest import ensure_account, ensure_statement
                 stmt_type = _kind_from_account_name(account_name)
 
-                account_id = ensure_account(conn, account_name, stmt_type)
+                account_id = ensure_account(conn, account_name, stmt_type, currency_of[id(group)])
                 accounts_created.append(account_name)
 
                 # Create per-month statement records so coverage matrix reflects each month.
@@ -2761,8 +2838,10 @@ def api_balance_sheet():
     """The household's balance sheet at the end of ?month=YYYY-MM (this month
     when none is given): its bank, card, loan and holding accounts in
     sections, each line with its balance in its own currency, the anchor it
-    rests on, the rows since and its check; section totals and net worth in
-    SGD, saying what is left out; and how many transfers wait for review.
+    rests on, the rows since and its check; a line in another currency with
+    its SGD value and the saved rate that gives it; section totals and net
+    worth in SGD, saying what is left out; the month's currency change; and
+    how many transfers wait for review.
     A month before January 2026 is refused: nothing is shown before then."""
     month = request.args.get("month")
     if month is None:
@@ -2774,6 +2853,62 @@ def api_balance_sheet():
             return jsonify({"error": str(e)}), 400
         shown["review_waiting"] = _waiting_for_review(conn)[0]
     return jsonify(shown)
+
+
+# ---------------------------------------------------------------------------
+# Saved rates: what a rupee was worth in SGD on a date
+# ---------------------------------------------------------------------------
+
+@app.route("/api/rates")
+def api_rates():
+    """Every saved rate, newest first; with ?currency=INR that currency's.
+    `pair` reads "INR/SGD": SGD for one rupee. `rate` is decimal text."""
+    currency = request.args.get("currency")
+    with get_db() as conn:
+        try:
+            pair = rates.pair_for(currency) if currency is not None else None
+        except rates.InvalidRate as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify(rates.listed(conn, pair))
+
+
+@app.route("/api/rates/fetch", methods=["POST"])
+def api_rates_fetch():
+    """Fetch the European Central Bank's reference rate for a day and save it.
+
+    Body: currency (INR), date (YYYY-MM-DD). A rate already saved for that day
+    is returned as it is and the source is not asked: fin reads its saved
+    copy. A weekend or holiday takes the prior business day's rate, and the
+    saved source says which day that is. A failed fetch saves nothing (502).
+    """
+    data = request.get_json(silent=True) or {}
+    with get_db() as conn:
+        try:
+            held, created = rates.ensure(conn, data.get("currency"), data.get("date"))
+        except rates.InvalidRate as e:
+            return jsonify({"error": str(e)}), 400
+        except rates.FetchFailed as e:
+            return jsonify({"error": str(e)}), 502
+        conn.commit()
+    return jsonify({"success": True, "created": created, "rate": held})
+
+
+@app.route("/api/rates", methods=["PUT"])
+def api_rates_overwrite():
+    """Enter a rate for a day, in place of any saved for it.
+
+    Body: currency (INR), date (YYYY-MM-DD), rate (decimal text: SGD for one
+    unit of the currency). Every SGD figure is worked out on read, so a
+    corrected rate corrects the months that use it.
+    """
+    data = request.get_json(silent=True) or {}
+    with get_db() as conn:
+        try:
+            held = rates.overwrite(conn, data.get("currency"), data.get("date"), data.get("rate"))
+        except rates.InvalidRate as e:
+            return jsonify({"error": str(e)}), 400
+        conn.commit()
+    return jsonify({"success": True, "rate": held})
 
 
 # ---------------------------------------------------------------------------

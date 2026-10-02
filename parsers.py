@@ -169,7 +169,12 @@ def handle_vantage_split(statements: list) -> list:
 def _register_builtins():
     """Register all built-in parsers. Called once at import time."""
 
-    # PDF parsers — order matters: specific detectors first, DBS as fallback
+    # PDF parsers — order matters: specific detectors first, DBS as fallback.
+    # HDFC sits first: it also claims a PDF that will not open without a
+    # password, so that its refusal names the variable the password comes from.
+    from parse_hdfc import detect_hdfc_pdf, parse_hdfc_pdf
+    register("HDFC PDF", ".pdf", detect_fn=detect_hdfc_pdf, parse_fn=parse_hdfc_pdf)
+
     from parse_uob import detect_uob_pdf, parse_uob_pdf
     register("UOB PDF", ".pdf", detect_fn=detect_uob_pdf, parse_fn=parse_uob_pdf)
 

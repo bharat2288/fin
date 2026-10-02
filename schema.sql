@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     short_name TEXT NOT NULL,    -- e.g., "DBS-Altitude-5054"
     type TEXT NOT NULL,          -- the account's kind: bank, card, loan, holding, company, person (declared in account_kind.py)
     last_four TEXT,              -- last 4 digits
-    currency TEXT DEFAULT 'SGD',
+    currency TEXT DEFAULT 'SGD', -- three-letter code with a declared minor unit (money.py): SGD, INR
     status TEXT DEFAULT 'active', -- 'active', 'archived'
     created_at TEXT DEFAULT (datetime('now')),
     owner TEXT NOT NULL DEFAULT 'Household'  -- whose sheet it is on: Household, or a company (declared in account_kind.py)
@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS anchors (
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     UNIQUE (account_id, date)
+);
+
+-- A saved rate: what one unit of a currency was worth in SGD on a date
+-- (rates.py). One per pair and date; fetched once and read from here after,
+-- or entered by the operator. A new table, made empty by CREATE IF NOT EXISTS
+-- on start; no existing row is converted.
+CREATE TABLE IF NOT EXISTS rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair TEXT NOT NULL,             -- 'INR/SGD': SGD for one rupee
+    date TEXT NOT NULL,             -- YYYY-MM-DD, the day the rate is used for
+    rate TEXT NOT NULL,             -- decimal text, never a float
+    source TEXT NOT NULL,           -- where it came from, and the day it is of when that differs
+    fetched_at TEXT NOT NULL,       -- when it was fetched or entered (UTC)
+    UNIQUE (pair, date)
 );
 
 CREATE TABLE IF NOT EXISTS statements (

@@ -41,6 +41,9 @@ class ParsedStatement:
     closing_minor: int | None = None
     opening_date: str | None = None   # YYYY-MM-DD, where the source gives it
     closing_date: str | None = None   # YYYY-MM-DD; always given with the balances
+    # The currency the account is kept in, as a three-letter code. The rows
+    # and the balances are whole minor units of it.
+    currency: str = "SGD"
 
 
 # Month abbreviation → number
