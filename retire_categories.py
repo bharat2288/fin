@@ -37,6 +37,14 @@ RETIRED = (
     ("merchant_rules", "category_override_id"),
     ("subscriptions", "category_id"),
 )
+# Columns a later step retires (retire_float_amounts.py), so schema.sql no
+# longer declares them. A database that still holds one keeps it through the
+# rebuild, for that step to drop once its own checks pass. Frozen, like RETIRED.
+#   table: ((column, declaration), ...)
+RETIRED_LATER = {
+    "transactions": (("amount_sgd", "REAL"),),
+    "merchant_rules": (("min_amount", "REAL"), ("max_amount", "REAL")),
+}
 CATEGORIES = "categories"
 # What the merchants gain in the same rebuild.
 REVIEW_MARK = "review_each_time"
@@ -90,7 +98,11 @@ def _rebuild(conn: sqlite3.Connection, table: str, retired: str, body: str) -> N
     """Remake `table` in its declared shape, keeping every row and its id."""
     new = f"{table}_new"
     conn.execute(f"CREATE TABLE {new} ({body}\n)")
-    old_columns, new_columns = _columns(conn, table), _columns(conn, new)
+    old_columns = _columns(conn, table)
+    for column, declaration in RETIRED_LATER.get(table, ()):
+        if column in old_columns:
+            conn.execute(f"ALTER TABLE {new} ADD COLUMN {column} {declaration}")
+    new_columns = _columns(conn, new)
     undeclared = [c for c in old_columns if c not in new_columns and c != retired]
     if undeclared:
         raise ColumnNotInSchema(f"{table}: {', '.join(undeclared)}")

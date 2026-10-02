@@ -238,6 +238,13 @@ def _refuse_unconverted(conn: sqlite3.Connection) -> None:
             "order: python convert_book_type.py <path to database>, then "
             "python retire_categories.py <path to database>"
         )
+    rule_cols = {r[1] for r in conn.execute("PRAGMA table_info(merchant_rules)")}
+    if "amount_sgd" in tx_cols or "min_amount" in rule_cols or "max_amount" in rule_cols:
+        raise DatabaseNotConverted(
+            "this database still carries float amounts. Convert it first, in this "
+            "order: python convert_minor_units.py <path to database>, then "
+            "python retire_float_amounts.py <path to database>"
+        )
 
 
 def get_connection() -> sqlite3.Connection:
@@ -340,7 +347,7 @@ def _get_rules(conn: sqlite3.Connection) -> list[dict]:
     if _rules_cache is None:
         rows = conn.execute(
             "SELECT mr.pattern, mr.match_type, "
-            "       mr.priority, mr.min_amount, mr.max_amount, "
+            "       mr.priority, mr.min_amount_minor, mr.max_amount_minor, "
             "       mr.service_id, mr.book_override, mr.type_override_id, "
             "       s.book, s.type_id, s.review_each_time "
             "FROM merchant_rules mr "
@@ -378,13 +385,13 @@ NO_MATCH = {
 def match_merchant(
     description: str,
     conn: sqlite3.Connection,
-    amount: float | None = None,
+    amount_minor: int | None = None,
 ) -> dict:
     """Match a transaction description to a merchant using merchant rules.
 
     Rules are sorted by priority DESC, then pattern length DESC (most specific first).
-    Amount-conditional rules (min_amount / max_amount) only match if the transaction
-    amount falls within the specified range.
+    Amount-conditional rules (min_amount_minor / max_amount_minor) only match if
+    the transaction's amount, in whole minor units, falls within the range.
 
     Returns {book, type_id, service_id, cat_source, review_each_time}; every
     value is empty when no rule matches. Book and type are the merchant's
@@ -410,14 +417,14 @@ def match_merchant(
             continue
 
         # Check amount conditions (if set on the rule)
-        if amount is not None:
-            if rule["min_amount"] is not None and amount < rule["min_amount"]:
+        if amount_minor is not None:
+            if rule["min_amount_minor"] is not None and amount_minor < rule["min_amount_minor"]:
                 continue
-            if rule["max_amount"] is not None and amount > rule["max_amount"]:
+            if rule["max_amount_minor"] is not None and amount_minor > rule["max_amount_minor"]:
                 continue
         else:
             # No amount provided — skip amount-conditional rules
-            if rule["min_amount"] is not None or rule["max_amount"] is not None:
+            if rule["min_amount_minor"] is not None or rule["max_amount_minor"] is not None:
                 continue
 
         book, type_id, cat_source = rule_label(rule)

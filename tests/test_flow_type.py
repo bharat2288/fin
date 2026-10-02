@@ -34,7 +34,7 @@ def test_flow_type_manual_defaults_to_zero(conn):
 def test_canonical_rent_income():
     facts = {
         "description": "Inward Credit-FAST OTHR Other A C J &/OR A C#",
-        "amount_sgd": -10200.00,
+        "amount_minor": -1020000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "income"
 
@@ -42,7 +42,7 @@ def test_canonical_rent_income():
 def test_canonical_self_transfer():
     facts = {
         "description": "TRANSFER OF FUND TRF SURI BHARAT I-BANK XXXX018277-1",
-        "amount_sgd": -25000.00,
+        "amount_minor": -2500000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
 
@@ -50,7 +50,7 @@ def test_canonical_self_transfer():
 def test_canonical_aws_expense():
     facts = {
         "description": "BUSINESS ADVANCE CARD TRANSACTION BAT AMAZON WEB SERVICES SI SGP 02NOV",
-        "amount_sgd": 87.56,
+        "amount_minor": 8756,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "expense"
 
@@ -58,7 +58,7 @@ def test_canonical_aws_expense():
 def test_canonical_cash_rebate_refund():
     facts = {
         "description": "BUSINESS ADVANCE CARD TRANSACTION BAT Cash Rebate 15OCT 4096-3620",
-        "amount_sgd": -0.88,
+        "amount_minor": -88,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "refund"
 
@@ -66,7 +66,7 @@ def test_canonical_cash_rebate_refund():
 def test_canonical_cc_payoff_payment():
     facts = {
         "description": "DBSC-4119110062437436 : I-BANK REF: 17725077050087806737",
-        "amount_sgd": 3200.00,
+        "amount_minor": 320000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
@@ -77,7 +77,7 @@ def test_payment_beats_transfer():
     """Linked-CC payoff that also contains an own-alias should classify as payment."""
     facts = {
         "description": "DBSC-4119110062437436 SURI BHARAT I-BANK REF: 17741498686319",
-        "amount_sgd": 3200.00,
+        "amount_minor": 320000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
@@ -86,7 +86,7 @@ def test_refund_beats_income():
     """Negative cash rebate is refund, not income."""
     facts = {
         "description": "Some Merchant Cash Rebate",
-        "amount_sgd": -5.00,
+        "amount_minor": -500,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "refund"
 
@@ -95,7 +95,7 @@ def test_transfer_beats_income_for_own_alias_inflow():
     """Inflow from own counterparty is transfer, not income."""
     facts = {
         "description": "Inward PayNow OTHER SURI BHARAT SGD 4990",
-        "amount_sgd": -4990.00,
+        "amount_minor": -499000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
 
@@ -103,7 +103,7 @@ def test_transfer_beats_income_for_own_alias_inflow():
 def test_paylah_topup_classifies_as_transfer():
     facts = {
         "description": "TOP-UP TO PAYLAH! : 97863267 TF635241773149937651",
-        "amount_sgd": 120.00,
+        "amount_minor": 12000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
 
@@ -111,7 +111,7 @@ def test_paylah_topup_classifies_as_transfer():
 def test_mep_transfer_classifies_as_transfer():
     facts = {
         "description": "MEP 100172443 0016OI8504497",
-        "amount_sgd": 100.00,
+        "amount_minor": 10000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "transfer"
 
@@ -119,7 +119,7 @@ def test_mep_transfer_classifies_as_transfer():
 def test_mep_charge_stays_expense():
     facts = {
         "description": "MEP CHG 100172443 0016OI8504154",
-        "amount_sgd": 20.00,
+        "amount_minor": 2000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "expense"
 
@@ -127,7 +127,7 @@ def test_mep_charge_stays_expense():
 def test_known_internal_ib_ref_classifies_as_transfer():
     facts = {
         "description": "TRF FT260209MB29906564 100-018277-1:IB",
-        "amount_sgd": 7000.00,
+        "amount_minor": 700000,
     }
     assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
 
@@ -135,7 +135,7 @@ def test_known_internal_ib_ref_classifies_as_transfer():
 def test_recurring_internal_ib_ref_classifies_as_transfer():
     facts = {
         "description": "FT260329MB39802467 438-59169-9:IB",
-        "amount_sgd": 75.00,
+        "amount_minor": 7500,
     }
     assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
 
@@ -149,7 +149,7 @@ def test_local_own_alias_overrides_are_loaded(conn, monkeypatch):
 
     facts = {
         "description": "Inward PayNow LOCAL PAYNOW ALIAS",
-        "amount_sgd": -100.00,
+        "amount_minor": -10000,
     }
     assert classify_flow(facts, ctx) == "transfer"
 
@@ -157,7 +157,7 @@ def test_local_own_alias_overrides_are_loaded(conn, monkeypatch):
 def test_named_paynow_counterparty_stays_expense():
     facts = {
         "description": "PayNow Transfer 6741027 To: Lev OTHR PayNow transfer",
-        "amount_sgd": 1710.00,
+        "amount_minor": 171000,
     }
     assert classify_flow(facts, CTX_WITH_RAILS) == "expense"
 
@@ -168,7 +168,7 @@ def test_citi_payoff_from_bank_is_payment():
     """Bank-side outflow paying a Citi card is own-money, not spend."""
     facts = {
         "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000",
-        "amount_sgd": 850.00,
+        "amount_minor": 85000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
@@ -177,21 +177,21 @@ def test_uob_payoff_from_bank_mixed_case_is_payment():
     """Source statements print this wording in mixed case."""
     facts = {
         "description": "Bill Payment mBK-UOB Cards 0000000000001111",
-        "amount_sgd": 420.00,
+        "amount_minor": 42000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
 
 def test_card_credit_atm_internet_payment_is_payment():
     for description in ("PAYMENT - ATM/INTERNET", "PAYMENT - ATM/INTERNET REF 99999"):
-        facts = {"description": description, "amount_sgd": -850.00}
+        facts = {"description": description, "amount_minor": -85000}
         assert classify_flow(facts, CTX_OWN_ONLY) == "payment", description
 
 
 def test_card_credit_paymt_thru_ebank_is_payment():
     facts = {
         "description": "PAYMT THRU E-BANK/HOMEB/CYBERB (EP00)",
-        "amount_sgd": -420.00,
+        "amount_minor": -42000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "payment"
 
@@ -204,7 +204,7 @@ def test_dbs_card_credit_bill_payment_wording_is_payment():
         "BILL  PAYMENT -  DBS INTERNET/WIRELESS",
         "Bill Payment - DBS Internet/Wireless",
     ):
-        facts = {"description": description, "amount_sgd": -850.00}
+        facts = {"description": description, "amount_minor": -85000}
         assert classify_flow(facts, CTX_OWN_ONLY) == "payment", description
 
 
@@ -212,7 +212,7 @@ def test_dbs_card_bill_payment_wording_as_outflow_is_not_payment():
     """A debit carrying the card-credit wording is not an own-money credit."""
     facts = {
         "description": "BILL PAYMENT - DBS INTERNET/WIRELESS",
-        "amount_sgd": 850.00,
+        "amount_minor": 85000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "expense"
 
@@ -221,7 +221,7 @@ def test_dbs_card_bill_payment_wording_mid_description_is_not_payment():
     """Prefix-anchored like the other card-side wordings."""
     facts = {
         "description": "SOME MERCHANT BILL PAYMENT - DBS INTERNET/WIRELESS",
-        "amount_sgd": -12.00,
+        "amount_minor": -1200,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "income"
 
@@ -230,7 +230,7 @@ def test_bank_side_payoff_wording_as_inflow_is_not_payment():
     """An inflow carrying outbound-payoff wording is a return, not a payoff."""
     facts = {
         "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000",
-        "amount_sgd": -850.00,
+        "amount_minor": -85000,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "income"
 
@@ -239,7 +239,7 @@ def test_card_side_payoff_wording_as_outflow_is_not_payment():
     """A debit with card-credit wording (e.g. a dishonoured payoff, or a
     bank-side internet bill payment to a merchant) is not an own-money credit."""
     for description in ("PAYMENT - ATM/INTERNET", "PAYMT THRU E-BANK/HOMEB/CYBERB (EP00)"):
-        facts = {"description": description, "amount_sgd": 850.00}
+        facts = {"description": description, "amount_minor": 85000}
         assert classify_flow(facts, CTX_OWN_ONLY) == "expense", description
 
 
@@ -247,7 +247,7 @@ def test_card_side_wording_mid_description_is_not_payment():
     """Card-side wordings are prefix-anchored; embedded in a longer line they stay as-is."""
     facts = {
         "description": "NETS SOME MERCHANT PAYMENT - ATM/INTERNET",
-        "amount_sgd": -12.00,
+        "amount_minor": -1200,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "income"
 
@@ -259,7 +259,7 @@ def test_other_bill_payment_payees_stay_expense():
         "PAYMENT TO CITYGAS MBKFT00000000000",
         "BILL PAYMENT MBK-UOB INSURANCE 0000000000003333",
     ):
-        facts = {"description": description, "amount_sgd": 120.00}
+        facts = {"description": description, "amount_minor": 12000}
         assert classify_flow(facts, CTX_OWN_ONLY) == "expense", description
 
 
@@ -267,11 +267,11 @@ def test_card_payoff_wording_beats_own_alias_transfer():
     """Same precedence as the DBS linked-card form: payoff beats generic own-transfer."""
     ctx = ClassifierContext(own_aliases=("JANE TESTER",))
     # Control: the alias alone does fire, so the payoff result below is precedence.
-    alias_only = {"description": "FAST PAYMENT JANE TESTER", "amount_sgd": 850.00}
+    alias_only = {"description": "FAST PAYMENT JANE TESTER", "amount_minor": 85000}
     assert classify_flow(alias_only, ctx) == "transfer"
     facts = {
         "description": "PAYMENT TO CITI CREDIT CARD MBKFT00000000000 JANE TESTER",
-        "amount_sgd": 850.00,
+        "amount_minor": 85000,
     }
     assert classify_flow(facts, ctx) == "payment"
 
@@ -302,7 +302,7 @@ def test_backfill_populates_all_rows(conn, tmp_path):
         "BAT Cash Rebate Something",                        # refund
         "DBSC-5420891100884777 : I-BANK REF",               # payment (via linked CC)
     ]
-    amounts = [-10200, -500, 87.56, -0.88, 1500]
+    amounts = [-1020000, -50000, 8756, -88, 150000]  # whole cents
     # Add the CC account so build_context picks up last_four 4777 as linked_cc
     conn.execute(
         "INSERT INTO accounts (name, short_name, type, last_four, status) "
@@ -310,7 +310,7 @@ def test_backfill_populates_all_rows(conn, tmp_path):
     )
     for desc, amt in zip(seed, amounts):
         conn.execute(
-            "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
+            "INSERT INTO transactions (statement_id, date, description, amount_minor) "
             "VALUES (?, '2026-04-01', ?, ?)",
             (stmt, desc, amt),
         )
@@ -337,7 +337,7 @@ def _type_id(conn, name):
     ).fetchone()[0]
 
 
-def _seed_one_tx(conn, description="x", amount=1.0):
+def _seed_one_tx(conn, description="x", amount=100):
     conn.execute("INSERT INTO accounts (name, short_name, type, last_four, status) "
                  "VALUES ('A', 'A', 'bank', '0000', 'active')")
     acc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -348,7 +348,7 @@ def _seed_one_tx(conn, description="x", amount=1.0):
     svc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     shopping = _type_id(conn, "Shopping")
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
+        "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
         "VALUES (?, '2025-04-15', ?, ?, 'expense')",
         (stmt, description, amount),
     )
@@ -395,8 +395,8 @@ def test_resolve_recomputes_flow_type_from_the_wording(client, conn):
     )
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
-        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ REBATE', -20.0, 'income')",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
+        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ REBATE', -2000, 'income')",
         (stmt,),
     )
     tx_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -467,8 +467,8 @@ def test_recategorize_recomputes_flow_type_on_the_rows_a_rule_relabels(client, c
     )
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type, cat_source) "
-        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ REBATE', -20.0, 'income', 'auto')",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, cat_source) "
+        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ REBATE', -2000, 'income', 'auto')",
         (stmt,),
     )
     tx_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -496,9 +496,9 @@ def test_refund_reduces_monthly_spend_in_same_month(client, conn):
     conn.execute("INSERT INTO statements (account_id, statement_date, filename) "
                  "VALUES (?, '2025-04-01', 't')", (acc,))
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    for desc, amt, ft in [("purchase", 100.0, "expense"), ("cash rebate", -30.0, "refund")]:
+    for desc, amt, ft in [("purchase", 10000, "expense"), ("cash rebate", -3000, "refund")]:
         conn.execute(
-            "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
+            "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
             "VALUES (?, '2025-04-15', ?, ?, ?)",
             (stmt, desc, amt, ft),
         )
@@ -524,14 +524,14 @@ def test_dashboard_spend_uses_flow_type_and_preserves_exclude(client, conn):
     excluded_svc = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     rows = [
-        ("Groceries buy", 100.0, "expense", None),
-        ("Rent received", -1000.0, "income", None),
-        ("Self paynow", -50.0, "transfer", None),
-        ("Home loan EMI", 9446.52, "expense", excluded_svc),  # excluded from totals
+        ("Groceries buy", 10000, "expense", None),
+        ("Rent received", -100000, "income", None),
+        ("Self paynow", -5000, "transfer", None),
+        ("Home loan EMI", 944652, "expense", excluded_svc),  # excluded from totals
     ]
     for desc, amt, ft, svc in rows:
         conn.execute(
-            "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type, service_id) "
+            "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, service_id) "
             "VALUES (?, '2025-04-15', ?, ?, ?, ?)",
             (stmt, desc, amt, ft, svc),
         )
@@ -554,13 +554,13 @@ def test_dashboard_monthly_excludes_null_flow_type_rows(client, conn):
                  "VALUES (?, '2025-04-01', 't')", (acc,))
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd, type_id, flow_type) "
-        "VALUES (?, '2025-04-15', 'Expense', 100.0, ?, 'expense')",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor, type_id, flow_type) "
+        "VALUES (?, '2025-04-15', 'Expense', 10000, ?, 'expense')",
         (stmt, shopping),
     )
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
-        "VALUES (?, '2025-04-15', 'Legacy Transfer', 50.0)",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor) "
+        "VALUES (?, '2025-04-15', 'Legacy Transfer', 5000)",
         (stmt,),
     )
     conn.commit()
@@ -579,8 +579,8 @@ def test_transactions_api_normalizes_null_flow_type(client, conn):
                  "VALUES (?, '2025-04-01', 't')", (acc,))
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
-        "VALUES (?, '2025-04-15', 'LEGACY ROW', 42.0)",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor) "
+        "VALUES (?, '2025-04-15', 'LEGACY ROW', 4200)",
         (stmt,),
     )
     conn.commit()
@@ -600,19 +600,19 @@ def test_transactions_api_expense_only_excludes_transfer_and_null_rows(client, c
                  "VALUES (?, '2025-04-01', 't')", (acc,))
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     rows = [
-        ("Expense", 20.0, "expense"),
-        ("Refund", -5.0, "refund"),
-        ("Transfer", -50.0, "transfer"),
+        ("Expense", 2000, "expense"),
+        ("Refund", -500, "refund"),
+        ("Transfer", -5000, "transfer"),
     ]
     for desc, amt, ft in rows:
         conn.execute(
-            "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
+            "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
             "VALUES (?, '2025-04-15', ?, ?, ?)",
             (stmt, desc, amt, ft),
         )
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
-        "VALUES (?, '2025-04-15', 'Legacy Null', 42.0)",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor) "
+        "VALUES (?, '2025-04-15', 'Legacy Null', 4200)",
         (stmt,),
     )
     conn.commit()
@@ -647,13 +647,13 @@ def test_import_preview_kept_default_for_income_skipped_default_for_transfer(cli
                 ParsedTransaction(
                     date="2025-04-09",
                     description="Inward Credit-FAST OTHR Other A C J &/OR A C#",
-                    amount_sgd=-10200.0,
+                    amount_minor=-1020000,
                     is_transfer=True,  # legacy flag (incorrect)
                 ),
                 ParsedTransaction(
                     date="2025-04-10",
                     description="TRANSFER OF FUND TRF SURI BHARAT I-BANK XXXX018277-1",
-                    amount_sgd=-500.0,
+                    amount_minor=-50000,
                     is_transfer=True,
                 ),
             ],
@@ -686,16 +686,16 @@ def test_parser_post_parse_classification_sets_flow_type(conn):
 
     # Synthetic parsed txns covering all 5 flow types
     txns = [
-        ParsedTransaction(date="2025-04-09", description="Inward Credit-FAST A C J tenant rent", amount_sgd=-10200, is_transfer=True),
-        ParsedTransaction(date="2025-04-10", description="TRANSFER OF FUND TRF SURI BHARAT I-BANK", amount_sgd=-1000, is_transfer=True),
-        ParsedTransaction(date="2025-04-11", description="BUSINESS ADVANCE CARD TRANSACTION BAT AMAZON WEB SERVICES", amount_sgd=87.56),
-        ParsedTransaction(date="2025-04-12", description="BAT Cash Rebate", amount_sgd=-0.88, is_payment=True),
+        ParsedTransaction(date="2025-04-09", description="Inward Credit-FAST A C J tenant rent", amount_minor=-1020000, is_transfer=True),
+        ParsedTransaction(date="2025-04-10", description="TRANSFER OF FUND TRF SURI BHARAT I-BANK", amount_minor=-100000, is_transfer=True),
+        ParsedTransaction(date="2025-04-11", description="BUSINESS ADVANCE CARD TRANSACTION BAT AMAZON WEB SERVICES", amount_minor=8756),
+        ParsedTransaction(date="2025-04-12", description="BAT Cash Rebate", amount_minor=-88, is_payment=True),
     ]
 
     ctx = build_context(conn)
     for t in txns:
         t.flow_type = classify_flow(
-            {"description": t.description, "amount_sgd": t.amount_sgd},
+            {"description": t.description, "amount_minor": t.amount_minor},
             ctx,
         )
 
@@ -737,8 +737,8 @@ def test_backfill_skips_already_populated_rows(conn):
     )
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd, flow_type) "
-        "VALUES (?, '2026-04-01', 'x', 1.0, 'expense')",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
+        "VALUES (?, '2026-04-01', 'x', 100, 'expense')",
         (stmt,),
     )
     conn.commit()
@@ -751,7 +751,7 @@ def test_transfer_does_not_swallow_refund_with_own_alias_false_positive():
     """Cash Rebate wording beats a false own-alias hit (e.g., a random string containing XXXX)."""
     facts = {
         "description": "Cash Rebate via SOMEONE",
-        "amount_sgd": -1.00,
+        "amount_minor": -100,
     }
     assert classify_flow(facts, CTX_OWN_ONLY) == "refund"
 
@@ -807,8 +807,8 @@ def test_init_db_backfills_null_flow_type_rows(temp_db):
     )
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd) "
-        "VALUES (?, '2025-04-15', 'TRANSFER OF FUND TRF SURI BHARAT I-BANK', -50.0)",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor) "
+        "VALUES (?, '2025-04-15', 'TRANSFER OF FUND TRF SURI BHARAT I-BANK', -5000)",
         (stmt,),
     )
     conn.commit()

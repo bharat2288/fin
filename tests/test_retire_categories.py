@@ -15,7 +15,9 @@ import app as fin_app
 import conversion
 import convert_book_type
 import db
+import convert_minor_units
 import retire_categories
+import retire_float_amounts
 
 DAY = date(2026, 3, 14)
 OLD_SCHEMA = Path(__file__).parent / "schema_before_book_and_type.sql"
@@ -229,9 +231,13 @@ def test_an_id_already_handed_out_is_not_given_to_a_new_row(old):
     assert new_id == 10
 
 
-def test_a_database_through_both_steps_has_the_shape_of_a_new_one(old, tmp_path):
+def test_a_database_through_every_step_has_the_shape_of_a_new_one(old, tmp_path):
     expand(old)
     retire(old)
+    # A new database holds amounts as whole cents only: the two money steps
+    # follow the two that retire the category.
+    conversion.run_step(old, convert_minor_units.STEP, today=DAY)
+    conversion.run_step(old, retire_float_amounts.STEP, today=DAY)
     fresh = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(fresh))
     conn.executescript(db.SCHEMA_PATH.read_text())
@@ -407,6 +413,9 @@ def test_the_app_serves_a_converted_database_by_book_and_type(old, started_on, m
     monkeypatch.setattr(fin_app, "_get_usd_sgd_rate", lambda: 1.35)
     expand(old)
     retire(old)
+    # The app starts only on amounts held as whole cents.
+    conversion.run_step(old, convert_minor_units.STEP, today=DAY)
+    conversion.run_step(old, retire_float_amounts.STEP, today=DAY)
 
     client = started_on(old)
 

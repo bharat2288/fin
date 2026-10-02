@@ -11,17 +11,18 @@ from pathlib import Path
 import pytest
 
 import conversion
-import db
 
 DAY = date(2026, 3, 14)
+OLD_SCHEMA = Path(__file__).parent / "schema_before_minor_units.sql"
 
 
 @pytest.fixture
 def old_db(tmp_path: Path) -> Path:
-    """A database in the old shape (today's schema.sql) with two accounts."""
+    """A database in the old shape, where an amount is a float (the frozen
+    schema_before_minor_units.sql), with two accounts."""
     path = tmp_path / "ledger.db"
     conn = sqlite3.connect(str(path))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(OLD_SCHEMA.read_text())
     conn.executemany(
         "INSERT INTO accounts (id, name, short_name, type) VALUES (?, ?, ?, ?)",
         [(1, "Sample Card 0001", "Sample-0001", "credit_card"),

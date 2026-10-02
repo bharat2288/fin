@@ -84,19 +84,26 @@ def count_rows(conn: sqlite3.Connection) -> dict[str, int]:
 
 def measure(conn: sqlite3.Connection) -> dict:
     """The default measure: row counts per table and the total of each
-    account's rows, in cents, read from the float amount.
+    account's rows, in cents. The total is read from the whole minor units a
+    row carries; a database that still holds the float amount is totalled
+    from that, as it was before the amounts were converted.
 
     Every transaction row is in exactly one total. A row whose statement is
     missing, or whose statement names no account, is totalled under the key
     None, so a change to its amount is seen like any other.
     """
-    # Each amount is rounded to its cent before summing, so the total is an
-    # exact integer and two measurements compare without float error.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
+    if "amount_sgd" in columns:
+        # Each amount is rounded to its cent before summing, so the total is an
+        # exact integer and two measurements compare without float error.
+        cents = "CAST(ROUND(t.amount_sgd * 100) AS INTEGER)"
+    else:
+        cents = "t.amount_minor"
     totals = {
         row[0]: row[1]
         for row in conn.execute(
-            """
-            SELECT s.account_id, SUM(CAST(ROUND(t.amount_sgd * 100) AS INTEGER))
+            f"""
+            SELECT s.account_id, SUM({cents})
             FROM transactions t
             LEFT JOIN statements s ON s.id = t.statement_id
             GROUP BY s.account_id

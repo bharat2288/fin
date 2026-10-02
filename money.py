@@ -43,6 +43,43 @@ def is_whole_minor(amount: float, currency: str = "SGD") -> bool:
     return abs(exact - exact.quantize(Decimal(1), rounding=ROUND_HALF_EVEN)) <= _NOISE
 
 
+def exact_minor(amount: float, currency: str = "SGD") -> int:
+    """A float amount a spreadsheet cell holds, in whole minor units. A figure
+    finer than the minor unit is refused, not rounded."""
+    if not is_whole_minor(amount, currency):
+        raise ValueError("not a whole number of minor units")
+    return to_minor(amount, currency)
+
+
+def parse_minor(text: str, currency: str = "SGD") -> int:
+    """An amount as a statement prints it ("1,234.56") in whole minor units.
+    The text is read as a decimal and never as a float. A figure finer than
+    the minor unit is refused, not rounded."""
+    if currency not in MINOR_UNIT_DIGITS:
+        raise UnknownCurrency(currency)
+    try:
+        exact = Decimal(text.strip().replace(",", "")).scaleb(MINOR_UNIT_DIGITS[currency])
+    except ArithmeticError:
+        raise ValueError("not an amount") from None
+    if not exact.is_finite() or exact != exact.to_integral_value():
+        raise ValueError("not a whole number of minor units")
+    return int(exact)
+
+
+def from_minor(minor: int, currency: str = "SGD") -> float:
+    """Whole minor units as the decimal number a payload carries (1230 is
+    12.3). The result is for showing: it is never stored, added or compared."""
+    if currency not in MINOR_UNIT_DIGITS:
+        raise UnknownCurrency(currency)
+    return float(Decimal(minor).scaleb(-MINOR_UNIT_DIGITS[currency]))
+
+
+def mean_minor(total: int, count: int) -> int:
+    """The average of `count` amounts adding up to `total`, in whole minor
+    units, rounded half-even."""
+    return int((Decimal(total) / Decimal(count)).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
 # --- currency codes ---------------------------------------------------------
 
 # The names statements print for a currency, to its standard three-letter

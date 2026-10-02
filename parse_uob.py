@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pdfplumber
 
+import money
 from parse_dbs import ParsedTransaction, ParsedStatement, MONTH_MAP
 
 
@@ -89,9 +90,9 @@ def _extract_cc_card_info(text: str) -> tuple[str, str]:
     return "UOB Card", ""
 
 
-def _parse_amount(amount_str: str) -> float:
-    """Parse amount string, handling commas."""
-    return float(amount_str.replace(",", ""))
+def _parse_amount(amount_str: str) -> int:
+    """Parse amount string, handling commas, into whole minor units."""
+    return money.parse_minor(amount_str)
 
 
 def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
@@ -145,7 +146,7 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                     transactions[-1] = ParsedTransaction(
                         date=last.date,
                         description=last.description + " " + line,
-                        amount_sgd=last.amount_sgd,
+                        amount_minor=last.amount_minor,
                         amount_foreign=last.amount_foreign,
                         currency_foreign=last.currency_foreign,
                         is_payment=last.is_payment,
@@ -199,15 +200,15 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                     prev_balance, balance, candidates
                 )
                 if deposit is not None:
-                    amount_sgd = -deposit
+                    amount_minor = -deposit
                 elif withdrawal is not None:
-                    amount_sgd = withdrawal
+                    amount_minor = withdrawal
                 elif "Interest Credit" in description or "Inward Credit" in description:
                     # Fallback when no balance anchor: credits are negative
-                    amount_sgd = -_parse_amount(amounts[0])
+                    amount_minor = -_parse_amount(amounts[0])
                 else:
                     # Fallback default: positive = expense
-                    amount_sgd = _parse_amount(amounts[0])
+                    amount_minor = _parse_amount(amounts[0])
                 prev_balance = balance
 
                 desc_upper = description.upper()
@@ -223,7 +224,7 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                 tx = ParsedTransaction(
                     date=tx_date,
                     description=description,
-                    amount_sgd=amount_sgd,
+                    amount_minor=amount_minor,
                     is_payment=is_payment,
                     is_transfer=is_transfer,
                     card_info=f"UOB One Account {account_number}",
@@ -337,16 +338,16 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
 
             # Credits are negative (payments/refunds), debits are positive (expenses)
             if is_credit:
-                amount_sgd = -amount
+                amount_minor = -amount
             else:
-                amount_sgd = amount
+                amount_minor = amount
 
             is_payment = "PAYMT" in description.upper() or "PAYMENT" in description.upper()
 
             tx = ParsedTransaction(
                 date=tx_date,
                 description=description,
-                amount_sgd=amount_sgd,
+                amount_minor=amount_minor,
                 is_payment=is_payment,
                 card_info=account_name,
             )

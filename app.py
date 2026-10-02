@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 from flask import Flask, jsonify, request, send_from_directory
 
 import book_type
+import money
 from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
 
 
@@ -199,11 +200,30 @@ def _paynow_fallback_label(description: str | None, conn) -> tuple[str | None, i
     return book_type.proposed_book(type_name), type_id
 
 
-def _label_for(conn, description: str, amount_sgd: float) -> dict:
+class BadAmount(ValueError):
+    """An amount sent to the API is not a number of whole minor units."""
+
+
+def _minor_from_request(value, what: str = "amount") -> int:
+    """A decimal amount from a request body as whole minor units. Refuses
+    anything that is not a number, and a number finer than the minor unit:
+    an amount is never rounded on its way in."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BadAmount(f"{what} must be a number")
+    try:
+        whole = money.is_whole_minor(value)
+    except ArithmeticError:
+        whole = False
+    if not whole:
+        raise BadAmount(f"{what} must be a whole number of cents")
+    return money.to_minor(value)
+
+
+def _label_for(conn, description: str, amount_minor: int) -> dict:
     """What the rules, then the PayNow wording, make of a row: the result of
     match_merchant, with the fallback's type when no rule gave one. A merchant
     the rules did find is kept, and so is its book."""
-    found = match_merchant(description, conn, amount=amount_sgd)
+    found = match_merchant(description, conn, amount_minor=amount_minor)
     if found["type_id"] is None:
         book, type_id = _paynow_fallback_label(description, conn)
         if type_id is not None:
@@ -211,13 +231,13 @@ def _label_for(conn, description: str, amount_sgd: float) -> dict:
     return found
 
 
-def _classify_flow_for_tx(conn, description: str, amount_sgd: float, *, flow_ctx=None) -> str:
+def _classify_flow_for_tx(conn, description: str, amount_minor: int, *, flow_ctx=None) -> str:
     """Classify a transaction using the shared flow_type model."""
     from flow import build_context, classify_flow
 
     if flow_ctx is None:
         flow_ctx = build_context(conn)
-    return classify_flow({"description": description, "amount_sgd": amount_sgd}, flow_ctx)
+    return classify_flow({"description": description, "amount_minor": amount_minor}, flow_ctx)
 
 
 def _expense_visibility_filter(service_alias: str = "svc") -> str:
@@ -630,7 +650,7 @@ def api_service_transactions(svc_id):
     """Get all transactions for a specific service."""
     with get_db() as conn:
         rows = conn.execute("""
-            SELECT t.id, t.date, t.description, t.amount_sgd,
+            SELECT t.id, t.date, t.description, t.amount_minor,
                    t.amount_foreign, t.currency_foreign,
                    """ + book_expr("t") + """ as book,
                    t.type_id, ty.name as type_name, tp.name as parent_type
@@ -643,6 +663,7 @@ def api_service_transactions(svc_id):
     result = []
     for r in rows:
         d = dict(r)
+        d["amount_sgd"] = money.from_minor(d.pop("amount_minor"))
         d["display_type"] = format_type_display(d["parent_type"], d["type_name"])
         result.append(d)
     return jsonify(result)
@@ -709,12 +730,12 @@ def api_dashboard_stat_cards():
     # One total per declared book, keyed by the book's name in lower case.
     books = [(name, name.lower()) for name in book_type.BOOK_NAMES]
     book_sums = "".join(
-        f"SUM(CASE WHEN {book_expr('t')} = ? THEN amount_sgd ELSE 0 END), " for _ in books
+        f"SUM(CASE WHEN {book_expr('t')} = ? THEN amount_minor ELSE 0 END), " for _ in books
     )
 
     with get_db() as conn:
         def query_month(y: int, m: int) -> dict:
-            """Query spend totals for a single month."""
+            """Query spend totals for a single month, in whole minor units."""
             start = f"{y:04d}-{m:02d}-01"
             if m == 12:
                 end_d = date(y + 1, 1, 1) - timedelta(days=1)
@@ -726,7 +747,7 @@ def api_dashboard_stat_cards():
             row = conn.execute(f"""
                 SELECT
                     {book_sums}
-                    SUM(amount_sgd),
+                    SUM(amount_minor),
                     COUNT(CASE WHEN t.type_id IS NULL THEN 1 END),
                     COUNT(*)
                 FROM transactions t
@@ -737,8 +758,8 @@ def api_dashboard_stat_cards():
                   {extra_filters}
             """, params).fetchone()
             n = len(books)
-            result = {key: round(row[i] or 0, 2) for i, (_, key) in enumerate(books)}
-            result["total"] = round(row[n] or 0, 2)
+            result = {key: row[i] or 0 for i, (_, key) in enumerate(books)}
+            result["total"] = row[n] or 0
             result["untyped"] = row[n + 1] or 0
             result["tx_count"] = row[n + 2] or 0
             return result
@@ -750,14 +771,14 @@ def api_dashboard_stat_cards():
         avg_data = [query_month(y, m) for y, m in avg_months]
         n = len([d for d in avg_data if d["tx_count"] > 0]) or 1  # only months with data
         averages = {
-            key: round(sum(d[key] for d in avg_data) / n, 2)
+            key: money.mean_minor(sum(d[key] for d in avg_data), n)
             for key in ["total"] + [key for _, key in books]
         }
 
     # Pick which spend to feature based on filter
     featured = book.lower() if book else "total"
-    spend = ref_data[featured]
-    avg_spend = averages[featured]
+    spend = money.from_minor(ref_data[featured])
+    avg_spend = money.from_minor(averages[featured])
 
     month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -773,8 +794,8 @@ def api_dashboard_stat_cards():
         "avg_months": n,
     }
     for _, key in books:
-        payload[key] = ref_data[key]
-        payload[f"avg_{key}"] = averages[key]
+        payload[key] = money.from_minor(ref_data[key])
+        payload[f"avg_{key}"] = money.from_minor(averages[key])
     return jsonify(payload)
 
 
@@ -812,7 +833,7 @@ def api_dashboard_monthly():
             SELECT
                 {time_bucket} as period,
                 {type_expr} as type,
-                SUM(t.amount_sgd) as total
+                SUM(t.amount_minor) as total
             FROM transactions t
             {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
@@ -822,16 +843,19 @@ def api_dashboard_monthly():
             ORDER BY period, total DESC
         """, params).fetchall()
 
-    # Structure: {period: {type: total, ...}, ...}
-    result = {}
+    # Structure: {period: {type: total, ...}, ...}, added up in minor units
+    minor = {}
     for r in rows:
         period = r["period"]
-        if period not in result:
-            result[period] = {}
+        if period not in minor:
+            minor[period] = {}
         name = r["type"] or NO_TYPE_LABEL
-        result[period][name] = round(result[period].get(name, 0) + r["total"], 2)
+        minor[period][name] = minor[period].get(name, 0) + r["total"]
 
-    return jsonify(result)
+    return jsonify({
+        period: {name: money.from_minor(total) for name, total in by_type.items()}
+        for period, by_type in minor.items()
+    })
 
 
 @app.route("/api/dashboard/types")
@@ -847,7 +871,7 @@ def api_dashboard_types():
         rows = conn.execute(f"""
             SELECT
                 {type_expr} as type,
-                SUM(t.amount_sgd) as total,
+                SUM(t.amount_minor) as total,
                 COUNT(*) as count
             FROM transactions t
             {_TYPE_JOINS.format(owner="t")}
@@ -860,7 +884,7 @@ def api_dashboard_types():
 
     return jsonify([{
         "type": r["type"] or NO_TYPE_LABEL,
-        "total": round(r["total"], 2),
+        "total": money.from_minor(r["total"]),
         "count": r["count"],
     } for r in rows])
 
@@ -937,7 +961,7 @@ def api_transactions():
         "type": "ty.name",
         "service": "svc.name",
         "account": "a.name",
-        "amount": "t.amount_sgd",
+        "amount": "t.amount_minor",
     }
     order_col = valid_sorts.get(sort_col, "t.date")
     if sort_dir not in ("ASC", "DESC"):
@@ -959,7 +983,7 @@ def api_transactions():
         rows = conn.execute(
             f"""
             SELECT
-                t.id, t.date, t.description, t.amount_sgd,
+                t.id, t.date, t.description, t.amount_minor,
                 t.amount_foreign, t.currency_foreign,
                 {book_expr("t")} as book,
                 t.type_id, ty.name as type, tp.name as parent_type,
@@ -985,6 +1009,7 @@ def api_transactions():
     txns = []
     for r in rows:
         tx = dict(r)
+        tx["amount_sgd"] = money.from_minor(tx.pop("amount_minor"))
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])
         if tx.get("account_name"):
             tx["account_name"] = mask_card_number(tx["account_name"])
@@ -1181,7 +1206,7 @@ def api_resolve_transaction():
                 "service_default": "service_default",
             }.get(apply_scope, "manual")
             tx_row = conn.execute(
-                "SELECT description, amount_sgd, flow_type_manual FROM transactions WHERE id = ?",
+                "SELECT description, amount_minor, flow_type_manual FROM transactions WHERE id = ?",
                 (tx_id,),
             ).fetchone()
             label = (book, type_id, service_id, tx_cat_source)
@@ -1193,7 +1218,7 @@ def api_resolve_transaction():
                 )
             elif tx_row and not tx_row["flow_type_manual"]:
                 flow_type = _classify_flow_for_tx(
-                    conn, tx_row["description"], tx_row["amount_sgd"]
+                    conn, tx_row["description"], tx_row["amount_minor"]
                 )
                 conn.execute(
                     "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
@@ -1325,20 +1350,20 @@ def api_import_upload():
                 account = tx.card_info or stmt.accounts[0] if stmt.accounts else "Unknown"
 
                 # Merchant rules first; for bank statements, then the PayNow wording
-                found = _label_for(conn, tx.description, tx.amount_sgd)
+                found = _label_for(conn, tx.description, tx.amount_minor)
                 type_id = found["type_id"]
                 svc_id = found["service_id"]
 
                 # Classify flow_type post-parse, from the row's own wording
                 tx.flow_type = classify_flow(
-                    {"description": tx.description, "amount_sgd": tx.amount_sgd},
+                    {"description": tx.description, "amount_minor": tx.amount_minor},
                     flow_ctx,
                 )
 
                 entry = {
                     "date": tx.date,
                     "description": tx.description,
-                    "amount_sgd": tx.amount_sgd,
+                    "amount_sgd": money.from_minor(tx.amount_minor),
                     "amount_foreign": tx.amount_foreign,
                     "currency_foreign": tx.currency_foreign,
                     "book": found["book"],
@@ -1473,7 +1498,9 @@ def api_import_confirm():
     }
 
     A book or a type that is not in its vocabulary refuses the whole import
-    before anything is written.
+    before anything is written, and so does an amount that is missing or is
+    not a whole number of cents. The amount arrives as the decimal the preview
+    showed and is stored as whole minor units.
     """
     data = request.get_json()
     if not data:
@@ -1488,11 +1515,16 @@ def api_import_confirm():
         try:
             for labelled in [tx for g in groups for tx in g.get("transactions", [])] + new_services:
                 _checked_labels(conn, labelled)
+            # Each row's amount in whole minor units, keyed by the row itself.
+            minor_of = {
+                id(tx): _minor_from_request(tx.get("amount_sgd"))
+                for g in groups for tx in g.get("transactions", [])
+            }
             # A new merchant's book is the one given, or the one its type
             # proposes; a type that proposes none has to be given one.
             for ns in new_services:
                 _book_or_proposed(conn, ns.get("book") or None, ns.get("type_id") or None)
-        except (UnknownLabel, BookNeeded) as e:
+        except (UnknownLabel, BookNeeded, BadAmount) as e:
             return jsonify({"error": str(e)}), 400
 
     total_saved = 0
@@ -1541,7 +1573,7 @@ def api_import_confirm():
                 import_counts = Counter()
                 import_by_key = {}  # key -> [list of tx dicts]
                 for tx in active_txns:
-                    key = (tx["date"], tx["description"], tx["amount_sgd"])
+                    key = (tx["date"], tx["description"], minor_of[id(tx)])
                     import_counts[key] += 1
                     import_by_key.setdefault(key, []).append(tx)
 
@@ -1554,7 +1586,7 @@ def api_import_confirm():
                         """SELECT COUNT(*) FROM transactions t
                            JOIN statements s ON t.statement_id = s.id
                            WHERE s.account_id = ?
-                             AND t.date = ? AND t.description = ? AND t.amount_sgd = ?""",
+                             AND t.date = ? AND t.description = ? AND t.amount_minor = ?""",
                         (account_id, date_val, desc_val, amount_val),
                     ).fetchone()[0]
 
@@ -1569,7 +1601,7 @@ def api_import_confirm():
                         statement_id = month_stmt_ids[tx_month]
                         conn.execute(
                             "INSERT INTO transactions "
-                            "(statement_id, date, description, amount_sgd, amount_foreign, "
+                            "(statement_id, date, description, amount_minor, amount_foreign, "
                             "currency_foreign, book, type_id, service_id, "
                             "is_one_off, cat_source, flow_type) "
                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1577,7 +1609,7 @@ def api_import_confirm():
                                 statement_id,
                                 tx["date"],
                                 tx["description"],
-                                tx["amount_sgd"],
+                                amount_val,
                                 tx.get("amount_foreign"),
                                 tx.get("currency_foreign"),
                                 tx.get("book") or None,
@@ -1812,6 +1844,26 @@ def api_statements_coverage():
 # Merchant Rules CRUD
 # ---------------------------------------------------------------------------
 
+# A rule's amount thresholds, as the API names them, and the columns that
+# hold them in whole minor units. Frozen: the column names in the statements
+# below come from here and nowhere else.
+_THRESHOLD_COLUMNS = {"min_amount": "min_amount_minor", "max_amount": "max_amount_minor"}
+
+
+def _threshold_shown(minor: int | None) -> float | None:
+    return None if minor is None else money.from_minor(minor)
+
+
+def _threshold_minor(data: dict, field: str) -> int | None:
+    """A threshold from a request body in whole minor units; None when it is
+    left out or cleared. Raises BadAmount for anything else that is not a
+    whole number of cents."""
+    value = data.get(field)
+    if value is None or value == "":
+        return None
+    return _minor_from_request(value, field)
+
+
 @app.route("/api/rules")
 def api_rules():
     """List all merchant rules with their service, and the book and type each
@@ -1819,7 +1871,7 @@ def api_rules():
     with get_db() as conn:
         rows = conn.execute("""
             SELECT mr.id, mr.pattern, mr.match_type, mr.confidence,
-                   mr.priority, mr.min_amount, mr.max_amount,
+                   mr.priority, mr.min_amount_minor, mr.max_amount_minor,
                    mr.service_id,
                    mr.book_override, mr.type_override_id,
                    s.name as service_name,
@@ -1839,8 +1891,8 @@ def api_rules():
         "match_type": r["match_type"],
         "confidence": r["confidence"],
         "priority": r["priority"],
-        "min_amount": r["min_amount"],
-        "max_amount": r["max_amount"],
+        "min_amount": _threshold_shown(r["min_amount_minor"]),
+        "max_amount": _threshold_shown(r["max_amount_minor"]),
         "service_id": r["service_id"],
         "service_name": r["service_name"],
         "book_override": r["book_override"],
@@ -1868,12 +1920,14 @@ def api_rules_create():
         try:
             book_override = _checked_book(data.get("book_override"))
             type_override_id = _checked_type_id(conn, data.get("type_override_id"))
-        except UnknownLabel as e:
+            min_minor = _threshold_minor(data, "min_amount")
+            max_minor = _threshold_minor(data, "max_amount")
+        except (UnknownLabel, BadAmount) as e:
             return jsonify({"error": str(e)}), 400
         return _crud_insert(
             conn,
             "INSERT INTO merchant_rules (pattern, service_id, book_override, type_override_id, "
-            "match_type, confidence, priority, min_amount, max_amount) "
+            "match_type, confidence, priority, min_amount_minor, max_amount_minor) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 data["pattern"],
@@ -1883,8 +1937,8 @@ def api_rules_create():
                 data.get("match_type", "contains"),
                 "confirmed",
                 data.get("priority", 0),
-                data.get("min_amount"),
-                data.get("max_amount"),
+                min_minor,
+                max_minor,
             ),
             "rule",
             post_commit=invalidate_rules_cache,
@@ -1902,8 +1956,15 @@ def api_rules_update(rule_id):
     sets, params = _build_update_sets(
         data,
         ["pattern", "service_id", "book_override", "type_override_id", "match_type",
-         "priority", "min_amount", "max_amount"],
+         "priority"],
     )
+    try:
+        for field, column in _THRESHOLD_COLUMNS.items():
+            if field in (data or {}):
+                sets.append(f"{column} = ?")
+                params.append(_threshold_minor(data, field))
+    except BadAmount as e:
+        return jsonify({"error": str(e)}), 400
     if not sets:
         return jsonify({"error": "No fields to update"}), 400
 
@@ -1931,7 +1992,7 @@ def api_rules_update(rule_id):
             flow_ctx = None
             rows = conn.execute(
                 f"""
-                SELECT id, description, amount_sgd, flow_type_manual
+                SELECT id, description, amount_minor, flow_type_manual
                 FROM transactions
                 WHERE {match_cond}
                   AND COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
@@ -1949,7 +2010,7 @@ def api_rules_update(rule_id):
                         flow_ctx = build_context(conn)
                     params.append(
                         _classify_flow_for_tx(
-                            conn, tx["description"], tx["amount_sgd"], flow_ctx=flow_ctx
+                            conn, tx["description"], tx["amount_minor"], flow_ctx=flow_ctx
                         )
                     )
                     sql += ", flow_type = ?"
@@ -1983,7 +2044,7 @@ def api_rules_recategorize():
     with get_db() as conn:
         # Skip manually resolved transactions — only re-run on rows the rules labelled
         rows = conn.execute("""
-            SELECT id, description, amount_sgd, book, type_id, service_id, cat_source,
+            SELECT id, description, amount_minor, book, type_id, service_id, cat_source,
                    COALESCE(flow_type, 'expense') AS flow_type, flow_type_manual
             FROM transactions
             WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
@@ -1999,7 +2060,7 @@ def api_rules_recategorize():
         unchanged = 0
         flow_ctx = None
         for tx in rows:
-            found = _label_for(conn, tx["description"], tx["amount_sgd"])
+            found = _label_for(conn, tx["description"], tx["amount_minor"])
             new_label = (found["book"], found["type_id"], found["service_id"], found["cat_source"])
             new_flow = tx["flow_type"]
             if not tx["flow_type_manual"]:
@@ -2008,7 +2069,7 @@ def api_rules_recategorize():
 
                     flow_ctx = build_context(conn)
                 new_flow = _classify_flow_for_tx(
-                    conn, tx["description"], tx["amount_sgd"], flow_ctx=flow_ctx
+                    conn, tx["description"], tx["amount_minor"], flow_ctx=flow_ctx
                 )
             old_label = (tx["book"], tx["type_id"], tx["service_id"], tx["cat_source"])
             if new_label != old_label or new_flow != tx["flow_type"]:
@@ -2100,7 +2161,7 @@ def api_subscriptions():
         latest_tx_rows = conn.execute("""
         WITH matched AS (
             SELECT s.id as sub_id,
-                   t.id as tx_id, t.date as tx_date, t.amount_sgd,
+                   t.id as tx_id, t.date as tx_date, t.amount_minor,
                    ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY t.date DESC) as rn
             FROM subscriptions s
             JOIN transactions t
@@ -2110,7 +2171,7 @@ def api_subscriptions():
               AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
               AND """ + book_expr("t") + " = " + book_expr("svc") + """
         )
-        SELECT sub_id, tx_id, tx_date, amount_sgd
+        SELECT sub_id, tx_id, tx_date, amount_minor
         FROM matched WHERE rn = 1
         """).fetchall()
         latest_tx = {r["sub_id"]: dict(r) for r in latest_tx_rows}
@@ -2120,7 +2181,7 @@ def api_subscriptions():
         monthly_rows = conn.execute("""
             SELECT s.id as sub_id,
                    SUBSTR(t.date, 1, 7) as ym,
-                   SUM(t.amount_sgd) as month_total
+                   SUM(t.amount_minor) as month_total
             FROM subscriptions s
             JOIN transactions t
                 ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
@@ -2133,7 +2194,9 @@ def api_subscriptions():
             ORDER BY s.id, ym DESC
         """, (cutoff_90d,)).fetchall()
 
-    # Build lookup: sub_id → [{ym, month_total}, ...] ordered by ym DESC
+    # Build lookup: sub_id → [{ym, month_total}, ...] ordered by ym DESC.
+    # A month_total is in whole minor units, and so is every figure worked
+    # out from the rows below until it is put on the payload.
     monthly_by_sub: dict[int, list[dict]] = {}
     for r in monthly_rows:
         monthly_by_sub.setdefault(r["sub_id"], []).append(
@@ -2157,16 +2220,16 @@ def api_subscriptions():
             tx = latest_tx.get(sub_id)
             if tx:
                 d["tx_last_paid"] = tx["tx_date"]
-                d["tx_amount"] = round(tx["amount_sgd"], 2)
+                d["tx_amount"] = money.from_minor(tx["amount_minor"])
                 d["tx_id"] = tx["tx_id"]
             d["tx_months_90d"] = len(monthly_sums)
             if monthly_sums:
                 totals = [m["month_total"] for m in monthly_sums]
-                d["tx_avg_90d"] = round(sum(totals) / len(totals), 2)
+                d["tx_avg_90d"] = money.from_minor(money.mean_minor(sum(totals), len(totals)))
 
         # Last paid amount: latest month's sum (handles split payments)
         if pat and d.get("tx_months_90d"):
-            d["tx_amount"] = round(monthly_sums[0]["month_total"], 2)
+            d["tx_amount"] = money.from_minor(monthly_sums[0]["month_total"])
 
         # Billed = configured amount per cycle (source of truth)
         amt = d.get("amount") or 0
@@ -2177,9 +2240,9 @@ def api_subscriptions():
         if d["tx_avg_90d"] and d["tx_months_90d"] >= 2:
             totals = [m["month_total"] for m in monthly_sums]
             mn, mx = min(totals), max(totals)
-            if mx > mn * 1.10:
+            if mx * 100 > mn * 110:
                 d["is_variable"] = True
-                d["monthly_sgd"] = round(d["tx_avg_90d"], 2)
+                d["monthly_sgd"] = d["tx_avg_90d"]
         if not d["is_variable"]:
             d["monthly_sgd"] = round(_monthly_equivalent(amt, d["frequency"], d["periods"], cur, fx_rate), 2)
 
@@ -2270,7 +2333,7 @@ def api_subscriptions_enrich():
         renewals_advanced = 0
         for s in subs:
             tx = conn.execute("""
-                SELECT t.date, t.amount_sgd
+                SELECT t.date
                 FROM transactions t
                 WHERE UPPER(t.description) LIKE '%' || ? || '%'
                   AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')

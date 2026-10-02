@@ -390,18 +390,18 @@ def test_a_new_database_reads_as_already_converted(temp_db):
 
 
 def test_schema_declares_the_integer_amounts(temp_db):
-    """A database made today has the columns the step adds to an old one."""
+    """A database made today has the columns the step adds to an old one, and
+    none of the floats it filled them from."""
     run(temp_db, "INSERT INTO accounts (id, name, short_name, type) VALUES (1, 'A', 'A', 'bank')")
     run(temp_db, "INSERT INTO statements (id, account_id, statement_date) VALUES (1, 1, '2026-01-31')")
     run(
         temp_db,
-        "INSERT INTO transactions (statement_id, date, description, amount_sgd, amount_minor)"
-        " VALUES (1, '2026-01-10', 'SAMPLE ROW', 7.70, 770)",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor)"
+        " VALUES (1, '2026-01-10', 'SAMPLE ROW', 770)",
     )
     run(
         temp_db,
-        "UPDATE merchant_rules SET min_amount = 1.50, min_amount_minor = 150,"
-        " max_amount_minor = NULL WHERE id = 1",
+        "UPDATE merchant_rules SET min_amount_minor = 150, max_amount_minor = NULL WHERE id = 1",
     )
 
     report = conversion.run_step(temp_db, convert_minor_units.STEP, today=DAY)
@@ -409,41 +409,9 @@ def test_schema_declares_the_integer_amounts(temp_db):
     assert report["status"] == "already-applied"
 
 
-# --- nothing reads the new amounts yet ---------------------------------------
-
-
-def test_the_app_shows_the_same_figures_before_and_after(client, temp_db):
-    conn = sqlite3.connect(str(temp_db))
-    conn.executescript("""
-        INSERT INTO accounts (id, name, short_name, type) VALUES
-            (1, 'Sample Card 0001', 'Sample-0001', 'credit_card');
-        INSERT INTO statements (id, account_id, statement_date) VALUES (1, 1, '2026-01-31');
-        INSERT INTO transactions
-            (statement_id, date, description, amount_sgd, amount_foreign, currency_foreign, flow_type)
-        VALUES
-            (1, '2026-01-10', 'SAMPLE CAFE', 12.30, NULL, NULL, 'expense'),
-            (1, '2026-01-11', 'SAMPLE BOOK SHOP', 40.05, 29.50, 'USD', 'expense'),
-            (1, '2026-01-12', 'SAMPLE REFUND', -19.99, NULL, NULL, 'refund');
-        UPDATE merchant_rules SET min_amount = 10.00 WHERE id = 1;
-    """)
-    conn.commit()
-    conn.close()
-    paths = (
-        "/api/transactions",
-        "/api/rules",
-        "/api/dashboard/stat-cards?ref_month=2026-01",
-        "/api/dashboard/monthly",
-    )
-    before = {path: client.get(path).get_json() for path in paths}
-    assert [t["amount_sgd"] for t in before["/api/transactions"]["transactions"]] != []
-
-    report = conversion.run_step(temp_db, convert_minor_units.STEP, today=DAY)
-
-    assert report["status"] == "applied"
-    assert {path: client.get(path).get_json() for path in paths} == before
-    assert sorted(query(temp_db, "SELECT amount_minor FROM transactions")) == [
-        (-1999,), (1230,), (4005,)
-    ]
+# What the app shows of a converted database is proved in
+# test_retire_float_amounts.py: the app reads the whole cents, and starts only
+# once the floats are gone.
 
 
 # --- the command ---------------------------------------------------------------

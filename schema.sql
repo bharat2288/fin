@@ -5,10 +5,11 @@
 -- (what kind), declared in book_type.py. The category tree they replaced is
 -- retired; an existing database loses it through retire_categories.py.
 
--- An amount is on its way from a float to a whole number of minor units
--- (cents, for an SGD account). The integer columns sit beside the floats and
--- nothing reads them yet; an existing database gains and fills them through
--- convert_minor_units.py.
+-- An amount is a whole number of minor units of its account's currency
+-- (cents, for an SGD account); positive is money out. No float amount is
+-- stored for a row or a rule threshold. An existing database gains and fills
+-- the integers through convert_minor_units.py and loses the floats through
+-- retire_float_amounts.py.
 
 CREATE TABLE IF NOT EXISTS merchant_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,13 +18,11 @@ CREATE TABLE IF NOT EXISTS merchant_rules (
     match_type TEXT DEFAULT 'contains',  -- 'contains', 'startswith', 'exact'
     confidence TEXT DEFAULT 'confirmed', -- 'auto', 'confirmed' (user-verified)
     priority INTEGER DEFAULT 0,    -- higher priority wins (for overlapping patterns)
-    min_amount REAL,               -- if set, rule only matches when amount >= this
-    max_amount REAL,               -- if set, rule only matches when amount <= this
     created_at TEXT DEFAULT (datetime('now')),
     book_override TEXT,            -- book the rule sets in place of the merchant's; NULL = the merchant's
     type_override_id INTEGER REFERENCES types(id),  -- type the rule sets in place of the merchant's
-    min_amount_minor INTEGER,      -- min_amount in whole minor units; filled by convert_minor_units.py, not read yet
-    max_amount_minor INTEGER,      -- max_amount in whole minor units; filled by convert_minor_units.py, not read yet
+    min_amount_minor INTEGER,      -- if set, rule only matches when the row's amount_minor >= this
+    max_amount_minor INTEGER,      -- if set, rule only matches when the row's amount_minor <= this
     FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
@@ -53,7 +52,6 @@ CREATE TABLE IF NOT EXISTS transactions (
     statement_id INTEGER NOT NULL,
     date TEXT NOT NULL,             -- YYYY-MM-DD
     description TEXT NOT NULL,      -- raw merchant description from statement
-    amount_sgd REAL NOT NULL,       -- positive = expense, negative = credit/payment
     amount_foreign REAL,           -- original amount if foreign currency
     currency_foreign TEXT,         -- three-letter code, e.g., 'USD', 'AUD', 'INR'
     service_id INTEGER,            -- FK to services table (merchant identity)
@@ -65,7 +63,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TEXT DEFAULT (datetime('now')),
     book TEXT,                     -- whose spending: Household, Moom, Kalesh (declared in book_type.py); NULL reads as Household
     type_id INTEGER REFERENCES types(id),  -- what kind of spending; NULL = not placed, or not spending
-    amount_minor INTEGER,          -- amount_sgd in whole minor units of the account's currency; filled by convert_minor_units.py, not read yet
+    amount_minor INTEGER,          -- the amount in whole minor units of the account's currency: positive = money out, negative = money in
     FOREIGN KEY (statement_id) REFERENCES statements(id),
     FOREIGN KEY (service_id) REFERENCES services(id)
 );

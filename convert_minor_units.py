@@ -5,16 +5,17 @@ This is the expand half of the money change. It adds an integer amount to
 each row (`amount_minor`: cents, for an SGD account) and to each rule's amount
 thresholds, fills them from the floats, and turns the foreign-currency names
 on card rows into standard three-letter codes. It removes nothing and changes
-no float: nothing reads the new amounts yet, and the float stays the amount
-the app shows until the step that drops it. It runs only through the
-conversion runner (conversion.run_step).
+no float: the floats are dropped by the step that follows it
+(retire_float_amounts.py), and the app starts only once that one has run. It
+runs only through the conversion runner (conversion.run_step).
 
 The step fails, and is rolled back, unless the row count is unchanged and the
 new integer amounts of every account add up to its old amounts each rounded to
 its cent.
 
-Nothing writes the integer amount on a new row yet, so rows imported after the
-step have none. Run the step again: it reads as not applied and fills them.
+A row that reaches a database between this step and the next, with a float
+amount and no integer, makes the step read as not applied. Run it again and
+it fills that row; the next step will not drop the floats until it has.
 
     python convert_minor_units.py <path to database>
 """
