@@ -183,6 +183,9 @@ class Step:
                  invariant is given. Defaults to `measure`, which totals the
                  float amount; a step that changes how an amount is stored
                  declares its own, and its invariant reads that.
+    refusal    — reads the database before anything is written (the backup
+                 included) and returns why the step will not run on it, in
+                 words for the operator, or None. Defaults to never refusing.
     """
 
     name: str
@@ -190,6 +193,7 @@ class Step:
     is_applied: Callable[[sqlite3.Connection], bool]
     invariant: Callable[[dict, dict], list[str]] = unchanged
     measure: Callable[[sqlite3.Connection], dict] = measure
+    refusal: Callable[[sqlite3.Connection], str | None] = lambda conn: None
 
 
 def copy_file(source: Path, target: Path) -> None:
@@ -254,6 +258,10 @@ def run_step(
                 f"{'has' if len(waiting) == 1 else 'have'} not been applied; nothing was "
                 "changed. Run every step in order with: python convert_all.py <path to database>"
             )
+
+        why = step.refusal(conn)
+        if why:
+            raise ConversionRefused(f"step {step.name} will not run: {why}. Nothing was changed.")
 
         # In WAL mode committed rows can sit in the -wal file, where a copy of
         # the main file would miss them. Fold them in, then take the write

@@ -270,10 +270,38 @@ def test_an_account_of_a_type_nobody_declared_stops_the_step(old):
     run(old, "INSERT INTO accounts (name, short_name, type) VALUES ('Sample Odd', 'Odd', 'wallet')")
     before = dump(old)
 
-    with pytest.raises(conversion.ConversionFailed, match="UndeclaredKind"):
+    with pytest.raises(conversion.ConversionRefused, match="'wallet'"):
         convert(old)
 
     assert dump(old) == before
+    assert not list(old.parent.glob("*.bak"))
+
+
+def test_every_unknown_type_is_named_before_anything_is_written(old, capsys):
+    run(old, "INSERT INTO accounts (name, short_name, type) VALUES ('Sample Odd', 'Odd', 'wallet')")
+    run(old, "INSERT INTO accounts (name, short_name, type) VALUES ('Sample Odd 2', 'Odd2', 'brokerage')")
+    run(old, "INSERT INTO accounts (name, short_name, type) VALUES ('Sample Odd 3', 'Odd3', 'wallet')")
+    before = dump(old)
+
+    assert convert_account_kinds.main([str(old)]) == 1
+
+    out = capsys.readouterr().out
+    assert "types it does not know: 'brokerage', 'wallet'." in out
+    assert "UndeclaredKind" not in out
+    assert dump(old) == before
+    assert not list(old.parent.glob("*.bak"))
+
+
+def test_an_account_with_a_created_name_and_another_type_is_not_created_again(old):
+    # The operator keeps the car as a bank account, and a loan in other case.
+    run(old, "INSERT INTO accounts (name, short_name, type) VALUES ('Car', 'Car', 'bank')")
+    run(old, "INSERT INTO accounts (name, short_name, type) VALUES ('uob home loan', 'Loan', 'bank')")
+
+    convert(old)
+
+    assert query(old, "SELECT type FROM accounts WHERE UPPER(name) = 'CAR'") == [("bank",)]
+    assert query(old, "SELECT COUNT(*) FROM accounts WHERE UPPER(name) = 'UOB HOME LOAN'") == [(1,)]
+    assert convert(old)["status"] == "already-applied"
 
 
 # --- the command ------------------------------------------------------------------

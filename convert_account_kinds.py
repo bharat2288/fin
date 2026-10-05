@@ -82,13 +82,41 @@ def has_shape(conn: sqlite3.Connection) -> bool:
 
 
 def _missing(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """The accounts to create: those no account has the name of. An account
+    is matched on its name alone (case and outer spaces aside), so one the
+    operator already keeps under another kind is not created a second time."""
     return [
         (name, kind)
         for name, kind in CREATED
         if not conn.execute(
-            "SELECT 1 FROM accounts WHERE name = ? AND type = ?", (name, kind)
+            "SELECT 1 FROM accounts WHERE UPPER(TRIM(name)) = UPPER(?)", (name,)
         ).fetchone()
     ]
+
+
+def unknown_types(conn: sqlite3.Connection) -> list[str]:
+    """The account types that are neither an old one this step converts nor a
+    declared kind, each once, sorted."""
+    known = (*BECOME_CARDS, *account_kind.KIND_NAMES)
+    marks = ", ".join("?" for _ in known)
+    return sorted(
+        str(r[0])
+        for r in conn.execute(
+            f"SELECT DISTINCT type FROM accounts WHERE type IS NULL OR type NOT IN ({marks})", known
+        )
+    )
+
+
+def _refusal(conn: sqlite3.Connection) -> str | None:
+    unknown = unknown_types(conn)
+    if not unknown:
+        return None
+    return (
+        f"accounts carry {'a type' if len(unknown) == 1 else 'types'} it does not know: "
+        f"{', '.join(repr(t) for t in unknown)}. Each account's type must be one of "
+        f"{', '.join(BECOME_CARDS)} (they become cards) or a declared kind "
+        f"({', '.join(account_kind.KIND_NAMES)}); change those accounts' type and run again"
+    )
 
 
 def _is_applied(conn: sqlite3.Connection) -> bool:
@@ -102,6 +130,10 @@ def _is_applied(conn: sqlite3.Connection) -> bool:
 
 
 def _apply(conn: sqlite3.Connection) -> None:
+    # Checked again here, before the first write, for a caller that gives
+    # the step its own connection; run_step refuses on it before the backup.
+    if unknown_types(conn):
+        raise UndeclaredKind()
     gains_owner = "owner" not in _account_columns(conn)
     if gains_owner:
         conn.execute(f"ALTER TABLE accounts ADD COLUMN {_OWNER_COLUMN}")
@@ -110,11 +142,6 @@ def _apply(conn: sqlite3.Connection) -> None:
         conn.execute(f"CREATE TABLE anchors ({body}\n)")
 
     conn.execute("UPDATE accounts SET type = ? WHERE type IN (?, ?)", (CARD, *BECOME_CARDS))
-    marks = ", ".join("?" for _ in account_kind.KIND_NAMES)
-    if conn.execute(
-        f"SELECT 1 FROM accounts WHERE type NOT IN ({marks})", account_kind.KIND_NAMES
-    ).fetchone():
-        raise UndeclaredKind()
 
     # Owners are marked only as the accounts gain one. On a database that
     # already has owners, they are the operator's and are left as they are.
@@ -146,7 +173,11 @@ def _invariant(before: dict, after: dict) -> list[str]:
 
 
 STEP = conversion.Step(
-    name="account-kinds", apply=_apply, is_applied=_is_applied, invariant=_invariant
+    name="account-kinds",
+    apply=_apply,
+    is_applied=_is_applied,
+    invariant=_invariant,
+    refusal=_refusal,
 )
 
 
