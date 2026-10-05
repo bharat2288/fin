@@ -40,6 +40,10 @@ MANY_ROWS = 20
 HIDDEN_KEYS = frozenset({"file", "filename", "filenames", "path", "file_path"})
 
 FIXED_ERROR = "fin could not do that just now; nothing was changed"
+UNDO_NOT_CHAT = (
+    "the chat can undo only a change made from the chat; nothing was changed. "
+    "The operator can undo this one in fin's history."
+)
 
 
 @dataclass(frozen=True)
@@ -356,8 +360,8 @@ _WRITES = [
     ),
     _w(
         "undo",
-        "Undo one change from the history. Refused, naming it, when a later change touched "
-        "the same rows: undo that one first.",
+        "Undo one change made from the chat. Refused, naming it, when a later change touched "
+        "the same rows: undo that one first. A change made in fin itself is the operator's to undo.",
         {"entry_id": _I},
         ("entry_id",),
         lambda a: ("POST", f"/api/history/{int(a['entry_id'])}/undo", {}),
@@ -457,13 +461,21 @@ def call(name: str, args: dict | None, actor: str) -> dict:
 
     with history.WRITE_LOCK:
         if name == "undo":
-            # An undo writes back exactly the rows its entry changed, so its
-            # count is known before anything is written: ask first.
             conn = db.get_connection()
             try:
+                undoing = conn.execute(
+                    "SELECT via FROM change_entries WHERE id = ?", (int(args["entry_id"]),)
+                ).fetchone()
+                # An undo writes back exactly the rows its entry changed, so
+                # its count is known before anything is written: ask first.
                 rows = history.row_count(conn, int(args["entry_id"]))
             finally:
                 conn.close()
+            # The chat undoes only what the chat did (a default the operator
+            # may overturn): an import, an account or a subscription is not
+            # the chat's to take back. Fin's own undo is not limited.
+            if undoing is not None and undoing["via"] != history.VIA_CHAT:
+                return {"ok": False, "error": UNDO_NOT_CHAT}
             if rows > MANY_ROWS and expected != rows:
                 return _stopped(name, rows)
         try:

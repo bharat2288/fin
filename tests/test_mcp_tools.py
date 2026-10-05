@@ -247,3 +247,19 @@ def test_a_change_that_could_not_be_put_back_is_reported_as_standing(many, monke
     assert "could not be put back" in answer["error"]
     assert str(answer["change"]["entry_id"]) in answer["error"]
     assert "FOREIGN KEY" not in answer["error"]
+
+
+def test_the_chat_may_undo_only_a_chat_change(book):
+    row = first_row()
+    by_app = book.put(f"/api/transactions/{row['id']}", json={"book": "Moom"})
+    entry = int(by_app.headers["X-Fin-Change"])
+    history_before = call("history")["result"]["entries"]
+
+    answer = call("undo", entry_id=entry)
+
+    assert answer["ok"] is False and "only a change made from the chat" in answer["error"]
+    assert first_row()["book"] == "Moom"
+    assert call("history")["result"]["entries"] == history_before
+    # The operator's own undo, in fin, is not limited.
+    assert book.post(f"/api/history/{entry}/undo").status_code == 200
+    assert first_row()["book"] == row["book"]
