@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pdfplumber
 
+import card_balance
 import money
 
 
@@ -63,17 +64,9 @@ MONTH_MAP = {
 LATE_POSTING_GRACE = timedelta(days=31)
 
 
-# Ruling 3 (how the two-cardholder Vantage bill is held) is pending. Switched
-# on, a card in DBS_SUPPLEMENTARY_CARDHOLDER_MAP is held as one bill: every
-# cardholder's rows file to the card's own account and the card hands over one
-# balance, from its PREVIOUS BALANCE and its TOTAL, like any other card. Off,
-# its rows file by cardholder and it hands over no balance (_split_by_cardholder).
-SPLIT_CARD_ONE_BALANCE = False
-
-DBS_SUPPLEMENTARY_CARDHOLDER_MAP = {
-    ("7436", "BHARAT SURI"): "DBS Vantage Visa Infinite Card 3696",
-    ("7436", "MILI KALE"): "DBS Vantage Visa Infinite Card 7436 (MK)",
-}
+# A card split by cardholder (the DBS Vantage card) is declared in
+# card_balance.py: which account each cardholder's rows go on, and which one
+# the card's one balance sits on (ruling 3, amended 2026-10-05).
 
 
 def _normalize_card_header(card_header: str) -> str:
@@ -84,16 +77,30 @@ def _normalize_card_header(card_header: str) -> str:
     return card_header.strip()
 
 
+def _last_four(card: str) -> str | None:
+    digits = re.findall(r"\d{4}", card)
+    return digits[-1] if digits else None
+
+
+def _card_account(card: str) -> str:
+    """The account a card's own rows go on (those printed outside any
+    cardholder's block: bill payments before the first, fees after the last
+    SUB-TOTAL): the card itself, or for a card split by cardholder the
+    account its one balance sits on."""
+    four = _last_four(card)
+    if card_balance.is_split(four):
+        return card_balance.balance_account(four) or card
+    return card
+
+
 def _subsection_account_label(base_card: str, holder_name: str) -> str:
-    """Map known consolidated-card subsections to the correct live account."""
-    if not _is_split_card(base_card):
+    """The account a cardholder's block goes on: on a card split by
+    cardholder the holder's own account, else (or for a holder not named) the
+    card's own."""
+    four = _last_four(base_card)
+    if not card_balance.is_split(four):
         return base_card
-    digits = re.findall(r"\d{4}", base_card)
-    last_four = digits[-1] if digits else ""
-    return DBS_SUPPLEMENTARY_CARDHOLDER_MAP.get(
-        (last_four, holder_name.upper().strip()),
-        base_card,
-    )
+    return card_balance.cardholder_account(four, holder_name) or _card_account(base_card)
 
 
 def _parse_statement_date(text: str) -> str:
@@ -192,10 +199,10 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
         card_match = re.match(r"(DBS\s+.*?CARD\s+NO\.?:?\s*[\d\s]+)", line)
         if card_match:
             current_card = _normalize_card_header(card_match.group(1).strip())
-            # Clean up card info — extract last 4 digits
-            current_tx_account = current_card
-            if current_card not in statement.accounts:
-                statement.accounts.append(current_card)
+            # Rows before any cardholder's block are the card's own.
+            current_tx_account = _card_account(current_card)
+            if current_tx_account not in statement.accounts:
+                statement.accounts.append(current_tx_account)
             sections.setdefault(
                 current_card,
                 {"card": current_card, "previous": None, "total": None, "accounts": []},
@@ -210,10 +217,9 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
         # (an admin fee and its GST, a bill payment, a payment reversal), and
         # they are the card's rows. "GRAND TOTAL FOR ALL CARD ACCOUNTS:" sums
         # every card and is not a card's balance: the match is anchored at the
-        # line's start, so it never reads as TOTAL. The rows after a SUB-TOTAL
-        # are read like any other and go where the card's rows go: to the
-        # card, or on a card split by cardholder (filed by holder until
-        # ruling 3), to the last holder's block, as before.
+        # line's start, so it never reads as TOTAL. A SUB-TOTAL ends its
+        # cardholder's block: the rows after it, up to the next block, are
+        # the card's own (_card_account).
         balance_match = re.match(
             r"(PREVIOUS BALANCE|SUB[\s-]*TOTAL|TOTAL)\s*:?\s+([\d,]+\.\d{2})\s*(CR)?$",
             line,
@@ -230,6 +236,8 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
                     section["previous"] = printed
             elif label == "TOTAL":
                 section["total"] = printed
+            else:
+                current_tx_account = _card_account(current_card)
             i += 1
             continue
 
@@ -241,6 +249,9 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
             )
             if current_tx_account not in statement.accounts:
                 statement.accounts.append(current_tx_account)
+            # A cardholder's block is the card's, rows or none.
+            if current_tx_account not in sections[current_card]["accounts"]:
+                sections[current_card]["accounts"].append(current_tx_account)
             i += 1
             continue
 
@@ -312,44 +323,30 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
     return statement
 
 
+def _own_accounts(section: dict) -> list[str]:
+    """The accounts a card section's rows and balance belong to: the card's
+    own account first (where its balance sits), then each cardholder's
+    account its rows went on."""
+    own = _card_account(section["card"])
+    return [own] + [a for a in section["accounts"] if a != own]
+
+
 def _split_by_cardholder(section: dict) -> bool:
-    """Whether a card section is split by cardholder: a card whose last four
-    are in DBS_SUPPLEMENTARY_CARDHOLDER_MAP (the DBS Vantage card, whose two
-    cardholders' subsections are filed to two accounts under one statement
-    balance), or any section whose rows went to more than its own card's
-    account.
-
-    Ruling 3 (how that bill is held) is pending, so such a section hands over
-    no balance and its rows are filed exactly as before: by cardholder, not
-    checked. This is the one place that decides it:
-      - "one bill, one account": switch SPLIT_CARD_ONE_BALANCE on. Every
-        cardholder's rows then file to the card's own account and the section
-        ties and anchors like any other, from its PREVIOUS BALANCE and its
-        TOTAL. What is left then: the card's own account is the normalised
-        header (_normalize_card_header), so the live account it should be
-        must be named to match, and handle_vantage_split (the CSV export)
-        must file the same way.
-      - "split per cardholder": the one balance belongs to two accounts; the
-        section would be tied as a whole and its anchor needs a home both
-        accounts count toward (a parent account, or the supplementary
-        account read as part of the main card's balance), which the balance
-        sheet does not have yet.
-    """
-    if _is_split_card(section["card"]):
-        return True
+    """Whether a card section hands over no balance because its rows went to
+    accounts no balance is declared for: a card split by cardholder with no
+    balance account in card_balance.py, or a section whose rows went to an
+    account other than its own. The DBS Vantage card is split by cardholder
+    with one balance (ruling 3, amended 2026-10-05): its section ties and
+    anchors as a whole, on the balance account, its rows staying on each
+    cardholder's account."""
+    four = _last_four(section["card"])
+    if card_balance.is_split(four):
+        own = card_balance.balance_account(four)
+        if own is None:
+            return True
+        holders = set(card_balance.part_of_names()) | {own}
+        return any(account not in holders for account in section["accounts"])
     return any(account != section["card"] for account in section["accounts"])
-
-
-def _is_split_card(card: str) -> bool:
-    """Whether a card is one DBS_SUPPLEMENTARY_CARDHOLDER_MAP splits by
-    cardholder. Decided on the card, not on where this month's rows went: a
-    month with no rows, or with a holder the map does not name, is still
-    that card. Never, once SPLIT_CARD_ONE_BALANCE holds the card as one bill."""
-    if SPLIT_CARD_ONE_BALANCE:
-        return False
-    digits = re.findall(r"\d{4}", card)
-    last_four = digits[-1] if digits else None
-    return any(four == last_four for four, _ in DBS_SUPPLEMENTARY_CARDHOLDER_MAP)
 
 
 def by_card(statement: ParsedStatement) -> list[ParsedStatement]:
@@ -357,9 +354,11 @@ def by_card(statement: ParsedStatement) -> list[ParsedStatement]:
     section that prints both its previous balance and its TOTAL, with
     that card's rows and its balances (signed as the household sees them:
     owed negative), closing on the statement date; and, when anything is
-    left, the rest as one statement with no balance, as before. A section
-    split by cardholder (_split_by_cardholder) is always in the rest. A
-    statement with no section that states its balances is returned as it is.
+    left, the rest as one statement with no balance, as before. A card split
+    by cardholder is one statement whose first account carries the balance
+    and whose rows keep each cardholder's account (card_balance.py). A
+    section _split_by_cardholder refuses is always in the rest. A statement
+    with no section that states its balances is returned as it is.
     """
     try:
         date.fromisoformat(statement.statement_date)
@@ -373,21 +372,22 @@ def by_card(statement: ParsedStatement) -> list[ParsedStatement]:
     if not stated:
         return [statement]
 
-    split_off = {section["card"] for section in stated}
-    cards = [
-        ParsedStatement(
+    cards = []
+    split_off: set[str] = set()
+    for section in stated:
+        own = _own_accounts(section)
+        split_off |= set(own)
+        cards.append(ParsedStatement(
             statement_type=statement.statement_type,
             statement_date=statement.statement_date,
-            accounts=[section["card"]],
-            transactions=[tx for tx in statement.transactions if tx.card_info == section["card"]],
+            accounts=own,
+            transactions=[tx for tx in statement.transactions if tx.card_info in own],
             filename=statement.filename,
             opening_minor=-section["previous"],
             closing_minor=-section["total"],
             closing_date=statement.statement_date,
             currency=statement.currency,
-        )
-        for section in stated
-    ]
+        ))
     rest_rows = [tx for tx in statement.transactions if tx.card_info not in split_off]
     rest_accounts = [name for name in statement.accounts if name not in split_off]
     if rest_rows or rest_accounts:
@@ -398,7 +398,7 @@ def by_card(statement: ParsedStatement) -> list[ParsedStatement]:
             transactions=rest_rows,
             filename=statement.filename,
             currency=statement.currency,
-            card_sections=[s for s in statement.card_sections if s["card"] not in split_off],
+            card_sections=[s for s in statement.card_sections if s not in stated],
         ))
     return cards
 

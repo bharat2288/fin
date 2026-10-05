@@ -114,6 +114,24 @@ def ensure_account(
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
+def ensure_named_account(
+    conn: sqlite3.Connection, name: str, stmt_type: str, currency: str = "SGD",
+) -> int:
+    """The account of exactly this name, or a new one: for an account a rule
+    names (a cardholder's account on a card split by cardholder), which a
+    match by last four could take for another. Does not commit."""
+    existing = conn.execute("SELECT id FROM accounts WHERE name = ?", (name,)).fetchone()
+    if existing:
+        return existing[0]
+    account_kind.checked_kind(stmt_type)
+    all_digits = re.sub(r"\D", "", name)
+    conn.execute(
+        "INSERT INTO accounts (name, short_name, type, last_four, currency) VALUES (?, ?, ?, ?, ?)",
+        (name, name, stmt_type, all_digits[-4:] if len(all_digits) >= 4 else None, currency),
+    )
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
 def _free_day_in_month(conn: sqlite3.Connection, account_id: int, month: str) -> str:
     """The first day of a month (YYYY-MM) the account holds no record for."""
     taken = {r[0] for r in conn.execute(

@@ -18,6 +18,7 @@ fin_upload.py       ← Upload command: sends a folder of statements to fin's im
 schema.sql          ← SQLite schema (source of truth)
 parsers.py          ← Statement parser orchestrator
 parse_dbs.py        ← DBS PDF/CSV parser
+card_balance.py     ← A card split by cardholder held as one balance (the Vantage card)
 parse_citi_csv.py   ← Citi CSV parser
 parse_uob.py        ← UOB PDF parser
 seed_mock_data.py   ← Demo data generator (for GitHub)

@@ -8,6 +8,11 @@ owed negative. A row's amount is positive for money out.
 
     bank, card   the anchor less the account's own rows since, each row
                  counted on its day in the statement it printed on (ROW_DAY)
+    card split   (the DBS Vantage card, card_balance.py) one balance, on the
+    by holder    main cardholder's account: its anchor less the rows of every
+                 cardholder's account since. A cardholder's account that is
+                 part of it shows no balance of its own and is not left out:
+                 its line says which balance counts it, once
     bank with    (Home Reno, a fixed deposit: no statement fin imports) the
     no statement supplied figure plus the transfer and movement rows naming
                  it since, on the household's accounts in its currency: money
@@ -52,6 +57,7 @@ from datetime import date, timedelta
 import account_kind
 import anchors
 import book_type
+import card_balance
 import flow
 import loan_interest
 import money
@@ -152,13 +158,16 @@ def _anchor_before(conn: sqlite3.Connection, account_id: int, on: str, inclusive
 
 
 def _own_rows(conn: sqlite3.Connection, account_id: int, after: str, upto: str) -> tuple[int, int]:
-    """How many rows the account holds that count after one day up to
-    another (ROW_DAY), and what they add up to."""
+    """How many rows move the account's balance that count after one day up
+    to another (ROW_DAY), and what they add up to: its own, and on a card
+    split by cardholder every cardholder's account's (card_balance.py)."""
+    members = card_balance.members(conn, account_id)
+    held = ", ".join("?" for _ in members)
     row = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(t.amount_minor), 0) FROM transactions t "
         "JOIN statements s ON t.statement_id = s.id "
-        f"WHERE s.account_id = ? AND {ROW_DAY} > ? AND {ROW_DAY} <= ?",
-        (account_id, after, upto),
+        f"WHERE s.account_id IN ({held}) AND {ROW_DAY} > ? AND {ROW_DAY} <= ?",
+        (*members, after, upto),
     ).fetchone()
     return row[0], row[1]
 
@@ -303,6 +312,9 @@ def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -
     kind = account["type"]
     currency = account["currency"] or TOTAL_CURRENCY
     upto = as_at.isoformat()
+    whole = card_balance.part_of_ids(conn).get(account["id"])
+    if whole is not None:
+        return _part_line(conn, account, whole, currency, name_of)
     anchor = _anchor_before(conn, account["id"], upto, inclusive=True)
     line = {
         "account_id": account["id"],
@@ -334,6 +346,31 @@ def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -
         since=since if count else None,
     )
     return line
+
+
+def _part_line(conn: sqlite3.Connection, account, whole: int, currency: str, name_of) -> dict:
+    """The line of a cardholder's account that is part of its card's one
+    balance: no balance of its own (any anchor on it is not read), counted in
+    the balance account's line, and never left out."""
+    whole_name = conn.execute("SELECT name FROM accounts WHERE id = ?", (whole,)).fetchone()[0]
+    return {
+        "account_id": account["id"],
+        "name": name_of(account["name"]),
+        "kind": account["type"],
+        "currency": currency,
+        "balance_minor": None,
+        "balance": f"counted in {name_of(whole_name)}",
+        "value_minor": None,
+        "value": None,
+        "rate": None,
+        "rests_on": None,
+        "rows_since": 0,
+        "since": None,
+        "check": None,
+        "in_total": False,
+        "left_out": None,
+        "counted_in": whole,
+    }
 
 
 def _valued(conn: sqlite3.Connection, balance: int, currency: str, upto: str) -> dict:
@@ -594,7 +631,7 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
             "total": anchors.format_amount(total, TOTAL_CURRENCY),
             "left_out": [
                 {"name": line["name"], "why": line["left_out"]}
-                for line in lines if not line["in_total"]
+                for line in lines if not line["in_total"] and not line.get("counted_in")
             ],
         })
 

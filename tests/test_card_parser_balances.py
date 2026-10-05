@@ -1,7 +1,8 @@
 """DBS and UOB card statements hand over each card's previous balance and its
 closing balance (M1: a DBS card's TOTAL, a UOB card's sub-total), so the card
-ties and anchors like any statement with balances. A DBS card whose section is split by cardholder (the Vantage card;
-ruling 3 pending) hands over none and is filed exactly as before.
+ties and anchors like any statement with balances. A DBS card split by
+cardholder (the Vantage card) hands over one balance for the card, its rows
+staying on each cardholder's account (ruling 3, amended 2026-10-05).
 
 Synthetic text shaped like pdfplumber's output: invented card numbers,
 holders, merchants and figures; no PDF is on disk. Whole cents; owed is
@@ -12,6 +13,7 @@ import io
 
 import pytest
 
+import card_balance
 import parse_dbs
 import parse_uob
 import parsers
@@ -135,7 +137,7 @@ def test_the_grand_total_for_all_cards_is_not_a_cards_total(monkeypatch):
     assert parse_dbs.by_card(whole) == [whole]
 
 
-# --- a card split by cardholder: ruling 3 pending -------------------------------
+# --- a card split by cardholder: one balance (ruling 3, amended 2026-10-05) -----
 
 SPLIT = "\n".join([
     "DBS Credit Cards",
@@ -143,68 +145,81 @@ SPLIT = "\n".join([
     "15 Aug 2026",
     "DBS SAMPLE INFINITE CARD NO.: 0000 0000 0000 9999",
     "PREVIOUS BALANCE 300.00",
+    # the card's own rows, before the first cardholder's block
+    "20 JUL BILL PAYMENT - DBS INTERNET/WIRELESS 250.00 CR",
+    "21 JUL INTER ACCOUNT TRANSFER 50.00 CR",
     "NEW TRANSACTIONS SAMPLE HOLDER",
-    "20 JUL PAYMENT - DBS INTERNET/WIRELESS 300.00 CR",
     "28 JUL SAMPLE MERCHANT ONE 40.00",
+    "SUB-TOTAL: 40.00",
     "NEW TRANSACTIONS OTHER HOLDER",
     "02 AUG SAMPLE MERCHANT TWO 60.00",
     "SUB-TOTAL: 60.00",
+    # and after the last SUB-TOTAL
     "05 AUG SAMPLE ADMIN FEE 10.00",
-    "TOTAL: 110.00",
+    "05 AUG GST 0.90",
+    "TOTAL: 110.90",
     "DBS SAMPLE VISA CARD NO.: 0000 0000 0000 1111",
     "PREVIOUS BALANCE 0.00",
     "25 JUL SAMPLE MERCHANT THREE 12.30",
     "SUB-TOTAL: 12.30",
     "TOTAL: 12.30",
-    "GRAND TOTAL FOR ALL CARD ACCOUNTS: 122.30",
+    "GRAND TOTAL FOR ALL CARD ACCOUNTS: 123.20",
 ])
 MAIN, SUPPLEMENTARY = "Sample Infinite Card 9999", "Sample Infinite Card 9999 (OH)"
 
 
 @pytest.fixture
 def holders(monkeypatch):
-    monkeypatch.setattr(parse_dbs, "DBS_SUPPLEMENTARY_CARDHOLDER_MAP", {
+    monkeypatch.setattr(card_balance, "CARDHOLDER_ACCOUNTS", {
         ("9999", "SAMPLE HOLDER"): MAIN,
         ("9999", "OTHER HOLDER"): SUPPLEMENTARY,
     })
+    monkeypatch.setattr(card_balance, "BALANCE_ACCOUNTS", {"9999": MAIN})
 
 
-def test_a_card_split_by_cardholder_hands_over_no_balance_and_is_filed_as_before(monkeypatch, holders):
-    whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement, [SPLIT])
-    before = [(t.date, t.description, t.amount_minor, t.card_info) for t in whole.transactions
-              if t.card_info != VISA]
-
-    visa, rest = parse_dbs.by_card(whole)
-
-    assert visa.accounts == [VISA] and tie.check(visa)["difference_minor"] == 0
-    # The split card: no balance, its rows filed by cardholder as before.
-    assert (rest.opening_minor, rest.closing_minor) == (None, None)
-    assert [(t.date, t.description, t.amount_minor, t.card_info) for t in rest.transactions] == before
-    assert {t.card_info for t in rest.transactions} == {MAIN, SUPPLEMENTARY}
-    assert VISA not in rest.accounts and {MAIN, SUPPLEMENTARY} <= set(rest.accounts)
-
-
-def test_switched_to_one_bill_the_split_card_ties_on_its_previous_balance_and_total(monkeypatch, holders):
-    # Ruling 3 pending: the switch is off. Switched on, every cardholder's
-    # rows, and the fee after the last SUB-TOTAL, are the card's own, and the
-    # card hands over one balance.
-    monkeypatch.setattr(parse_dbs, "SPLIT_CARD_ONE_BALANCE", True)
+def test_a_card_split_by_cardholder_ties_as_one_bill_with_its_rows_on_each_holders_account(monkeypatch, holders):
     whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement, [SPLIT])
 
     card, visa = parse_dbs.by_card(whole)
 
-    assert card.accounts == ["DBS SAMPLE INFINITE 9999"]
-    assert [t.amount_minor for t in card.transactions] == [-30_000, 4_000, 6_000, 1_000]
-    assert (card.opening_minor, card.closing_minor) == (-30_000, -11_000)
+    # One statement: the balance on the main cardholder's account, first.
+    assert card.accounts == [MAIN, SUPPLEMENTARY]
+    assert [(t.description, t.amount_minor, t.card_info) for t in card.transactions] == [
+        ("BILL PAYMENT - DBS INTERNET/WIRELESS", -25_000, MAIN),
+        ("INTER ACCOUNT TRANSFER", -5_000, MAIN),
+        ("SAMPLE MERCHANT ONE", 4_000, MAIN),
+        ("SAMPLE MERCHANT TWO", 6_000, SUPPLEMENTARY),
+        ("SAMPLE ADMIN FEE", 1_000, MAIN),
+        ("GST", 90, MAIN),
+    ]
+    # PREVIOUS BALANCE plus both cardholders' rows and the card's own is the TOTAL.
+    assert (card.opening_minor, card.closing_minor) == (-30_000, -11_090)
     assert tie.check(card)["difference_minor"] == 0
     assert visa.accounts == [VISA] and tie.check(visa)["difference_minor"] == 0
+    # The card header is no third account.
+    assert "DBS SAMPLE INFINITE 9999" not in whole.accounts
 
 
-def test_a_statement_holding_only_the_split_card_is_returned_unchanged(monkeypatch, holders):
-    only = SPLIT.split("DBS SAMPLE VISA")[0].rstrip()
-    whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement, [only])
+def test_a_split_card_with_a_row_missing_does_not_tie(monkeypatch, holders):
+    whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement,
+                  [SPLIT.replace("02 AUG SAMPLE MERCHANT TWO 60.00\n", "")])
 
-    assert parse_dbs.by_card(whole) == [whole]
+    card, _visa = parse_dbs.by_card(whole)
+
+    with pytest.raises(tie.DoesNotTie) as excinfo:
+        tie.check(card)
+    assert excinfo.value.figures["difference_minor"] == 6_000
+
+
+def test_a_split_card_with_no_balance_account_declared_hands_over_none(monkeypatch, holders):
+    monkeypatch.setattr(card_balance, "BALANCE_ACCOUNTS", {})
+    whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement, [SPLIT])
+
+    visa, rest = parse_dbs.by_card(whole)
+
+    assert visa.accounts == [VISA]
+    assert (rest.opening_minor, rest.closing_minor) == (None, None)
+    assert {t.card_info for t in rest.transactions} == {MAIN, SUPPLEMENTARY, "DBS SAMPLE INFINITE 9999"}
 
 
 # --- UOB card -------------------------------------------------------------------
@@ -289,18 +304,20 @@ def test_a_dbs_card_statement_imports_and_anchors_each_card(client, monkeypatch)
     assert held == {VISA: ("2026-08-15", -1_680), OTHER: ("2026-08-15", -2_000)}
 
 
-@pytest.mark.parametrize("section", [
+@pytest.mark.parametrize("section, rows", [
     # a month in which the split card printed no row
-    ["PREVIOUS BALANCE 500.00", "TOTAL: 500.00"],
-    # a holder the map does not name: the rows fall to the card itself
-    ["PREVIOUS BALANCE 500.00", "NEW TRANSACTIONS UNNAMED HOLDER",
-     "02 AUG SAMPLE MERCHANT TWO 60.00", "SUB-TOTAL: 60.00", "TOTAL: 560.00"],
+    (["PREVIOUS BALANCE 500.00", "TOTAL: 500.00"], []),
+    # a holder the map does not name: the rows are the card's own
+    (["PREVIOUS BALANCE 500.00", "NEW TRANSACTIONS UNNAMED HOLDER",
+      "02 AUG SAMPLE MERCHANT TWO 60.00", "SUB-TOTAL: 60.00", "TOTAL: 560.00"], [(6_000, MAIN)]),
 ])
-def test_the_split_card_hands_over_no_balance_whatever_its_rows(monkeypatch, holders, section):
+def test_the_split_card_hands_over_its_one_balance_whatever_its_rows(monkeypatch, holders, section, rows):
     text = "\n".join(["DBS Credit Cards", "STATEMENT DATE", "15 Aug 2026",
                       "DBS SAMPLE INFINITE CARD NO.: 0000 0000 0000 9999", *section])
     whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement, [text])
 
     (only,) = parse_dbs.by_card(whole)
 
-    assert (only.opening_minor, only.closing_minor) == (None, None)
+    assert only.accounts[0] == MAIN
+    assert [(t.amount_minor, t.card_info) for t in only.transactions] == rows
+    assert tie.check(only)["difference_minor"] == 0

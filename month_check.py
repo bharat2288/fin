@@ -67,6 +67,7 @@ import account_kind
 import anchors
 import balance_sheet
 import book_type
+import card_balance
 import flow
 import loan_interest
 import money
@@ -87,7 +88,8 @@ def _rows_by_account(conn: sqlite3.Connection, after: str, upto: str) -> dict:
     """The household's income and spending on each of the accounts net worth
     is made of, dated after one day up to another, in whole minor units of the
     account's currency, both as positive figures for money in and money out:
-    {account id: (income, spending)}."""
+    {account id: (income, spending)}. A cardholder's account that is part of
+    its card's one balance (card_balance.py) counts as that balance's account."""
     income = ", ".join("?" for _ in INCOME_FLOWS)
     spending = ", ".join("?" for _ in SPENDING_FLOWS)
     rows = conn.execute(
@@ -106,7 +108,13 @@ def _rows_by_account(conn: sqlite3.Connection, after: str, upto: str) -> dict:
             account_kind.HOUSEHOLD, *account_kind.STATEMENT_KINDS, after, upto,
         ),
     ).fetchall()
-    return {r[0]: (r[1], r[2]) for r in rows}
+    parts = card_balance.part_of_ids(conn)
+    figures: dict = {}
+    for acct, income_minor, spending_minor in rows:
+        acct = parts.get(acct, acct)
+        held_income, held_spending = figures.get(acct, (0, 0))
+        figures[acct] = (held_income + income_minor, held_spending + spending_minor)
+    return figures
 
 
 # The flows of a row that move money between two lines of net worth, and so
@@ -168,7 +176,8 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
             touched.add(source)
 
     names = dict(conn.execute("SELECT id, name FROM accounts"))
-    for acct in sorted(in_check):
+    # An account that is part of another's balance has no line of its own.
+    for acct in sorted(a for a in in_check if a in lines):
         line = lines[acct]
         kind, currency = line["kind"], line["currency"]
         if kind in ("loan", "holding"):
@@ -233,9 +242,13 @@ def _conversions(conn: sqlite3.Connection, acct: int, after: str, upto: str,
     return sum(here[o] for o in paired), sum(there[o] for o in paired)
 
 
-def _line_values(shown: dict) -> dict:
-    """Each line of a sheet by its account id."""
-    return {line["account_id"]: line for section in shown["sections"] for line in section["lines"]}
+def _line_values(shown: dict, parts: dict | None = None) -> dict:
+    """Each line of a sheet by its account id, less the lines of accounts
+    that are part of another's balance."""
+    return {
+        line["account_id"]: line for section in shown["sections"] for line in section["lines"]
+        if line["account_id"] not in (parts or {})
+    }
 
 
 def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda name: name,
@@ -248,12 +261,16 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
     start = as_at.replace(day=1) - timedelta(days=1)
     after, upto = start.isoformat(), as_at.isoformat()
 
-    end_lines = _line_values(end_sheet)
+    # A cardholder's account that is part of its card's one balance is not a
+    # line of its own here: its rows are the balance account's
+    # (card_balance.py), in the check or out of it with that account.
+    parts = card_balance.part_of_ids(conn)
+    end_lines = _line_values(end_sheet, parts)
     if start < balance_sheet.START:
         start_sheet = start_lines = None
     else:
         start_sheet = balance_sheet.sheet(conn, f"{start:%Y-%m}", name_of)
-        start_lines = _line_values(start_sheet)
+        start_lines = _line_values(start_sheet, parts)
 
     # The accounts in the check: those in net worth at both ends (M8). An
     # account with no balance at one end (a card with no statement balance,
@@ -292,7 +309,9 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
 
     # Money moved between an account in the check and one left out of it:
     # it changes the checked net worth and is neither income nor spending.
-    outside, touched = _crossing(conn, after, upto, in_check, out_of_check, end_lines)
+    with_parts = in_check | {part for part, whole in parts.items() if whole in in_check}
+    outside, touched = _crossing(conn, after, upto, with_parts, out_of_check, end_lines)
+    touched = {parts.get(acct, acct) for acct in touched}
 
     # Accounts in another currency: in the check at the month-end rate, or
     # left out of both sides.

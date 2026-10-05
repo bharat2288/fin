@@ -24,6 +24,7 @@ import anchors
 import backup
 import balance_sheet
 import book_type
+import card_balance
 import db
 import flow
 import history
@@ -2361,8 +2362,14 @@ def api_import_upload():
 
             for tx in stmt.transactions:
                 account = tx.card_info or stmt.accounts[0] if stmt.accounts else "Unknown"
+                group_account = account
                 if statement_account is not None:
-                    account = statement_account
+                    # A statement's rows are checked together, in its one
+                    # group. A card split by cardholder (card_balance.py)
+                    # keeps each row on its cardholder's account inside it.
+                    group_account = statement_account
+                    if card_balance.part_of_names().get(tx.card_info) != statement_account:
+                        account = statement_account
 
                 # Merchant rules first; for bank statements, then the PayNow wording
                 found = _label_for(conn, tx.description, tx.amount_minor)
@@ -2429,9 +2436,7 @@ def api_import_upload():
                     "statement": statement_ref,
                 }
 
-                if account not in all_groups:
-                    all_groups[account] = []
-                all_groups[account].append(entry)
+                all_groups.setdefault(group_account, []).append(entry)
 
     # Build response
     groups = []
@@ -2650,7 +2655,7 @@ def api_import_confirm():
                     continue
 
                 # Ensure account exists
-                from ingest import ensure_account, ensure_statement
+                from ingest import ensure_account, ensure_named_account, ensure_statement
                 stmt_type = _kind_from_account_name(account_name)
 
                 account_id = ensure_account(conn, account_name, stmt_type, currency_of[id(group)])
@@ -2663,26 +2668,49 @@ def api_import_confirm():
                 # from a source with no balance goes on a record for its own
                 # calendar month, so the coverage matrix reflects each month
                 # (a multi-month CSV, e.g. Citi Oct-Dec, makes three).
-                filename = f"import_{import_id}_{account_name[:30]}"
-                printed_ids = [
-                    ensure_statement(conn, account_id, line["closing_date"], filename, printed=True)[0]
-                    for line in statement_lines
-                ]
-                month_stmt_ids: dict[str, int] = {}
+                #
+                # A card split by cardholder (card_balance.py) is one group:
+                # a row naming a cardholder's account that is part of this
+                # one's balance is filed on that account, under its own record
+                # of the same printed statement. Any other row is this one's.
+                parts = card_balance.part_of_names()
+
+                def target_name(tx) -> str:
+                    named = tx.get("account")
+                    return named if parts.get(named) == account_name else account_name
+
+                account_ids = {account_name: account_id}
+                for name in sorted({target_name(tx) for tx in active_txns} - {account_name}):
+                    account_ids[name] = ensure_named_account(
+                        conn, name, _kind_from_account_name(name), currency_of[id(group)]
+                    )
+                printed_ids = {
+                    name: [
+                        ensure_statement(
+                            conn, held_id, line["closing_date"], f"import_{import_id}_{name[:30]}", printed=True,
+                        )[0]
+                        for line in statement_lines
+                    ]
+                    for name, held_id in account_ids.items()
+                }
+                month_stmt_ids: dict[tuple[str, str], int] = {}
                 for tx in active_txns:
                     if tx.get("statement") is not None:
                         continue
                     ym = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
-                    if ym not in month_stmt_ids:
-                        stmt_date = f"{ym}-01"
-                        sid, _ = ensure_statement(conn, account_id, stmt_date, filename)
-                        month_stmt_ids[ym] = sid
+                    name = target_name(tx)
+                    if (name, ym) not in month_stmt_ids:
+                        sid, _ = ensure_statement(
+                            conn, account_ids[name], f"{ym}-01", f"import_{import_id}_{name[:30]}"
+                        )
+                        month_stmt_ids[(name, ym)] = sid
 
                 def statement_of(tx) -> int:
+                    name = target_name(tx)
                     if tx.get("statement") is not None:
-                        return printed_ids[tx["statement"]]
+                        return printed_ids[name][tx["statement"]]
                     ym = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
-                    return month_stmt_ids[ym]
+                    return month_stmt_ids[(name, ym)]
 
                 # --- Deduplication ---
                 # Group import transactions by (date, description, amount) to handle
@@ -2694,13 +2722,13 @@ def api_import_confirm():
                 import_counts = Counter()
                 import_by_key = {}  # key -> [list of tx dicts]
                 for tx in active_txns:
-                    key = (tx["date"], tx["description"], minor_of[id(tx)])
+                    key = (account_ids[target_name(tx)], tx["date"], tx["description"], minor_of[id(tx)])
                     import_counts[key] += 1
                     import_by_key.setdefault(key, []).append(tx)
 
                 duplicates_skipped = 0
                 for key, import_count in import_counts.items():
-                    date_val, desc_val, amount_val = key
+                    row_account_id, date_val, desc_val, amount_val = key
 
                     # Existing matches for this account, and whether each is
                     # already filed under a printed statement.
@@ -2710,7 +2738,7 @@ def api_import_confirm():
                            WHERE s.account_id = ?
                              AND t.date = ? AND t.description = ? AND t.amount_minor = ?
                            ORDER BY t.id""",
-                        (account_id, date_val, desc_val, amount_val),
+                        (row_account_id, date_val, desc_val, amount_val),
                     ).fetchall()
                     existing = len(held_rows)
 

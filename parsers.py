@@ -125,7 +125,10 @@ def handle_vantage_split(statements: list) -> list:
                     else:
                         mk_txns.append(tx)
 
-            # Create split statements
+            # Create split statements, on the same accounts the PDF files
+            # each cardholder's rows on (card_balance.py): the main
+            # cardholder's on the account the card's one balance sits on,
+            # the other's on theirs.
             combined_name = by_card[combined_card][0].accounts[0]
             mk_name = combined_name.replace(
                 combined_name.split()[-1],
@@ -135,6 +138,21 @@ def handle_vantage_split(statements: list) -> list:
                 combined_name.split()[-1],
                 combined_name.split()[-1] + " (BS)",
             )
+            import re
+
+            import card_balance
+
+            fours = re.findall(r"\d{4}", combined_name)
+            four = fours[-1] if fours else None
+            balance_name = card_balance.balance_account(four)
+            others = [
+                part for part, whole in card_balance.part_of_names().items()
+                if whole == balance_name and any(
+                    account == part for (f, _), account in card_balance.CARDHOLDER_ACCOUNTS.items() if f == four
+                )
+            ]
+            if balance_name and len(others) == 1:
+                bs_name, mk_name = balance_name, others[0]
 
             for tx in mk_txns:
                 tx.card_info = mk_name
