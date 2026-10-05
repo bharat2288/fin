@@ -219,3 +219,20 @@ def test_a_dbs_card_statement_imports_and_anchors_each_card(client, monkeypatch)
     assert resp.get_json()["anchors_written"] == 2
     held = {a["account_name"]: (a["date"], a["amount_minor"]) for a in client.get("/api/anchors").get_json()}
     assert held == {VISA: ("2026-08-15", -1_680), OTHER: ("2026-08-15", -2_000)}
+
+
+@pytest.mark.parametrize("section", [
+    # a month in which the split card printed no row
+    ["PREVIOUS BALANCE 500.00", "SUB-TOTAL: 500.00"],
+    # a holder the map does not name: the rows fall to the card itself
+    ["PREVIOUS BALANCE 500.00", "NEW TRANSACTIONS UNNAMED HOLDER",
+     "02 AUG SAMPLE MERCHANT TWO 60.00", "SUB-TOTAL: 560.00"],
+])
+def test_the_split_card_hands_over_no_balance_whatever_its_rows(monkeypatch, holders, section):
+    text = "\n".join(["DBS Credit Cards", "STATEMENT DATE", "15 Aug 2026",
+                      "DBS SAMPLE INFINITE CARD NO.: 0000 0000 0000 9999", *section])
+    whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement, [text])
+
+    (only,) = parse_dbs.by_card(whole)
+
+    assert (only.opening_minor, only.closing_minor) == (None, None)

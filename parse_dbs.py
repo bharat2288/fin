@@ -294,9 +294,11 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
 
 
 def _split_by_cardholder(section: dict) -> bool:
-    """Whether a card section's rows went to more than its own card's account:
-    the DBS Vantage card, whose two cardholders' subsections are filed to two
-    accounts (DBS_SUPPLEMENTARY_CARDHOLDER_MAP) under one statement balance.
+    """Whether a card section is split by cardholder: a card whose last four
+    are in DBS_SUPPLEMENTARY_CARDHOLDER_MAP (the DBS Vantage card, whose two
+    cardholders' subsections are filed to two accounts under one statement
+    balance), or any section whose rows went to more than its own card's
+    account.
 
     Ruling 3 (how that bill is held) is pending, so such a section hands over
     no balance and its rows are filed exactly as before: by cardholder, not
@@ -311,6 +313,12 @@ def _split_by_cardholder(section: dict) -> bool:
         account read as part of the main card's balance), which the balance
         sheet does not have yet.
     """
+    # Decided on the card, not on where this month's rows went: a month with
+    # no rows, or with a holder the map does not name, is still that card.
+    digits = re.findall(r"\d{4}", section["card"])
+    last_four = digits[-1] if digits else None
+    if any(four == last_four for four, _ in DBS_SUPPLEMENTARY_CARDHOLDER_MAP):
+        return True
     return any(account != section["card"] for account in section["accounts"])
 
 
