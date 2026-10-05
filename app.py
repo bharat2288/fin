@@ -29,11 +29,13 @@ import db
 import flow
 import history
 import loan_interest
+import mcp_tools
 import money
 import month_check
 import pairing
 import rates
 import review
+import screens
 import suggest
 import tie
 from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
@@ -302,6 +304,7 @@ def _tie_line(conn, stmt, figures: dict) -> dict:
     return {
         "file": stmt.filename,
         "account": mask_card_number(account),
+        "currency": currency,
         "opening_date": stmt.opening_date,
         "closing_date": stmt.closing_date,
         "status": "ties" if figures["difference_minor"] == 0 else "off",
@@ -311,6 +314,21 @@ def _tie_line(conn, stmt, figures: dict) -> dict:
         "closing": anchors.format_amount(figures["closing_minor"], currency),
         "difference": anchors.format_amount(abs(figures["difference_minor"]), currency),
     }
+
+
+def _record_refused(conn, stmt, line: dict) -> None:
+    """Keep a statement refused at upload (screens.py), and commit."""
+    from ingest import find_account
+    account = stmt.accounts[0] if stmt.accounts else "Unknown"
+    screens.record_refused(
+        conn,
+        account_name=mask_card_number(account),
+        account_id=find_account(conn, account),
+        statement_date=stmt.closing_date or stmt.statement_date,
+        currency=line["currency"],
+        figures=line,
+    )
+    conn.commit()
 
 
 class AnchorRefused(Exception):
@@ -547,7 +565,26 @@ def api_history():
     except ValueError:
         return jsonify({"error": "limit and before must be whole numbers"}), 400
     with get_db() as conn:
-        return jsonify({"entries": history.entries(conn, limit, before)})
+        shown = history.entries(conn, limit, before)
+        for e in shown:
+            e["asked_first"] = _asked_first(e)
+        if request.args.get("blockers") == "1":
+            # What would refuse each entry's undo, named, so the list can say
+            # so before the operator taps it.
+            for e in shown:
+                later = history.blocker(conn, e["id"]) if e["undone_by"] is None else None
+                e["blocked_by"] = None if later is None else {
+                    "id": later["id"], "summary": later["summary"], "at": later["at"],
+                    "via": later["via"], "actor": later["actor"],
+                }
+        return jsonify({"entries": shown, "many_rows": mcp_tools.MANY_ROWS,
+                        **screens.since_looked(conn)})
+
+
+def _asked_first(entry: dict) -> bool:
+    """A chat change over MANY_ROWS rows stands only when the operator said
+    yes to its count in chat first (mcp_tools.call puts any other back)."""
+    return entry["via"] == history.VIA_CHAT and entry["rows"] > mcp_tools.MANY_ROWS
 
 
 @app.route("/api/history/<int:entry_id>")
@@ -559,6 +596,7 @@ def api_history_entry(entry_id: int):
         if shown is None:
             return jsonify({"error": "no such change"}), 404
         shown["blocked_by"] = history.blocker(conn, entry_id) if shown["undone_by"] is None else None
+        shown["asked_first"] = _asked_first(shown)
     return jsonify(shown)
 
 
@@ -591,6 +629,99 @@ def api_history_undo(entry_id: int):
 
 
 _RULE_CACHE_TABLES = frozenset({"merchant_rules", "services"})
+
+
+# ---------------------------------------------------------------------------
+# What the screens keep (screens.py): the "Claude may write" switch, where the
+# operator last looked in the history, and statements refused at upload.
+# None is a change to the book: these writes leave no history entry.
+# ---------------------------------------------------------------------------
+
+def _from_chat() -> bool:
+    return _caller()[0] == history.VIA_CHAT
+
+
+_SCREENS_ONLY = "only fin's own screens can do that; nothing was changed"
+
+
+@app.route("/api/settings")
+def api_settings():
+    """The "Claude may write" switch and the history mark Home counts from."""
+    with get_db() as conn:
+        return jsonify({"claude_may_write": screens.claude_may_write(conn), **screens.since_looked(conn)})
+
+
+@app.route("/api/settings/claude-write", methods=["PUT"])
+def api_settings_claude_write():
+    """Switch Claude's writes on or off. Body: on (true or false). Only from
+    fin's own screens: a chat client can never set it."""
+    if _from_chat():
+        return jsonify({"error": _SCREENS_ONLY}), 403
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get("on"), bool):
+        return jsonify({"error": "on must be true or false"}), 400
+    with get_db() as conn:
+        screens.set_claude_may_write(conn, data["on"])
+        return jsonify({"claude_may_write": screens.claude_may_write(conn)})
+
+
+@app.route("/api/changes/looked", methods=["POST"])
+def api_changes_looked():
+    """The operator looked: Recent changes was opened, or "Looks right" was
+    tapped on Home. Body: upto, the newest entry they saw (optional; the
+    newest entry when left out). The mark never moves back."""
+    if _from_chat():
+        return jsonify({"error": _SCREENS_ONLY}), 403
+    data = request.get_json(silent=True) or {}
+    upto = data.get("upto")
+    if upto is not None and (isinstance(upto, bool) or not isinstance(upto, int)):
+        return jsonify({"error": "upto must be a change number"}), 400
+    with get_db() as conn:
+        screens.mark_looked(conn, upto)
+        return jsonify(screens.since_looked(conn))
+
+
+@app.route("/api/statements/refused")
+def api_statements_refused():
+    """Statements refused at upload that still stand (no file that ties has
+    been imported for the same account and day), newest first; ?account_id=
+    for one account's. Each with its tie line in whole minor units and
+    whether it was set aside ("Known, leave it")."""
+    account_id = request.args.get("account_id", type=int)
+    with get_db() as conn:
+        return jsonify({"refused": screens.refused(conn, account_id)})
+
+
+@app.route("/api/statements/refused/<int:refused_id>/set-aside", methods=["POST"])
+def api_statements_refused_set_aside(refused_id: int):
+    """"Known, leave it": off Home and the queue's top, still marked refused
+    on its account. Body: aside (default true); false brings it back."""
+    if _from_chat():
+        return jsonify({"error": _SCREENS_ONLY}), 403
+    data = request.get_json(silent=True) or {}
+    aside = data.get("aside", True)
+    if not isinstance(aside, bool):
+        return jsonify({"error": "aside must be true or false"}), 400
+    with get_db() as conn:
+        if not screens.set_aside(conn, refused_id, aside):
+            return jsonify({"error": "no such refused statement"}), 404
+    return jsonify({"ok": True, "id": refused_id, "set_aside": aside})
+
+
+@app.route("/api/accounts/<int:acct_id>/ties")
+def api_account_ties(acct_id: int):
+    """One account's tie lines, newest first: for each statement balance
+    after the first, the balance before it, what the rows between add up to,
+    the balance stated and the difference (zero when it ties)."""
+    with get_db() as conn:
+        account = conn.execute("SELECT * FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+        if account is None:
+            return jsonify({"error": "no such account"}), 404
+        return jsonify({
+            "account_id": acct_id,
+            "currency": account["currency"] or "SGD",
+            "ties": balance_sheet.tie_lines(conn, account),
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -1673,6 +1804,11 @@ def api_transactions():
         filters += " AND COALESCE(t.flow_type, 'expense') = ?"
         params.append(flow_filter)
 
+    # look=mixed: rows of a mixed merchant (looked at each time) that nobody
+    # has set by hand yet: the queue's "is this type right?" items.
+    if request.args.get("look") == "mixed":
+        filters += " AND COALESCE(svc.review_each_time, 0) = 1 AND COALESCE(t.cat_source, 'auto') != 'manual'"
+
     # Type filter (from chart selection or multi-select dropdown): type names,
     # a parent taking its sub-types with it. __untyped__ is the list of rows
     # with no type, which holds spending and refund rows only: a transfer, a
@@ -1762,7 +1898,7 @@ def api_transactions():
                 t.is_one_off, COALESCE(t.flow_type, 'expense') as flow_type, t.flow_type_manual,
                 t.notes,
                 t.other_side_id, oa.name as other_side_name,
-                a.name as account_name,
+                a.name as account_name, s.account_id,
                 COALESCE(a.currency, 'SGD') as currency,
                 t.service_id,
                 svc.name as service_name,
@@ -2319,11 +2455,11 @@ def api_import_upload():
                         _account_currency(conn, name, stmt.currency)
                     tie.check(stmt)
                 except tie.DoesNotTie as e:
-                    errors.append({
-                        "file": filename,
-                        "error": str(e),
-                        "tie": _tie_line(conn, stmt, e.figures),
-                    })
+                    line = _tie_line(conn, stmt, e.figures)
+                    errors.append({"file": filename, "error": str(e), "tie": line})
+                    # Kept so the queue and the account page say so until a
+                    # file that ties is imported (screens.py). No file name.
+                    _record_refused(conn, stmt, line)
                 except ValueError as e:
                     errors.append({"file": filename, "error": str(e)})
                 else:

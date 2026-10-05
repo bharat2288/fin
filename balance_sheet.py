@@ -676,3 +676,49 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
             + "; ".join(f"{entry['name']} ({entry['why']})" for entry in left_out)
         ) if left_out else None,
     }
+
+
+def tie_lines(conn: sqlite3.Connection, account) -> list[dict]:
+    """An account's tie lines, newest first, for its page: for each statement
+    balance with an anchor before it, that earlier balance, what the rows
+    between add up to (as the change they make: money out lowers it), the
+    balance stated and the difference, worked out as _check works it out.
+    A supplied figure is the fact and is never checked; it is listed with
+    `status` "your figure". The first statement balance is "not checked"."""
+    kind = account["type"]
+    held = conn.execute(
+        "SELECT date, amount, source FROM anchors WHERE account_id = ? ORDER BY date",
+        (account["id"],),
+    ).fetchall()
+    lines = []
+    earlier = None
+    for anchor in held:
+        line = {
+            "date": anchor["date"],
+            "source": anchor["source"],
+            "label": SOURCE_LABELS[anchor["source"]],
+            "closing_minor": anchor["amount"],
+            "opening_minor": None,
+            "opening_date": None,
+            "rows": None,
+            "rows_minor": None,
+            "difference_minor": None,
+        }
+        if anchor["source"] != anchors.STATEMENT or kind not in OWN_ROW_KINDS:
+            line["status"] = "your figure" if anchor["source"] == anchors.SUPPLIED else "not_checked"
+        elif earlier is None:
+            line["status"] = "not_checked"
+        else:
+            count, between = _own_rows(conn, account["id"], earlier["date"], anchor["date"])
+            difference = earlier["amount"] - between - anchor["amount"]
+            line.update(
+                opening_minor=earlier["amount"],
+                opening_date=earlier["date"],
+                rows=count,
+                rows_minor=-between,
+                difference_minor=difference,
+                status="ties" if difference == 0 else "off",
+            )
+        lines.append(line)
+        earlier = anchor
+    return list(reversed(lines))

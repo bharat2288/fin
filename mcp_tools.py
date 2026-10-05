@@ -14,6 +14,8 @@ Rulings this module carries:
   than MANY_ROWS rows runs only when the call says how many it expects:
   without that, or with a different count, it is put back and the count is
   returned, for Claude to tell the operator and ask.
+- With the "Claude may write" switch off in fin (screens.py), every write
+  tool is refused and changes nothing; reads still work. No tool sets it.
 - No tool imports a statement, changes or deletes an imported row, edits an
   account other than adding a company or a person, sends merchants to the
   type-suggestion service, runs a conversion or touches subscriptions.
@@ -33,6 +35,7 @@ from typing import Callable
 import access_gate
 import db
 import history
+import screens
 
 MANY_ROWS = 20
 
@@ -460,6 +463,15 @@ def call(name: str, args: dict | None, actor: str) -> dict:
             return {"ok": False, "error": FIXED_ERROR}
 
     with history.WRITE_LOCK:
+        # The operator's off switch (01): with it off every write is refused
+        # before anything runs, and reads go on working.
+        conn = db.get_connection()
+        try:
+            writes_on = screens.claude_may_write(conn)
+        finally:
+            conn.close()
+        if not writes_on:
+            return {"ok": False, "error": screens.WRITES_OFF}
         if name == "undo":
             conn = db.get_connection()
             try:

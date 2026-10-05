@@ -185,6 +185,39 @@ CREATE TABLE IF NOT EXISTS batch_imports (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- What the screens keep between visits (screens.py): the "Claude may write"
+-- switch and the last change the operator looked at in the history. Not a
+-- tracked table: flipping the switch or looking is not a change to the book.
+-- A new table, made empty by CREATE IF NOT EXISTS on start; no existing row
+-- is converted.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,           -- declared in screens.py
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- A statement refused at upload because its rows do not tie to its own
+-- balances (screens.py). None of its rows is written; this keeps the tie line
+-- so the queue and the account page can say so until a file that ties is
+-- imported for the same account and day. No file name is kept. Not a
+-- tracked table. A new table, made empty by CREATE IF NOT EXISTS on start;
+-- no existing row is converted.
+CREATE TABLE IF NOT EXISTS refused_statements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_name TEXT NOT NULL,     -- as the statement names it, card numbers masked
+    account_id INTEGER REFERENCES accounts(id),  -- the account it would land on; NULL = none yet
+    statement_date TEXT NOT NULL,   -- YYYY-MM-DD, its closing day
+    currency TEXT NOT NULL DEFAULT 'SGD',
+    opening_minor INTEGER NOT NULL,
+    rows_minor INTEGER NOT NULL,    -- the change its rows make to the balance (tie.figures)
+    closing_minor INTEGER NOT NULL,
+    difference_minor INTEGER NOT NULL,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    refused_at TEXT NOT NULL DEFAULT (datetime('now')),
+    set_aside_at TEXT,              -- "Known, leave it": off Home and the queue's top; still refused
+    UNIQUE (account_name, statement_date)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_transactions_statement ON transactions(statement_id);

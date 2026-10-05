@@ -1,0 +1,156 @@
+"""What fin's screens keep that is not part of the book (fin-surfaces 02).
+
+- The "Claude may write" switch (01, off switches): with it off, every chat
+  write tool is refused and reads still work. Only fin's own screens set it;
+  no chat tool can (mcp_tools has none, and the route refuses a chat caller).
+- Where the operator last looked in the change history: Home's quiet line
+  counts the chat's changes after it. It moves when Recent changes is opened
+  or "Looks right" is tapped on Home (02, ruling 7).
+- Statements refused at upload because they do not tie. Their rows are never
+  written; the record keeps the tie line so the queue and the account page say
+  so until a file that ties is imported for the same account and day. "Known,
+  leave it" sets one aside: it leaves Home and the top of the queue and stays
+  marked refused on its account (02, ruling 8).
+
+None of this is in a tracked table: flipping the switch, looking, or setting
+a refusal aside is not a change to the book and is not in the history.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+CLAUDE_MAY_WRITE = "claude_may_write"
+LAST_LOOKED = "last_looked_entry"
+KEYS = (CLAUDE_MAY_WRITE, LAST_LOOKED)
+
+# What a chat write tool says while the switch is off.
+WRITES_OFF = (
+    "the operator has switched off Claude's writes in fin; nothing was changed. "
+    "Reads still work. Only the operator can switch writes back on, in fin."
+)
+
+
+def _get(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return None if row is None else row[0]
+
+
+def _set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    if key not in KEYS:
+        raise ValueError(f"unknown setting: {key!r}")
+    conn.execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (key, value),
+    )
+    conn.commit()
+
+
+def claude_may_write(conn: sqlite3.Connection) -> bool:
+    """On unless the operator switched it off."""
+    return _get(conn, CLAUDE_MAY_WRITE) != "0"
+
+
+def set_claude_may_write(conn: sqlite3.Connection, on: bool) -> None:
+    _set(conn, CLAUDE_MAY_WRITE, "1" if on else "0")
+
+
+def last_looked(conn: sqlite3.Connection) -> int | None:
+    value = _get(conn, LAST_LOOKED)
+    return int(value) if value is not None else None
+
+
+def mark_looked(conn: sqlite3.Connection, upto: int | None = None) -> int:
+    """Move the mark to `upto`, or to the newest closed entry. It never moves
+    back: an older id leaves it where it is. Returns where it is."""
+    newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_entries WHERE open = 0").fetchone()[0]
+    target = newest if upto is None else max(0, min(int(upto), newest))
+    held = last_looked(conn)
+    if held is None or target > held:
+        _set(conn, LAST_LOOKED, str(target))
+        return target
+    return held
+
+
+def since_looked(conn: sqlite3.Connection) -> dict:
+    """The chat's changes after the mark: how many, and the newest entry id.
+    With no mark yet, every chat change counts."""
+    mark = last_looked(conn)
+    row = conn.execute(
+        "SELECT COUNT(*), MAX(at) FROM change_entries WHERE open = 0 AND via = 'chat' AND id > ?",
+        (mark or 0,),
+    ).fetchone()
+    newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_entries WHERE open = 0").fetchone()[0]
+    return {"last_looked": mark, "claude_count": row[0], "latest_claude_at": row[1], "newest": newest}
+
+
+# ---------------------------------------------------------------------------
+# Refused statements
+# ---------------------------------------------------------------------------
+
+def record_refused(conn: sqlite3.Connection, *, account_name: str, account_id: int | None,
+                   statement_date: str, currency: str, figures: dict) -> None:
+    """Keep a refusal. The same account and day again replaces its figures
+    and leaves a "Known, leave it" in place. Not committed here."""
+    conn.execute(
+        "INSERT INTO refused_statements (account_name, account_id, statement_date, currency, "
+        "opening_minor, rows_minor, closing_minor, difference_minor, row_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(account_name, statement_date) DO UPDATE SET "
+        "account_id = excluded.account_id, currency = excluded.currency, "
+        "opening_minor = excluded.opening_minor, rows_minor = excluded.rows_minor, "
+        "closing_minor = excluded.closing_minor, difference_minor = excluded.difference_minor, "
+        "row_count = excluded.row_count, refused_at = datetime('now')",
+        (account_name, account_id, statement_date, currency,
+         figures["opening_minor"], figures["rows_minor"], figures["closing_minor"],
+         figures["difference_minor"], figures.get("rows", 0)),
+    )
+
+
+# A refusal stands until a statement for the same account and closing day is
+# held: the file that ties was imported.
+_STANDING = (
+    "NOT EXISTS (SELECT 1 FROM statements s JOIN accounts a ON a.id = s.account_id "
+    "WHERE (a.id = r.account_id OR a.name = r.account_name) AND s.statement_date = r.statement_date)"
+)
+
+
+def refused(conn: sqlite3.Connection, account_id: int | None = None) -> list[dict]:
+    """Every refusal that still stands, newest first; with an account, its own."""
+    sql = f"SELECT r.* FROM refused_statements r WHERE {_STANDING}"
+    args: list = []
+    if account_id is not None:
+        sql += " AND (r.account_id = ? OR r.account_name = (SELECT name FROM accounts WHERE id = ?))"
+        args += [account_id, account_id]
+    sql += " ORDER BY r.statement_date DESC, r.id DESC"
+    return [
+        {
+            "id": r["id"],
+            "account_name": r["account_name"],
+            "account_id": r["account_id"],
+            "statement_date": r["statement_date"],
+            "currency": r["currency"],
+            "opening_minor": r["opening_minor"],
+            "rows_minor": r["rows_minor"],
+            "closing_minor": r["closing_minor"],
+            "difference_minor": r["difference_minor"],
+            "rows": r["row_count"],
+            "refused_at": r["refused_at"],
+            "set_aside": r["set_aside_at"] is not None,
+            "set_aside_at": r["set_aside_at"],
+        }
+        for r in conn.execute(sql, args)
+    ]
+
+
+def set_aside(conn: sqlite3.Connection, refused_id: int, aside: bool) -> bool:
+    """Set a refusal aside, or bring it back. False when there is no such one."""
+    cur = conn.execute(
+        "UPDATE refused_statements SET set_aside_at = "
+        + ("datetime('now')" if aside else "NULL")
+        + " WHERE id = ?",
+        (refused_id,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
