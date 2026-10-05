@@ -1,0 +1,134 @@
+"""The upload command (fin-surfaces 01): a Claude Code session sends a folder
+of statements straight to fin's import, one file at a time, so the model
+never handles their contents.
+
+The command is driven against the app in-process through a sender that wraps
+the Flask test client, with a stand-in parser. Every name and figure is
+invented.
+"""
+
+import json
+
+import pytest
+
+import fin_upload
+from test_import_that_ties import BANK, CLOSING, OPENING, ROWS, stand_in  # noqa: F401 (a fixture)
+
+
+@pytest.fixture
+def send(client):
+    """Send as the upload command does, arriving as the hosted gate would
+    stamp a service-token request."""
+    environ = {"fin.via": "chat", "fin.actor": "Claude Code (upload)"}
+
+    def sender(path, body, content_type):
+        resp = client.post(path, data=body, content_type=content_type, environ_base=environ)
+        return resp.status_code, resp.get_json(silent=True)
+
+    return sender
+
+
+@pytest.fixture
+def folder(tmp_path):
+    (tmp_path / "statement-aug.csv").write_bytes(b"stand-in")
+    (tmp_path / "notes.txt").write_text("not a statement")
+    return tmp_path
+
+
+def rows_held(client) -> int:
+    return client.get("/api/transactions?per_page=100").get_json()["total"]
+
+
+def test_a_folder_that_ties_is_imported_and_recorded_as_the_upload(client, stand_in, send, folder, capsys):
+    stand_in(ROWS, OPENING, CLOSING)
+
+    assert fin_upload.main([str(folder)], send=send) == 0
+
+    out = capsys.readouterr().out
+    assert "statement-aug.csv: imported 5 new rows" in out
+    assert "notes.txt" not in out
+    assert rows_held(client) == 5
+    latest = client.get("/api/history").get_json()["entries"][0]
+    assert (latest["summary"], latest["via"], latest["actor"]) == (
+        "Imported a statement", "chat", "Claude Code (upload)",
+    )
+
+
+def test_sending_the_same_folder_again_adds_nothing(client, stand_in, send, folder, capsys):
+    stand_in(ROWS, OPENING, CLOSING)
+    fin_upload.main([str(folder)], send=send)
+
+    assert fin_upload.main([str(folder)], send=send) == 0
+
+    assert "imported 0 new rows (5 already there)" in capsys.readouterr().out
+    assert rows_held(client) == 5
+
+
+def test_a_statement_that_does_not_tie_is_refused_and_nothing_is_written(
+    client, stand_in, send, folder, capsys
+):
+    stand_in(ROWS, OPENING, CLOSING + 1)
+
+    assert fin_upload.main([str(folder)], send=send) == 1
+
+    assert "refused, nothing imported" in capsys.readouterr().out
+    assert rows_held(client) == 0
+    assert client.get("/api/history").get_json()["entries"] == []
+
+
+def test_a_dry_run_imports_nothing(client, stand_in, send, folder, capsys):
+    stand_in(ROWS, OPENING, CLOSING)
+
+    assert fin_upload.main(["--dry-run", str(folder)], send=send) == 0
+
+    assert f"would import {BANK}: 5 rows (ties)" in capsys.readouterr().out
+    assert rows_held(client) == 0
+
+
+def test_refused_credentials_say_which_variables_to_check(folder, capsys):
+    def gate(path, body, content_type):
+        return 401, {"error": "authentication required"}
+
+    assert fin_upload.main([str(folder)], send=gate) == 1
+    assert "authentication required" in capsys.readouterr().out
+
+    def bare(path, body, content_type):
+        return 403, None
+
+    assert fin_upload.main([str(folder)], send=bare) == 1
+    assert "FIN_UPLOAD_CLIENT_ID" in capsys.readouterr().out
+
+
+def test_it_needs_somewhere_to_send_and_something_to_send(monkeypatch, folder, capsys):
+    monkeypatch.delenv("FIN_URL", raising=False)
+    assert fin_upload.main([str(folder)]) == 2
+    assert "FIN_URL" in capsys.readouterr().out
+    assert fin_upload.main([]) == 2
+    assert fin_upload.main([str(folder / "missing")], send=lambda *a: (200, {})) == 2
+
+
+def test_the_service_token_goes_in_the_gate_headers(monkeypatch, tmp_path):
+    seen = {}
+
+    class Answer:
+        status = 200
+
+        def read(self):
+            return json.dumps({"errors": [], "groups": []}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout):
+        seen.update({k.lower(): v for k, v in req.header_items()})
+        seen["url"] = req.full_url
+        return Answer()
+
+    monkeypatch.setattr(fin_upload.request, "urlopen", fake_urlopen)
+    send = fin_upload.http_sender("https://fin.example.invalid/", "id-value", "secret-value")
+    send("/api/import/upload", b"x", "application/octet-stream")
+    assert seen["url"] == "https://fin.example.invalid/api/import/upload"
+    assert (seen["cf-access-client-id"], seen["cf-access-client-secret"]) == ("id-value", "secret-value")
