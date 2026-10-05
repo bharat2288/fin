@@ -287,6 +287,16 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
     account_name = f"UOB {card_name} {card_number}" if card_number else f"UOB {card_name}"
 
     transactions = []
+    # The card's previous balance and its sub-total (or, failing that, its
+    # total balance), as printed: whole cents, owed positive, CR negative.
+    printed = {"previous": None, "closing": None}
+
+    def balance_on(line: str) -> int | None:
+        m = re.search(r"([\d,]+\.\d{2})\s*(CR)?$", line)
+        if not m:
+            return None
+        amount = _parse_amount(m.group(1))
+        return -amount if m.group(2) else amount
 
     for page in pdf.pages:
         text = page.extract_text() or ""
@@ -305,7 +315,11 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
             if "Description of Transaction" in line:
                 in_transactions = True
                 continue
-            if "End of Transaction" in line or "SUB TOTAL" in line or "TOTAL BALANCE" in line:
+            if "SUB TOTAL" in line or "TOTAL BALANCE" in line:
+                if in_transactions and printed["closing"] is None:
+                    printed["closing"] = balance_on(line)
+                break
+            if "End of Transaction" in line:
                 break
             if not in_transactions:
                 continue
@@ -314,8 +328,12 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
             if line.startswith("Ref No."):
                 continue
             if "PREVIOUS BALANCE" in line:
+                if printed["previous"] is None:
+                    printed["previous"] = balance_on(line)
                 continue
-            if "ADD UNI$" in line or "MEMBERSHIP FEE" in line:
+            # Rewards lines carry no money. A membership fee, or its waiver,
+            # is a row like any other: the sub-total counts it.
+            if "ADD UNI$" in line:
                 continue
 
             # Transaction line: "DD MMM DD MMM Description Amount"
@@ -382,12 +400,18 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
             mon = MONTH_MAP.get(m.group(2).upper()[:3], "01")
             stmt_date = f"{m.group(3)}-{mon}-{day}"
 
+    # The balances, signed as the household sees them (owed negative), only
+    # when both are printed and the statement date is a real day.
+    stated = printed["previous"] is not None and printed["closing"] is not None and bool(stmt_date)
     return ParsedStatement(
         statement_type="credit_card",
         statement_date=stmt_date,
         accounts=[account_name],
         filename=path.name,
         transactions=transactions,
+        opening_minor=-printed["previous"] if stated else None,
+        closing_minor=-printed["closing"] if stated else None,
+        closing_date=stmt_date if stated else None,
     )
 
 

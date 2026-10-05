@@ -44,6 +44,10 @@ class ParsedStatement:
     # The currency the account is kept in, as a three-letter code. The rows
     # and the balances are whole minor units of it.
     currency: str = "SGD"
+    # A card statement's sections, one per card, as parse_cc_statement read
+    # them: what by_card splits the statement by. Not part of what the import
+    # reads.
+    card_sections: list = field(default_factory=list, repr=False)
 
 
 # Month abbreviation → number
@@ -166,6 +170,11 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
     current_tx_account = ""
     lines = all_text.split("\n")
     i = 0
+    # Each card's section: its previous balance and its sub-total, as printed
+    # (whole cents, owed positive, a credit balance negative), and the
+    # accounts its rows went to. A card whose header repeats on a later page
+    # is the same section.
+    sections: dict[str, dict] = {}
 
     while i < len(lines):
         line = lines[i].strip()
@@ -178,6 +187,30 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
             current_tx_account = current_card
             if current_card not in statement.accounts:
                 statement.accounts.append(current_card)
+            sections.setdefault(
+                current_card,
+                {"card": current_card, "previous": None, "sub_total": None, "accounts": []},
+            )
+            i += 1
+            continue
+
+        # A card section's balances: the previous statement's balance, and
+        # the section's sub-total (the previous balance plus what is new).
+        balance_match = re.match(
+            r"(PREVIOUS BALANCE|SUB[\s-]*TOTAL)\s*:?\s+([\d,]+\.\d{2})\s*(CR)?$",
+            line,
+            re.IGNORECASE,
+        )
+        if balance_match and current_card:
+            printed = money.parse_minor(balance_match.group(2))
+            if balance_match.group(3):
+                printed = -printed
+            which = "previous" if balance_match.group(1).upper().startswith("PREV") else "sub_total"
+            section = sections[current_card]
+            if which == "previous" and section["previous"] is None:
+                section["previous"] = printed
+            elif which == "sub_total":
+                section["sub_total"] = printed
             i += 1
             continue
 
@@ -232,7 +265,8 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
                     # Filter out non-currency lines (page headers, etc.)
                     if len(currency_foreign.split()) <= 3 and not any(
                         skip in currency_foreign
-                        for skip in ["CARD", "DBS", "PREVIOUS", "STATEMENT", "PAGE", "PDS_"]
+                        for skip in ["CARD", "DBS", "PREVIOUS", "STATEMENT", "PAGE", "PDS_",
+                                     "TOTAL", "BALANCE"]
                     ):
                         amount_foreign = float(fx_match.group(2).replace(",", ""))
                         i += 1  # skip the foreign currency line
@@ -249,11 +283,86 @@ def parse_cc_statement(pdf_path: str) -> ParsedStatement:
                 card_info=current_tx_account or current_card,
             )
             statement.transactions.append(tx)
+            if current_card and tx.card_info not in sections[current_card]["accounts"]:
+                sections[current_card]["accounts"].append(tx.card_info)
 
         i += 1
 
     pdf.close()
+    statement.card_sections = list(sections.values())
     return statement
+
+
+def _split_by_cardholder(section: dict) -> bool:
+    """Whether a card section's rows went to more than its own card's account:
+    the DBS Vantage card, whose two cardholders' subsections are filed to two
+    accounts (DBS_SUPPLEMENTARY_CARDHOLDER_MAP) under one statement balance.
+
+    Ruling 3 (how that bill is held) is pending, so such a section hands over
+    no balance and its rows are filed exactly as before: by cardholder, not
+    checked. This is the one place that decides it:
+      - "one bill, one account": file the supplementary cardholder's rows to
+        the card's own account (the map, and handle_vantage_split for the CSV
+        export) and drop this exclusion; the section then ties and anchors
+        like any other.
+      - "split per cardholder": the one balance belongs to two accounts; the
+        section would be tied as a whole and its anchor needs a home both
+        accounts count toward (a parent account, or the supplementary
+        account read as part of the main card's balance), which the balance
+        sheet does not have yet.
+    """
+    return any(account != section["card"] for account in section["accounts"])
+
+
+def by_card(statement: ParsedStatement) -> list[ParsedStatement]:
+    """A card statement as the import takes it: one statement per card
+    section that prints both its previous balance and its sub-total, with
+    that card's rows and its balances (signed as the household sees them:
+    owed negative), closing on the statement date; and, when anything is
+    left, the rest as one statement with no balance, as before. A section
+    split by cardholder (_split_by_cardholder) is always in the rest. A
+    statement with no section that states its balances is returned as it is.
+    """
+    try:
+        date.fromisoformat(statement.statement_date)
+    except (TypeError, ValueError):
+        return [statement]
+    stated = [
+        section for section in statement.card_sections
+        if section["previous"] is not None and section["sub_total"] is not None
+        and not _split_by_cardholder(section)
+    ]
+    if not stated:
+        return [statement]
+
+    split_off = {section["card"] for section in stated}
+    cards = [
+        ParsedStatement(
+            statement_type=statement.statement_type,
+            statement_date=statement.statement_date,
+            accounts=[section["card"]],
+            transactions=[tx for tx in statement.transactions if tx.card_info == section["card"]],
+            filename=statement.filename,
+            opening_minor=-section["previous"],
+            closing_minor=-section["sub_total"],
+            closing_date=statement.statement_date,
+            currency=statement.currency,
+        )
+        for section in stated
+    ]
+    rest_rows = [tx for tx in statement.transactions if tx.card_info not in split_off]
+    rest_accounts = [name for name in statement.accounts if name not in split_off]
+    if rest_rows or rest_accounts:
+        cards.append(ParsedStatement(
+            statement_type=statement.statement_type,
+            statement_date=statement.statement_date,
+            accounts=rest_accounts,
+            transactions=rest_rows,
+            filename=statement.filename,
+            currency=statement.currency,
+            card_sections=[s for s in statement.card_sections if s["card"] not in split_off],
+        ))
+    return cards
 
 
 # How far, in whole minor units, a balance movement may sit from the amount
@@ -457,8 +566,9 @@ def _save_bank_tx(
     statement.transactions.append(tx)
 
 
-def parse_statement(pdf_path: str) -> ParsedStatement:
-    """Auto-detect and parse a DBS statement PDF."""
+def parse_statement(pdf_path: str) -> ParsedStatement | list[ParsedStatement]:
+    """Auto-detect and parse a DBS statement PDF. A card statement comes back
+    as a list, one statement per card that states its balances (by_card)."""
     path = Path(pdf_path)
     if not path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
@@ -471,7 +581,7 @@ def parse_statement(pdf_path: str) -> ParsedStatement:
     stmt_type = _detect_statement_type(first_page)
 
     if stmt_type == "credit_card":
-        return parse_cc_statement(pdf_path)
+        return by_card(parse_cc_statement(pdf_path))
     elif stmt_type == "bank":
         return parse_bank_statement(pdf_path)
     else:
@@ -517,5 +627,6 @@ if __name__ == "__main__":
         print("Usage: py parse_dbs.py <path_to_pdf>")
         sys.exit(1)
 
-    stmt = parse_statement(sys.argv[1])
-    print_summary(stmt)
+    parsed = parse_statement(sys.argv[1])
+    for stmt in parsed if isinstance(parsed, list) else [parsed]:
+        print_summary(stmt)
