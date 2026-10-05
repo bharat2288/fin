@@ -3392,26 +3392,32 @@ def api_pair_matching():
 # Subscriptions API
 # ---------------------------------------------------------------------------
 
-# FX rate cache
+# The USD→SGD rate the subscriptions are shown at: a fixed stand-in until the
+# operator fetches one (POST /api/fx-rate). Only a click fetches: no GET route
+# reaches outside fin.
 _fx_cache = {"rate": 1.35, "fetched_at": None}
 
 
 def _get_usd_sgd_rate() -> float:
-    """Get current USD→SGD rate with hourly caching."""
+    """The USD→SGD rate held now: the last one fetched on request, or the
+    stand-in. Never fetches."""
+    return _fx_cache["rate"]
+
+
+def _fetch_usd_sgd_rate() -> float:
+    """Fetch the current USD→SGD rate and hold it. Called only by the POST
+    route a click sends; on failure the held rate is kept."""
     import time
-    now = time.time()
-    if _fx_cache["fetched_at"] and (now - _fx_cache["fetched_at"]) < 3600:
-        return _fx_cache["rate"]
+    import urllib.request
+
     try:
-        import urllib.request
         with urllib.request.urlopen("https://open.er-api.com/v6/latest/USD", timeout=5) as resp:
-            data = json.loads(resp.read())
-            rate = data["rates"]["SGD"]
-            _fx_cache["rate"] = rate
-            _fx_cache["fetched_at"] = now
-            return rate
+            rate = float(json.loads(resp.read())["rates"]["SGD"])
     except Exception:
-        return _fx_cache["rate"]  # fallback
+        return _fx_cache["rate"]
+    _fx_cache["rate"] = rate
+    _fx_cache["fetched_at"] = time.time()
+    return rate
 
 
 def _monthly_equivalent(amount: float, frequency: str, periods: int,
@@ -3716,10 +3722,13 @@ def _add_billing_period(d: date, frequency: str, periods: int) -> date:
         return d.replace(year=year, month=month, day=day)
 
 
-@app.route("/api/fx-rate")
+@app.route("/api/fx-rate", methods=["GET", "POST"])
 def api_fx_rate():
-    """Get current USD→SGD exchange rate."""
-    return jsonify({"usd_sgd": _get_usd_sgd_rate()})
+    """The USD→SGD rate held now (GET), or fetched now and held (POST, sent
+    by a click)."""
+    if request.method == "POST":
+        return jsonify({"usd_sgd": _fetch_usd_sgd_rate(), "fetched": _fx_cache["fetched_at"] is not None})
+    return jsonify({"usd_sgd": _get_usd_sgd_rate(), "fetched": _fx_cache["fetched_at"] is not None})
 
 
 # ---------------------------------------------------------------------------

@@ -176,7 +176,16 @@ function setupFxHint(modalId, currencySelectId) {
     const currSel = document.getElementById(currencySelectId);
     const update = () => {
         document.querySelectorAll(`#${modalId} .fx-rate-hint`).forEach(el => {
-            el.textContent = currSel.value === 'USD' && subsFxRate ? `(1 USD = ${subsFxRate.toFixed(2)} SGD)` : '';
+            el.textContent = currSel.value === 'USD' && subsFxRate ? `(1 USD = ${subsFxRate.toFixed(2)} SGD, click to fetch)` : '';
+            // The rate is fetched only on this click, never by a page load.
+            el.onclick = currSel.value === 'USD' ? async (ev) => {
+                ev.preventDefault();
+                const resp = await fetch('/api/fx-rate', { method: 'POST' });
+                if (resp.ok) {
+                    subsFxRate = (await resp.json()).usd_sgd;
+                    update();
+                }
+            } : null;
         });
     };
     currSel.onchange = update;
