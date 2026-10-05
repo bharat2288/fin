@@ -2,7 +2,8 @@
 
 The statement:
   - a header line "Date Narration Chq./Ref.No. ValueDt WithdrawalAmt.
-    DepositAmt. ClosingBalance", repeated on each page;
+    DepositAmt. ClosingBalance", on the first page (some files repeat it on
+    each page); a later page without it carries the rows on from its top;
   - rows dated dd/mm/yy: "DATE NARRATION REF VALUEDATE AMOUNT CLOSINGBALANCE".
     The text carries one amount per row and not which column it stood in, so
     the direction comes from the closing balance the row itself states;
@@ -170,25 +171,39 @@ def _description(narration: str) -> str:
 
 
 def _table_lines(pages: list[str]):
-    """The lines under each page's header, up to the summary: (kind, value)
-    where kind is 'row' (a match) or 'more' (a narration running on)."""
+    """The table's lines, up to the summary: (kind, value) where kind is
+    'row' (a match) or 'more' (a narration running on).
+
+    The table starts under the column header. A page that prints the header
+    is read from under it; a later page that does not (HDFC prints it on the
+    first page only) carries the table on from its top, so a narration cut
+    by the page break runs on there. On such a page a footer line seen
+    before its first row (a page number at the top) is passed over; after
+    it, one ends the page's rows."""
+    started = False
     for text in pages:
-        in_rows = False
-        for line in (raw.strip() for raw in text.splitlines()):
+        lines = [raw.strip() for raw in text.splitlines()]
+        headed = any(_HEADER in _compact(line) for line in lines)
+        in_rows = started and not headed
+        rows_on_page = 0
+        for line in lines:
             compact = _compact(line)
             if not compact:
                 continue
             if _SUMMARY_HEADING in compact:
                 return
             if _HEADER in compact:
-                in_rows = True
+                in_rows = started = True
                 continue
             if not in_rows:
                 continue
             if compact.startswith(_END_OF_ROWS):
-                in_rows = False
+                if rows_on_page or headed:
+                    in_rows = False
                 continue
             match = _ROW.match(line)
+            if match:
+                rows_on_page += 1
             yield ("row", match) if match else ("more", line)
 
 

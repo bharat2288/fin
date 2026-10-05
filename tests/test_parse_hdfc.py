@@ -101,6 +101,54 @@ def test_rows_are_read_in_paise_with_money_out_positive(monkeypatch):
     ]
 
 
+# HDFC prints the column header on the first page only: later pages carry the
+# rows on from their top, and a narration cut by the page break runs on there.
+MULTI_PAGE = [
+    "\n".join([
+        "HDFC BANK LIMITED",
+        "SAMPLE HOLDER",
+        "Account No : 00000000001234",
+        "From : 01/04/2026 To : 30/06/2026",
+        HEADER,
+        "02/04/26 UPI-SAMPLE GROCER-PAYMENT 0000000000000001 02/04/26 1,500.00 98,500.00",
+        "15/04/26 NEFT CR-SAMPLE EMPLOYER 0000000000000002 15/04/26 25,000.50 1,23,500.50",
+        "Page No .: 1",
+    ]),
+    "\n".join([
+        "Page No .: 2",
+        "FROM SAMPLE EMPLOYER PVT",
+        "03/05/26 UPI-SAMPLE PHARMACY 0000000000000004 03/05/26 200.00 1,23,300.50",
+        "HDFC BANK LIMITED",
+        "*Closing balance includes funds earmarked for hold and uncleared funds",
+    ]),
+    "\n".join([
+        "01/06/26 INTEREST PAID TILL 31-MAY-2026 0000000000000003 31/05/26 310.25 1,23,610.75",
+        "STATEMENT SUMMARY :-",
+        "Opening Balance Dr Count Cr Count Debits Credits Closing Bal",
+        "1,00,000.00 2 2 1,700.00 25,310.75 1,23,610.75",
+    ]),
+]
+
+
+def test_rows_on_pages_without_the_header_are_read_and_a_narration_runs_across_the_break(monkeypatch):
+    stmt = read(monkeypatch, MULTI_PAGE)
+
+    assert [(tx.date, tx.description, tx.amount_minor) for tx in stmt.transactions] == [
+        ("2026-04-02", "UPI-SAMPLE GROCER-PAYMENT", 150000),
+        ("2026-04-15", "NEFT CR-SAMPLE EMPLOYER FROM SAMPLE EMPLOYER PVT", -2500050),
+        ("2026-05-03", "UPI-SAMPLE PHARMACY", 20000),
+        ("2026-06-01", "INTEREST PAID TILL 31-MAY-2026", -31025),
+    ]
+    assert tie.check(stmt)["difference_minor"] == 0
+
+
+def test_a_page_before_the_header_is_still_not_read_as_rows(monkeypatch):
+    cover = "SAMPLE COVER LETTER\n01/01/26 NOT A ROW 0000000000000009 01/01/26 1.00 2.00"
+    stmt = read(monkeypatch, [cover, *MULTI_PAGE])
+
+    assert len(stmt.transactions) == 4
+
+
 def test_the_statement_is_a_rupee_bank_account_named_by_its_last_four(monkeypatch):
     stmt = read(monkeypatch)
 
