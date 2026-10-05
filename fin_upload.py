@@ -144,8 +144,11 @@ def main(argv: list[str], send: Sender | None = None) -> int:
         if not base:
             print("FIN_URL is not set: say which fin to send to")
             return 2
-        send = http_sender(base, os.environ.get("FIN_UPLOAD_CLIENT_ID"),
-                           os.environ.get("FIN_UPLOAD_CLIENT_SECRET"))
+        # Stripped as serve.py strips the gate's FIN_UPLOAD_CLIENT_ID, which
+        # it compares with the common_name Access puts in the JWT: the
+        # client id this sends.
+        send = http_sender(base, (os.environ.get("FIN_UPLOAD_CLIENT_ID") or "").strip(),
+                           (os.environ.get("FIN_UPLOAD_CLIENT_SECRET") or "").strip())
     try:
         files = statement_files(targets)
     except FileNotFoundError as e:

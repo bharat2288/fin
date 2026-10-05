@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import access_gate
 import conversion
 import convert_change_history
 import db
@@ -113,10 +114,21 @@ def test_a_chat_write_is_stamped_with_its_client(imported):
     tx = a_row(imported)
     imported.put(
         f"/api/transactions/{tx['id']}", json={"book": "Kalesh"},
-        environ_base={"fin.via": "chat", "fin.actor": "Claude"},
+        environ_base={access_gate.CHAT_CALL_ENVIRON_KEY: access_gate.chat_call_identity("Claude")},
     )
     latest = entries(imported)[0]
     assert (latest["via"], latest["actor"]) == ("chat", "Claude")
+
+
+def test_only_the_gate_or_a_chat_call_says_who_asked(imported):
+    # fin.via and fin.actor are set by Flask's second layer from the identity
+    # it admitted, so a caller putting them in the environ directly is not
+    # believed.
+    tx = a_row(imported)
+    imported.put(f"/api/transactions/{tx['id']}", json={"book": "Kalesh"},
+                 environ_base={"fin.via": "chat", "fin.actor": "Claude"})
+    latest = entries(imported)[0]
+    assert (latest["via"], latest["actor"]) == ("app", "fin")
 
 
 def test_a_header_cannot_claim_to_be_chat(imported):

@@ -24,7 +24,7 @@ seed_mock_data.py   ← Demo data generator (for GitHub)
 serve.py            ← Hosted entry point: access gate → /mcp or Flask (fin-online; not yet live)
 access_gate.py      ← Cloudflare Access JWT check on every request (copied from folio)
 backup.py           ← Nightly backup to the object store, the seed step (copied from folio)
-mcp_server.py       ← /mcp; lists and calls mcp_tools.TOOLS (empty until that lands)
+mcp_server.py       ← /mcp; registers mcp_tools.TOOLS and calls them as the chat-gate client
 railway.json        ← Railway start command (python serve.py); deploy is by hand only
 specs/              ← Project specs (design, status, pipeline, decisions)
 ```

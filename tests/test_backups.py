@@ -18,7 +18,9 @@ import pytest
 
 import app as fin_app
 import backup
+import conversion
 import db
+import history
 import serve
 from backup import (
     BACKUP_JOB_ID,
@@ -280,14 +282,29 @@ def test_any_missing_backup_variable_turns_backups_off_and_fin_still_serves(miss
 
 # ---------------------------------------------------------------- the seed
 
-def _laptop_book(tmp_path) -> tuple[bytes, str]:
+def _laptop_book(tmp_path, schema: str | None = None) -> tuple[bytes, str]:
+    """A book as the laptop holds it once every conversion step has run:
+    schema.sql's shape, the change history's tables and triggers included.
+    `schema` builds an older shape instead."""
     path = tmp_path / "laptop" / "fin.db"
     path.parent.mkdir()
     conn = sqlite3.connect(path)
-    conn.executescript((Path(db.__file__).parent / "schema.sql").read_text())
+    conn.executescript(schema if schema is not None else db.SCHEMA_PATH.read_text())
     conn.close()
     data = path.read_bytes()
     return data, hashlib.sha256(data).hexdigest()
+
+
+def test_the_converted_laptop_book_keeps_the_change_history(tmp_path):
+    data, _digest = _laptop_book(tmp_path)
+    conn = sqlite3.connect(tmp_path / "laptop" / "fin.db")
+    try:
+        assert history.has_shape(conn)
+        assert "change-history" not in conversion.not_applied(conn)
+        assert conversion.CHAIN[-1][0] == "change-history"
+        assert not db._needs_converting(conn)
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("compressed", [False, True], ids=["raw", "gzip"])
@@ -413,6 +430,22 @@ def test_an_unconverted_seed_stops_the_boot_with_init_dbs_own_message(tmp_path, 
     # (Not byte for byte: get_connection's journal_mode=WAL rewrites the header
     # before init_db's refusal, as on the laptop.)
     assert dump(tmp_path / "volume" / "fin.db") == dump(old)
+
+
+def test_a_seed_without_the_change_history_stops_the_boot_as_unconverted(tmp_path, boot, capsys):
+    # Every step run but the last: the book has no change_entries, no
+    # change_rows and none of the history triggers.
+    data, digest = _laptop_book(tmp_path, history.without_history(db.SCHEMA_PATH.read_text()))
+    boot["store"] = FakeObjectStore({"seed/fin.db": data})
+    laptop = tmp_path / "laptop" / "fin.db"
+
+    assert serve.main(_seed_env(tmp_path, digest)) == 2
+
+    err = capsys.readouterr().err
+    assert "has not been through every conversion step" in err
+    assert "change-history (convert_change_history.py)" in err
+    assert boot["served"] == []
+    assert dump(tmp_path / "volume" / "fin.db") == dump(laptop)
 
 
 def test_without_the_seed_variables_boot_never_builds_a_seed_client(tmp_path, boot):

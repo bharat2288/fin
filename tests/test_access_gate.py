@@ -452,8 +452,53 @@ def test_the_service_token_reaches_each_upload_route_as_claude_code(book, monkey
     response = send(composed(), "POST", path, header(upload_token()))
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"email": "", "gate": "app", "via": "app", "actor": "Claude Code (upload)"}
+    # Its writes are a chat client's (the MCP thread's ruling): via chat.
+    assert response.json() == {"email": "", "gate": "app", "via": "chat", "actor": "Claude Code (upload)"}
 
+
+def test_the_client_id_the_upload_command_sends_is_the_common_name_the_gate_checks(book, monkeypatch, tmp_path):
+    # Cloudflare Access turns a request carrying CF-Access-Client-Id and
+    # CF-Access-Client-Secret into a JWT whose `common_name` is that client
+    # id. The upload command sends FIN_UPLOAD_CLIENT_ID; the gate compares
+    # common_name with the FIN_UPLOAD_CLIENT_ID fin was started with. One
+    # environment, read by both, so the two sides cannot drift.
+    import fin_upload
+
+    environment = {**FULL_ENV, "FIN_URL": "https://fin.example.invalid",
+                   "FIN_UPLOAD_CLIENT_ID": f" {UPLOAD_CLIENT_ID}\n", "FIN_UPLOAD_CLIENT_SECRET": "secret-fake"}
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    sent = []
+
+    class Refused:
+        status = 403
+
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout):
+        sent.append(dict((k.lower(), v) for k, v in req.header_items()))
+        return Refused()
+
+    monkeypatch.setattr(fin_upload.request, "urlopen", fake_urlopen)
+    (tmp_path / "statement.csv").write_bytes(b"stand-in")
+    fin_upload.main([str(tmp_path)])
+    [headers] = sent
+    gate = serve.load_runtime_config(os.environ).gate
+    _probe(monkeypatch, "api_import_upload")
+
+    response = send(composed(gate=gate), "POST", "/api/import/upload",
+                    header(upload_token(common_name=headers["cf-access-client-id"])))
+
+    assert headers["cf-access-client-id"] == UPLOAD_CLIENT_ID
+    assert response.status_code == 200, response.text
+    assert response.json()["actor"] == "Claude Code (upload)"
 
 def test_the_service_token_is_refused_on_every_other_route(book, monkeypatch, caplog):
     reached = _reached_flask(monkeypatch)
@@ -509,7 +554,7 @@ def test_the_browser_through_the_upload_application_reaches_the_upload_routes_on
     allowed = send(asgi, "POST", "/api/import/upload", header(mint(aud=UPLOAD_AUD)))
     elsewhere = send(asgi, "POST", "/api/accounts", header(mint(aud=UPLOAD_AUD)))
 
-    assert allowed.json()["actor"] == "fin"
+    assert (allowed.json()["via"], allowed.json()["actor"]) == ("app", "fin")
     _assert_refused(elsewhere, 403, ACCESS_DENIED)
 
 

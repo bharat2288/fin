@@ -5,16 +5,18 @@ verifies the chat gate's token and serve.py's router sends `/mcp` here. The
 server is the MCP SDK's (pinned, mcp 2.2.0) streamable-HTTP app, stateless with
 JSON responses, folio's proven configuration.
 
-The seam: the tools live in `mcp_tools.py` (fin-surfaces 01, another build).
-Its interface is
+The seam: the tools live in `mcp_tools.py` (fin-surfaces 01). Its interface is
 
-    TOOLS                      a list of (name, description, input_schema, handler)
+    TOOLS                      a list of mcp_tools.Tool (name, description,
+                               input_schema, write, request)
     call(name, args, actor)    -> dict; actor is the chat client the gate verified
 
-This module only lists and dispatches them. Without `mcp_tools.py` the tool
-list is empty and /mcp serves no tools. tests/test_mcp_inventory.py pins the
-list. A tool failure reaches the chat as one fixed message, never exception
-text.
+This module only lists and dispatches them: each tool is registered from its
+name, description and input schema, and marked read-only unless it writes.
+Without `mcp_tools.py` the tool list is empty and /mcp serves no tools.
+tests/test_mcp_inventory.py pins the list. An answer with "ok": false reaches
+the chat as an error result carrying that answer; a tool that raises reaches
+it as one fixed message, never exception text.
 
 As a second layer, like the Flask app's: a request that reaches this side
 without the gate's chat identity is refused, so the server run without the
@@ -26,7 +28,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Sequence
 
 import anyio
 import mcp_types as types
@@ -61,7 +63,7 @@ _LOOPBACK_SECURITY = TransportSecuritySettings(
 _GATED_SECURITY = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
 
-def load_registry() -> tuple[list[tuple], Callable[[str, dict, str], dict] | None]:
+def load_registry() -> tuple[list[Any], Callable[[str, dict, str], dict] | None]:
     """(mcp_tools.TOOLS, mcp_tools.call), or ([], None) when the module is absent."""
     try:
         import mcp_tools
@@ -81,10 +83,16 @@ def chat_actor(request: Any) -> str | None:
     return None
 
 
-def build_server(tools: list[tuple], call: Callable[[str, dict, str], dict] | None) -> Server:
+def build_server(tools: Sequence[Any], call: Callable[[str, dict, str], dict] | None) -> Server:
+    """`tools` are mcp_tools.Tool objects (or anything with their fields)."""
     listed = [
-        types.Tool(name=name, description=description, input_schema=input_schema)
-        for name, description, input_schema, _handler in tools
+        types.Tool(
+            name=tool.name,
+            description=tool.description,
+            input_schema=tool.input_schema,
+            annotations=types.ToolAnnotations(read_only_hint=not tool.write),
+        )
+        for tool in tools
     ]
     names = {tool.name for tool in listed}
 
@@ -105,9 +113,13 @@ def build_server(tools: list[tuple], call: Callable[[str, dict, str], dict] | No
         except Exception as exc:  # a fixed message; the type only is logged
             logger.error("mcp: tool %s failed - %s", params.name, type(exc).__name__)
             return failed(TOOL_FAILED)
+        if not isinstance(result, dict):
+            logger.error("mcp: tool %s answered a %s, not a dict", params.name, type(result).__name__)
+            return failed(TOOL_FAILED)
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=json.dumps(result, default=str))],
             structured_content=result,
+            is_error=result.get("ok") is False,
         )
 
     return Server(SERVER_NAME, on_list_tools=list_tools, on_call_tool=call_tool)
@@ -116,7 +128,7 @@ def build_server(tools: list[tuple], call: Callable[[str, dict, str], dict] | No
 class ChatEndpoint:
     """The ASGI app the router sends `/mcp` to."""
 
-    def __init__(self, *, local_dev: bool, registry: tuple[list[tuple], Callable | None] | None = None):
+    def __init__(self, *, local_dev: bool, registry: tuple[Sequence[Any], Callable | None] | None = None):
         tools, call = registry if registry is not None else load_registry()
         self.server = build_server(tools, call)
         self._http = self.server.streamable_http_app(

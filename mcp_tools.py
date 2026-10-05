@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+import access_gate
 import db
 import history
 
@@ -441,7 +442,10 @@ def call(name: str, args: dict | None = None, actor: str = "Claude") -> dict:
     except (KeyError, TypeError, ValueError):
         return {"ok": False, "error": f"{name} was given arguments it cannot use"}
 
-    environ = {"fin.via": history.VIA_CHAT, "fin.actor": actor or "chat client"}
+    # The chat identity, where the Flask app's second layer (access_gate.
+    # RequireGateIdentity) takes it: an environ key no HTTP request can set.
+    # It stamps the write via='chat', actor=the client the chat gate verified.
+    environ = {access_gate.CHAT_CALL_ENVIRON_KEY: access_gate.chat_call_identity(actor or "chat client")}
     client = fin_app.app.test_client()
     if not tool.write:
         try:

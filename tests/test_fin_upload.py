@@ -11,15 +11,17 @@ import json
 
 import pytest
 
+import access_gate
 import fin_upload
 from test_import_that_ties import BANK, CLOSING, OPENING, ROWS, stand_in  # noqa: F401 (a fixture)
 
 
 @pytest.fixture
 def send(client):
-    """Send as the upload command does, arriving as the hosted gate would
-    stamp a service-token request."""
-    environ = {"fin.via": "chat", "fin.actor": "Claude Code (upload)"}
+    """Send as the upload command does, arriving with the identity the hosted
+    gate gives a service-token request (Flask's second layer reads it)."""
+    identity = access_gate.AccessIdentity(email="", gate=access_gate.APP_GATE, client=access_gate.UPLOAD_ACTOR)
+    environ = {"asgi.scope": {access_gate.ACCESS_IDENTITY_SCOPE_KEY: identity}}
 
     def sender(path, body, content_type):
         resp = client.post(path, data=body, content_type=content_type, environ_base=environ)

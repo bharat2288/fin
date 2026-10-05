@@ -25,7 +25,15 @@ Access service token, behind a third Access application whose policy reaches
 only the two upload routes. Its JWT carries `common_name` (the token's client
 id) and no email. It is accepted on exactly UPLOAD_ROUTES, with the upload
 AUD and the configured client id, and refused (403) on every other path. With
-its two settings unset the service token is refused everywhere.
+its two settings unset the service token is refused everywhere. Its writes
+are a chat client's: stamped `fin.via='chat'`, `fin.actor='Claude Code
+(upload)'` (the MCP thread's ruling); the browser stays app/fin.
+
+The chat tools (mcp_tools.py) run fin's own routes in-process, after the chat
+gate verified the client at /mcp. They hand Flask the chat identity under
+CHAT_CALL_ENVIRON_KEY, an environ key no HTTP request can set (a2wsgi builds
+the environ from the scope, and a client's headers only ever become HTTP_*
+strings); RequireGateIdentity admits a chat identity only from there.
 
 Refusals: 401 when the token is missing, malformed, badly signed, from another
 issuer or outside its validity window; 403 when it is valid but for the wrong
@@ -140,7 +148,11 @@ class AccessIdentity:
 
     @property
     def via(self) -> str:
-        """`app` or `chat`: the side of fin the request came through."""
+        """`app` or `chat`: the side of fin the request came through. The
+        upload credential passes the app gate but is a chat client's (Claude
+        Code), so its writes are stamped as chat."""
+        if self.gate == APP_GATE and self.client == UPLOAD_ACTOR:
+            return CHAT_GATE
         return self.gate
 
     @property
@@ -158,6 +170,14 @@ UPLOAD_ACTOR = "Claude Code (upload)"
 # history): set on every request that reaches Flask, from the gate's identity.
 VIA_ENVIRON_KEY = "fin.via"
 ACTOR_ENVIRON_KEY = "fin.actor"
+# Where an in-process chat call (mcp_tools.call) puts the chat identity the
+# chat gate verified. Only a caller inside the process can set it.
+CHAT_CALL_ENVIRON_KEY = "fin.chat_call"
+
+
+def chat_call_identity(actor: str) -> AccessIdentity:
+    """The identity an in-process chat call carries into Flask."""
+    return AccessIdentity(email="", gate=CHAT_GATE, client=actor or "chat")
 
 
 def is_upload_route(scope: dict) -> bool:
@@ -442,8 +462,10 @@ class RequireGateIdentity:
     on the ASGI scope, which the WSGI adapter carries into the environ. A
     request that reaches Flask without it (Flask served without the gate by a
     misconfigured start command) is refused unless `config["LOCAL_DEV"]` is
-    on, and a chat-gate identity is refused always. No view runs. Client
-    headers are never trusted here. A request let through carries `fin.via`
+    on, and a chat-gate identity arriving over HTTP is refused always. The
+    one chat identity admitted is an in-process chat call's, under
+    CHAT_CALL_ENVIRON_KEY, and it is taken before the HTTP identity. No view
+    runs on a refusal. Client headers are never trusted here. A request let through carries `fin.via`
     and `fin.actor` in its environ, from the identity. It wraps `app.wsgi_app`
     rather than adding a request hook, so the app's own hooks never see a
     refused request.
@@ -454,6 +476,11 @@ class RequireGateIdentity:
         self._config = config
 
     def __call__(self, environ, start_response):
+        chat_call = environ.get(CHAT_CALL_ENVIRON_KEY)
+        if isinstance(chat_call, AccessIdentity) and chat_call.gate == CHAT_GATE:
+            environ[VIA_ENVIRON_KEY] = chat_call.via
+            environ[ACTOR_ENVIRON_KEY] = chat_call.actor
+            return self._app(environ, start_response)
         identity = identity_from_environ(environ)
         if identity is None and self._config.get("LOCAL_DEV"):
             identity = local_dev_identity(APP_GATE)
