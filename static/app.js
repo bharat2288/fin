@@ -4876,8 +4876,9 @@ async function saveFigure() {
 }
 
 // ---------------------------------------------------------------------------
-// Backup warning (fin-online D3): shown when backups are not configured or
-// none has succeeded in 36 hours. The server decides; this only shows it.
+// Backup warning (fin-online D3): shown when backups are not configured
+// (hosted only, never in local-dev) or none has succeeded in 36 hours. The
+// server decides; this only shows it.
 // ---------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
     try {

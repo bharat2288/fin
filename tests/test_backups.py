@@ -34,7 +34,7 @@ from backup import (
     run_backup,
     seed_book,
 )
-from gate_tokens import book, dump  # noqa: F401 (fixture)
+from gate_tokens import APP_AUD, book, composed, dump, header, mint, send  # noqa: F401 (fixture)
 
 NOW_ISO = "2026-10-01T18:30:00Z"
 MOCK_BACKUP_ENV = {
@@ -276,8 +276,27 @@ def test_any_missing_backup_variable_turns_backups_off_and_fin_still_serves(miss
     assert flask_app.config["BACKUP_STORE"] is None
     assert client.get("/api/books").status_code == 200
     status = client.get("/api/backups/status").get_json()
-    assert (status["configured"], status["warning"]) == (False, "backups not configured")
+    # Local-dev: backups off is expected, so no warning; "back up now" still says why not.
+    assert (status["configured"], status["warning"]) == (False, None)
     assert client.post("/api/backups/run").get_json() == {"error": "backups not configured"}
+
+
+def test_hosted_without_backups_the_app_shell_is_warned(book):
+    # The book fixture serves as hosted: LOCAL_DEV off, no backup store.
+    response = send(composed(), "GET", "/api/backups/status", header(mint(aud=APP_AUD)))
+
+    assert response.status_code == 200
+    assert (response.json()["configured"], response.json()["warning"]) == (False, "backups not configured")
+
+
+@pytest.mark.parametrize("local_dev, warning", [(False, "backups not configured"), (True, None)])
+def test_not_configured_warns_only_when_hosted(book, local_dev, warning):
+    assert backup_status(book, configured=False, local_dev=local_dev)["warning"] == warning
+
+
+def test_in_local_dev_a_configured_backup_still_warns_when_overdue(book):
+    status = backup_status(book, configured=True, local_dev=True)
+    assert status["warning"] == "no backup has succeeded yet"
 
 
 # ---------------------------------------------------------------- the seed

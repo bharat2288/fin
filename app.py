@@ -3890,8 +3890,13 @@ def api_fx_rate():
 @app.route("/api/backups/status")
 def api_backups_status():
     """Last attempt, last success, last error; the warning the app shell shows
-    when backups are not configured or none succeeded in 36 hours."""
-    return jsonify(backup.backup_status(db.DB_PATH, configured=app.config["BACKUP_STORE"] is not None))
+    when backups are not configured (hosted only: never in local-dev) or none
+    succeeded in 36 hours."""
+    return jsonify(backup.backup_status(
+        db.DB_PATH,
+        configured=app.config["BACKUP_STORE"] is not None,
+        local_dev=bool(app.config.get("LOCAL_DEV")),
+    ))
 
 
 @app.route("/api/backups/run", methods=["POST"])

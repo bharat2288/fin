@@ -428,15 +428,16 @@ def run_backup(db_path, store: ObjectStore, *, clock: Callable[[], str] = _utc_n
     return backup_status(db_path, configured=True, now_iso=now_iso)
 
 
-def backup_status(db_path, *, configured: bool, now_iso: str | None = None) -> dict:
+def backup_status(db_path, *, configured: bool, now_iso: str | None = None, local_dev: bool = False) -> dict:
     """The backup status GET /api/backups/status answers and the app shell's
-    warning reads."""
+    warning reads. In local-dev (the laptop) backups are expected to be off,
+    so "not configured" carries no warning there; hosted, it always does."""
     now_iso = now_iso or _utc_now_iso()
     rows = {key: value or None for key, value in _read_status(db_path).items()}
     last_success = rows.get(LAST_SUCCESS_KEY)
     last_error = rows.get(LAST_ERROR_KEY)
     if not configured:
-        overdue, warning = False, NOT_CONFIGURED_WARNING
+        overdue, warning = False, None if local_dev else NOT_CONFIGURED_WARNING
     elif last_success is None:
         overdue, warning = True, NEVER_SUCCEEDED_WARNING
     elif _parse_iso(now_iso) - _parse_iso(last_success) > OVERDUE_AFTER:
