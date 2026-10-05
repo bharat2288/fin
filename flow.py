@@ -103,6 +103,33 @@ PAYING_BACK_RAIL = "PAYNOW"
 # A row of this merchant is a loan instalment: a movement naming the loan.
 # (the merchant's name, the loan's account name)
 LOAN_MERCHANTS = (("UOB Home Loan", "UOB home loan"), ("Car Loan", "DBS auto loan"))
+# Receipts on a household rupee account (HDFC) that are not income. Each is
+# a default; the operator can overturn any row. Matched against the
+# uppercased description, on money received on a household bank account.
+#   - An own SGD->INR remittance: "NEFT CR-<IFSC>-<NAME>-<NAME>-<REF>(<REF>)
+#     FAMILY EXPENSE/SAVINGS", sent through DBS, so the IFSC is a DBS Bank
+#     India branch's (DBSS0 and six more). The routing code alone is enough;
+#     the purpose wording usually rides with it. It is one leg of a
+#     conversion whose other leg is on the household's SGD account; ruling
+#     5's spread counts it once both legs name each other. Pair matching
+#     pairs only rows in one currency, and no rule knows the SGD leg's
+#     wording, so neither leg can be labelled automatically: the rupee leg
+#     waits on the review list, where the operator labels it (and the SGD
+#     leg) with the other side, never income.
+OWN_REMITTANCE_RE = re.compile(r"^NEFT CR-DBSS0[A-Z0-9]{6}\b")
+OWN_REMITTANCE_FLOW = REVIEW
+#   - A fixed deposit closed early pays its principal back: money coming back
+#     from something the household owns, a movement. Its interest ("IB FD
+#     PREMAT INT PAID", "INTEREST PAID TILL") stays income.
+FD_PRINCIPAL_MARKERS = ("FD PREMAT PRINCIPAL",)
+#   - A mutual-fund redemption ("RTGS CR-... REDEMPTION A/C-...") is a
+#     holding sold, but investment holdings are not in the ledger yet (ledger
+#     ticket 02): it waits on the review list.
+REDEMPTION_PREFIX, REDEMPTION_MARKER = "RTGS CR", "REDEMPTION"
+# Funds transfers and NEFT receipts from family members ("IB FUNDS TRANSFER
+# CR", "NEFT CR" from another bank) are income or gifts (ruling 01): no rule
+# here.
+
 # The kinds of account a rule above may name as an other side.
 RULE_OTHER_SIDE_KINDS = ("loan", "holding", "company")
 
@@ -302,6 +329,21 @@ def _ledger_rule(facts: dict, ctx: ClassifierContext, received: bool) -> str | N
     return None
 
 
+def _rupee_receipt_rule(facts: dict, received: bool) -> str | None:
+    """The flow a receipt on a household bank account gets from the rupee
+    rules above, or None when none knows it."""
+    if not (received and _on_household_bank(facts)):
+        return None
+    up = " ".join((facts.get("description", "") or "").upper().split())
+    if OWN_REMITTANCE_RE.match(up):
+        return OWN_REMITTANCE_FLOW
+    if any(marker in up for marker in FD_PRINCIPAL_MARKERS):
+        return MOVEMENT
+    if up.startswith(REDEMPTION_PREFIX) and REDEMPTION_MARKER in up:
+        return REVIEW
+    return None
+
+
 def classify_row(facts: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
     """Return (flow, the account id of the row's other side or None)."""
     flow = classify_flow(facts, ctx)
@@ -341,6 +383,13 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     # 2b. The ledger's own rules. Before the own-alias rule: two of the
     #     sources they know are aliases.
     known = _ledger_rule(facts, ctx, received=amount < 0)
+    if known:
+        return known
+
+    # 2c. Rupee receipts that are not income: an own remittance from SGD, a
+    #     fixed deposit's principal, a fund redemption. Before the own-alias
+    #     rule: a remittance names the household's own people.
+    known = _rupee_receipt_rule(facts, received=amount < 0)
     if known:
         return known
 
