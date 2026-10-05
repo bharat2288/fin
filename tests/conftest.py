@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -8,8 +9,17 @@ import pytest
 import app as fin_app
 import db
 
-# The operator's real database, captured before any fixture repoints DB_PATH.
-REAL_DB_PATH = Path(db.DB_PATH).resolve()
+
+
+def real_db_paths(environ=None) -> frozenset[Path]:
+    """The books no test may open: the one beside the code, and the one
+    FIN_DB_PATH names when it is set."""
+    configured = db.configured_db_path(os.environ if environ is None else environ)
+    return frozenset({db.DEFAULT_DB_PATH.resolve(), configured.resolve()})
+
+
+# The operator's real databases, captured before any fixture repoints DB_PATH.
+REAL_DB_PATHS = real_db_paths()
 
 
 def _database_file(database) -> Path | None:
@@ -33,9 +43,10 @@ def real_database_guard(monkeypatch: pytest.MonkeyPatch):
     real_connect = sqlite3.connect
 
     def guarded_connect(database, *args, **kwargs):
-        if _database_file(database) == REAL_DB_PATH:
+        opened = _database_file(database)
+        if opened in REAL_DB_PATHS:
             pytest.fail(
-                f"test tried to open the real database ({REAL_DB_PATH}); "
+                f"test tried to open the real database ({opened}); "
                 "use the temp_db fixture or a file under tmp_path"
             )
         return real_connect(database, *args, **kwargs)

@@ -1,11 +1,24 @@
 """Database initialization and helpers for fin."""
 
+import os
 import sqlite3
 from pathlib import Path
 
 import book_type
 
-DB_PATH = Path(__file__).parent / "fin.db"
+# The book beside the code, as on the laptop; FIN_DB_PATH names another
+# (the Railway volume). Read once, at import.
+DEFAULT_DB_PATH = Path(__file__).parent / "fin.db"
+DB_PATH_VARIABLE = "FIN_DB_PATH"
+
+
+def configured_db_path(environ=os.environ) -> Path:
+    """The book FIN_DB_PATH names, or the one beside the code when it is unset."""
+    value = (environ.get(DB_PATH_VARIABLE) or "").strip()
+    return Path(value) if value else DEFAULT_DB_PATH
+
+
+DB_PATH = configured_db_path()
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 # Initial merchant rules based on known data: (pattern, label, match_type).

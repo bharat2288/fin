@@ -6,7 +6,10 @@ tests open a throwaway file, never the operator's database. One separate test
 pins what the guard protects by default.
 """
 
+import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,19 +17,49 @@ import pytest
 import conftest
 import db
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 @pytest.fixture
 def stand_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A path under tmp_path that the guard treats as the real database."""
     path = (tmp_path / "guarded" / "fin.db").resolve()
     path.parent.mkdir()
-    monkeypatch.setattr(conftest, "REAL_DB_PATH", path)
+    monkeypatch.setattr(conftest, "REAL_DB_PATHS", frozenset({path}))
     monkeypatch.setattr(db, "DB_PATH", path)
     return path
 
 
 def test_the_guard_protects_the_database_beside_the_app():
-    assert conftest.REAL_DB_PATH == Path(db.__file__).resolve().parent / "fin.db"
+    assert Path(db.__file__).resolve().parent / "fin.db" in conftest.REAL_DB_PATHS
+
+
+def test_fin_db_path_names_the_book_and_the_guard_protects_it_too(tmp_path):
+    named = tmp_path / "volume" / "fin.db"
+    beside = Path(db.__file__).resolve().parent / "fin.db"
+
+    assert db.configured_db_path({"FIN_DB_PATH": str(named)}) == named
+    assert db.configured_db_path({"FIN_DB_PATH": "  "}) == db.DEFAULT_DB_PATH
+    assert db.configured_db_path({}) == db.DEFAULT_DB_PATH
+    assert conftest.real_db_paths({"FIN_DB_PATH": str(named)}) == {beside, named.resolve()}
+
+
+def test_a_suite_run_with_fin_db_path_set_guards_both_books(tmp_path):
+    # As the suite starts on a machine where FIN_DB_PATH is set: db reads it
+    # at import, and the guard captures it beside the repo's book.
+    named = tmp_path / "volume" / "fin.db"
+    code = (
+        "import sys; sys.path[:0] = ['.', 'tests']; import db, conftest; "
+        "print(db.DB_PATH); print(sorted(str(p) for p in conftest.REAL_DB_PATHS))"
+    )
+    env = {**os.environ, "FIN_DB_PATH": str(named)}
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+
+    assert result.returncode == 0, result.stderr
+    db_path, guarded = result.stdout.splitlines()
+    assert db_path == str(named)
+    assert str(named.resolve()) in guarded and str(ROOT / "fin.db") in guarded
+    assert not named.exists()
 
 
 def test_opening_the_real_database_fails_the_test(stand_in):
