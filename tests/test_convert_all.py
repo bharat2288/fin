@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import app as fin_app
+import card_balance
 import conversion
 import convert_account_kinds
 import convert_all
@@ -45,9 +46,11 @@ def columns(path: Path, table: str) -> set[str]:
 
 
 @pytest.fixture
-def old(tmp_path: Path) -> Path:
-    """A database in the oldest shape, with half-cent amounts among its rows
-    and a row with no flow."""
+def old(tmp_path: Path, monkeypatch) -> Path:
+    """A database in the oldest shape, with half-cent amounts among its rows,
+    a row with no flow and a row on a split card's old header-label account."""
+    monkeypatch.setattr(card_balance, "HEADER_LABELS", {"9999": "SAMPLE INFINITE 9999"})
+    monkeypatch.setattr(card_balance, "BALANCE_ACCOUNTS", {"9999": "Sample Infinite Card 9999"})
     path = tmp_path / "ledger.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(OLD_SCHEMA.read_text())
@@ -55,9 +58,11 @@ def old(tmp_path: Path) -> Path:
         INSERT INTO categories (id, name, parent_id) VALUES (1, 'Dining', NULL), (2, 'Other', NULL);
         INSERT INTO accounts (id, name, short_name, type) VALUES
             (1, 'Sample Card 0001', 'Sample-0001', 'credit_card'),
-            (2, 'Sample Bank 0002', 'Sample-0002', 'bank');
+            (2, 'Sample Bank 0002', 'Sample-0002', 'bank'),
+            (3, 'Sample Infinite Card 9999', 'Sample-9999', 'credit_card'),
+            (4, 'SAMPLE INFINITE 9999', 'Sample-9999-label', 'credit_card');
         INSERT INTO statements (id, account_id, statement_date) VALUES
-            (1, 1, '2026-01-01'), (2, 2, '2026-01-01');
+            (1, 1, '2026-01-01'), (2, 2, '2026-01-01'), (3, 4, '2026-01-01');
         INSERT INTO services (id, name, category_id) VALUES (1, 'Sample Cafe', 1);
         INSERT INTO transactions
             (id, statement_id, date, description, amount_sgd, category_id, service_id,
@@ -68,7 +73,8 @@ def old(tmp_path: Path) -> Path:
             (3, 1, '2026-01-12', 'CORNER STALL', 0.005, 2, NULL, 'auto', 'expense'),
             (4, 2, '2026-01-13', 'SAMPLE STALL', 2.675, 2, NULL, 'auto', 'expense'),
             (5, 2, '2026-01-14', 'SAMPLE REFUND', -0.015, 2, NULL, 'auto', 'expense'),
-            (6, 2, '2026-01-15', 'SAMPLE SHOP', 7.50, 2, NULL, 'auto', NULL);
+            (6, 2, '2026-01-15', 'SAMPLE SHOP', 7.50, 2, NULL, 'auto', NULL),
+            (7, 3, '2026-01-16', 'SAMPLE ANNUAL FEE', 196.20, 2, NULL, 'auto', 'expense');
     """)
     conn.commit()
     conn.close()
@@ -82,6 +88,7 @@ def test_the_command_runs_every_step_in_order(old, capsys):
     shown = [line for line in out.splitlines() if line.startswith("--- step ")]
     assert [line.split(": ")[1].split(" ")[0] for line in shown] == STEP_NAMES
     assert f"all {len(STEP_NAMES)} steps applied" in out
+    assert "rows moved to the balance account: 1" in out
     # Each step that did work wrote its backup first; one with nothing to do
     # (this database has no row the movements step reclassifies) wrote none.
     assert len(backups(old)) == out.count(": applied") >= len(STEP_NAMES) - 1
@@ -92,7 +99,7 @@ def test_the_command_runs_every_step_in_order(old, capsys):
         conn.close()
     # The half cents went one way, by one rule: half-even on the decimal reading.
     assert query(old, "SELECT id, amount_minor FROM transactions ORDER BY id") == [
-        (1, 1230), (2, 1234), (3, 0), (4, 268), (5, -2), (6, 750),
+        (1, 1230), (2, 1234), (3, 0), (4, 268), (5, -2), (6, 750), (7, 19620),
     ]
     # And the row with no flow has one.
     assert query(old, "SELECT COUNT(*) FROM transactions WHERE flow_type IS NULL") == [(0,)]
@@ -112,10 +119,11 @@ def test_run_again_it_changes_nothing(old, capsys):
 
 
 def test_a_failed_step_stops_the_steps_after_it(old, capsys, monkeypatch):
+    original = retire_float_amounts.STEP
     monkeypatch.setattr(
         retire_float_amounts,
         "STEP",
-        dataclasses.replace(retire_float_amounts.STEP, invariant=lambda before, after: ["forced"]),
+        dataclasses.replace(original, invariant=lambda before, after: ["forced"]),
     )
 
     assert convert_all.main([str(old)]) == 1
@@ -132,10 +140,11 @@ def test_a_failed_step_stops_the_steps_after_it(old, capsys, monkeypatch):
     assert "amount_sgd" in columns(old, "transactions")
 
     # Fixed, the same command picks up where it stopped.
-    monkeypatch.undo()
+    monkeypatch.setattr(retire_float_amounts, "STEP", original)
     capsys.readouterr()
     assert convert_all.main([str(old)]) == 0
     assert "amount_sgd" not in columns(old, "transactions")
+    assert query(old, "SELECT id FROM accounts WHERE name = 'SAMPLE INFINITE 9999'") == []
     assert "owner" in columns(old, "accounts")
 
 
@@ -186,13 +195,15 @@ def test_a_start_on_an_unconverted_database_says_every_step_and_the_one_command(
 
 
 def test_part_way_through_it_names_only_the_steps_left(old, monkeypatch, capsys):
+    original = retire_float_amounts.STEP
     monkeypatch.setattr(
         retire_float_amounts,
         "STEP",
-        dataclasses.replace(retire_float_amounts.STEP, invariant=lambda before, after: ["forced"]),
+        dataclasses.replace(original, invariant=lambda before, after: ["forced"]),
     )
     convert_all.main([str(old)])
-    monkeypatch.undo()
+    # Only the forced failure is undone: the fixture's card stays declared.
+    monkeypatch.setattr(retire_float_amounts, "STEP", original)
     monkeypatch.setattr(db, "DB_PATH", old)
     capsys.readouterr()
 

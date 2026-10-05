@@ -56,6 +56,7 @@ CHAIN = (
     ("movements", "convert_movements"),
     ("printed-statements", "convert_printed_statements"),
     ("flows", "convert_null_flows"),
+    ("vantage-header-label", "convert_vantage_label"),
     ("change-history", "convert_change_history"),
 )
 

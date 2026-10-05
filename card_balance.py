@@ -38,6 +38,12 @@ CARDHOLDER_ACCOUNTS = {
 BALANCE_ACCOUNTS = {
     "7436": "DBS Vantage Visa Infinite Card 3696",
 }
+# The card's last four -> the account name the card's header gave before the
+# card was one balance (parse_dbs._normalize_card_header). Rows an import
+# filed there are moved to the balance account by convert_vantage_label.py.
+HEADER_LABELS = {
+    "7436": "DBS VANTAGE VISA INFINITE 7436",
+}
 
 
 def is_split(last_four: str | None) -> bool:
