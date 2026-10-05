@@ -47,16 +47,20 @@ def test_fin_db_path_names_the_book_and_the_guard_protects_it_too(tmp_path):
 def test_a_suite_run_with_fin_db_path_set_guards_both_books(tmp_path):
     # As the suite starts on a machine where FIN_DB_PATH is set: db reads it
     # at import, and the guard captures it beside the repo's book.
-    named = tmp_path / "volume" / "fin.db"
+    # A backslash in the path, as every Windows path has: on POSIX it is a
+    # character of the folder's name.
+    named = tmp_path / ("back\\slash" if os.sep == "/" else "volume") / "fin.db"
     code = (
         "import sys; sys.path[:0] = ['.', 'tests']; import db, conftest; "
-        "print(db.DB_PATH); print(sorted(str(p) for p in conftest.REAL_DB_PATHS))"
+        "print(db.DB_PATH); print(*sorted(str(p) for p in conftest.REAL_DB_PATHS), sep='\\n')"
     )
     env = {**os.environ, "FIN_DB_PATH": str(named)}
     result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
 
     assert result.returncode == 0, result.stderr
-    db_path, guarded = result.stdout.splitlines()
+    # One path per line, compared as whole paths: a printed list would show a
+    # Windows path with its backslashes doubled.
+    db_path, *guarded = result.stdout.splitlines()
     assert db_path == str(named)
     assert str(named.resolve()) in guarded and str(ROOT / "fin.db") in guarded
     assert not named.exists()
