@@ -114,6 +114,19 @@ def ensure_account(
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
+def _free_day_in_month(conn: sqlite3.Connection, account_id: int, month: str) -> str:
+    """The first day of a month (YYYY-MM) the account holds no record for."""
+    taken = {r[0] for r in conn.execute(
+        "SELECT statement_date FROM statements WHERE account_id = ? AND statement_date LIKE ?",
+        (account_id, f"{month}-%"),
+    )}
+    for day in range(1, 32):
+        candidate = f"{month}-{day:02d}"
+        if candidate not in taken:
+            return candidate
+    raise ValueError(f"no free day left in {month} for a statement record")
+
+
 def ensure_statement(
     conn: sqlite3.Connection,
     account_id: int,
@@ -123,25 +136,50 @@ def ensure_statement(
 ) -> tuple[int, bool]:
     """Get or create a statement record.
 
-    Returns (statement_id, is_new). If a record already exists for this
-    account + date, returns the existing ID with is_new=False. Does not
-    commit: the caller owns the transaction.
+    Returns (statement_id, is_new). Does not commit: the caller owns the
+    transaction.
 
     `printed` is a statement as printed: dated by its closing day, holding
-    the rows it printed. A month record already held on that day (one closing
-    on the 1st) becomes the printed one; a printed record never goes back.
+    the rows it printed; the record held for that day is returned. A month
+    record (printed False) is the account's record for the month of
+    `statement_date`, whatever day it is dated: normally the 1st, or the
+    first free day when a printed statement closed on the 1st. A month
+    record that sits on the day a printed statement needs is moved to a free
+    day of its month, keeping its rows, so the two never share a record.
     """
+    if not printed:
+        month = statement_date[:7]
+        existing = conn.execute(
+            "SELECT id FROM statements WHERE account_id = ? AND printed = 0 "
+            "AND statement_date LIKE ? ORDER BY statement_date LIMIT 1",
+            (account_id, f"{month}-%"),
+        ).fetchone()
+        if existing:
+            return (existing[0], False)
+        held = conn.execute(
+            "SELECT 1 FROM statements WHERE account_id = ? AND statement_date = ?",
+            (account_id, statement_date),
+        ).fetchone()
+        on = _free_day_in_month(conn, account_id, month) if held else statement_date
+        cur = conn.execute(
+            "INSERT INTO statements (account_id, statement_date, filename, printed) VALUES (?, ?, ?, 0)",
+            (account_id, on, filename),
+        )
+        return (cur.lastrowid, True)
+
     existing = conn.execute(
-        "SELECT id FROM statements WHERE account_id = ? AND statement_date = ?",
+        "SELECT id, printed FROM statements WHERE account_id = ? AND statement_date = ?",
         (account_id, statement_date),
     ).fetchone()
+    if existing and existing[1]:
+        return (existing[0], False)
     if existing:
-        if printed:
-            conn.execute("UPDATE statements SET printed = 1 WHERE id = ?", (existing["id"],))
-        return (existing["id"], False)
-
+        conn.execute(
+            "UPDATE statements SET statement_date = ? WHERE id = ?",
+            (_free_day_in_month(conn, account_id, statement_date[:7]), existing[0]),
+        )
     cur = conn.execute(
-        "INSERT INTO statements (account_id, statement_date, filename, printed) VALUES (?, ?, ?, ?)",
-        (account_id, statement_date, filename, 1 if printed else 0),
+        "INSERT INTO statements (account_id, statement_date, filename, printed) VALUES (?, ?, ?, 1)",
+        (account_id, statement_date, filename),
     )
     return (cur.lastrowid, True)

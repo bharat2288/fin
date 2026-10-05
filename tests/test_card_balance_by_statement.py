@@ -122,3 +122,28 @@ def test_a_row_held_from_a_source_with_no_balance_is_filed_under_the_statement_t
     assert (result["transactions_saved"], result["duplicates_skipped"], result["rows_refiled"]) == (0, 2, 2)
     assert lines(sheet(client, "2026-08"))[CARD]["check"]["status"] == "ties"
     assert lines(sheet(client, "2026-07"))[CARD]["check"]["status"] == "ties"
+
+
+def test_a_statement_closing_on_the_1st_never_shares_a_record_with_the_month_record(client, conn):
+    # A month record for August (dated the 1st) already holds a row from a
+    # source with no balance; then a statement closing on 1 August arrives:
+    # the month record moves to a free day of its month, keeping its row, and
+    # a later row from such a source finds it there.
+    import_statement(client, [("2026-08-20", "SAMPLE AUGUST SHOP", 900)], closing_date="2026-08-31")
+    import_statement(client, [("2026-07-05", "SAMPLE CAFE", 1_000)],
+                     closing_date="2026-07-01", opening=-50_000)
+    import_statement(client, [("2026-07-20", "SAMPLE GROCER", 2_000)],
+                     closing_date="2026-08-01", opening=-51_000)
+    import_statement(client, [("2026-08-25", "SAMPLE LATER SHOP", 300)], closing_date="2026-08-31")
+
+    records = conn.execute(
+        "SELECT statement_date, printed, (SELECT COUNT(*) FROM transactions t WHERE t.statement_id = s.id) "
+        "FROM statements s ORDER BY statement_date"
+    ).fetchall()
+    assert [tuple(r) for r in records] == [
+        ("2026-07-01", 1, 1),
+        ("2026-08-01", 1, 1),
+        ("2026-08-02", 0, 2),
+    ]
+    # 31 August: the 1 August balance less the month record's two rows.
+    assert lines(sheet(client, "2026-08"))[CARD]["balance_minor"] == -53_000 - 900 - 300
