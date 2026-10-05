@@ -18,6 +18,11 @@ parse_dbs.py        ← DBS PDF/CSV parser
 parse_citi_csv.py   ← Citi CSV parser
 parse_uob.py        ← UOB PDF parser
 seed_mock_data.py   ← Demo data generator (for GitHub)
+serve.py            ← Hosted entry point: access gate → /mcp or Flask (fin-online; not yet live)
+access_gate.py      ← Cloudflare Access JWT check on every request (copied from folio)
+backup.py           ← Nightly backup to the object store, the seed step (copied from folio)
+mcp_server.py       ← /mcp; lists and calls mcp_tools.TOOLS (empty until that lands)
+railway.json        ← Railway start command (python serve.py); deploy is by hand only
 specs/              ← Project specs (design, status, pipeline, decisions)
 ```
 
@@ -26,6 +31,7 @@ specs/              ← Project specs (design, status, pipeline, decisions)
 ```bash
 python app.py                    # Start server (port 8450)
 python seed_mock_data.py         # Generate demo DB (refuses if fin.db exists)
+FIN_LOCAL_DEV=1 python serve.py  # The hosted process on loopback, gate off (port 8000)
 ```
 
 ## Specs
