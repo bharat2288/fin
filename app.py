@@ -3726,13 +3726,25 @@ def api_fx_rate():
 # Main
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     import argparse
+    import sys
+
     parser = argparse.ArgumentParser(description="fin — Personal Finance Tracker")
     parser.add_argument("--port", type=int, default=8450)
     parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    init_db()
+    try:
+        init_db()
+    except db.DatabaseNotConverted as refused:
+        # A plain message, not a traceback: it says what to run.
+        print(refused, file=sys.stderr)
+        return 1
     print(f"fin running at http://localhost:{args.port}")
     app.run(host="127.0.0.1", port=args.port, debug=args.debug)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

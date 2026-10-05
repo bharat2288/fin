@@ -9,9 +9,11 @@ from pathlib import Path
 
 import pytest
 
+import app as fin_app
 import conversion
 import convert_account_kinds
 import convert_all
+import db
 import retire_float_amounts
 
 OLD_SCHEMA = Path(__file__).parent / "schema_before_book_and_type.sql"
@@ -163,3 +165,40 @@ def test_the_steps_own_command_says_so_too(old, capsys):
 def test_the_command_needs_a_database_path(tmp_path, capsys):
     assert convert_all.main([]) == 2
     assert convert_all.main([str(tmp_path / "missing.db")]) == 1
+
+
+def test_a_start_on_an_unconverted_database_says_every_step_and_the_one_command(
+    old, monkeypatch, capsys
+):
+    monkeypatch.setattr(db, "DB_PATH", old)
+    before = dump(old)
+
+    assert fin_app.main([]) == 1
+
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    listed = [line.split(". ", 1)[1].split(" ")[0] for line in err.splitlines()
+              if line.startswith("  ") and ". " in line]
+    assert listed == STEP_NAMES
+    assert f"python convert_all.py {old}" in err
+    assert dump(old) == before
+    assert backups(old) == []
+
+
+def test_part_way_through_it_names_only_the_steps_left(old, monkeypatch, capsys):
+    monkeypatch.setattr(
+        retire_float_amounts,
+        "STEP",
+        dataclasses.replace(retire_float_amounts.STEP, invariant=lambda before, after: ["forced"]),
+    )
+    convert_all.main([str(old)])
+    monkeypatch.undo()
+    monkeypatch.setattr(db, "DB_PATH", old)
+    capsys.readouterr()
+
+    assert fin_app.main([]) == 1
+
+    err = capsys.readouterr().err
+    listed = [line.split(". ", 1)[1].split(" ")[0] for line in err.splitlines()
+              if line.startswith("  ") and ". " in line]
+    assert listed == STEP_NAMES[STEP_NAMES.index("retire-float-amounts"):]

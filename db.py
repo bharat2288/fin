@@ -222,52 +222,56 @@ class DatabaseNotConverted(Exception):
     category tree. Nothing was changed."""
 
 
+def _needs_converting(conn: sqlite3.Connection) -> bool:
+    """Whether the database holds anything the app cannot serve until the
+    conversion steps have run: the category tree, float amounts, accounts
+    with no owner, rows that cannot name their other side or their printed
+    statement, or rows with no flow."""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "transactions" not in tables:
+        return False  # a new database
+    tx_cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+    rule_cols = {r[1] for r in conn.execute("PRAGMA table_info(merchant_rules)")}
+    return (
+        "categories" in tables
+        or "category_id" in tx_cols
+        or "book" not in tx_cols
+        or "amount_sgd" in tx_cols
+        or "min_amount" in rule_cols
+        or "max_amount" in rule_cols
+        or "owner" not in {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
+        or "other_side_id" not in tx_cols
+        or "printed" not in {r[1] for r in conn.execute("PRAGMA table_info(statements)")}
+        or conn.execute("SELECT 1 FROM transactions WHERE flow_type IS NULL LIMIT 1").fetchone()
+        is not None
+    )
+
+
+def refusal(conn: sqlite3.Connection, path) -> str:
+    """The one message a start on an unconverted database gives: every step
+    still to run, in order, and the one command that runs them."""
+    import conversion
+
+    waiting = conversion.not_applied(conn)
+    modules = dict(conversion.CHAIN)
+    steps = "\n".join(f"  {n}. {name} ({modules[name]}.py)" for n, name in enumerate(waiting, 1))
+    return (
+        "fin will not start: this database has not been through every conversion step, "
+        "and a start never changes rows. Nothing was changed.\n"
+        f"Steps still to run, in order:\n{steps}\n"
+        "Run them all with this one command (each step backs the database up first):\n"
+        f"  python convert_all.py {path}"
+    )
+
+
 def _refuse_unconverted(conn: sqlite3.Connection) -> None:
-    """Stop before touching a database that still carries categories, or
-    whose accounts have no owner yet.
+    """Stop before touching a database the conversion steps have not finished.
 
     Conversions of existing rows go through the conversion runner, behind a
     backup, and never happen here.
     """
-    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if "transactions" not in tables:
-        return  # a new database
-    tx_cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
-    if "categories" in tables or "category_id" in tx_cols or "book" not in tx_cols:
-        raise DatabaseNotConverted(
-            "this database still carries the category tree. Convert it first, in this "
-            "order: python convert_book_type.py <path to database>, then "
-            "python retire_categories.py <path to database>"
-        )
-    rule_cols = {r[1] for r in conn.execute("PRAGMA table_info(merchant_rules)")}
-    if "amount_sgd" in tx_cols or "min_amount" in rule_cols or "max_amount" in rule_cols:
-        raise DatabaseNotConverted(
-            "this database still carries float amounts. Convert it first, in this "
-            "order: python convert_minor_units.py <path to database>, then "
-            "python retire_float_amounts.py <path to database>"
-        )
-    if "owner" not in {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}:
-        raise DatabaseNotConverted(
-            "this database is from before accounts had a kind and an owner. Convert it "
-            "first: python convert_account_kinds.py <path to database>"
-        )
-    if "other_side_id" not in tx_cols:
-        raise DatabaseNotConverted(
-            "this database is from before a row could name its other side. Convert it "
-            "first: python convert_movements.py <path to database>"
-        )
-    if "printed" not in {r[1] for r in conn.execute("PRAGMA table_info(statements)")}:
-        raise DatabaseNotConverted(
-            "this database is from before a row was filed under the statement it printed "
-            "on. Convert it first: python convert_printed_statements.py <path to database>"
-        )
-    if conn.execute("SELECT 1 FROM transactions WHERE flow_type IS NULL LIMIT 1").fetchone():
-        # A start never writes to rows: giving them a flow is a conversion
-        # step, behind a backup.
-        raise DatabaseNotConverted(
-            "this database holds rows with no flow. Convert it first: "
-            "python convert_null_flows.py <path to database>"
-        )
+    if _needs_converting(conn):
+        raise DatabaseNotConverted(refusal(conn, DB_PATH))
 
 
 def get_connection() -> sqlite3.Connection:

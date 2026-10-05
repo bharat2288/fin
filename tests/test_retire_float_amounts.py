@@ -528,7 +528,8 @@ def test_the_app_will_not_start_on_a_database_that_still_carries_float_amounts(o
     # Half way is not enough either.
     to_cents(old)
     half_way = dump(old)
-    with pytest.raises(db.DatabaseNotConverted, match="convert_minor_units.py"):
+    # The refusal names only what is still to run, starting with the next step.
+    with pytest.raises(db.DatabaseNotConverted, match=r"in order:\n  1\. retire-float-amounts"):
         started_on(old)
     assert dump(old) == half_way
 
