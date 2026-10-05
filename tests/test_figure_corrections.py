@@ -142,3 +142,13 @@ def test_a_typed_bank_figure_cannot_be_moved_onto_the_days_its_statements_cover(
     assert next(f for f in figures(client, bank) if f["id"] == typed["id"]) == typed
     # Earlier is fine.
     assert client.put(f"/api/anchors/{typed['id']}", json={"date": "2026-07-30"}).status_code == 200
+
+
+def test_a_body_that_is_not_an_object_is_refused_not_a_crash(client):
+    reno = make_account(client, RENO, "bank")
+    enter(client, reno, "1000.00", "2026-08-10")
+    (held,) = figures(client, reno)
+
+    assert client.post("/api/anchors", json=[reno, "1.00"]).status_code == 400
+    assert client.put(f"/api/anchors/{held['id']}", json=["1.00"]).status_code == 400
+    assert figures(client, reno) == [held]

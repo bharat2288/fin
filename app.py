@@ -697,6 +697,8 @@ def api_anchors_create():
     figure, null when there is none; `message` says it in words.
     """
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "the body must be a JSON object"}), 400
     account_id = data.get("account_id")
     if isinstance(account_id, bool) or not isinstance(account_id, int):
         return jsonify({"error": "account_id is required: the account the figure is for"}), 400
@@ -805,6 +807,8 @@ def api_anchors_replace(anchor_id: int):
     out on read, so they follow at once; for a loan the interest is worked
     out again, and `message` says what that came to."""
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "the body must be a JSON object"}), 400
     note_sent = "note" in data
     note = data.get("note")
     if note is not None and not isinstance(note, str):
