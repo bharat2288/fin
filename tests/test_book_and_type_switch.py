@@ -743,6 +743,23 @@ def test_import_confirm_writes_the_label_the_operator_set_on_a_row(
     )
 
 
+def test_import_confirm_gives_a_row_sent_without_a_flow_the_classifiers(
+    client, conn, fake_statement
+):
+    """A start no longer fills in a missing flow, so the confirm never saves
+    a row without one."""
+    fake_statement([("2026-04-04", "CORNER STALL", 4.20)])
+    preview = upload(client)
+    preview["groups"][0]["transactions"][0].pop("flow_type", None)
+
+    resp = confirm(client, preview)
+
+    assert resp.status_code == 200, resp.get_json()
+    assert conn.execute(
+        "SELECT flow_type FROM transactions WHERE description = 'CORNER STALL'"
+    ).fetchone()[0] == "expense"
+
+
 def test_import_confirm_makes_a_new_merchant_with_book_and_type(client, conn, fake_statement):
     fake_statement([("2026-04-04", "NEW SAMPLE SUPPLIER", 88.00)])
     preview = upload(client)

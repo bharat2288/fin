@@ -55,6 +55,7 @@ CHAIN = (
     ("account-kinds", "convert_account_kinds"),
     ("movements", "convert_movements"),
     ("printed-statements", "convert_printed_statements"),
+    ("flows", "convert_null_flows"),
 )
 
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")

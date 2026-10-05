@@ -2581,7 +2581,7 @@ def api_import_confirm():
                         tx_flow = tx.get("flow_type")
                         if tx_flow == flow.REVIEW and (tx.get("type_id") or tx.get("service_id")):
                             tx_flow = "income" if amount_val < 0 else "expense"
-                        conn.execute(
+                        cur = conn.execute(
                             "INSERT INTO transactions "
                             "(statement_id, date, description, amount_minor, amount_foreign, "
                             "currency_foreign, book, type_id, service_id, "
@@ -2603,6 +2603,18 @@ def api_import_confirm():
                                 tx.get("other_side_id"),
                             ),
                         )
+                        if tx_flow is None:
+                            # A row sent with no flow takes the classifier's,
+                            # read with the account it is on: a row is never
+                            # saved without one (a start does not fill it in).
+                            labelled = bool(tx.get("type_id") or tx.get("service_id"))
+                            conn.execute(
+                                "UPDATE transactions SET flow_type = ?, other_side_id = ? WHERE id = ?",
+                                (*_classify_flow_for_tx(
+                                    conn, tx["description"], amount_val, tx_id=cur.lastrowid,
+                                    service_id=tx.get("service_id"), labelled=labelled,
+                                ), cur.lastrowid),
+                            )
                         total_saved += 1
 
                 total_duplicates += duplicates_skipped

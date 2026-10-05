@@ -261,6 +261,13 @@ def _refuse_unconverted(conn: sqlite3.Connection) -> None:
             "this database is from before a row was filed under the statement it printed "
             "on. Convert it first: python convert_printed_statements.py <path to database>"
         )
+    if conn.execute("SELECT 1 FROM transactions WHERE flow_type IS NULL LIMIT 1").fetchone():
+        # A start never writes to rows: giving them a flow is a conversion
+        # step, behind a backup.
+        raise DatabaseNotConverted(
+            "this database holds rows with no flow. Convert it first: "
+            "python convert_null_flows.py <path to database>"
+        )
 
 
 def get_connection() -> sqlite3.Connection:
@@ -325,16 +332,6 @@ def init_db() -> None:
     conn.commit()
     if added > 0:
         print(f"Added {added} new merchant rules")
-
-    # Backfill rows that have no flow_type yet. This keeps dashboard expense
-    # views from treating old transfer/payment rows as spend after restart.
-    null_flow_count = conn.execute(
-        "SELECT COUNT(*) FROM transactions WHERE flow_type IS NULL"
-    ).fetchone()[0]
-    if null_flow_count:
-        from backfill_flow_type import backfill
-
-        backfill(conn)
 
     total_types = conn.execute(
         "SELECT COUNT(*) FROM types WHERE kind = ?", (book_type.SPENDING,)

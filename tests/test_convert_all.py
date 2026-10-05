@@ -44,7 +44,8 @@ def columns(path: Path, table: str) -> set[str]:
 
 @pytest.fixture
 def old(tmp_path: Path) -> Path:
-    """A database in the oldest shape, with half-cent amounts among its rows."""
+    """A database in the oldest shape, with half-cent amounts among its rows
+    and a row with no flow."""
     path = tmp_path / "ledger.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(OLD_SCHEMA.read_text())
@@ -64,7 +65,8 @@ def old(tmp_path: Path) -> Path:
             (2, 1, '2026-01-11', 'SAMPLE CAFE', 12.345, 1, 1, 'service_default', 'expense'),
             (3, 1, '2026-01-12', 'CORNER STALL', 0.005, 2, NULL, 'auto', 'expense'),
             (4, 2, '2026-01-13', 'SAMPLE STALL', 2.675, 2, NULL, 'auto', 'expense'),
-            (5, 2, '2026-01-14', 'SAMPLE REFUND', -0.015, 2, NULL, 'auto', 'expense');
+            (5, 2, '2026-01-14', 'SAMPLE REFUND', -0.015, 2, NULL, 'auto', 'expense'),
+            (6, 2, '2026-01-15', 'SAMPLE SHOP', 7.50, 2, NULL, 'auto', NULL);
     """)
     conn.commit()
     conn.close()
@@ -88,8 +90,10 @@ def test_the_command_runs_every_step_in_order(old, capsys):
         conn.close()
     # The half cents went one way, by one rule: half-even on the decimal reading.
     assert query(old, "SELECT id, amount_minor FROM transactions ORDER BY id") == [
-        (1, 1230), (2, 1234), (3, 0), (4, 268), (5, -2),
+        (1, 1230), (2, 1234), (3, 0), (4, 268), (5, -2), (6, 750),
     ]
+    # And the row with no flow has one.
+    assert query(old, "SELECT COUNT(*) FROM transactions WHERE flow_type IS NULL") == [(0,)]
 
 
 def test_run_again_it_changes_nothing(old, capsys):
@@ -115,8 +119,8 @@ def test_a_failed_step_stops_the_steps_after_it(old, capsys, monkeypatch):
     assert convert_all.main([str(old)]) == 1
 
     out = capsys.readouterr().out
-    assert "stopped at step 4 of 7: retire-float-amounts" in out
-    assert "not run: account-kinds, movements, printed-statements" in out
+    assert f"stopped at step 4 of {len(STEP_NAMES)}: retire-float-amounts" in out
+    assert "not run: account-kinds, movements, printed-statements, flows" in out
     assert "--- step 5 of" not in out
     # Steps 5 to 7 left nothing behind: no owner, no printed mark, no backup.
     assert "owner" not in columns(old, "accounts")

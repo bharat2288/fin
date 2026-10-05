@@ -1,5 +1,9 @@
 """Tests for flow_type transaction model (ADR v2)."""
 
+from pathlib import Path
+
+import pytest
+
 import db
 from flow import ClassifierContext, classify_flow
 
@@ -788,13 +792,15 @@ def test_dbs_business_parser_uses_generic_account_label(monkeypatch):
     assert stmt.accounts == ["DBS Business 12345678901"]
 
 
-def test_init_db_backfills_null_flow_type_rows(temp_db):
-    """init_db should classify legacy rows with NULL flow_type on startup."""
+def test_a_start_refuses_rows_with_no_flow_and_the_flows_step_gives_them_one(temp_db):
+    """A start never writes to rows (S6): a row with no flow stops it, and the
+    flows step gives the row one, behind its backup."""
     import sqlite3
+
+    import convert_all
     import db as db_module
 
     conn = sqlite3.connect(str(temp_db))
-    conn.row_factory = sqlite3.Row
     conn.execute(
         "INSERT INTO accounts (name, short_name, type, last_four, status) "
         "VALUES ('A', 'A', 'bank', '0000', 'active')"
@@ -812,10 +818,25 @@ def test_init_db_backfills_null_flow_type_rows(temp_db):
         (stmt,),
     )
     conn.commit()
+    before = "\n".join(conn.iterdump())
     conn.close()
 
-    db_module.init_db()
+    with pytest.raises(db_module.DatabaseNotConverted, match="flow"):
+        db_module.init_db()
 
+    conn = sqlite3.connect(str(temp_db))
+    try:
+        assert "\n".join(conn.iterdump()) == before
+    finally:
+        conn.close()
+    assert not list(temp_db.parent.glob("*.bak"))
+
+    # The one command the refusal names runs the steps this new database
+    # has not had, the flows step last.
+    assert convert_all.main([str(temp_db)]) == 0
+    assert list(temp_db.parent.glob("*.pre-flows-*.bak"))
+
+    db_module.init_db()
     conn = db_module.get_connection()
     try:
         row = conn.execute(
