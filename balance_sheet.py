@@ -486,11 +486,20 @@ def _currency_change(conn: sqlite3.Connection, accounts: list, as_at: date, name
     }
 
 
+def _marked(line: dict, account) -> dict:
+    """A line marked with whether its account is archived: shown apart if the
+    screen likes, never left out of a total."""
+    line["archived"] = account["status"] == "archived"
+    return line
+
+
 def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> dict:
     """The household's balance sheet at the end of a month written YYYY-MM.
 
-    Lists the household's own bank, card, loan and holding accounts that are
-    not archived, then its money in each company and with each person.
+    Lists the household's own bank, card, loan and holding accounts, then its
+    money in each company and with each person. An archived account is listed
+    and counted like any other, its line marked `archived`: archiving changes
+    what is shown, never the figure (ruling 6).
     `name_of` is how an account's name is shown. Raises NotShown
     for a month that is not one, or that ends before the sheet starts.
     """
@@ -499,13 +508,14 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
     listed = []
     for name, heading, kind, owed in SECTIONS:
         accounts = conn.execute(
-            "SELECT id, name, type, currency FROM accounts "
-            "WHERE type = ? AND owner = ? AND COALESCE(status, 'active') != 'archived' "
-            "ORDER BY name, id",
+            "SELECT id, name, type, currency, status FROM accounts "
+            "WHERE type = ? AND owner = ? ORDER BY name, id",
             (kind, account_kind.HOUSEHOLD),
         ).fetchall()
         listed += accounts
-        lines = [_line(conn, account, as_at, month, name_of) for account in accounts]
+        lines = [
+            _marked(_line(conn, account, as_at, month, name_of), account) for account in accounts
+        ]
         total = sum(line["value_minor"] for line in lines if line["in_total"])
         sections.append({
             "name": name,
@@ -522,12 +532,14 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
 
     name, heading, kinds = COUNTERPARTIES
     accounts = conn.execute(
-        "SELECT id, name, type, currency FROM accounts "
-        f"WHERE type IN ({', '.join('?' for _ in kinds)}) AND owner = ? "
-        "AND COALESCE(status, 'active') != 'archived' ORDER BY name, id",
+        "SELECT id, name, type, currency, status FROM accounts "
+        f"WHERE type IN ({', '.join('?' for _ in kinds)}) AND owner = ? ORDER BY name, id",
         (*kinds, account_kind.HOUSEHOLD),
     ).fetchall()
-    lines = [_counterparty_line(conn, account, as_at, month, name_of) for account in accounts]
+    lines = [
+        _marked(_counterparty_line(conn, account, as_at, month, name_of), account)
+        for account in accounts
+    ]
     total = sum(line["value_minor"] for line in lines if line["in_total"])
     sections.append({
         "name": name,

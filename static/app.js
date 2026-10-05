@@ -4664,7 +4664,7 @@ async function loadBalanceSheet() {
 
     document.getElementById('balance-body').innerHTML = sheet.sections.map(section => {
         const lines = section.lines.map(line => `<tr>
-                <td>${escapeHtml(line.name)}</td>
+                <td>${escapeHtml(line.name)}${line.archived ? ' <span class="text-muted" style="font-size:11px;">archived</span>' : ''}</td>
                 <td class="col-amount${line.balance_minor === null ? ' text-muted' : ''}">${balanceFigure(line)}</td>
                 <td class="text-secondary" style="font-size:12px;">${balanceRestsOn(line)}</td>
                 <td style="font-size:12px;">${balanceCheck(line)}</td>

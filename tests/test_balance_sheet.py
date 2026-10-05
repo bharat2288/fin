@@ -399,23 +399,26 @@ def test_an_account_in_another_currency_is_shown_in_it_and_left_out_of_the_total
     assert "Sample Rupee Savings" in shown["note"] and "INR" in shown["note"]
 
 
-def test_only_the_households_own_accounts_that_are_not_archived_are_on_the_sheet(client, bank):
+def test_only_the_households_own_accounts_are_on_the_sheet_archived_ones_included(client, bank):
     business = make_account(client, "Sample Business 0003", "bank", owner="Kalesh")
     company = make_account(client, "Sample Company", "company")
     person = make_account(client, "Sample Friend", "person")
     archived = make_account(client, "Sample Closed 0004", "bank")
-    client.put(f"/api/accounts/{archived}", json={"status": "archived"})
     for account_id in (bank, business, company, person):
         enter(client, account_id, "1000.00", "2026-08-31")
+    enter(client, archived, "500.00", "2026-08-31")
+    client.put(f"/api/accounts/{archived}", json={"status": "archived"})
 
     shown = sheet(client, "2026-08")
 
-    # A company's own account and an archived one are not; the household's
-    # money in a company and with a person is, in its own section.
-    assert list(lines(shown)) == [BANK, "Sample Company", "Sample Friend"]
+    # A company's own account is not; the household's money in a company and
+    # with a person is, in its own section. An archived account still holds
+    # its balance (ruling 6): it is listed, marked, and in the total.
+    assert list(lines(shown)) == [BANK, "Sample Closed 0004", "Sample Company", "Sample Friend"]
+    assert [line["archived"] for line in lines(shown).values()] == [False, True, False, False]
     assert [line["name"] for line in section(shown, "companies")["lines"]] == [
         "Sample Company", "Sample Friend"]
-    assert shown["net_worth_minor"] == 300000
+    assert shown["net_worth_minor"] == 350000
 
 
 def test_the_sheet_says_how_many_transfers_wait_for_review(client, bank):

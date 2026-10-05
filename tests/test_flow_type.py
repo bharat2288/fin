@@ -507,9 +507,10 @@ def test_refund_reduces_monthly_spend_in_same_month(client, conn):
     assert resp.get_json()["spend"] == 70.0
 
 
-def test_dashboard_spend_uses_flow_type_and_preserves_exclude(client, conn):
-    """Bullet 7: Dashboard spend totals come from flow_type IN ('expense','refund'),
-    and exclude_from_expense_views service filter still applies.
+def test_dashboard_spend_uses_flow_type_and_counts_hidden_merchants(client, conn):
+    """Bullet 7: Dashboard spend totals come from flow_type IN ('expense','refund').
+    A merchant hidden from expense views is still counted: ruling 6 (2026-10-05)
+    replaced the earlier rule that hiding took it out of the totals.
     """
     # Seed: 1 expense, 1 income, 1 transfer, 1 expense excluded via service.
     conn.execute("INSERT INTO accounts (name, short_name, type, last_four, status) "
@@ -527,7 +528,7 @@ def test_dashboard_spend_uses_flow_type_and_preserves_exclude(client, conn):
         ("Groceries buy", 10000, "expense", None),
         ("Rent received", -100000, "income", None),
         ("Self paynow", -5000, "transfer", None),
-        ("Home loan EMI", 944652, "expense", excluded_svc),  # excluded from totals
+        ("Home loan EMI", 944652, "expense", excluded_svc),  # hidden, still counted
     ]
     for desc, amt, ft, svc in rows:
         conn.execute(
@@ -540,8 +541,8 @@ def test_dashboard_spend_uses_flow_type_and_preserves_exclude(client, conn):
     resp = client.get("/api/dashboard/stat-cards?ref_month=2025-04")
     assert resp.status_code == 200
     data = resp.get_json()
-    # Spend should be 100.0 only (income excluded, transfer excluded, loan-svc excluded)
-    assert data["spend"] == 100.0
+    # Income and the transfer are not spending; the hidden merchant's row is.
+    assert data["spend"] == 9546.52
 
 
 def test_dashboard_monthly_excludes_null_flow_type_rows(client, conn):

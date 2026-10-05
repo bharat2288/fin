@@ -1113,6 +1113,11 @@ _SGD_ACCOUNT = (
 )
 
 
+# Rows on an account the household owns: what household spending is counted
+# on (ruling 6). Takes the owner as its parameter.
+_HOUSEHOLD_ACCOUNT = "s.account_id IN (SELECT id FROM accounts WHERE owner = ?)"
+
+
 def _waiting_sides(conn, filters: str = "", params: tuple | list = ()) -> dict:
     """The transfers waiting for review, money out and money in apart: how
     many each side holds and what each adds up to in whole minor units, both
@@ -1170,9 +1175,11 @@ def api_dashboard_stat_cards():
     Respects: book, exclude_one_off, account_id
 
     The cards:
-      household, household_rows   spending and refunds in the Household book.
-                                  No company's row and no row waiting for
-                                  review is in it.
+      household, household_rows   spending and refunds in the Household book,
+                                  on accounts the household owns, archived
+                                  or not, hidden merchants included (ruling
+                                  6). No company's row and no row waiting
+                                  for review is in it.
       held_out_count, _total      the month's transfers waiting for review:
                                   what the household figure is held short of.
                                   _total is money out less money in;
@@ -1230,7 +1237,8 @@ def api_dashboard_stat_cards():
     # The account filter alone: what narrows the transfers waiting for review.
     account_filter = ""
     account_params = []
-    extra_filters += f" AND {_expense_visibility_filter('svc')}"
+    # No merchant is hidden from a sum: hiding changes what a list shows,
+    # never the figure (ruling 6).
     if exclude_one_off:
         # Exclude both transaction-level and service-level one-offs
         extra_filters += " AND t.is_one_off = 0 AND (svc.is_one_off IS NULL OR svc.is_one_off = 0)"
@@ -1244,9 +1252,15 @@ def api_dashboard_stat_cards():
             pass
 
     # One total per declared book, keyed by the book's name in lower case.
+    # The Household book's is household spending: on accounts the household
+    # owns only (ruling 6). A row with no book on a company's own account is
+    # not the household's money.
     books = [(name, name.lower()) for name in book_type.BOOK_NAMES]
     book_sums = "".join(
-        f"SUM(CASE WHEN {book_expr('t')} = ? THEN amount_minor ELSE 0 END), " for _ in books
+        f"SUM(CASE WHEN {book_expr('t')} = ?"
+        + (" AND a.owner = ?" if name == book_type.DEFAULT_BOOK else "")
+        + " THEN amount_minor ELSE 0 END), "
+        for name, _ in books
     )
     # A company's card: its costs paid from the household's own accounts. What
     # the company paid from an account it owns is not the household's money.
@@ -1266,10 +1280,12 @@ def api_dashboard_stat_cards():
                 end_d = date(y, m + 1, 1) - timedelta(days=1)
             end = end_d.strftime("%Y-%m-%d")
 
-            params = [name for name, _ in books]
+            params = []
+            for name, _ in books:
+                params += [name, account_kind.HOUSEHOLD] if name == book_type.DEFAULT_BOOK else [name]
             for name, _ in companies:
                 params += [name, account_kind.HOUSEHOLD]
-            params += [book_type.DEFAULT_BOOK, start, end] + extra_params
+            params += [book_type.DEFAULT_BOOK, account_kind.HOUSEHOLD, start, end] + extra_params
             row = conn.execute(f"""
                 SELECT
                     {book_sums}
@@ -1277,7 +1293,7 @@ def api_dashboard_stat_cards():
                     SUM(amount_minor),
                     COUNT(CASE WHEN t.type_id IS NULL THEN 1 END),
                     COUNT(*),
-                    COUNT(CASE WHEN {book_expr('t')} = ? THEN 1 END)
+                    COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? THEN 1 END)
                 FROM transactions t
                 LEFT JOIN services svc ON t.service_id = svc.id
                 JOIN statements s ON t.statement_id = s.id
@@ -1371,7 +1387,7 @@ def api_dashboard_monthly():
     Query params: start, end, book, exclude_one_off, granularity, group_parent
     granularity: 'monthly' (default), 'weekly', 'quarterly'
     """
-    filters, params = _build_filters(request.args)
+    filters, params = _build_filters(request.args, hide=False)
     granularity = request.args.get("granularity", "monthly")
 
     # Choose time bucket SQL expression
@@ -1421,7 +1437,7 @@ def api_dashboard_types():
 
     Query params: start, end, book, exclude_one_off, group_parent
     """
-    filters, params = _build_filters(request.args)
+    filters, params = _build_filters(request.args, hide=False)
     type_expr = _type_group_expr(request.args)
 
     with get_db() as conn:
@@ -1457,9 +1473,10 @@ def api_transactions():
     Query params: start, end, book, exclude_one_off, types, account_id, month,
                   page, per_page, search, flow
 
-    flow=review is the review list: the transfers waiting for a label.
+    flow=review is the review list: the transfers waiting for a label. It
+    hides no merchant, so it lists every row the waiting count counts.
     """
-    filters, params = _build_filters(request.args)
+    filters, params = _build_filters(request.args, hide=request.args.get("flow") != flow.REVIEW)
 
     flow_filter = request.args.get("flow")
     if flow_filter:
@@ -1836,8 +1853,13 @@ def api_resolve_transaction():
             return jsonify({"error": "Failed to resolve transaction"}), 400
 
 
-def _build_filters(args) -> tuple[str, list]:
-    """Build SQL WHERE clause fragments from common query params."""
+def _build_filters(args, hide: bool = True) -> tuple[str, list]:
+    """Build SQL WHERE clause fragments from common query params.
+
+    The Household view is the household's spending: the Household book on
+    accounts the household owns (ruling 6). `hide` leaves out the merchants
+    hidden from expense views; it is for what a list shows, never for a sum:
+    hiding a merchant changes what is shown, not the figure."""
     filters = ""
     params = []
 
@@ -1855,13 +1877,17 @@ def _build_filters(args) -> tuple[str, list]:
     if book:
         filters += f" AND {book_expr('t')} = ?"
         params.append(book)
+        if book == book_type.DEFAULT_BOOK:
+            filters += f" AND {_HOUSEHOLD_ACCOUNT}"
+            params.append(account_kind.HOUSEHOLD)
 
     exclude_one_off = args.get("exclude_one_off")
     if exclude_one_off == "true":
         # Exclude both transaction-level and service-level one-offs
         filters += " AND t.is_one_off = 0 AND (svc.is_one_off IS NULL OR svc.is_one_off = 0)"
 
-    filters += f" AND {_expense_visibility_filter('svc')}"
+    if hide:
+        filters += f" AND {_expense_visibility_filter('svc')}"
 
     account_id = args.get("account_id")
     if account_id:
