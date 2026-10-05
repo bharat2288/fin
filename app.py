@@ -15,7 +15,7 @@ import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
 import account_kind
@@ -24,6 +24,7 @@ import balance_sheet
 import book_type
 import db
 import flow
+import history
 import loan_interest
 import money
 import month_check
@@ -429,6 +430,149 @@ def mask_card_number(text: str) -> str:
 
 # Max upload size: 10MB
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
+
+# ---------------------------------------------------------------------------
+# The change history (history.py): every request that may write opens an
+# entry, the triggers record the rows it changes, and the entry is closed
+# when the response is ready. One write at a time.
+# ---------------------------------------------------------------------------
+
+_WRITE_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+
+# What each writing route did, in words, for the history's list.
+_CHANGE_SUMMARIES = {
+    "api_accounts_create": "Added an account",
+    "api_accounts_update": "Changed an account",
+    "api_accounts_delete": "Deleted an account",
+    "api_anchors_create": "Entered a figure",
+    "api_anchors_replace": "Corrected a figure",
+    "api_anchors_delete": "Deleted a figure",
+    "api_loan_interest": "Worked out loan interest",
+    "api_services_bulk_rename": "Renamed merchants",
+    "api_services_create": "Added a merchant",
+    "api_services_update": "Changed a merchant",
+    "api_services_merge": "Merged merchants",
+    "api_services_delete": "Deleted a merchant",
+    "api_update_transaction": "Changed a row's labels",
+    "api_resolve_transaction": "Gave a row a merchant and type",
+    "api_import_upload": "Read a statement for import",
+    "api_import_confirm": "Imported a statement",
+    "api_rules_create": "Added a merchant rule",
+    "api_rules_update": "Changed a merchant rule",
+    "api_rules_delete": "Deleted a merchant rule",
+    "api_rules_recategorize": "Re-ran every merchant rule",
+    "api_rates_fetch": "Fetched an exchange rate",
+    "api_rates_overwrite": "Overwrote an exchange rate",
+    "api_review_label": "Labelled a waiting transfer",
+    "api_pair_matching": "Paired transfers between own accounts",
+    "api_subscriptions_create": "Added a subscription",
+    "api_subscriptions_update": "Changed a subscription",
+    "api_subscriptions_delete": "Deleted a subscription",
+    "api_subscriptions_enrich": "Filled in subscriptions",
+    "api_history_undo": "Undid a change",
+}
+
+
+def _caller() -> tuple[str, str]:
+    """Who is asking: (via, actor). The front door (serve.py when hosted, the
+    chat tools in-process) puts them in the WSGI environ; nothing a client
+    sends can set them. Anything else is the operator in fin's own screens."""
+    via = request.environ.get("fin.via", history.VIA_APP)
+    if via not in history.VIAS:
+        via = history.VIA_APP
+    actor = request.environ.get("fin.actor") or history.APP_ACTOR
+    return via, str(actor)[:80]
+
+
+@app.before_request
+def _open_change_entry():
+    if request.method not in _WRITE_METHODS:
+        return None
+    history.WRITE_LOCK.acquire()
+    g.change_locked = True
+    via, actor = _caller()
+    with get_db() as conn:
+        g.change_entry = history.open_entry(conn, via, actor, request.environ.get("fin.summary", ""))
+    return None
+
+
+def _close_change_entry() -> tuple[int | None, int]:
+    entry_id = g.pop("change_entry", None)
+    if entry_id is None:
+        return None, 0
+    summary = _CHANGE_SUMMARIES.get(request.endpoint or "", f"Changed something ({request.endpoint})")
+    with get_db() as conn:
+        count = history.close_entry(conn, entry_id, summary)
+    return (entry_id if count else None), count
+
+
+@app.after_request
+def _finish_change_entry(response):
+    entry_id, count = _close_change_entry()
+    if entry_id is not None:
+        response.headers["X-Fin-Change"] = str(entry_id)
+        response.headers["X-Fin-Change-Rows"] = str(count)
+    return response
+
+
+@app.teardown_request
+def _release_write_lock(exc):
+    try:
+        if "change_entry" in g:  # the request failed before a response
+            _close_change_entry()
+    finally:
+        if g.pop("change_locked", False):
+            history.WRITE_LOCK.release()
+
+
+@app.route("/api/history")
+def api_history():
+    """The change history, newest first: ?limit= (default 50), ?before=<id>
+    for the page after. Each entry: when (UTC), via (app or chat), actor,
+    summary, how many rows, and whether it undid or was undone by another."""
+    try:
+        limit = int(request.args.get("limit", 50))
+        before = request.args.get("before")
+        before = int(before) if before is not None else None
+    except ValueError:
+        return jsonify({"error": "limit and before must be whole numbers"}), 400
+    with get_db() as conn:
+        return jsonify({"entries": history.entries(conn, limit, before)})
+
+
+@app.route("/api/history/<int:entry_id>")
+def api_history_entry(entry_id: int):
+    """One entry with every row it changed, before and after, and the later
+    change that would block undoing it, if any."""
+    with get_db() as conn:
+        shown = history.entry(conn, entry_id)
+        if shown is None:
+            return jsonify({"error": "no such change"}), 404
+        shown["blocked_by"] = history.blocker(conn, entry_id) if shown["undone_by"] is None else None
+    return jsonify(shown)
+
+
+@app.route("/api/history/row/<table>/<int:row_id>")
+def api_history_row(table: str, row_id: int):
+    """The entries that changed one row, newest first."""
+    if table not in history.TRACKED:
+        return jsonify({"error": "unknown table"}), 404
+    with get_db() as conn:
+        return jsonify({"entries": history.row_entries(conn, table, row_id)})
+
+
+@app.route("/api/history/<int:entry_id>/undo", methods=["POST"])
+def api_history_undo(entry_id: int):
+    """Undo one change: every row it changed goes back to how it was, as a
+    new entry. Refused, changing nothing, when a later change touched the
+    same rows (it is named: undo it first) or the change was already undone."""
+    with get_db() as conn:
+        try:
+            done = history.undo(conn, entry_id, g.change_entry)
+        except history.UndoRefused as e:
+            return jsonify({"error": str(e)}), 409
+    return jsonify({"ok": True, **done})
 
 
 # ---------------------------------------------------------------------------

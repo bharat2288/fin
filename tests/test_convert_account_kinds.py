@@ -16,8 +16,10 @@ import pytest
 import app as fin_app
 import book_type
 import conversion
+import convert_change_history
 import convert_account_kinds
 import db
+import history
 
 DAY = date(2026, 3, 14)
 
@@ -69,7 +71,7 @@ def old(tmp_path: Path) -> Path:
     """A database from before the step, holding accounts of every old type."""
     path = tmp_path / "ledger.db"
     conn = sqlite3.connect(str(path))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.executescript("""
         DROP TABLE anchors;
         ALTER TABLE accounts DROP COLUMN owner;
@@ -163,7 +165,7 @@ def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
     convert(old)
     fresh = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(fresh))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.close()
 
     def shape(path: Path) -> dict:
@@ -363,6 +365,8 @@ def test_the_app_will_not_start_on_a_database_from_before_the_step(old, started_
 def test_the_app_serves_a_converted_database_and_takes_a_figure(old, started_on):
     convert(old)
 
+    # And the change history, the last step of the chain.
+    conversion.run_step(old, convert_change_history.STEP)
     client = started_on(old)
 
     listed = {a["name"]: a for a in client.get("/api/accounts").get_json()}
@@ -391,6 +395,8 @@ def test_the_bank_accounts_with_no_statement_take_a_figure_on_a_converted_databa
     old, started_on
 ):
     convert(old)
+    # And the change history, the last step of the chain.
+    conversion.run_step(old, convert_change_history.STEP)
     client = started_on(old)
     listed = {a["name"]: a for a in client.get("/api/accounts").get_json()}
     figures = {

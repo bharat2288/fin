@@ -17,11 +17,13 @@ import pytest
 import app as fin_app
 import book_type
 import conversion
+import convert_change_history
 import convert_account_kinds
 import convert_minor_units
 import convert_movements
 import convert_printed_statements
 import db
+import history
 import retire_float_amounts
 
 DAY = date(2026, 3, 14)
@@ -390,13 +392,13 @@ def test_a_database_through_both_steps_has_the_shape_of_a_new_one(old, tmp_path)
     conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
     fresh = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(fresh))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.close()
     # What the next start does to a converted database: the schema script's
     # CREATE IF NOT EXISTS adds any table no step makes (the suggestion
     # answers) and leaves every table the steps shaped as it is.
     conn = sqlite3.connect(str(old))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.close()
 
     def shape(path: Path) -> dict:
@@ -543,6 +545,8 @@ def test_the_app_shows_a_converted_database_the_figures_its_floats_stated(old, s
     conversion.run_step(old, convert_movements.STEP, today=DAY)
     conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
 
+    # And the change history, the last step of the chain.
+    conversion.run_step(old, convert_change_history.STEP)
     client = started_on(old)
 
     rows = {

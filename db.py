@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 import book_type
+import history
 
 DB_PATH = Path(__file__).parent / "fin.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -226,7 +227,7 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
     """Whether the database holds anything the app cannot serve until the
     conversion steps have run: the category tree, float amounts, accounts
     with no owner, rows that cannot name their other side or their printed
-    statement, or rows with no flow."""
+    statement, rows with no flow, or no change history."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "transactions" not in tables:
         return False  # a new database
@@ -244,6 +245,7 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
         or "printed" not in {r[1] for r in conn.execute("PRAGMA table_info(statements)")}
         or conn.execute("SELECT 1 FROM transactions WHERE flow_type IS NULL LIMIT 1").fetchone()
         is not None
+        or not history.has_shape(conn)
     )
 
 
