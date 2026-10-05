@@ -57,6 +57,15 @@ _HEADER = "DATENARRATIONCHQ./REF.NO.VALUEDT"
 _SUMMARY_HEADING = "STATEMENTSUMMARY"
 # Lines that end the rows of a page: what follows is not a narration.
 _END_OF_ROWS = ("PAGENO", "HDFCBANKLIMITED", "*CLOSINGBALANCE", "CONTENTSOFTHISSTATEMENT", "GENERATEDON")
+# The labels of the page-top block (branch, address, the holder's details)
+# each page opens with, matched on the compacted line with the colon that
+# follows them: a line starting with one is header text, never a narration
+# running on ("STATE BANK ..." is not "State :").
+_PAGE_TOP_LABEL = re.compile(
+    r"^(ACCOUNTBRANCH|ADDRESS|CITY|STATE|PHONENO|EMAIL|CUSTID|ACCOUNTNO|A/COPENDATE|ACCOUNTSTATUS"
+    r"|RTGS/NEFTIFSC|MICR|BRANCHCODE|PRODUCTCODE|JOINTHOLDERS|NOMINATION|ODLIMIT|CURRENCY|FROM)\.?:"
+    r"|^STATEMENTOFACCOUNT"
+)
 
 
 def _compact(text: str) -> str:
@@ -179,7 +188,15 @@ def _table_lines(pages: list[str]):
     first page only) carries the table on from its top, so a narration cut
     by the page break runs on there. On such a page a footer line seen
     before its first row (a page number at the top) is passed over; after
-    it, one ends the page's rows."""
+    it, one ends the page's rows.
+
+    Such a page opens with the page-top block (branch, address, the holder's
+    name) before its first row. A line there is read as a narration running
+    on only when it cannot be header text: it starts with none of the block's
+    labels and is none of the lines above the column header on the first
+    page (the block's unlabelled lines, the address and the holder's name,
+    print there too)."""
+    page_top = _page_top_lines(pages)
     started = False
     for text in pages:
         lines = [raw.strip() for raw in text.splitlines()]
@@ -201,10 +218,25 @@ def _table_lines(pages: list[str]):
                 if rows_on_page or headed:
                     in_rows = False
                 continue
+            if not headed and not rows_on_page and (compact in page_top or _PAGE_TOP_LABEL.match(compact)):
+                continue
             match = _ROW.match(line)
             if match:
                 rows_on_page += 1
             yield ("row", match) if match else ("more", line)
+
+
+def _page_top_lines(pages: list[str]) -> frozenset[str]:
+    """The first headed page's lines above its column header, compacted: the
+    page-top block as the statement prints it."""
+    for text in pages:
+        above = []
+        for line in text.splitlines():
+            compact = _compact(line)
+            if _HEADER in compact:
+                return frozenset(c for c in above if c)
+            above.append(compact)
+    return frozenset()
 
 
 def _summary(pages: list[str]) -> tuple[int, int, int, int, int, int]:

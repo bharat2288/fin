@@ -142,6 +142,70 @@ def test_rows_on_pages_without_the_header_are_read_and_a_narration_runs_across_t
     assert tie.check(stmt)["difference_minor"] == 0
 
 
+# Each later page opens with the statement's page-top block (branch, address,
+# the holder's name) before its first row: header text, not a narration.
+PAGE_TOP = [
+    "Page No .: 2",
+    "MR SAMPLE HOLDER Account Branch : SAMPLE BRANCH",
+    "Address : HDFC BANK LTD SAMPLE STREET 1",
+    "SAMPLE LANE City : SAMPLE CITY 000001",
+    "State : SAMPLE STATE",
+    "Phone no. : 00000000",
+    "Email : SAMPLE@EXAMPLE.TEST",
+    "Cust ID : 00000001",
+    "Account No : 00000000001234",
+    "A/C Open Date : 01/01/2020",
+    "JOINT HOLDERS :",
+    "MR SAMPLE HOLDER",
+]
+TOP_OF_FIRST_PAGE = [
+    "HDFC BANK LIMITED",
+    *PAGE_TOP[1:],
+    "From : 01/04/2026 To : 30/06/2026",
+]
+
+
+def with_page_tops(continuation_after_block: bool) -> list[str]:
+    first, second, third = MULTI_PAGE
+    second_rows = second.splitlines()[1:]  # without its page number
+    if continuation_after_block:
+        # the cut narration prints under the block
+        page_two = [*PAGE_TOP, *second_rows]
+    else:
+        # the cut narration prints above it
+        page_two = [PAGE_TOP[0], second_rows[0], *PAGE_TOP[1:], *second_rows[1:]]
+    return [
+        "\n".join([*TOP_OF_FIRST_PAGE, *first.splitlines()[4:]]),
+        "\n".join(page_two),
+        "\n".join([*PAGE_TOP[1:], *third.splitlines()]),
+    ]
+
+
+def test_a_label_line_is_header_text_even_where_page_one_does_not_print_it(monkeypatch):
+    pages = with_page_tops(True)
+    pages[1] = pages[1].replace("Cust ID : 00000001", "Cust ID : 00000001\nMICR : 000000000")
+    assert read(monkeypatch, pages).transactions[1].description == "NEFT CR-SAMPLE EMPLOYER FROM SAMPLE EMPLOYER PVT"
+
+
+def test_a_cut_narration_that_starts_like_a_label_word_still_joins(monkeypatch):
+    first, second, third = MULTI_PAGE
+    pages = [first, second.replace("FROM SAMPLE EMPLOYER PVT", "STATE BANK SAMPLE"), third]
+    assert read(monkeypatch, pages).transactions[1].description == "NEFT CR-SAMPLE EMPLOYER STATE BANK SAMPLE"
+
+
+@pytest.mark.parametrize("after_block", [True, False], ids=["under-the-block", "above-the-block"])
+def test_the_page_top_block_is_not_glued_to_a_narration_but_a_cut_narration_still_joins(monkeypatch, after_block):
+    stmt = read(monkeypatch, with_page_tops(after_block))
+
+    assert [(tx.date, tx.description, tx.amount_minor) for tx in stmt.transactions] == [
+        ("2026-04-02", "UPI-SAMPLE GROCER-PAYMENT", 150000),
+        ("2026-04-15", "NEFT CR-SAMPLE EMPLOYER FROM SAMPLE EMPLOYER PVT", -2500050),
+        ("2026-05-03", "UPI-SAMPLE PHARMACY", 20000),
+        ("2026-06-01", "INTEREST PAID TILL 31-MAY-2026", -31025),
+    ]
+    assert stmt.accounts == ["HDFC Bank Savings 1234"]
+
+
 def test_a_page_before_the_header_is_still_not_read_as_rows(monkeypatch):
     cover = "SAMPLE COVER LETTER\n01/01/26 NOT A ROW 0000000000000009 01/01/26 1.00 2.00"
     stmt = read(monkeypatch, [cover, *MULTI_PAGE])
