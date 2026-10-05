@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import app as fin_app
+import book_type
 import conversion
 import convert_account_kinds
 import convert_minor_units
@@ -120,6 +121,8 @@ def old(tmp_path: Path) -> Path:
         " VALUES (?, ?, ?, ?, ?)",
         [(rule_id, f"SAMPLE RULE {rule_id}", 1, *floats) for rule_id, (floats, _) in RULES.items()],
     )
+    # The steps before this one have been applied: the types are seeded.
+    book_type.seed_types(conn)
     conn.commit()
     conn.close()
     return path
@@ -285,7 +288,7 @@ def test_a_rule_threshold_moved_by_a_cent_fails(old):
 def test_it_will_not_run_before_the_minor_units_step(old):
     before = dump(old)
 
-    with pytest.raises(conversion.ConversionFailed, match="MinorUnitsNotApplied"):
+    with pytest.raises(conversion.ConversionRefused, match="runs after minor-units"):
         retire(old)
 
     assert dump(old) == before
@@ -303,7 +306,7 @@ def test_it_will_not_run_while_a_row_has_no_whole_cents_yet(old):
     )
     before = dump(old)
 
-    with pytest.raises(conversion.ConversionFailed, match="MinorUnitsNotApplied"):
+    with pytest.raises(conversion.ConversionRefused, match="runs after minor-units"):
         retire(old)
     assert dump(old) == before
 
@@ -317,7 +320,7 @@ def test_it_will_not_run_while_a_rows_whole_cents_disagree_with_its_float(old):
     run(old, "UPDATE transactions SET amount_minor = 1231 WHERE id = 1")
     before = dump(old)
 
-    with pytest.raises(conversion.ConversionFailed, match="MinorUnitsNotApplied"):
+    with pytest.raises(conversion.ConversionRefused, match="runs after minor-units"):
         retire(old)
 
     assert dump(old) == before
@@ -328,7 +331,7 @@ def test_it_will_not_guess_at_a_database_with_only_some_of_the_floats_gone(old):
     run(old, "ALTER TABLE merchant_rules DROP COLUMN max_amount")
     before = dump(old)
 
-    with pytest.raises(conversion.ConversionFailed, match="PartlyRetired"):
+    with pytest.raises(conversion.ConversionRefused, match="runs after minor-units"):
         retire(old)
 
     assert dump(old) == before

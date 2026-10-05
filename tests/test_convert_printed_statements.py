@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
+import book_type
 import conversion
+import convert_account_kinds
 import convert_printed_statements
 import db
 
@@ -54,6 +56,10 @@ def old(tmp_path: Path) -> Path:
         " VALUES (?, ?, 'SAMPLE GROCER', ?, 'expense')",
         [(1, "2026-07-12", 1_000), (2, "2026-08-12", 2_550)],
     )
+    # The steps before this one have been applied: the types are seeded and
+    # the accounts the account-kinds step creates are there.
+    book_type.seed_types(conn)
+    convert_account_kinds.STEP.apply(conn)
     conn.commit()
     conn.close()
     return path

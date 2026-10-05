@@ -313,7 +313,7 @@ def test_it_runs_behind_its_backup_and_refuses_without_one(old):
 def test_it_will_not_run_before_the_book_and_type_step(old):
     before = dump(old)
 
-    with pytest.raises(conversion.ConversionFailed, match="BookAndTypeNotApplied"):
+    with pytest.raises(conversion.ConversionRefused, match="runs after book-and-type"):
         retire(old)
 
     assert dump(old) == before
@@ -329,7 +329,7 @@ def test_it_will_not_run_while_rows_wait_for_the_book_and_type_step(old):
     )
     before = dump(old)
 
-    with pytest.raises(conversion.ConversionFailed, match="BookAndTypeNotApplied"):
+    with pytest.raises(conversion.ConversionRefused, match="runs after book-and-type"):
         retire(old)
     assert dump(old) == before
 

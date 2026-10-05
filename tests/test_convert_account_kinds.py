@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import app as fin_app
+import book_type
 import conversion
 import convert_account_kinds
 import db
@@ -82,6 +83,8 @@ def old(tmp_path: Path) -> Path:
         INSERT INTO statements (id, account_id, statement_date) VALUES
             (1, 1, '2026-01-01'), (2, 2, '2026-01-01'), (3, 4, '2026-01-01');
     """)
+    # The steps before this one have been applied: the types are seeded.
+    book_type.seed_types(conn)
     conn.commit()
     conn.close()
     return path

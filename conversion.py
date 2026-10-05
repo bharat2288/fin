@@ -18,6 +18,7 @@ by a relative name and has no default path.
 
 from __future__ import annotations
 
+import importlib
 import re
 import shutil
 import sqlite3
@@ -42,6 +43,20 @@ COUNTED_TABLES = (
     "batch_imports",
 )
 
+# The conversion steps in the order they run: (step name, module). Each
+# module declares STEP and a main(argv). convert_all.py runs them in this
+# order, and run_step refuses a step from this list while a step before it
+# has not been applied.
+CHAIN = (
+    ("book-and-type", "convert_book_type"),
+    ("retire-categories", "retire_categories"),
+    ("minor-units", "convert_minor_units"),
+    ("retire-float-amounts", "retire_float_amounts"),
+    ("account-kinds", "convert_account_kinds"),
+    ("movements", "convert_movements"),
+    ("printed-statements", "convert_printed_statements"),
+)
+
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 
 
@@ -53,6 +68,34 @@ class ConversionFailed(Exception):
     """The step was started and did not pass. Its changes were rolled back and
     the database is as it was, unless the message says the changes could not be
     rolled back and names the backup to restore from."""
+
+
+def chain_step(module_name: str) -> Step:
+    """The STEP a module of the chain declares."""
+    return importlib.import_module(module_name).STEP
+
+
+def not_applied(conn: sqlite3.Connection, names=None) -> list[str]:
+    """The steps of the chain that do not read as applied, in chain order.
+    `names` limits the reading to those steps."""
+    waiting = []
+    for name, module_name in CHAIN:
+        if names is not None and name not in names:
+            continue
+        try:
+            applied = chain_step(module_name).is_applied(conn)
+        except sqlite3.Error:
+            # A shape the step cannot read (a column it needs is gone) is not
+            # the shape it leaves behind.
+            applied = False
+        if not applied:
+            waiting.append(name)
+    return waiting
+
+
+def _earlier(step_name: str) -> list[str]:
+    names = [name for name, _ in CHAIN]
+    return names[: names.index(step_name)] if step_name in names else []
 
 
 def unchanged(before: dict, after: dict) -> list[str]:
@@ -177,7 +220,8 @@ def run_step(
     "already-applied"), the backup's path (None when nothing was run), and the
     measurements before and after.
 
-    Raises ConversionRefused when the step was not started, ConversionFailed
+    Raises ConversionRefused when the step was not started (a step of the
+    chain is not started while a step before it is not applied), ConversionFailed
     when it was started and rolled back.
     """
     if not _STEP_NAME.fullmatch(step.name):
@@ -199,6 +243,16 @@ def run_step(
                 "before": None,
                 "after": None,
             }
+
+        # A step of the chain runs only on a database every earlier step has
+        # been applied to: it is written for that shape.
+        waiting = not_applied(conn, _earlier(step.name))
+        if waiting:
+            raise ConversionRefused(
+                f"step {step.name} runs after {', '.join(waiting)}, which "
+                f"{'has' if len(waiting) == 1 else 'have'} not been applied; nothing was "
+                "changed. Run every step in order with: python convert_all.py <path to database>"
+            )
 
         # In WAL mode committed rows can sit in the -wal file, where a copy of
         # the main file would miss them. Fold them in, then take the write

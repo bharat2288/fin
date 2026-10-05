@@ -13,7 +13,9 @@ from pathlib import Path
 import pytest
 
 import app as fin_app
+import book_type
 import conversion
+import convert_account_kinds
 import convert_movements
 import db
 import money
@@ -136,6 +138,10 @@ def old(tmp_path: Path) -> Path:
             for (i, account, description, amount, flow, manual, service, typed, book), _ in ROWS
         ],
     )
+    # The steps before this one have been applied: the types are seeded and
+    # the accounts the account-kinds step creates are there.
+    book_type.seed_types(conn)
+    convert_account_kinds.STEP.apply(conn)
     conn.commit()
     conn.close()
     return path
@@ -255,7 +261,7 @@ def test_a_database_from_before_accounts_had_an_owner_stops_the_step(old):
     run(old, "ALTER TABLE accounts DROP COLUMN owner")
     before = dump(old)
 
-    with pytest.raises(conversion.ConversionFailed, match="AccountKindsNotConverted"):
+    with pytest.raises(conversion.ConversionRefused, match="runs after account-kinds"):
         convert(old)
 
     assert dump(old) == before

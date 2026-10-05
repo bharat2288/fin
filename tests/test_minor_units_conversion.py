@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import book_type
 import conversion
 import convert_minor_units
 
@@ -119,6 +120,8 @@ def old(tmp_path: Path) -> Path:
             (4, "SAMPLE LANDLORD REFUND", 2, None, -19.99),
         ],
     )
+    # The steps before this one have been applied: the types are seeded.
+    book_type.seed_types(conn)
     conn.commit()
     conn.close()
     return path
