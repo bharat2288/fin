@@ -802,3 +802,30 @@ def test_python_app_py_serves_on_loopback_as_local_dev(monkeypatch, temp_db):
 
     assert fin_app.main(["--port", "8450"]) == 0
     assert ran["host"] == "127.0.0.1" and ran["local_dev"] is True
+
+
+def test_the_desk_app_starts_without_the_hosting_packages(tmp_path):
+    # python app.py on the laptop, with only the requirements fin had before
+    # hosting: the gate's JWT library (and the rest of the hosting set) is
+    # imported where it is used, never as app.py starts.
+    code = (
+        "import sys, importlib.abc\n"
+        "HOSTING = {'jwt', 'boto3', 'botocore', 'uvicorn', 'a2wsgi', 'mcp', 'mcp_types', 'apscheduler',"
+        " 'httpx', 'cryptography'}\n"
+        "class Missing(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path, target=None):\n"
+        "        if name.split('.')[0] in HOSTING:\n"
+        "            raise ModuleNotFoundError(f'No module named {name!r}', name=name)\n"
+        "sys.meta_path.insert(0, Missing())\n"
+        "sys.path.insert(0, '.')\n"
+        "import db, app\n"
+        "db.init_db()\n"
+        "app.app.config['LOCAL_DEV'] = True\n"
+        "print(app.app.test_client().get('/api/books').status_code)\n"
+    )
+    env = {**os.environ, "FIN_DB_PATH": str(tmp_path / "desk" / "fin.db")}
+    (tmp_path / "desk").mkdir()
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip().splitlines()[-1] == "200"

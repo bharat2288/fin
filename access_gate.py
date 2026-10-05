@@ -52,8 +52,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-import jwt
-import requests
+# jwt (PyJWT) and requests are imported where they are used, so that the
+# desk app (python app.py, local-dev) starts with fin's requirements from
+# before hosting: only a gate that verifies a token needs them.
 
 
 logger = logging.getLogger("fin.access")
@@ -228,6 +229,8 @@ def _denied(reason: str) -> AccessRefused:
 
 
 def fetch_team_jwks(certs_url: str) -> dict:
+    import requests
+
     response = requests.get(certs_url, timeout=KEY_FETCH_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
@@ -264,6 +267,8 @@ class AccessKeys:
     def _fetch(self) -> None:
         self._last_attempt = self._clock()
         try:
+            import jwt
+
             key_set = jwt.PyJWKSet.from_dict(self._fetch_jwks())
             keys = {
                 key.key_id: key.key
@@ -302,6 +307,8 @@ class AccessVerifier:
         self._keys = keys
 
     def verify(self, token: str | None, gate: str, *, upload_route: bool = False) -> AccessIdentity:
+        import jwt
+
         if not token:
             raise _unauthenticated("missing-token")
         try:
