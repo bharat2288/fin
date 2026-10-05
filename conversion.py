@@ -26,6 +26,8 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
+import money
+
 # Tables whose row counts are recorded. A frozen list: table names in the
 # count query come from here and nowhere else. A table absent from the
 # database (not created yet, or retired by an earlier step) is left out.
@@ -93,23 +95,26 @@ def measure(conn: sqlite3.Connection) -> dict:
     None, so a change to its amount is seen like any other.
     """
     columns = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
-    if "amount_sgd" in columns:
-        # Each amount is rounded to its cent before summing, so the total is an
-        # exact integer and two measurements compare without float error.
-        cents = "CAST(ROUND(t.amount_sgd * 100) AS INTEGER)"
-    else:
-        cents = "t.amount_minor"
-    totals = {
-        row[0]: row[1]
-        for row in conn.execute(
-            f"""
-            SELECT s.account_id, SUM({cents})
-            FROM transactions t
-            LEFT JOIN statements s ON s.id = t.statement_id
-            GROUP BY s.account_id
-            """
-        )
-    }
+    rows = conn.execute(
+        f"""
+        SELECT s.account_id, t.{"amount_sgd" if "amount_sgd" in columns else "amount_minor"}
+        FROM transactions t
+        LEFT JOIN statements s ON s.id = t.statement_id
+        """
+    ).fetchall()
+    totals: dict = {}
+    for account_id, amount in rows:
+        if "amount_sgd" in columns and amount is not None:
+            # Each float is rounded to its cent by the one rule money has
+            # (money.to_minor: its decimal reading, half-even), the rule the
+            # minor-units step fills the integers by, so the money steps and
+            # this measure never disagree about a half cent. SQLite's ROUND
+            # rounds the binary value half away from zero, and would.
+            amount = money.to_minor(amount)
+        if amount is None:
+            totals.setdefault(account_id, None)
+            continue
+        totals[account_id] = (totals.get(account_id) or 0) + amount
     return {"rows": count_rows(conn), "account_totals_cents": totals}
 
 

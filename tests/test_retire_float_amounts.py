@@ -556,3 +556,32 @@ def test_the_app_shows_a_converted_database_the_figures_its_floats_stated(old, s
     rules = {r["id"]: (r["min_amount"], r["max_amount"]) for r in client.get("/api/rules").get_json()
              if r["id"] in RULES}
     assert rules == {1: (None, None), 2: (100.0, None), 3: (0.3, 4.35)}
+
+
+# --- a half cent: one rounding rule on both sides ---------------------------------
+#
+# money.to_minor reads a float as the decimal it was written as and rounds it
+# half-even. SQLite's ROUND rounds the binary value half away from zero. The
+# two disagree on a half cent, and the measure the float step is checked by
+# used to be SQLite's: such a row failed the step on every attempt.
+
+
+def test_half_cent_amounts_convert_and_retire_by_one_rule(old):
+    halves = {20: 12.345, 21: 0.005, 22: 2.675, 23: -0.015}   # half-even: 1234, 0, 268, -2
+    conn = sqlite3.connect(str(old))
+    conn.executemany(
+        "INSERT INTO transactions (id, statement_id, date, description, amount_sgd, flow_type)"
+        " VALUES (?, 1, '2026-01-11', 'SAMPLE HALF CENT', ?, 'expense')",
+        list(halves.items()),
+    )
+    conn.commit()
+    conn.close()
+
+    to_cents(old)
+    report = retire(old)
+
+    assert report["status"] == "applied"
+    assert query(old, "SELECT id, amount_minor FROM transactions WHERE id >= 20 ORDER BY id") == [
+        (20, 1234), (21, 0), (22, 268), (23, -2),
+    ]
+    assert report["after"]["account_totals_minor"][1] == CARD_TOTAL + 1234 + 0 + 268 - 2

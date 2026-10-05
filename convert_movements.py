@@ -70,6 +70,8 @@ def planned(conn: sqlite3.Connection) -> list[tuple[int, str, str, int | None]]:
     ):
         amount = "t.amount_minor"
     else:
+        # Only the sign is read: rounding cannot change it but for a row of
+        # under half a cent, which reads as nothing either way.
         amount = "CAST(ROUND(t.amount_sgd * 100) AS INTEGER)"
     rows = conn.execute(
         f"""
