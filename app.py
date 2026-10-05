@@ -1793,7 +1793,9 @@ def api_transactions():
     flow=review is the review list: the transfers waiting for a label. It
     hides no merchant, so it lists every row the waiting count counts.
     """
-    filters, params = _build_filters(request.args, hide=request.args.get("flow") != flow.REVIEW)
+    # A row asked for by id is shown whatever its merchant's hiding says.
+    hide = request.args.get("flow") != flow.REVIEW and request.args.get("tx_id") is None
+    filters, params = _build_filters(request.args, hide=hide)
 
     flow_filter = request.args.get("flow")
     if flow_filter:
@@ -1803,6 +1805,12 @@ def api_transactions():
             return jsonify({"error": str(e)}), 400
         filters += " AND COALESCE(t.flow_type, 'expense') = ?"
         params.append(flow_filter)
+
+    # tx_id: one row, as a row's own sheet reads it.
+    tx_id = request.args.get("tx_id", type=int)
+    if tx_id is not None:
+        filters += " AND t.id = ?"
+        params.append(tx_id)
 
     # look=mixed: rows of a mixed merchant (looked at each time) that nobody
     # has set by hand yet: the queue's "is this type right?" items.

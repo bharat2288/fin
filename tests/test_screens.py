@@ -249,3 +249,15 @@ def test_look_mixed_lists_rows_of_a_mixed_merchant_not_yet_set_by_hand(book, con
     assert listed[0]["account_id"]
     book.put(f"/api/transactions/{tx['id']}", json={"type_id": None})
     assert book.get("/api/transactions?look=mixed").get_json()["transactions"] == []
+
+
+def test_tx_id_reads_one_row_hidden_merchant_or_not(book, conn):
+    tx = first_row(book)
+    shown = book.get(f"/api/transactions?tx_id={tx['id']}").get_json()
+    assert [r["id"] for r in shown["transactions"]] == [tx["id"]]
+    assert book.get("/api/transactions?tx_id=999999").get_json()["transactions"] == []
+    conn.execute("INSERT INTO services (name, exclude_from_expense_views) VALUES ('Sample Hidden', 1)")
+    svc = conn.execute("SELECT id FROM services WHERE name = 'Sample Hidden'").fetchone()[0]
+    conn.execute("UPDATE transactions SET service_id = ? WHERE id = ?", (svc, tx["id"]))
+    conn.commit()
+    assert [r["id"] for r in book.get(f"/api/transactions?tx_id={tx['id']}").get_json()["transactions"]] == [tx["id"]]
