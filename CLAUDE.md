@@ -7,12 +7,13 @@ Flask + vanilla JS + Chart.js. Single-page app, no build step.
 ```
 app.py              ← Flask backend, all API routes
 static/
-    index.html      ← SPA shell (2 tabs + Import + Masters dropdown)
+    index.html      ← SPA shell: Home, Queue, Books, Changes (bottom tabs on phone, top bar on desk)
     app.js          ← All frontend logic
     styles.css      ← All styles
 db.py               ← Database helpers, categorization engine
 suggest.py          ← Type suggestion for unknown merchants (off without OPENROUTER_API_KEY)
 history.py          ← Change history: every write recorded (schema.sql triggers), undoable
+screens.py          ← What the screens keep: "Claude may write" switch, last-looked mark, refused statements
 mcp_tools.py        ← The chat tools over MCP; the tool list is the permission list
 fin_upload.py       ← Upload command: sends a folder of statements to fin's import
 schema.sql          ← SQLite schema (source of truth)

@@ -1,4896 +1,1968 @@
-/* fin — app.js
-   Frontend logic for Dashboard, Import, Subscriptions, Services, and Masters tabs.
-   A row is labelled by book (whose spending: Household, Moom, Kalesh) and type
-   (what kind); both lists come from the server (/api/books, /api/types). */
+/* fin — the household's books, kept mostly through Claude and checked here.
+ *
+ * Four places (fin-surfaces 02): Home, Queue, Books, Changes. Every figure is
+ * read from fin's own API; nothing here works out a balance, a tie or a
+ * check of its own. What the screens add is how it is shown:
+ *   - every amount carries its currency; rupees use Indian grouping
+ *     (₹ 10,84,000.00), S$ and the rest western; owed is negative;
+ *   - money out and money in are kept apart wherever something waits;
+ *   - books are never added together: each has its own total;
+ *   - trust markers (ties, off by, not checked, your figure, stale,
+ *     unexplained, refused) are always shown, each with a word, and each
+ *     links to its fix.
+ * Vanilla JS, no build step.
+ */
+'use strict';
 
-// ============================================================
-// STATE
-// ============================================================
+// A figure you entered that is older than this is stale: it waits in the queue.
+const STALE_DAYS = 60;
+// The balance sheet starts here (balance_sheet.START).
+const SHEET_START = '2026-01';
+// A missed bill: no payment seen this many days after it was due.
+const BILL_GRACE_DAYS = 7;
 
-let types = [];               // The type list: [{id, name, parent_id, parent_name, display_name, default_one_off, covers, not_for, proposed_book}, ...]
-let books = [];               // [{name, description}, ...] — Household, Moom, Kalesh
-let accounts = [];            // [{id, name, ...}, ...]
-let accountKinds = { kinds: [], owners: [] };  // the declared account kinds and owners, each with a description
-let reviewChoices = [];       // what a waiting transfer can be labelled: [{name, label, flow, asks, kinds, description}, ...]
-let incomeKinds = [];         // the income kinds: [{id, name, ...}, ...]
-let reviewRows = [];          // the transfers waiting for a label, largest first
-let currentImportId = null;   // Active import preview
-let currentImportData = null; // Preview data from upload
-let importServices = [];      // [{id, name, book, type_id, type_name}, ...] from upload response
-let monthlyChart = null;      // Chart.js instance
-let typeChart = null;     // Chart.js instance
-let txCurrentPage = 1;
-let spendFilter = 'Household'; // 'all' or a book — default to Household
-let selectedFiles = [];
-let txSortCol = 'date';       // Current sort column
-let txSortDir = 'desc';       // Current sort direction
-let showSubtypes = false;      // Charts: roll sub-types up to their parent by default
-let chartMode = 'bar';         // 'bar' or 'trend' for monthly chart
-let lastMonthlyData = null;    // Cache for chart mode toggle
-let lastGranularity = null;    // Cache for chart mode toggle
-let subsFilter = 'active';     // 'active', 'all', 'deactivated'
-let subsSpend = 'Household';   // 'all' or a book
-let allSubs = [];              // Cached subscription data
-const subsSortState = { col: 'service', asc: true };
-// sortSubs toggler created after renderSubscriptions is defined (line ~3400)
-let subsFxRate = 1.35;         // USD→SGD rate from subscriptions API
-let noteModalTxId = null;      // Transaction ID being edited in note modal
-let noteModalIconEl = null;    // Icon element to update after save
-// Chart-table linking state — selections[] model (any combo of type + period)
-// Each entry: { type: string, period: string|null }
-// period=null means "all periods" (from donut click)
-let chartFilter = { selections: [] };
-let monthlyPeriods = [];       // Raw period strings for chart click lookup
-let typeFilterSelections = []; // Multi-select type filter selections
-let allServicesList = [];      // Cached services list (shared by resolve modal, services master, subs)
-let typeColorMap = {};     // type name → hex color (shared between bar + donut)
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-// The book a row with none is read as, and what the charts and the type
-// filter call spending rows with no type. Both mirror the server.
-const DEFAULT_BOOK = 'Household';
-const NO_TYPE_LABEL = 'No type';
-const UNTYPED_FILTER = '__untyped__';
-let suggestionsEnabled = false; // Type suggestion is on only when the server has its key
+// ---------------------------------------------------------------------------
+// State kept per viewer (a convenience only; never a figure)
+// ---------------------------------------------------------------------------
 
-// Type color palette (Dark Neutral chart tokens)
-const CAT_COLORS = [
-    '#e8e0d8', '#ff6b6b', '#a09890', '#4aba6a', '#d4a85c',
-    '#7090c0', '#c090b0', '#80b8a8', '#e8e0d8', '#ff6b6b',
-    '#a09890', '#4aba6a', '#d4a85c', '#7090c0', '#c090b0',
-    '#80b8a8', '#707070', '#a0a0a0', '#505050', '#333333',
-    '#e8e0d8', '#ff6b6b',
+const store = {
+    get(key, fallback) {
+        try { const v = localStorage.getItem('fin.' + key); return v === null ? fallback : JSON.parse(v); }
+        catch (_) { return fallback; }
+    },
+    set(key, value) {
+        try { localStorage.setItem('fin.' + key, JSON.stringify(value)); } catch (_) { /* private window */ }
+    },
+};
+
+const S = {
+    month: null,               // the as-at month: the balance sheet's and the period filter's
+    sheetSort: { key: null, dir: 'asc' },
+    needsLook: false,
+    spending: store.get('spending', { book: 'all', view: 'type', span: 'month', search: '', type: '', oneOffs: true, account: '' }),
+    changes: { who: 'all', state: 'any', newOnly: false, asked: false, open: new Set() },
+    lastSeenMark: null,        // the mark as it was when Changes was opened: the divider sits there
+};
+
+function todayIso() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function currentMonth() { return todayIso().slice(0, 7); }
+function prevMonth(m) {
+    let [y, n] = m.split('-').map(Number);
+    n -= 1; if (n === 0) { n = 12; y -= 1; }
+    return `${y}-${String(n).padStart(2, '0')}`;
+}
+function monthsBack(m, count) {
+    const out = [m];
+    while (out.length < count) out.unshift(prevMonth(out[0]));
+    return out;
+}
+function monthEnd(m) {
+    const [y, n] = m.split('-').map(Number);
+    return `${m}-${String(new Date(y, n, 0).getDate()).padStart(2, '0')}`;
+}
+function sheetMonths() {
+    const out = [];
+    let m = currentMonth();
+    while (m >= SHEET_START) { out.push(m); m = prevMonth(m); }
+    return out;
+}
+S.month = store.get('month', null);
+if (!S.month || S.month < SHEET_START || S.month > currentMonth()) S.month = currentMonth();
+
+// ---------------------------------------------------------------------------
+// Words and numbers
+// ---------------------------------------------------------------------------
+
+function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+const SIGNS = { SGD: 'S$', INR: '₹', USD: 'US$', EUR: '€', GBP: '£', AUD: 'A$', JPY: '¥', MYR: 'RM', HKD: 'HK$' };
+const DIGITS = { JPY: 0, KRW: 0, VND: 0, IDR: 0 };
+const formatters = {};
+function digitsOf(cur) { return DIGITS[cur] ?? 2; }
+function groupFor(cur) {
+    const d = digitsOf(cur);
+    const locale = cur === 'INR' ? 'en-IN' : 'en-US';   // ruling 6: rupees in lakhs and crores
+    const key = locale + d;
+    if (!formatters[key]) formatters[key] = new Intl.NumberFormat(locale, { minimumFractionDigits: d, maximumFractionDigits: d });
+    return formatters[key];
+}
+/** An amount in whole minor units, with its currency: "S$ 1,234.50",
+ *  "₹ 10,84,000.00", owed "S$ −842,000.00". signed: show + on money in. */
+function money(minor, cur = 'SGD', { signed = false } = {}) {
+    if (minor === null || minor === undefined || Number.isNaN(minor)) return '—';
+    cur = cur || 'SGD';
+    const d = digitsOf(cur);
+    const sign = minor < 0 ? '−' : (signed && minor > 0 ? '+' : '');
+    return `${SIGNS[cur] || cur} ${sign}${groupFor(cur).format(Math.abs(minor) / 10 ** d)}`;
+}
+function toMinor(amount, cur = 'SGD') {
+    if (amount === null || amount === undefined) return null;
+    return Math.round(Number(amount) * 10 ** digitsOf(cur));
+}
+/** A row's amount as the lists show it: money out plain, money in marked. */
+function rowAmount(minor, cur) {
+    if (minor === null || minor === undefined) return '—';
+    if (minor < 0) return `<span class="dir in" title="money in">↙ IN</span> <span class="num">${esc(money(-minor, cur))}</span>`;
+    return `<span class="dir out" title="money out">↗ OUT</span> <span class="num">${esc(money(minor, cur))}</span>`;
+}
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const LONG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+function day(iso, { year = true } = {}) {
+    if (!iso) return '—';
+    const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
+    return `${d} ${MONTHS[m - 1]}${year ? ' ' + y : ''}`;
+}
+function monthName(m, { short = false } = {}) {
+    const [y, n] = m.split('-').map(Number);
+    return `${(short ? MONTHS : LONG_MONTHS)[n - 1]} ${y}`;
+}
+/** A history time (UTC, "YYYY-MM-DD HH:MM:SS") in the viewer's own time. */
+function when(utc) {
+    if (!utc) return '—';
+    const t = new Date(utc.replace(' ', 'T') + 'Z');
+    if (Number.isNaN(t.getTime())) return utc;
+    const hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+    const local = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    if (local === todayIso()) return `today ${hm}`;
+    return `${t.getDate()} ${MONTHS[t.getMonth()]}, ${hm}`;
+}
+function daysBetween(a, b) {
+    return Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+}
+function plural(n, one, many) { return `${n} ${n === 1 ? one : (many || one + 's')}`; }
+function pct(part, whole) {
+    if (!whole) return '0%';
+    const p = (part / whole) * 100;
+    if (p > 0 && p < 1) return '<1%';
+    return `${Math.round(p)}%`;
+}
+function sentence(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+// ---------------------------------------------------------------------------
+// The API
+// ---------------------------------------------------------------------------
+
+const cache = new Map();
+
+async function get(url, { fresh = false } = {}) {
+    if (!fresh && cache.has(url)) return cache.get(url);
+    const p = fetch(url, { headers: { Accept: 'application/json' } }).then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            const err = new Error(data.error || `fin could not read ${url}`);
+            err.status = res.status;
+            throw err;
+        }
+        return data;
+    });
+    cache.set(url, p);
+    p.catch(() => cache.delete(url));
+    return p;
+}
+
+/** A write. Returns {ok, status, data, change}: change is the history entry
+ *  it made, for the toast's Undo. Every write clears what was read. */
+async function send(method, url, body) {
+    const opts = { method, headers: { Accept: 'application/json' } };
+    if (body instanceof FormData) opts.body = body;
+    else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    let res;
+    try { res = await fetch(url, opts); }
+    catch (_) { return { ok: false, status: 0, data: { error: 'fin could not be reached; nothing was changed' } }; }
+    const data = await res.json().catch(() => ({}));
+    cache.clear();
+    const change = res.headers.get('X-Fin-Change');
+    return { ok: res.ok && !data.error, status: res.status, data, change: change ? Number(change) : null };
+}
+
+/** A write the operator made: toast it with Undo, or say why it failed. */
+async function act(method, url, body, done) {
+    const r = await send(method, url, body);
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return null; }
+    toast(done || 'Saved', { undo: r.change });
+    refreshFrame();
+    return r;
+}
+
+function sheetFor(month) { return get(`/api/balance-sheet?month=${month}`); }
+
+async function refs() {
+    const [types, books, accounts, review, kinds] = await Promise.all([
+        get('/api/types'), get('/api/books'), get('/api/accounts'), get('/api/review'), get('/api/account-kinds'),
+    ]);
+    const typeById = new Map(types.map(t => [t.id, t]));
+    const accountById = new Map(accounts.map(a => [a.id, a]));
+    return { types, books, accounts, review, kinds, typeById, accountById };
+}
+async function servicesList() { return get('/api/services'); }
+
+// ---------------------------------------------------------------------------
+// Toasts and sheets
+// ---------------------------------------------------------------------------
+
+function toast(message, { bad = false, undo = null, ms = 6000 } = {}) {
+    const box = document.createElement('div');
+    box.className = 'toast' + (bad ? ' bad' : '');
+    box.setAttribute('role', bad ? 'alert' : 'status');
+    box.innerHTML = `<span>${esc(message)}</span>`;
+    if (undo) {
+        const b = document.createElement('button');
+        b.className = 'btn sm';
+        b.textContent = 'Undo';
+        b.onclick = async () => { box.remove(); await undoEntry(undo); };
+        box.appendChild(b);
+    }
+    $('#toasts').appendChild(box);
+    setTimeout(() => box.remove(), undo ? ms + 4000 : ms);
+}
+
+let sheetCloser = null;
+function openSheet(title, body, { sub = '' } = {}) {
+    closeSheet();
+    const root = $('#sheets');
+    root.innerHTML = `<div class="scrim" data-act="scrim">
+        <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+            <div class="sheet-head"><div><h2 id="sheet-title">${title}</h2>${sub ? `<p class="muted small">${sub}</p>` : ''}</div>
+            <button class="close" data-act="close-sheet" aria-label="Close">×</button></div>
+            <div class="sheet-body stack">${body}</div>
+        </section></div>`;
+    const sheet = $('.sheet', root);
+    const keys = e => { if (e.key === 'Escape') closeSheet(); };
+    document.addEventListener('keydown', keys);
+    sheetCloser = () => document.removeEventListener('keydown', keys);
+    setTimeout(() => (sheet.querySelector('input, select, textarea, .choice, .btn.primary') || sheet).focus(), 30);
+    return sheet;
+}
+function closeSheet() {
+    if (sheetCloser) { sheetCloser(); sheetCloser = null; }
+    $('#sheets').innerHTML = '';
+}
+function sheetBody() { return $('#sheets .sheet-body'); }
+
+// ---------------------------------------------------------------------------
+// Trust markers: one vocabulary, each a word and a link to its fix
+// ---------------------------------------------------------------------------
+
+function tag(kind, text, { href = null, act = null, data = {}, title = '' } = {}) {
+    const icons = { ties: '✓', off: '≠', notchecked: '○', stale: '⧗', nofig: '!', yours: '†', unexplained: '?', refused: '⊘', claude: '✳', you: '', asked: '✓', aside: '–' };
+    const ic = icons[kind] ? `<span class="ic" aria-hidden="true">${icons[kind]}</span>` : '';
+    const attrs = Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
+    const t = title ? ` title="${esc(title)}"` : '';
+    if (href) return `<a class="tag ${kind}" href="${href}"${t}>${ic}${esc(text)}</a>`;
+    if (act) return `<button type="button" class="tag ${kind}" data-act="${act}"${attrs}${t} style="cursor:pointer">${ic}${esc(text)}</button>`;
+    return `<span class="tag ${kind}"${t}>${ic}${esc(text)}</span>`;
+}
+
+/** What a balance-sheet line's balance rests on, as a marker. */
+function restsOn(line, { short = false } = {}) {
+    const r = line.rests_on;
+    if (line.counted_in) return `<span class="muted">${esc(line.balance)}</span>`;
+    if (!r) {
+        if (line.since_label) return `<span class="muted">worked out from rows ${esc(line.since_label)}</span>`;
+        return tag('nofig', 'no figure', fixFor(line));
+    }
+    const date = day(r.date, { year: !short && !r.date.startsWith(S.month.slice(0, 4)) });
+    if (r.source === 'supplied') {
+        const stale = r.age_days > STALE_DAYS;
+        const age = `${r.age_days} days old`;
+        return `your figure ${esc(date)}${r.age_days > 0 ? `, <b>${esc(age)}</b>` : ''} ${stale ? tag('stale', 'stale', { act: 'figure', data: { account: line.account_id }, title: 'Enter a newer figure' }) : ''}`;
+    }
+    return `statement ${esc(date)}`;
+}
+function fixFor(line) {
+    const acct = window.__accountById?.get(line.account_id);
+    if (acct && acct.takes_a_figure) return { act: 'figure', data: { account: line.account_id }, title: 'Enter a figure' };
+    return { href: `#/books/account/${line.account_id}`, title: 'See why' };
+}
+function checkMarker(line) {
+    const c = line.check;
+    if (!c) return `<span class="muted">${line.rests_on && line.rests_on.source === 'supplied' ? 'no check: your figure is the fact' : 'no check possible'}</span>`;
+    const href = `#/books/account/${line.account_id}`;
+    if (c.status === 'ties') return tag('ties', 'ties', { href, title: 'See the tie line' });
+    if (c.status === 'off') return tag('off', `off by ${money(Math.abs(c.difference_minor), line.currency)}`, { href, title: 'See the tie line' });
+    const why = (c.text || '').replace(/^not checked\s*/, '');
+    return tag('notchecked', `not checked ${why}`.trim(), { href, title: 'See why' });
+}
+function tickOf(line) {
+    if (line.check?.status === 'ties') return '<span class="tick ties" title="ties">✓</span>';
+    if (line.check?.status === 'off') return '<span class="tick off" title="off">≠</span>';
+    if (line.check?.status === 'not_checked') return '<span class="tick notchecked" title="not checked">○</span>';
+    if (line.rests_on?.source === 'supplied') return '<span class="tick yours" title="your figure">†</span>';
+    return '';
+}
+function lineNeedsLook(line, refusedByAccount) {
+    if (line.counted_in) return false;
+    if (!line.in_total) return true;
+    if (line.check && line.check.status !== 'ties') return true;
+    if (line.rests_on?.source === 'supplied' && line.rests_on.age_days > STALE_DAYS) return true;
+    return refusedByAccount.has(line.account_id);
+}
+
+// ---------------------------------------------------------------------------
+// The frame: places, counts, the "Claude may write" pill
+// ---------------------------------------------------------------------------
+
+async function refreshFrame() {
+    try {
+        const [settings, q] = await Promise.all([get('/api/settings', { fresh: true }), loadQueue()]);
+        $$('[data-count="claude"]').forEach(el => { el.textContent = settings.claude_count ? settings.claude_count : ''; el.title = `${plural(settings.claude_count, 'change')} by Claude since you last looked`; });
+        $$('[data-count="queue"]').forEach(el => { el.textContent = q.count ? q.count : ''; el.title = `${plural(q.count, 'thing')} waiting`; });
+        const pill = $('#write-pill');
+        pill.classList.toggle('off', !settings.claude_may_write);
+        $('[data-write-state]').textContent = settings.claude_may_write ? 'on' : 'off';
+    } catch (_) { /* the page itself says what failed */ }
+}
+
+const ROUTES = [
+    [/^\/?$/, 'home', () => viewHome()],
+    [/^\/queue$/, 'queue', () => viewQueue()],
+    [/^\/books$/, 'books', () => viewSheet()],
+    [/^\/books\/account\/(\d+)$/, 'books', m => viewAccount(Number(m[1]))],
+    [/^\/books\/spending$/, 'books', () => viewSpending()],
+    [/^\/books\/bills$/, 'books', () => viewBills()],
+    [/^\/books\/lists(?:\/(\w+))?$/, 'books', m => viewLists(m[1] || 'merchants')],
+    [/^\/books\/import$/, 'books', () => viewImport()],
+    [/^\/changes$/, 'changes', () => viewChanges()],
 ];
 
-const MONTH_NAMES = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-// ============================================================
-// SHARED HELPERS
-// ============================================================
-
-// Build hierarchical type <option> HTML from the global types array.
-// Options: placeholder (default "—"), selectedId. The type list is fixed, so
-// there is no "new type" entry.
-function buildTypeDropdownHtml({placeholder = '—', selectedId = null} = {}) {
-    let html = `<option value="">${placeholder}</option>`;
-    const parents = types.filter(t => !t.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-    parents.forEach(p => {
-        html += `<option value="${p.id}"${p.id == selectedId ? ' selected' : ''}>${escapeHtml(p.name)}</option>`;
-        const children = types.filter(t => t.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-        children.forEach(c => {
-            html += `<option value="${c.id}"${c.id == selectedId ? ' selected' : ''}>&nbsp;&nbsp;${escapeHtml(p.name)} > ${escapeHtml(c.name)}</option>`;
-        });
-    });
-    return html;
-}
-
-// Populate a <select> element with hierarchical type options.
-function populateTypeSelect(selectId, {placeholder, selectedId} = {}) {
-    document.getElementById(selectId).innerHTML = buildTypeDropdownHtml({placeholder, selectedId});
-}
-
-// Build book <option> HTML from the global books array.
-function buildBookDropdownHtml({placeholder = '—', selectedBook = null} = {}) {
-    let html = `<option value="">${placeholder}</option>`;
-    books.forEach(b => {
-        html += `<option value="${escapeHtml(b.name)}"${b.name === selectedBook ? ' selected' : ''} title="${escapeHtml(b.description)}">${escapeHtml(b.name)}</option>`;
-    });
-    return html;
-}
-
-function populateBookSelect(selectId, {placeholder, selectedBook} = {}) {
-    document.getElementById(selectId).innerHTML = buildBookDropdownHtml({placeholder, selectedBook});
-}
-
-function typeDisplayName(typeId) {
-    if (!typeId) return '';
-    const type = types.find(t => t.id === typeId);
-    return type ? type.display_name : '';
-}
-
-// The book a type proposes for a merchant no rule knows: Moom for the types
-// only a company buys, nothing for Software & AI tools (the operator says),
-// Household for the rest. Decided by the server and sent with the type list.
-function proposedBook(typeId) {
-    const type = types.find(t => t.id === parseInt(typeId));
-    return type ? type.proposed_book : null;
-}
-
-// When a type is picked and no book is chosen yet, fill in the proposed book.
-// A book the operator already chose is left alone.
-function proposeBookInto(bookSelectId, typeId) {
-    const bookSel = document.getElementById(bookSelectId);
-    if (!bookSel || bookSel.value) return;
-    const proposed = proposedBook(typeId);
-    if (proposed) bookSel.value = proposed;
-}
-
-// Factory: create a sort toggler for a table section.
-// stateObj must have { col, asc } properties. renderFn is called after toggling.
-function createSortToggler(stateObj, renderFn) {
-    return function(col) {
-        if (stateObj.col === col) {
-            stateObj.asc = !stateObj.asc;
-        } else {
-            stateObj.col = col;
-            stateObj.asc = true;
-        }
-        renderFn();
-    };
-}
-
-// Update sort indicator CSS classes on sortable table headers.
-function updateSortIndicators(tableSelector, sortState) {
-    document.querySelectorAll(`${tableSelector} th.sortable`).forEach(th => {
-        th.classList.remove('sort-asc', 'sort-desc');
-        if (th.dataset.sort === sortState.col) {
-            th.classList.add(sortState.asc ? 'sort-asc' : 'sort-desc');
-        }
-    });
-}
-
-// Open a modal: display flex, optional backdrop close and Escape key handler.
-// Returns a close function. Stores handler refs on the element for closeModal().
-function openModalEl(modalId, closeFn) {
-    const modal = document.getElementById(modalId);
-    modal.style.display = 'flex';
-    const backdropHandler = (e) => { if (e.target === modal) closeFn(); };
-    const escHandler = (e) => { if (e.key === 'Escape') closeFn(); };
-    modal.onclick = backdropHandler;
-    document.addEventListener('keydown', escHandler);
-    modal._escHandler = escHandler;
-}
-
-function closeModalEl(modalId) {
-    const modal = document.getElementById(modalId);
-    modal.style.display = 'none';
-    if (modal._escHandler) {
-        document.removeEventListener('keydown', modal._escHandler);
-        modal._escHandler = null;
-    }
-    modal.onclick = null;
-}
-
-// Setup FX rate hint on a currency <select> within a modal.
-function setupFxHint(modalId, currencySelectId) {
-    const currSel = document.getElementById(currencySelectId);
-    const update = () => {
-        document.querySelectorAll(`#${modalId} .fx-rate-hint`).forEach(el => {
-            el.textContent = currSel.value === 'USD' && subsFxRate ? `(1 USD = ${subsFxRate.toFixed(2)} SGD, click to fetch)` : '';
-            // The rate is fetched only on this click, never by a page load.
-            el.onclick = currSel.value === 'USD' ? async (ev) => {
-                ev.preventDefault();
-                const resp = await fetch('/api/fx-rate', { method: 'POST' });
-                if (resp.ok) {
-                    subsFxRate = (await resp.json()).usd_sgd;
-                    update();
-                }
-            } : null;
-        });
-    };
-    currSel.onchange = update;
-    update();
-}
-
-// Compute renewal date from start + frequency + periods.
-function calcRenewalDate(startVal, freq, periods) {
-    const start = new Date(startVal);
-    if (freq === 'yearly') start.setFullYear(start.getFullYear() + periods);
-    else if (freq === 'half-yearly') start.setMonth(start.getMonth() + 6 * periods);
-    else if (freq === 'quarterly') start.setMonth(start.getMonth() + 3 * periods);
-    else if (freq === 'biweekly') start.setDate(start.getDate() + 14 * periods);
-    else if (freq === 'weekly') start.setDate(start.getDate() + 7 * periods);
-    else start.setMonth(start.getMonth() + periods);
-    return start.toISOString().split('T')[0];
-}
-
-// Update a service's book and type and show toast with the relabel count.
-// Returns the relabelled count (0 if failed/skipped). A subscription has no
-// label of its own: this is how its screen changes the label it shows.
-async function cascadeServiceLabel(serviceId, book, typeId, serviceName, verb) {
-    if (!serviceId || !typeId) return 0;
-    const body = { type_id: typeId };
-    if (book) body.book = book;
-    const svcData = await apiFetch(`/api/services/${serviceId}`, { method: 'PUT', body });
-    if (svcData && svcData.recategorized) {
-        showToast(`${verb} "${serviceName}" + relabelled ${svcData.recategorized} transactions`, 'info');
-        return svcData.recategorized;
-    }
-    return 0;
-}
-
-// The book an item is read as: its own, or the default when it has none.
-function bookOf(item) {
-    return (item && item.book) || DEFAULT_BOOK;
-}
-
-function matchesBook(filter, item) {
-    return filter === 'all' || bookOf(item) === filter;
-}
-
-// A badge naming the book, shown only where it is not the household's.
-function bookBadgeHtml(book) {
-    if (!book || book === DEFAULT_BOOK) return '';
-    return ` <span class="badge badge-muted">${escapeHtml(book)}</span>`;
-}
-
-// Build a visibility-change hint for toast when a transaction moves between books.
-function spendFilterHint(book) {
-    const next = book || DEFAULT_BOOK;
-    if (spendFilter !== 'all' && next !== spendFilter) {
-        return `Moved to ${next} — switch to "All" to see it`;
-    }
-    return null;
-}
-
-// Resolve service + its book and type from a picker: validate, create new service if needed.
-// Returns { serviceId, book, typeId, serviceName } or null if aborted.
-async function resolveSubService(pickerFn, bookSelectId, typeSelectId) {
-    const picker = pickerFn();
-    let { id: serviceId, name: serviceName } = picker.getValue();
-    if (!serviceName) { alert('Please select or create a service'); return null; }
-
-    const typeVal = document.getElementById(typeSelectId).value;
-    const typeId = typeVal ? parseInt(typeVal) : null;
-    const book = document.getElementById(bookSelectId).value || null;
-
-    if (!serviceId && serviceName) {
-        if (!typeId) { alert('Please select a type for the new service.'); return null; }
-        const body = { name: serviceName, type_id: typeId };
-        if (book) body.book = book;
-        const svcData = await apiFetch('/api/services', { method: 'POST', body });
-        if (!svcData) return null;
-        serviceId = svcData.id;
-        allServicesList = null;
-        showToast(`Created service "${serviceName}"`, 'info');
-    }
-    return { serviceId, book, typeId, serviceName };
-}
-
-// Read subscription form fields. prefix: 'sub' for add, 'edit-sub' for edit.
-// A subscription carries no book or type: they are its service's.
-function readSubFormBody(prefix, serviceId, serviceName) {
-    const el = (id) => document.getElementById(`${prefix}-${id}`);
-    return {
-        service_id: serviceId,
-        amount: parseFloat(el('amount').value) || 0,
-        currency: el('currency').value || 'SGD',
-        frequency: el(prefix === 'sub' ? 'frequency' : 'freq').value,
-        periods: parseInt(el('periods').value) || 1,
-        account_id: el('card').value ? parseInt(el('card').value) : null,
-        renewal_date: el('renewal').value || null,
-        match_pattern: getServiceRulePattern(serviceId) || serviceName.toUpperCase(),
-        status: el('status').value || 'active',
-        link: el('link').value.trim() || null,
-        notes: el('notes').value.trim() || null,
-    };
-}
-
-// Fetch JSON from an API endpoint with standard error handling.
-// Returns parsed JSON on success, or null if data.error was present (alert shown).
-// For non-JSON responses or network errors, throws.
-async function apiFetch(url, options = {}) {
-    if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
-        options.headers = {'Content-Type': 'application/json', ...options.headers};
-        options.body = JSON.stringify(options.body);
-    }
-    const res = await fetch(url, options);
-    const data = await res.json();
-    if (data.error) {
-        alert('Error: ' + data.error);
-        return null;
-    }
-    return data;
-}
-
-// ============================================================
-// INIT
-// ============================================================
-
-document.addEventListener('DOMContentLoaded', async () => {
-    initTabs();
-    await loadReferenceData();
-
-    // Restore tab from URL hash, or default to dashboard
-    const hashTab = location.hash.replace('#', '');
-    const startTab = hashTab || 'dashboard';
-    history.replaceState({ tab: startTab }, '', '#' + startTab);
-    if (startTab !== 'dashboard') {
-        switchTab(startTab, { pushHistory: false });
-    } else {
-        // Restore saved view mode
-        if (txViewMode !== 'flat') setTxView(txViewMode);
-        await loadDashboard();
-    }
-});
-
-async function loadReferenceData() {
-    const [typeRes, bookRes, acctRes, kindRes] = await Promise.all([
-        fetch('/api/types').then(r => r.json()),
-        fetch('/api/books').then(r => r.json()),
-        fetch('/api/accounts').then(r => r.json()),
-        fetch('/api/account-kinds').then(r => r.json()),
-    ]);
-    types = typeRes;
-    books = bookRes;
-    accounts = acctRes;
-    accountKinds = kindRes;
-
-    populateTypeMultiSelect();
-    populateAccountFilter();
-    await populateYearDropdown();
-
-    // Type suggestion: off unless the server says its key is present.
+let renderToken = 0;
+async function render() {
+    const path = (location.hash.replace(/^#/, '') || '/').split('?')[0];
+    const route = ROUTES.find(([re]) => re.test(path)) || ROUTES[0];
+    const match = path.match(route[0]) || [];
+    $$('[data-place]').forEach(a => { if (a.dataset.place === route[1]) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+    const token = ++renderToken;
+    const view = $('#view');
     try {
-        const status = await fetch('/api/suggestions/status').then(r => r.json());
-        suggestionsEnabled = !!status.enabled;
-    } catch (_) {
-        suggestionsEnabled = false;
+        window.__accountById = (await refs()).accountById;
+        const html = await route[2](match);
+        if (token !== renderToken) return;
+        if (typeof html === 'string') view.innerHTML = html;
+        if (view.__after) { const after = view.__after; view.__after = null; after(); }
+        if (afterNextRender) { const next = afterNextRender; afterNextRender = null; setTimeout(next, 60); }
+    } catch (err) {
+        if (token !== renderToken) return;
+        view.innerHTML = `<div class="card"><p class="notice bad">${esc(err.message || 'fin could not show this page')}</p></div>`;
+        console.warn(err);
     }
-    updateSuggestButton();
-    refreshReviewCount();
+    refreshFrame();
 }
+function afterRender(fn) { $('#view').__after = fn; }
+function rerender() { render(); }
 
-function populateAccountFilter() {
-    // Dashboard account filter
-    const dashSel = document.getElementById('filter-account');
-    if (dashSel) {
-        const current = dashSel.value;
-        dashSel.innerHTML = '<option value="">All Accounts</option>';
-        accounts.filter(hasStatements).forEach(a => {
-            dashSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
-        });
-        if (current) dashSel.value = current;
-    }
+window.addEventListener('hashchange', () => { closeSheet(); render(); window.scrollTo(0, 0); });
+document.addEventListener('DOMContentLoaded', render);
 
-    // Subscription card dropdowns (add form + edit modal)
-    const activeAccounts = accounts.filter(a => a.status !== 'archived' && hasStatements(a));
-    ['sub-card', 'edit-sub-card'].forEach(id => {
-        const sel = document.getElementById(id);
-        if (!sel) return;
-        const current = sel.value;
-        sel.innerHTML = '<option value="">All Accounts</option>';
-        activeAccounts.forEach(a => {
-            sel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
-        });
-        if (current) sel.value = current;
-    });
-}
-
-async function populateYearDropdown() {
-    const [oldest, newest] = await Promise.all([
-        fetch('/api/transactions?per_page=1&sort=date&sort_dir=asc').then(r => r.json()),
-        fetch('/api/transactions?per_page=1&sort=date&sort_dir=desc').then(r => r.json()),
-    ]);
-    const sel = document.getElementById('filter-year');
-    sel.innerHTML = '<option value="">All Years</option>';
-
-    if (oldest.transactions.length && newest.transactions.length) {
-        const startYear = parseInt(oldest.transactions[0].date.substring(0, 4));
-        const endYear = parseInt(newest.transactions[0].date.substring(0, 4));
-        for (let y = endYear; y >= startYear; y--) {
-            sel.innerHTML += `<option value="${y}">${y}</option>`;
-        }
-        if (!sel.value) {
-            if (sel.querySelector('option[value="2026"]')) sel.value = '2026';
-            else sel.value = String(endYear);
-        }
-    }
-}
-
-// ============================================================
-// TABS
-// ============================================================
-
-function initTabs() {
-    // Main tab buttons
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-    });
-
-    // Import icon button
-    document.querySelector('.tab-icon-btn[data-tab="import"]')?.addEventListener('click', () => {
-        switchTab('import');
-    });
-
-    // Masters dropdown toggle
-    document.getElementById('masters-toggle').addEventListener('click', (e) => {
-        e.stopPropagation();
-        document.getElementById('masters-menu').classList.toggle('open');
-    });
-
-    // Close masters dropdown when clicking outside
-    document.addEventListener('click', () => {
-        document.getElementById('masters-menu').classList.remove('open');
-    });
-
-    // Masters menu items switch tabs
-    document.querySelectorAll('.masters-item').forEach(item => {
-        item.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const tab = item.dataset.tab;
-            switchTab(tab);
-            document.getElementById('masters-menu').classList.remove('open');
-        });
-    });
-}
-
-// Centralized tab switching — called by main tabs, icon buttons, and masters items
-function switchTab(tabName, {pushHistory = true} = {}) {
-    // Deactivate all main tab buttons
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    // Deactivate all icon buttons
-    document.querySelectorAll('.tab-icon-btn').forEach(b => b.classList.remove('active'));
-    // Deactivate all masters items
-    document.querySelectorAll('.masters-item').forEach(b => b.classList.remove('active'));
-    // Hide all tab content
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-
-    // Show the target tab content
-    const tabEl = document.getElementById('tab-' + tabName);
-    if (tabEl) tabEl.classList.add('active');
-
-    // Highlight the correct nav element
-    const mainBtn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
-    if (mainBtn) {
-        // It's a main tab
-        mainBtn.classList.add('active');
-    } else if (tabName === 'import') {
-        // Import icon button
-        document.querySelector('.tab-icon-btn[data-tab="import"]')?.classList.add('active');
-    } else {
-        // Masters sub-tab — highlight the gear icon and the menu item
-        document.getElementById('masters-toggle')?.classList.add('active');
-        const mastersItem = document.querySelector(`.masters-item[data-tab="${tabName}"]`);
-        if (mastersItem) mastersItem.classList.add('active');
-    }
-
-    // Push browser history so back button works
-    if (pushHistory) {
-        history.pushState({ tab: tabName }, '', '#' + tabName);
-    }
-
-    // Load tab data on switch
-    if (tabName === 'dashboard') loadDashboard(true);
-    if (tabName === 'import') { loadCoverage(); loadHistory(); }
-    if (tabName === 'subs') loadSubscriptions();
-    if (tabName === 'accounts') renderAccountsTab();
-    if (tabName === 'rules') loadRules();
-    if (tabName === 'types') renderTypesMaster();
-    if (tabName === 'services-master') renderServicesMaster();
-    if (tabName === 'balance') loadBalanceSheet();
-    if (tabName === 'review') loadReviewList();
-    else refreshReviewCount();
-}
-
-// Handle browser back/forward
-window.addEventListener('popstate', (e) => {
-    const tab = e.state?.tab || 'dashboard';
-    switchTab(tab, { pushHistory: false });
+// One handler for every [data-act]: the views write plain HTML.
+const ACT = {};
+document.addEventListener('click', e => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    const fn = ACT[el.dataset.act];
+    if (!fn) return;
+    if (el.dataset.act === 'scrim' && e.target !== el) return;
+    e.preventDefault();
+    fn(el, e);
 });
+document.addEventListener('change', e => {
+    const el = e.target.closest('[data-change]');
+    if (el && ACT[el.dataset.change]) ACT[el.dataset.change](el, e);
+});
+ACT['close-sheet'] = () => closeSheet();
+ACT.scrim = () => closeSheet();
 
-// ============================================================
-// DASHBOARD
-// ============================================================
+function booksNav(current) {
+    const items = [['sheet', '#/books', 'Balance sheet'], ['spending', '#/books/spending', 'Spending'], ['bills', '#/books/bills', 'Bills'],
+        ['lists', '#/books/lists', 'Lists'], ['import', '#/books/import', 'Import']];
+    return `<nav class="subnav" aria-label="Books">${items.map(([k, href, label]) =>
+        `<a href="${href}"${k === current ? ' aria-current="page"' : ''}>${label}</a>`).join('')}</nav>`;
+}
+function monthPicker() {
+    return `<label class="field" style="min-width:190px"><span>As at the end of</span>
+        <select data-change="month">${sheetMonths().map(m => `<option value="${m}"${m === S.month ? ' selected' : ''}>${monthName(m)}${m === currentMonth() ? ' (so far)' : ''}</option>`).join('')}</select></label>`;
+}
+ACT.month = el => { S.month = el.value; store.set('month', S.month); rerender(); };
 
-async function loadDashboard(preserveChartFilter) {
-    // Clear chart selection when dashboard filters change (not when navigating back)
-    if (!preserveChartFilter && chartFilter.selections.length) {
-        chartFilter = { selections: [] };
-        renderFilterChip();
+// ---------------------------------------------------------------------------
+// What waits: one list behind Home's cards, the Queue and the counts
+// ---------------------------------------------------------------------------
+
+function addPeriod(iso, frequency, periods, sign) {
+    const [y, m, d] = iso.split('-').map(Number);
+    const months = ({ monthly: 1, quarterly: 3, yearly: 12, annual: 12 }[frequency] || 1) * (periods || 1) * sign;
+    const t = new Date(y, m - 1 + months, 1);
+    const last = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+    t.setDate(Math.min(d, last));
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+}
+/** A bill whose last renewal came and went with no payment seen. */
+function billMissed(sub) {
+    if (sub.status !== 'active' || !sub.computed_renewal) return null;
+    const due = addPeriod(sub.computed_renewal, sub.frequency, sub.periods, -1);
+    if (daysBetween(due, todayIso()) < BILL_GRACE_DAYS) return null;
+    const paid = sub.tx_last_paid || sub.last_paid;
+    if (paid && daysBetween(paid, due) <= 5) return null;
+    return { due, paid };
+}
+
+function rowItem(row, kind) {
+    const cur = row.currency || 'SGD';
+    const minor = toMinor(row.amount_sgd, cur);
+    const lane = minor < 0 ? 'in' : 'out';
+    const base = {
+        key: `${kind}-${row.id}`, kind, lane, row, currency: cur, amount: Math.abs(minor), signed: minor,
+        title: row.description,
+        meta: `${day(row.date)} · ${row.account_name || ''}`,
+    };
+    if (kind === 'transfer') {
+        return { ...base, holds: lane === 'out' ? 'Held out of spending until you say what it was' : 'Held out of income until you say what it was',
+            actions: [{ label: 'This was…', act: 'this-was', data: { tx: row.id }, primary: true }] };
     }
-
-    const params = buildFilterParams();           // full filter (includes month narrowing)
-    const chartFilterParams = buildChartParams();  // year-level only (no month narrowing)
-    const granularity = 'monthly';
-    const groupParent = showSubtypes ? 'false' : 'true';
-    const chartParams = chartFilterParams + (chartFilterParams ? '&' : '') + 'granularity=' + granularity + '&group_parent=' + groupParent;
-    const typeChartParams = params + (params ? '&' : '') + 'group_parent=' + groupParent;
-
-    // Stat cards: pass ref_month if a specific month is selected
-    const year = document.getElementById('filter-year').value;
-    const month = document.getElementById('filter-month').value;
-    let statParams = '';
-    if (year && month) {
-        statParams = `ref_month=${year}-${month}`;
+    if (kind === 'untyped') {
+        return { ...base, holds: lane === 'out' ? 'Counted in spending as “No type”' : 'A refund with no type; counted back as “No type”',
+            actions: [{ label: 'This was…', act: 'resolve', data: { tx: row.id }, primary: true }] };
     }
-    if (spendFilter !== 'all') statParams += (statParams ? '&' : '') + 'book=' + spendFilter;
-    if (document.getElementById('filter-one-off').checked) statParams += (statParams ? '&' : '') + 'exclude_one_off=true';
-    const accountId = document.getElementById('filter-account')?.value;
-    if (accountId) statParams += (statParams ? '&' : '') + 'account_id=' + accountId;
-
-    const [statCards, monthly, typeData] = await Promise.all([
-        fetch('/api/dashboard/stat-cards?' + statParams).then(r => r.json()),
-        fetch('/api/dashboard/monthly?' + chartParams).then(r => r.json()),
-        fetch('/api/dashboard/types?' + typeChartParams).then(r => r.json()),
-    ]);
-
-    renderStatCards(statCards);
-    renderMonthlyChart(monthly, granularity);
-    renderTypeChart(typeData);
-
-    // Load transaction area via txPage (includes search, chart filter, type filter)
-    txCurrentPage = 1;
-    txPage(0);
+    // a mixed merchant: its rows take a default type and are looked at each time
+    const type = row.display_type || 'no type';
+    return { ...base, holds: `${row.service_name || 'A mixed merchant'} sells more than one kind of thing: is ${type} right?`,
+        actions: [{ label: `Yes, ${type}`, act: 'mixed-yes', data: { tx: row.id }, primary: true },
+            { label: 'Another type', act: 'resolve', data: { tx: row.id } }] };
 }
 
-function buildFilterParams() {
-    const p = new URLSearchParams();
-
-    // Year/month preset → date range
-    const year = document.getElementById('filter-year').value;
-    const month = document.getElementById('filter-month').value;
-
-    if (year && month) {
-        // Specific month: start = first day, end = last day
-        const y = parseInt(year);
-        const m = parseInt(month);
-        const lastDay = new Date(y, m, 0).getDate(); // last day of month
-        p.set('start', `${year}-${month}-01`);
-        p.set('end', `${year}-${month}-${String(lastDay).padStart(2, '0')}`);
-    } else if (year) {
-        p.set('start', `${year}-01-01`);
-        p.set('end', `${year}-12-31`);
-    }
-
-    const accountId = document.getElementById('filter-account')?.value;
-    if (accountId) p.set('account_id', accountId);
-
-    if (spendFilter !== 'all') p.set('book', spendFilter);
-    if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
-    return p.toString();
-}
-
-function buildChartParams() {
-    // Like buildFilterParams but always year-level (no month narrowing)
-    // so charts show full year context with month highlighted
-    const p = new URLSearchParams();
-    const year = document.getElementById('filter-year').value;
-    if (year) {
-        p.set('start', `${year}-01-01`);
-        p.set('end', `${year}-12-31`);
-    }
-    const accountId = document.getElementById('filter-account')?.value;
-    if (accountId) p.set('account_id', accountId);
-    if (spendFilter !== 'all') p.set('book', spendFilter);
-    if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
-    return p.toString();
-}
-
-function applyDashboardFilters() { loadDashboard(); }
-
-function toggleSubtypes() {
-    showSubtypes = !showSubtypes;
-    const btn = document.getElementById('subcategory-toggle');
-    if (btn) btn.classList.toggle('active', showSubtypes);
-    loadDashboard();
-}
-
-function setSpendFilter(filter) {
-    spendFilter = filter;
-    document.querySelectorAll('[data-filter]').forEach(b => {
-        b.classList.toggle('active', b.dataset.filter === filter);
-    });
-    loadDashboard();
-}
-
-function renderStatCards(d) {
-    function delta(val, avg) {
-        if (!avg || avg === 0) return '';
-        const pct = ((val - avg) / avg) * 100;
-        const sign = pct >= 0 ? '+' : '';
-        const cls = pct > 5 ? 'delta-up' : pct < -5 ? 'delta-down' : 'delta-flat';
-        return `<span class="stat-delta ${cls}">${sign}${pct.toFixed(0)}%</span>`;
-    }
-
-    function avgLine(avg) {
-        if (!avg || avg === 0) return '';
-        return `<div class="stat-sub">3mo avg: S$${formatAmount(avg)}</div>`;
-    }
-
-    const transfers = (n) => `${n} ${n === 1 ? 'transfer' : 'transfers'}`;
-    const rows = (n) => `${n} ${n === 1 ? 'row' : 'rows'}`;
-    // What the headline is held short of: this month's transfers nobody has
-    // labelled, money out and money in apart.
-    const loanCard = `
-        <div class="stat-card">
-            <div class="stat-label">Loan principal</div>
-            <div class="stat-value">S$${formatAmount(d.loan_principal)}</div>
-            <div class="stat-sub">not spending; cash out S$${formatAmount(d.cash_out)}</div>
-            ${d.loan_interest ? `<div class="stat-sub">interest S$${formatAmount(d.loan_interest)} is inside spending</div>` : ''}
-        </div>`;
-    const heldOut = d.held_out_count
-        ? `<div class="stat-sub text-warning">excludes unreviewed ${d.held_out_count === 1 ? 'transfer' : 'transfers'}: ${waitingOutAndIn(d, 'held_out')}</div>`
-        : '';
-
-    // The headline is household spending only. A company's costs sit beside
-    // it and are never added into it.
-    document.getElementById('stats-row').innerHTML = `
-        <div class="stat-card">
-            <div class="stat-label">${d.ref_label} Household spending</div>
-            <div class="stat-value accent">S$${formatAmount(d.household)} ${delta(d.household, d.avg_household)}</div>
-            <div class="stat-sub">${rows(d.household_rows)}</div>
-            ${avgLine(d.avg_household)}
-            ${heldOut}
-        </div>
-        ${loanCard}
-        <div class="stat-card">
-            <div class="stat-label">Moom (its costs)</div>
-            <div class="stat-value moom">S$${formatAmount(d.moom)} ${delta(d.moom, d.avg_moom)}</div>
-            <div class="stat-sub">paid from our accounts</div>
-            ${avgLine(d.avg_moom)}
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Kalesh (its costs)</div>
-            <div class="stat-value" style="color:var(--accent-pop);">S$${formatAmount(d.kalesh)} ${delta(d.kalesh, d.avg_kalesh)}</div>
-            <div class="stat-sub">paid from our accounts</div>
-            ${avgLine(d.avg_kalesh)}
-        </div>
-        <div class="stat-card" style="cursor:pointer;" title="Open the review list" onclick="switchTab('review')">
-            <div class="stat-label">To review</div>
-            <div class="stat-value ${d.waiting > 0 ? 'text-warning' : ''}" style="font-size:22px;">${transfers(d.waiting)}</div>
-            ${d.waiting > 0 ? `<div class="stat-sub text-warning">${waitingOutAndIn(d, 'waiting')}</div>` : ''}
-            <div class="stat-sub">${rows(d.untyped)} with no type in ${d.ref_label}</div>
-        </div>
-    `;
-}
-
-function setChartMode(mode) {
-    chartMode = mode;
-    document.querySelectorAll('[data-chart-mode]').forEach(b => {
-        b.classList.toggle('active', b.dataset.chartMode === mode);
-    });
-    if (lastMonthlyData) renderMonthlyChart(lastMonthlyData, lastGranularity);
-}
-
-function renderMonthlyChart(data, granularity) {
-    // Cache for mode toggle re-render
-    lastMonthlyData = data;
-    lastGranularity = granularity;
-
-    const periods = Object.keys(data).sort();
-    if (!periods.length) return;
-
-    // Update chart title based on granularity + mode
-    const titleEl = document.getElementById('chart-trend-title');
-    const prefix = chartMode === 'trend' ? 'Type Trends' : (
-        granularity === 'weekly' ? 'Weekly Spending' :
-        granularity === 'quarterly' ? 'Quarterly Spending' : 'Monthly Spending'
-    );
-    titleEl.textContent = prefix;
-
-    // Collect all types across periods
-    const allCats = new Set();
-    periods.forEach(p => Object.keys(data[p]).forEach(c => allCats.add(c)));
-
-    // Backend already filters by book — just sort
-    let catList = [...allCats].sort();
-
-    // Build shared color map so donut uses same colors as bar chart
-    typeColorMap = {};
-    catList.forEach((cat, i) => {
-        typeColorMap[cat] = CAT_COLORS[i % CAT_COLORS.length];
-    });
-
-    // Format labels: "2025-09" → "Sep-25"
-    const labels = periods.map(p => {
-        const parts = p.split('-');
-        if (parts.length === 2 && parts[1].length === 2) {
-            const m = parseInt(parts[1]);
-            return MONTH_NAMES[m] + '-' + parts[0].slice(2);
-        }
-        return p;
-    });
-
-    // Store periods for chart click lookup
-    monthlyPeriods = periods;
-
-    if (chartMode === 'trend') {
-        renderTrendChart(catList, periods, labels, data);
-    } else {
-        renderBarChart(catList, periods, labels, data);
-    }
-}
-
-function renderBarChart(catList, periods, labels, data) {
-    // Determine if a specific month is highlighted
-    const filterYear = document.getElementById('filter-year').value;
-    const filterMonth = document.getElementById('filter-month').value;
-    const highlightPeriod = (filterYear && filterMonth) ? `${filterYear}-${filterMonth}` : null;
-
-    const datasets = catList.map((cat, i) => {
-        const color = CAT_COLORS[i % CAT_COLORS.length];
-        return {
-            label: cat,
-            data: periods.map(p => data[p][cat] || 0),
-            backgroundColor: highlightPeriod
-                ? periods.map(p => p === highlightPeriod ? color : hexToRgba(color, 0.25))
-                : color,
-            borderColor: highlightPeriod
-                ? periods.map(p => p === highlightPeriod ? color : 'transparent')
-                : 'transparent',
-            borderWidth: highlightPeriod ? 1 : 0,
-            borderRadius: 3,
-        };
-    });
-
-    const ctx = document.getElementById('chart-monthly');
-    if (monthlyChart) monthlyChart.destroy();
-
-    monthlyChart = new Chart(ctx, {
-        type: 'bar',
-        data: { labels, datasets },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            onClick: (event, elements) => {
-                if (!elements.length) return;
-                const el = elements[0];
-                const category = monthlyChart.data.datasets[el.datasetIndex].label;
-                const period = monthlyPeriods[el.index];
-                toggleChartFilter(category, period, 'bar');
-            },
-            onHover: (event, elements) => {
-                event.native.target.style.cursor = elements.length ? 'pointer' : 'default';
-            },
-            plugins: {
-                legend: {
-                    display: true,
-                    position: 'bottom',
-                    labels: { color: '#a0a0a0', font: { size: 11 }, boxWidth: 12, padding: 12 },
-                },
-                tooltip: {
-                    backgroundColor: '#1a1a1a',
-                    borderColor: '#333333',
-                    borderWidth: 1,
-                    titleColor: '#ededed',
-                    bodyColor: '#a0a0a0',
-                    callbacks: {
-                        label: ctx => `${ctx.dataset.label}: S$${formatAmount(ctx.raw)}`,
-                    },
-                },
-            },
-            interaction: {
-                mode: 'nearest',
-                intersect: true,
-            },
-            scales: {
-                x: {
-                    stacked: true,
-                    ticks: { color: '#707070', font: { size: 11 } },
-                    grid: { display: false },
-                },
-                y: {
-                    stacked: true,
-                    ticks: {
-                        color: '#707070',
-                        font: { size: 11 },
-                        callback: v => '$' + (v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v),
-                    },
-                    grid: { color: '#222222', drawBorder: false },
-                },
-            },
-        },
-    });
-}
-
-function renderTrendChart(catList, periods, labels, data) {
-    // Rank types by total spend, take top 8, aggregate the rest
-    const catTotals = catList.map(cat => ({
-        cat,
-        total: periods.reduce((s, p) => s + (data[p][cat] || 0), 0),
-    }));
-    catTotals.sort((a, b) => b.total - a.total);
-
-    const topCats = catTotals.slice(0, 8).map(c => c.cat);
-    const restCats = catTotals.slice(8).map(c => c.cat);
-
-    const datasets = topCats.map((cat, i) => ({
-        label: cat,
-        data: periods.map(p => data[p][cat] || 0),
-        borderColor: CAT_COLORS[i % CAT_COLORS.length],
-        backgroundColor: 'transparent',
-        borderWidth: 2,
-        tension: 0.3,
-        pointRadius: 3,
-        pointHoverRadius: 6,
-        pointBackgroundColor: CAT_COLORS[i % CAT_COLORS.length],
-    }));
-
-    // Aggregate remaining types (use "Rest" to avoid collision with the type "Other")
-    if (restCats.length) {
-        datasets.push({
-            label: 'Rest',
-            data: periods.map(p => restCats.reduce((s, c) => s + (data[p][c] || 0), 0)),
-            borderColor: '#505050',
-            backgroundColor: 'transparent',
-            borderWidth: 1.5,
-            borderDash: [4, 3],
-            tension: 0.3,
-            pointRadius: 2,
-            pointHoverRadius: 5,
-            pointBackgroundColor: '#505050',
+async function loadQueue() {
+    if (cache.has('queue')) return cache.get('queue');
+    const p = (async () => {
+        const month = currentMonth();
+        const [review, untyped, mixed, sheet, refused, subs, r] = await Promise.all([
+            get('/api/transactions?flow=review&per_page=500&sort=amount&sort_dir=desc'),
+            get('/api/transactions?types=__untyped__&per_page=500&sort=amount&sort_dir=desc'),
+            get('/api/transactions?look=mixed&per_page=200&sort=amount&sort_dir=desc'),
+            sheetFor(month),
+            get('/api/statements/refused'),
+            get('/api/subscriptions'),
+            refs(),
+        ]);
+        const items = [];
+        review.transactions.forEach(row => items.push(rowItem(row, 'transfer')));
+        untyped.transactions.forEach(row => items.push(rowItem(row, 'untyped')));
+        mixed.transactions.forEach(row => items.push(rowItem(row, 'mixed')));
+        subs.forEach(sub => {
+            const missed = billMissed(sub);
+            if (!missed) return;
+            const cur = sub.currency || 'SGD';
+            items.push({
+                key: `bill-${sub.id}`, kind: 'bill', lane: 'out', currency: cur, amount: toMinor(sub.amount, cur), sub,
+                title: `${sub.service_name || sub.match_pattern}: no payment seen`,
+                meta: `due ${day(missed.due)} · last paid ${missed.paid ? day(missed.paid) : 'never seen'}`,
+                holds: 'Not in the books: no row matches it since it was due',
+                actions: [{ label: 'Paused or stopped it', act: 'bill-pause', data: { sub: sub.id } },
+                    { label: 'Open Bills', href: '#/books/bills' }],
+            });
         });
-    }
-
-    const ctx = document.getElementById('chart-monthly');
-    if (monthlyChart) monthlyChart.destroy();
-
-    monthlyChart = new Chart(ctx, {
-        type: 'line',
-        data: { labels, datasets },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            onClick: (event, elements) => {
-                if (!elements.length) return;
-                const el = elements[0];
-                const category = monthlyChart.data.datasets[el.datasetIndex].label;
-                if (category === 'Others') return; // can't filter on aggregate rollup
-                const period = monthlyPeriods[el.index];
-                toggleChartFilter(category, period, 'bar');
-            },
-            onHover: (event, elements) => {
-                event.native.target.style.cursor = elements.length ? 'pointer' : 'default';
-            },
-            plugins: {
-                legend: {
-                    display: true,
-                    position: 'bottom',
-                    labels: {
-                        color: '#a0a0a0',
-                        font: { size: 11 },
-                        boxWidth: 12,
-                        padding: 12,
-                        usePointStyle: true,
-                        pointStyle: 'line',
-                    },
-                },
-                tooltip: {
-                    backgroundColor: '#1a1a1a',
-                    borderColor: '#333333',
-                    borderWidth: 1,
-                    titleColor: '#ededed',
-                    bodyColor: '#a0a0a0',
-                    mode: 'index',
-                    intersect: false,
-                    itemSort: (a, b) => b.raw - a.raw,
-                    filter: item => item.raw > 0,
-                    callbacks: {
-                        label: ctx => `${ctx.dataset.label}: S$${formatAmount(ctx.raw)}`,
-                    },
-                },
-            },
-            interaction: {
-                mode: 'index',
-                intersect: false,
-            },
-            scales: {
-                x: {
-                    ticks: { color: '#707070', font: { size: 11 } },
-                    grid: { display: false },
-                },
-                y: {
-                    ticks: {
-                        color: '#707070',
-                        font: { size: 11 },
-                        callback: v => '$' + (v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v),
-                    },
-                    grid: { color: '#222222', drawBorder: false },
-                },
-            },
-        },
-    });
-}
-
-function renderTypeChart(data) {
-    // Backend already filters by book. Top 10 + "Others"
-    const top = data.slice(0, 10).map(d => ({ category: d.type, total: d.total, count: d.count }));
-    const rest = data.slice(10);
-    if (rest.length) {
-        top.push({
-            category: 'Others',
-            total: rest.reduce((s, d) => s + d.total, 0),
-            count: rest.reduce((s, d) => s + d.count, 0),
+        const refusedBy = new Map();
+        refused.refused.forEach(f => {
+            if (f.account_id) refusedBy.set(f.account_id, f);
+            const item = {
+                key: `refused-${f.id}`, kind: f.set_aside ? 'aside' : 'refused', lane: f.set_aside ? 'aside' : 'books', refused: f,
+                currency: f.currency, amount: Math.abs(f.difference_minor),
+                title: `${f.account_name}: the ${day(f.statement_date)} statement was refused`,
+                meta: `its rows do not tie: off by ${money(Math.abs(f.difference_minor), f.currency)}`,
+                holds: `None of its ${plural(f.rows, 'row')} is in the books; the balance rests on the last statement that tied and the rows since`,
+                actions: f.set_aside
+                    ? [{ label: 'Bring it back', act: 'aside', data: { id: f.id, aside: 0 } }, { label: 'See the tie line', act: 'refused-sum', data: { id: f.id } }]
+                    : [{ label: 'Known, leave it', act: 'aside', data: { id: f.id, aside: 1 }, primary: true },
+                        { label: 'See the tie line', act: 'refused-sum', data: { id: f.id } },
+                        { label: 'Import a fixed file', href: '#/books/import' }],
+            };
+            items.push(item);
         });
-    }
-
-    const ctx = document.getElementById('chart-categories');
-    if (typeChart) typeChart.destroy();
-
-    typeChart = new Chart(ctx, {
-        type: 'doughnut',
-        data: {
-            labels: top.map(d => d.category),
-            datasets: [{
-                data: top.map(d => d.total),
-                backgroundColor: top.map(d => typeColorMap[d.category] || CAT_COLORS[0]),
-                borderWidth: 0,
-                offset: 0,
-            }],
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            cutout: '55%',
-            onClick: (event, elements) => {
-                if (!elements.length) return;
-                const el = elements[0];
-                const category = typeChart.data.labels[el.index];
-                toggleChartFilter(category, null, 'doughnut');
-            },
-            onHover: (event, elements) => {
-                event.native.target.style.cursor = elements.length ? 'pointer' : 'default';
-            },
-            plugins: {
-                legend: {
-                    position: 'right',
-                    labels: { color: '#a0a0a0', font: { size: 11 }, boxWidth: 10, padding: 8 },
-                },
-                tooltip: {
-                    backgroundColor: '#1a1a1a',
-                    borderColor: '#333333',
-                    borderWidth: 1,
-                    titleColor: '#ededed',
-                    bodyColor: '#a0a0a0',
-                    callbacks: {
-                        label: ctx => `S$${formatAmount(ctx.raw)} (${ctx.dataset.data.length ? ((ctx.raw / ctx.dataset.data.reduce((a, b) => a + b, 0)) * 100).toFixed(1) : 0}%)`,
-                    },
-                },
-            },
-        },
-    });
-}
-
-// ============================================================
-// TRANSACTIONS TABLE
-// ============================================================
-
-function renderTypeBadges(tx) {
-    const typeName = tx.parent_type || tx.type;
-    const badges = (() => {
-        if (!tx.type) return '<span class="badge badge-warning">No type</span>';
-        if (tx.parent_type) {
-            return `<span class="badge badge-parent">${escapeHtml(tx.parent_type)}</span><span class="badge badge-sub">${escapeHtml(tx.type)}</span>`;
-        }
-        return `<span class="badge badge-success">${escapeHtml(tx.type)}</span>`;
-    })();
-    // The book is named where it is not the household's; a mixed merchant's
-    // row is flagged so its type gets a look each time.
-    const extras = bookBadgeHtml(tx.book)
-        + (tx.review_each_time ? ' <span class="badge badge-warning" title="Mixed merchant: check this row\'s type">check type</span>' : '');
-    // Type text navigates to By Type view; a row with no type opens Resolve Modal directly
-    if (!typeName) {
-        return `<span class="tx-cat-editable" onclick="showTypePicker(${tx.id}, this)" title="Click to give it a type">${badges}</span>${extras}`;
-    }
-    return `<a href="#" class="tx-cat-link" onclick="navigateToType('${escapeHtml(typeName)}');return false;" title="View in By Type">${badges}</a>${extras}`;
-}
-
-function renderTransactions(data) {
-    const tbody = document.getElementById('tx-body');
-    tbody.innerHTML = '';
-
-    data.transactions.forEach(tx => {
-        if (tx.flow_type !== 'expense' && tx.flow_type !== 'refund') return;
-        const tr = document.createElement('tr');
-        tr.dataset.description = tx.description || '';
-        // Note indicator: small icon after description, clickable to edit
-        const noteIcon = tx.notes
-            ? `<span class="tx-note-icon has-note" title="${escapeHtml(tx.notes)}" onclick="editNote(${tx.id}, this)">&#9998;</span>`
-            : `<span class="tx-note-icon" title="Add note" onclick="editNote(${tx.id}, this)">&#9998;</span>`;
-        const oneOffClass = tx.is_one_off ? 'tx-one-off active' : 'tx-one-off';
-        const oneOffTitle = tx.is_one_off ? 'Marked as one-off (click to unmark)' : 'Mark as one-off (excludes from burn rate)';
-        tr.innerHTML = `
-            <td class="col-date">${formatDate(tx.date)}</td>
-            <td>${tx.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${tx.service_id});return false;">${escapeHtml(tx.service_name)}</a>` : `<span class="text-tertiary" style="font-size:12px;">${escapeHtml(tx.description).substring(0, 30)}</span>`}</td>
-            <td>${renderTypeBadges(tx)}</td>
-            <td class="text-secondary" style="font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}${noteIcon}</td>
-            <td class="text-secondary" style="font-size:12px;">${tx.account_name || ''}</td>
-            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
-            <td style="text-align:center;"><span class="${oneOffClass}" title="${oneOffTitle}" onclick="toggleTxOneOff(${tx.id}, this)">1x</span></td>
-            <td style="text-align:center;"><span class="tx-edit-icon" title="Resolve / edit transaction" onclick="showTypePicker(${tx.id}, this)">&#9998;</span></td>
-        `;
-        tbody.appendChild(tr);
-    });
-
-    txCurrentPage = data.page;
-    document.getElementById('tx-page-info').textContent =
-        `Page ${data.page} of ${data.pages} (${data.total} transactions)`;
-    document.getElementById('tx-prev').disabled = data.page <= 1;
-    document.getElementById('tx-next').disabled = data.page >= data.pages;
-
-    // Update sort indicators
-    document.querySelectorAll('#tx-table th.sortable').forEach(th => {
-        const col = th.dataset.sort;
-        const arrow = th.querySelector('.sort-arrow');
-        if (col === txSortCol) {
-            th.classList.add('active');
-            arrow.textContent = txSortDir === 'asc' ? '▲' : '▼';
-        } else {
-            th.classList.remove('active');
-            arrow.textContent = '';
-        }
-    });
-}
-
-function toggleSort(col) {
-    if (txSortCol === col) {
-        txSortDir = txSortDir === 'asc' ? 'desc' : 'asc';
-    } else {
-        txSortCol = col;
-        txSortDir = col === 'date' ? 'desc' : 'asc'; // date defaults desc, others asc
-    }
-    txCurrentPage = 1;
-    txPage(0);
-}
-
-function txPage(delta) {
-    // If not in flat view, delegate to accordion loaders
-    if (txViewMode === 'service') { loadServiceAccordion(); return; }
-    if (txViewMode === 'type') { loadTypeAccordion(); return; }
-
-    txCurrentPage += delta;
-    if (txCurrentPage < 1) txCurrentPage = 1;
-    const params = buildFilterParams();
-    const search = document.getElementById('tx-search').value;
-
-    let url = `/api/transactions?${params}&expense_only=true&per_page=50&page=${txCurrentPage}&sort=${txSortCol}&sort_dir=${txSortDir}`;
-    if (search) url += '&search=' + encodeURIComponent(search);
-
-    // Type filter: chart selections take precedence over multi-select dropdown
-    const typesParam = activeTypesParam();
-    if (typesParam) url += '&types=' + encodeURIComponent(typesParam);
-
-    // Chart-driven date narrowing from selections with specific periods
-    const chartDateRange = getChartFilterDateRange();
-    if (chartDateRange.start) url += '&chart_start=' + chartDateRange.start;
-    if (chartDateRange.end) url += '&chart_end=' + chartDateRange.end;
-
-    fetch(url).then(r => r.json()).then(renderTransactions);
-}
-
-function editNote(txId, iconEl) {
-    noteModalTxId = txId;
-    noteModalIconEl = iconEl;
-
-    // Get current note text and transaction description
-    const current = iconEl.classList.contains('has-note') ? iconEl.title : '';
-    const row = iconEl.closest('tr');
-    const desc = row?.dataset.description || '';
-
-    document.getElementById('note-modal-desc').textContent = desc;
-    document.getElementById('note-text').value = current;
-    document.getElementById('note-modal').style.display = 'flex';
-    document.getElementById('note-text').focus();
-}
-
-function closeNoteModal() {
-    document.getElementById('note-modal').style.display = 'none';
-    noteModalTxId = null;
-    noteModalIconEl = null;
-}
-
-async function saveNote() {
-    if (!noteModalTxId) return;
-    const note = document.getElementById('note-text').value.trim();
-    const btn = document.querySelector('#note-modal .btn-primary');
-    btn.disabled = true;
-    btn.textContent = 'Saving...';
-
-    try {
-        await apiFetch(`/api/transactions/${noteModalTxId}`, {
-            method: 'PUT', body: { notes: note || null }
-        });
-
-        // Update icon state inline
-        if (noteModalIconEl) {
-            if (note) {
-                noteModalIconEl.classList.add('has-note');
-                noteModalIconEl.title = note;
-            } else {
-                noteModalIconEl.classList.remove('has-note');
-                noteModalIconEl.title = 'Add note';
+        sheet.sections.forEach(section => section.lines.forEach(line => {
+            if (line.counted_in) return;
+            const acct = r.accountById.get(line.account_id);
+            const base = { lane: 'books', currency: line.currency, line };
+            if (line.check?.status === 'off') {
+                items.push({ ...base, key: `off-${line.account_id}`, kind: 'off', amount: Math.abs(line.check.difference_minor),
+                    title: `${line.name} is off by ${money(Math.abs(line.check.difference_minor), line.currency)}`,
+                    meta: `statement ${day(line.rests_on?.date)}`,
+                    holds: 'Its rows do not carry the earlier statement balance to this one',
+                    actions: [{ label: 'See the tie line', href: `#/books/account/${line.account_id}`, primary: true }] });
             }
+            if (line.rests_on?.source === 'supplied' && line.rests_on.age_days > STALE_DAYS) {
+                items.push({ ...base, key: `stale-${line.account_id}`, kind: 'stale', amount: Math.abs(line.balance_minor ?? 0),
+                    title: `${line.name}: your figure is ${line.rests_on.age_days} days old`,
+                    meta: `your figure ${day(line.rests_on.date)}`, shown: line.balance_minor,
+                    holds: 'Net worth rests on it as it stands',
+                    actions: [{ label: 'Enter a figure', act: 'figure', data: { account: line.account_id }, primary: true }] });
+            }
+            if (!line.in_total && line.balance === 'no figure') {
+                const figure = acct && acct.takes_a_figure;
+                items.push({ ...base, key: `nofig-${line.account_id}`, kind: 'nofig', amount: 0,
+                    title: `${line.name} has no figure`,
+                    meta: figure ? 'nothing entered yet' : 'no statement balance held',
+                    holds: 'Left out of net worth until it has one',
+                    actions: [figure ? { label: 'Enter a figure', act: 'figure', data: { account: line.account_id }, primary: true }
+                        : { label: 'Import a statement', href: '#/books/import', primary: true }] });
+            }
+        }));
+        const lanes = { out: [], in: [], books: [], aside: [] };
+        items.forEach(i => lanes[i.lane].push(i));
+        lanes.out.sort((a, b) => b.amount - a.amount);
+        lanes.in.sort((a, b) => b.amount - a.amount);
+        const order = { refused: 0, off: 1, stale: 2, nofig: 3 };
+        lanes.books.sort((a, b) => order[a.kind] - order[b.kind] || b.amount - a.amount);
+        const sum = list => {
+            const by = {};
+            list.forEach(i => { if (i.kind === 'bill') return; by[i.currency] = (by[i.currency] || 0) + i.amount; });
+            return Object.entries(by).map(([c, m]) => money(m, c)).join(' · ') || '';
+        };
+        return { lanes, refusedBy, count: lanes.out.length + lanes.in.length + lanes.books.length,
+            sums: { out: sum(lanes.out.filter(i => i.kind === 'transfer')), in: sum(lanes.in.filter(i => i.kind === 'transfer')) } };
+    })();
+    cache.set('queue', p);
+    p.catch(() => cache.delete('queue'));
+    return p;
+}
+
+function itemHTML(item) {
+    const amount = item.kind === 'nofig' ? '' : item.kind === 'stale'
+        ? `<span class="num">${esc(money(item.shown, item.currency))}</span>`
+        : item.lane === 'in' ? `<span class="dir in">↙ IN</span> <span class="num">${esc(money(item.amount, item.currency))}</span>`
+            : item.lane === 'out' ? `<span class="dir out">↗ OUT</span> <span class="num">${esc(money(item.amount, item.currency))}</span>`
+                : '';
+    const marker = { refused: tag('refused', 'refused'), aside: tag('aside', 'refused · set aside'), off: tag('off', 'off by'),
+        stale: tag('stale', 'stale'), nofig: tag('nofig', 'no figure'), mixed: tag('notchecked', 'mixed merchant'),
+        bill: tag('stale', 'missed bill'), untyped: tag('nofig', 'no type'), transfer: '' }[item.kind] || '';
+    const actions = (item.actions || []).map(a => a.href
+        ? `<a class="btn sm${a.primary ? ' primary' : ''}" href="${a.href}">${esc(a.label)}</a>`
+        : `<button type="button" class="btn sm${a.primary ? ' primary' : ''}" data-act="${a.act}"${Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(a.label)}</button>`).join('');
+    return `<article class="item ${item.kind}">
+        <div><div class="what">${esc(item.title)} ${marker}</div><div class="meta">${esc(item.meta || '')}</div>${item.holds ? `<div class="holds">${esc(item.holds)}</div>` : ''}</div>
+        <div class="amt">${amount}</div>
+        <div class="act">${actions}</div></article>`;
+}
+
+// ---------------------------------------------------------------------------
+// Home
+// ---------------------------------------------------------------------------
+
+function heroFigure(minor, cur) {
+    const text = money(minor, cur);
+    const m = text.match(/^(\S+)\s(.*?)(\.\d+)?$/);
+    if (!m) return esc(text);
+    return `<span class="cur">${esc(m[1])}</span>${esc(m[2])}${m[3] ? `<span class="cents">${esc(m[3])}</span>` : ''}`;
+}
+
+/** What net worth rests on: every figure in it by its size, owned and owed. */
+function restsOnParts(sheet) {
+    const parts = { ties: [0, 0], off: [0, 0], notchecked: [0, 0], recent: [0, 0], stale: [0, 0], rows: [0, 0] };
+    const leftOut = [];
+    sheet.sections.forEach(s => s.lines.forEach(line => {
+        if (line.counted_in) return;
+        if (!line.in_total) { leftOut.push(line); return; }
+        const w = Math.abs(line.value_minor || 0);
+        let k;
+        if (!line.rests_on) k = 'rows';
+        else if (line.rests_on.source === 'supplied') k = line.rests_on.age_days > STALE_DAYS ? 'stale' : 'recent';
+        else k = line.check?.status === 'ties' ? 'ties' : line.check?.status === 'off' ? 'off' : 'notchecked';
+        parts[k][0] += w; parts[k][1] += 1;
+    }));
+    const whole = Object.values(parts).reduce((a, [w]) => a + w, 0);
+    return { parts, whole, leftOut };
+}
+const REST_LABELS = {
+    ties: 'statement that ties', off: 'statement off by', notchecked: 'statement not checked',
+    recent: `your figure, ${STALE_DAYS} days old or newer`, stale: `your figure, over ${STALE_DAYS} days old`, rows: 'worked out from rows (companies, people)',
+};
+function restsOnHTML(sheet) {
+    const { parts, whole, leftOut } = restsOnParts(sheet);
+    const keys = Object.keys(parts).filter(k => parts[k][1]);
+    const bar = keys.map(k => `<span class="sw-${k}" style="width:${(parts[k][0] / (whole || 1)) * 100}%" title="${esc(REST_LABELS[k])}"></span>`).join('');
+    const legend = keys.map(k => `<a href="#/books" data-act="needs-look-link" data-key="${k}"><span class="sw sw-${k}"></span><span><b>${pct(parts[k][0], whole)}</b> ${esc(REST_LABELS[k])} · ${parts[k][1]}</span></a>`).join('');
+    const stale = parts.stale[0];
+    const words = stale
+        ? `<b>${pct(stale, whole)}</b> of what net worth rests on is your own figure over ${STALE_DAYS} days old. Statements that tie hold <b>${pct(parts.ties[0], whole)}</b>.`
+        : `Statements that tie hold <b>${pct(parts.ties[0], whole)}</b> of what net worth rests on.`;
+    return `<div class="rests"><div class="spread"><span class="eyebrow">What it rests on</span><span class="muted small">each figure by its size, owed included</span></div>
+        <div class="rests-bar" role="img" aria-label="What net worth rests on">${bar}</div>
+        <div class="legend">${legend}</div>
+        <p class="small" style="margin-top:10px">${words}${leftOut.length ? ` ${plural(leftOut.length, 'line is', 'lines are')} left out: ${leftOut.map(l => esc(l.name)).join(', ')}.` : ''}</p></div>`;
+}
+
+async function viewHome() {
+    const month = currentMonth();
+    const prev = prevMonth(month);
+    const [settings, now, before, q, cards, r] = await Promise.all([
+        get('/api/settings'), sheetFor(month),
+        prev >= SHEET_START ? sheetFor(prev).catch(() => null) : Promise.resolve(null),
+        loadQueue(), get('/api/dashboard/stat-cards'), refs(),
+    ]);
+
+    const claude = settings.claude_count
+        ? `<div class="claude-line"><span class="spark" aria-hidden="true">✳</span>
+            <span class="grow"><b>${plural(settings.claude_count, 'change')} by Claude</b> since you last looked${settings.latest_claude_at ? ` · latest ${esc(when(settings.latest_claude_at))}` : ''}</span>
+            <a class="btn sm" href="#/changes">Check them</a>
+            <button class="btn sm quiet" data-act="looks-right" data-upto="${settings.newest}">Looks right</button></div>`
+        : `<div class="claude-line quiet"><span aria-hidden="true">✳</span><span class="grow">Nothing new from Claude since you last looked.</span>
+            <span class="small">Claude may write: <b>${settings.claude_may_write ? 'on' : 'off'}</b></span></div>`;
+
+    const chips = [];
+    if (before) {
+        const change = now.net_worth_minor - before.net_worth_minor;
+        chips.push(`<span class="chip" style="cursor:default"><span class="num">${esc(money(change, 'SGD', { signed: true }))}</span> since ${esc(day(before.as_at, { year: false }))}</span>`);
+        const mc = before.month_check;
+        if (mc && mc.available && mc.unexplained_minor !== null && mc.unexplained_minor !== undefined) {
+            chips.push(mc.unexplained_minor === 0
+                ? tag('ties', `${monthName(prev, { short: true })} adds up`, { href: '#/books' + '', title: 'The month check' })
+                : `<a class="tag unexplained" href="#/books" data-act="go-month-check" data-month="${prev}"><span class="ic">?</span>${esc(money(mc.unexplained_minor, 'SGD'))} unexplained in ${esc(monthName(prev, { short: true }))}</a>`);
         }
-        closeNoteModal();
-    } finally {
-        btn.disabled = false;
-        btn.textContent = 'Save';
     }
-}
-
-async function clearNote() {
-    if (!noteModalTxId) return;
-    const btn = document.querySelector('#note-modal .modal-footer .btn:first-child');
-    btn.disabled = true;
-
-    try {
-        await apiFetch(`/api/transactions/${noteModalTxId}`, {
-            method: 'PUT', body: { notes: null }
-        });
-
-        if (noteModalIconEl) {
-            noteModalIconEl.classList.remove('has-note');
-            noteModalIconEl.title = 'Add note';
-        }
-        closeNoteModal();
-    } finally {
-        btn.disabled = false;
-    }
-}
-
-async function toggleTxOneOff(txId, el) {
-    const isActive = el.classList.contains('active');
-    const newVal = isActive ? 0 : 1;
-    try {
-        await apiFetch(`/api/transactions/${txId}`, {
-            method: 'PUT', body: { is_one_off: newVal }
-        });
-        el.classList.toggle('active');
-        el.title = newVal
-            ? 'Marked as one-off (click to unmark)'
-            : 'Mark as one-off (excludes from burn rate)';
-    } catch (_) {
-        // Silently fail — UI state unchanged
-    }
-}
-
-function showTypePicker(txId, containerEl) {
-    // Open the unified resolve modal
-    const row = containerEl.closest('tr');
-    const desc = row?.dataset.description || '';
-    openResolveModal(txId, desc);
-}
-
-// Wire up search/filter inputs
-document.addEventListener('DOMContentLoaded', () => {
-    ['tx-search'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.addEventListener('change', () => { txCurrentPage = 1; txPage(0); });
+    now.left_out.forEach(l => {
+        const line = now.sections.flatMap(s => s.lines).find(x => x.name === l.name);
+        chips.push(tag('nofig', `${l.name}: ${l.why}, left out`, line ? fixFor(line) : {}));
     });
-    const searchEl = document.getElementById('tx-search');
-    if (searchEl) {
-        let debounce;
-        searchEl.addEventListener('input', () => {
-            clearTimeout(debounce);
-            debounce = setTimeout(() => { txCurrentPage = 1; txPage(0); }, 300);
-        });
-    }
 
-    // Services master search debounce
-    const svcMasterSearchEl = document.getElementById('svc-master-search');
-    if (svcMasterSearchEl) {
-        svcMasterSearchEl.addEventListener('input', debounce(renderServicesMaster, 300));
-    }
+    const hero = `<section class="card home-hero">
+        <div class="spread"><span class="eyebrow">Net worth · today</span><a class="link small" href="#/books">Balance sheet</a></div>
+        <div class="hero-figure num">${heroFigure(now.net_worth_minor, now.currency)}</div>
+        <div class="chips">${chips.join('')}</div>
+        ${restsOnHTML(now)}</section>`;
 
-    // Close modals on Escape and overlay click (note-modal, resolve-modal, edit-rule-modal)
-    // add-service, edit-service, add-sub, edit-sub modals use openModalEl which handles its own Escape/backdrop
-    const _staticModals = {
-        'note-modal': closeNoteModal,
-        'resolve-modal': closeResolveModal,
-        'edit-rule-modal': closeEditRuleModal,
-        'figure-modal': closeFigureModal,
-    };
-    document.addEventListener('keydown', e => {
-        if (e.key !== 'Escape') return;
-        for (const [id, fn] of Object.entries(_staticModals)) {
-            if (document.getElementById(id).style.display !== 'none') { fn(); return; }
+    const lane = (key, title, list, sum) => `<div class="lane">
+        <h3>${key === 'out' ? '<span class="dir out">↗ OUT</span>' : key === 'in' ? '<span class="dir in">↙ IN</span>' : ''} ${title}
+            <span class="lane-sum">${plural(list.length, 'item')}${sum ? ` · transfers ${esc(sum)}` : ''}</span></h3>
+        ${list.length ? list.slice(0, 3).map(itemHTML).join('') : '<p class="muted small">Nothing waits here.</p>'}
+        ${list.length > 3 ? `<a class="link small" href="#/queue">${list.length - 3} more in the queue</a>` : ''}</div>`;
+    const waits = `<section class="card home-waits">
+        <div class="card-head"><h2>Waiting for you</h2><a class="btn sm" href="#/queue">Open the queue · ${q.count}</a></div>
+        ${q.count ? `<div class="waits-cols">${lane('out', 'Money out', q.lanes.out, q.sums.out)}${lane('in', 'Money in', q.lanes.in, q.sums.in)}</div>
+        ${q.lanes.books.length ? `<div style="margin-top:16px">${lane('books', 'Figures and statements', q.lanes.books)}</div>` : ''}`
+        : '<p class="empty">Nothing waits for you.</p>'}</section>`;
+
+    const books = r.books.map(b => b.name);
+    const tile = (cls, eyebrow, label, minor, body) => `<div class="tile ${cls}"><div class="eyebrow">${esc(eyebrow)}</div>
+        <div class="label">${esc(label)}</div><div class="fig num">${esc(money(minor, 'SGD'))}</div><p>${body}</p></div>`;
+    const tiles = [];
+    books.forEach((name, i) => {
+        const key = name.toLowerCase();
+        if (!(key in cards)) return;
+        const minor = toMinor(cards[key]);
+        if (i === 0) {
+            tiles.push(tile('household', 'Household', `${name} spending`, minor,
+                `${plural(cards.household_rows || 0, 'row')}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.`));
+        } else {
+            tiles.push(tile('company', 'Company book', `${name}, its costs`, minor,
+                `Paid from our accounts. Not household spending; it moves ${esc(name)}’s company balance.`));
         }
     });
-    for (const [id, fn] of Object.entries(_staticModals)) {
-        document.getElementById(id)?.addEventListener('mousedown', e => {
-            if (e.target === e.currentTarget) fn();
-        });
-    }
-});
+    tiles.push(tile('movement', 'Movement, not spending', 'Loan principal repaid', toMinor(cards.loan_principal),
+        `What the loans fell by: instalments ${esc(money(toMinor(cards.loan_instalments), 'SGD'))} less interest ${esc(money(toMinor(cards.loan_interest), 'SGD'))}. Still the household’s money.`));
+    const tilesCard = `<section class="card home-tiles">
+        <div class="card-head"><h2>${esc(cards.ref_label)}: ${tiles.length} figures, never added</h2><a class="link small" href="#/books/spending">Spending</a></div>
+        <div class="tiles">${tiles.join('')}</div>
+        <p class="never">Each book is its own figure, drawn three different ways so they never read as one sum. No total is shown between them.</p></section>`;
 
-// ============================================================
-// RULE CREATION MODAL (from the type picker)
-// ============================================================
-
-function isTransferLikeDescription(description) {
-    const normalized = (description || '').toUpperCase().replace(/\s+/g, ' ').trim();
-    if (!normalized) return false;
-    if (normalized.includes('PAYNOW') || normalized.includes('PAYLAH') || normalized.includes('I-BANK') || normalized.includes(':IB')) {
-        return true;
-    }
-    return /^FT\d+[A-Z0-9-]*/.test(normalized);
+    const mcCard = before ? monthCheckMini(before) : '';
+    return `<div class="home">${claude}${hero}${mcCard}${waits}${tilesCard}</div>`;
 }
 
+function monthCheckMini(sheet) {
+    const mc = sheet.month_check;
+    if (!mc) return '';
+    const name = monthName(sheet.month);
+    if (!mc.available || mc.unexplained_minor === null) {
+        return `<section class="card home-mc"><span class="eyebrow">Month check · ${esc(name)}</span><p class="small" style="margin-top:8px">${esc(mc.why || 'Not worked out for this month.')}</p></section>`;
+    }
+    const reasons = [];
+    if (mc.review && mc.review.count) reasons.push(`${plural(mc.review.out_count, 'transfer')} out (${esc(money(mc.review.out_minor, 'SGD'))}) and ${mc.review.in_count} in (${esc(money(mc.review.in_minor, 'SGD'))}) wait for a label`);
+    (mc.not_tying || []).forEach(l => reasons.push(`${esc(l.name)}: ${esc(l.text)}`));
+    (mc.left_out || []).forEach(l => reasons.push(`${esc(l.name)} left out (${esc(l.why)})`));
+    return `<section class="card home-mc"><span class="eyebrow">Month check · ${esc(name)}</span>
+        <p class="small muted" style="margin:4px 0 10px">Start + income − spending + currency change, against the actual end.</p>
+        <div class="eyebrow" style="margin-top:6px">${mc.unexplained_minor === 0 ? 'It adds up' : 'Unexplained'}</div>
+        <div class="tile-fig num" style="font-family:var(--font-display);font-size:30px;font-weight:600;color:${mc.unexplained_minor === 0 ? 'var(--ok)' : 'var(--bad)'}">${esc(money(mc.unexplained_minor, 'SGD'))}</div>
+        <p class="small muted">expected ${esc(money(mc.expected_minor, 'SGD'))} · actual ${esc(money(mc.actual_minor, 'SGD'))}</p>
+        ${reasons.length ? `<ul class="small" style="padding-left:18px;margin:10px 0">${reasons.slice(0, 4).map(x => `<li>${x}</li>`).join('')}</ul>` : ''}
+        <button class="btn sm" data-act="go-month-check" data-month="${sheet.month}">Open the month check</button></section>`;
+}
+
+ACT['looks-right'] = async el => {
+    const r = await send('POST', '/api/changes/looked', { upto: Number(el.dataset.upto) });
+    if (!r.ok) { toast(r.data.error || 'That did not work', { bad: true }); return; }
+    toast('Marked as looked at. Nothing was undone.');
+    rerender();
+};
+ACT['go-month-check'] = el => {
+    S.month = el.dataset.month; store.set('month', S.month);
+    if (location.hash !== '#/books') { afterNextRender = () => $('#month-check')?.scrollIntoView(); location.hash = '#/books'; }
+    else { rerender(); setTimeout(() => $('#month-check')?.scrollIntoView(), 300); }
+};
+let afterNextRender = null;
+ACT['needs-look-link'] = () => { S.needsLook = true; location.hash = '#/books'; };
+
+// ---------------------------------------------------------------------------
+// Queue
+// ---------------------------------------------------------------------------
+
+const queueOpen = { out: 12, in: 12, books: 12 };
+async function viewQueue() {
+    const q = await loadQueue();
+    const lane = (key, title, list, note) => `<section class="card lane-card" id="lane-${key}">
+        <div class="card-head"><h2>${key === 'out' ? '<span class="dir out">↗ OUT</span> ' : key === 'in' ? '<span class="dir in">↙ IN</span> ' : ''}${title}</h2>
+            <p>${plural(list.length, 'item')}${note ? ' · ' + esc(note) : ''}</p></div>
+        ${list.length ? list.slice(0, queueOpen[key] || 999).map(itemHTML).join('') : '<p class="empty">Nothing waits here.</p>'}
+        ${list.length > (queueOpen[key] || 999) ? `<button class="btn block" style="margin-top:10px" data-act="queue-more" data-lane="${key}">Show all ${list.length}</button>` : ''}
+        </section>`;
+    const jump = [['out', 'Out', q.lanes.out.length], ['in', 'In', q.lanes.in.length], ['books', 'Figures and statements', q.lanes.books.length]]
+        .map(([k, l, n]) => `<a class="chip" href="#/queue" data-act="jump" data-to="lane-${k}">${l} <span class="n">${n}</span></a>`).join('');
+    return `<div class="page-head"><div><h1>Queue</h1><p>${q.count ? `${plural(q.count, 'thing waits', 'things wait')} for you. Money out and money in are kept apart.` : 'Nothing waits for you.'}</p></div>
+            <div class="chips phone-only">${jump}</div></div>
+        <div class="waits">
+            <div class="waits-cols">${lane('out', 'Money out', q.lanes.out, q.sums.out ? `transfers ${q.sums.out}` : '')}${lane('in', 'Money in', q.lanes.in, q.sums.in ? `transfers ${q.sums.in}` : '')}</div>
+            ${lane('books', 'Figures and statements', q.lanes.books, 'what the balances rest on')}
+            ${q.lanes.aside.length ? `<section class="card"><div class="card-head"><h2>Set aside</h2><p>Known, left as they are. Still marked refused on their accounts.</p></div>${q.lanes.aside.map(itemHTML).join('')}</section>` : ''}
+        </div>`;
+}
+ACT['queue-more'] = el => { queueOpen[el.dataset.lane] = 9999; rerender(); };
+ACT.jump = el => $('#' + el.dataset.to)?.scrollIntoView({ behavior: 'smooth' });
+
+async function findRow(txId) {
+    const q = await loadQueue();
+    for (const list of Object.values(q.lanes)) {
+        const hit = list.find(i => i.row && i.row.id === txId);
+        if (hit) return hit.row;
+    }
+    const one = await get(`/api/transactions?tx_id=${txId}`).catch(() => null);
+    return one && one.transactions[0] || null;
+}
+
+function rowHead(row) {
+    const minor = toMinor(row.amount_sgd, row.currency);
+    return `<div class="notice"><div class="spread"><b>${esc(row.description)}</b>${rowAmount(minor, row.currency)}</div>
+        <div class="small muted">${esc(day(row.date))} · ${esc(row.account_name || '')}${row.service_name ? ' · ' + esc(row.service_name) : ''}</div></div>`;
+}
+
+function typeOptions(types, selected, { kind = 'spending', blank = 'Choose a type' } = {}) {
+    const list = types.filter(t => t.kind === kind);
+    return `<option value="">${esc(blank)}</option>` + list.map(t =>
+        `<option value="${t.id}"${String(t.id) === String(selected) ? ' selected' : ''}>${esc(t.display_name || t.name)}</option>`).join('');
+}
+function bookOptions(books, selected, blank = 'As the type says') {
+    return `<option value="">${esc(blank)}</option>` + books.map(b => `<option value="${esc(b.name)}"${b.name === selected ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
+}
+
+// "This was…" for a transfer waiting for review: one choice, then what it asks.
+ACT['this-was'] = async el => {
+    const txId = Number(el.dataset.tx);
+    const row = await findRow(txId);
+    if (!row) { toast('That row is no longer waiting', { bad: true }); return; }
+    const r = await refs();
+    const minor = toMinor(row.amount_sgd, row.currency);
+    const choices = r.review.choices.map(c => `<button type="button" class="choice" data-act="this-was-choice" data-tx="${txId}" data-choice="${esc(c.name)}">
+        <strong>${esc(sentence(c.label))}</strong><span>${esc(c.description)}</span></button>`).join('');
+    openSheet(minor < 0 ? 'Money in · what was it?' : 'Money out · what was it?', `${rowHead(row)}<div class="choices">${choices}</div><div id="choice-ask"></div>`);
+};
+ACT['this-was-choice'] = async el => {
+    const txId = Number(el.dataset.tx);
+    const r = await refs();
+    const row = await findRow(txId);
+    const choice = r.review.choices.find(c => c.name === el.dataset.choice);
+    $$('.choice', sheetBody()).forEach(b => b.setAttribute('aria-pressed', String(b === el)));
+    const ask = $('#choice-ask');
+    let fields = '';
+    if (choice.asks === 'type') {
+        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types)}</select></label>
+            <label class="field"><span>Book</span><select id="cw-book">${bookOptions(r.books)}</select></label>`;
+    } else if (choice.asks === 'account') {
+        const allowed = r.accounts.filter(a => choice.kinds.includes(a.type) && a.id !== row?.account_id && a.status !== 'archived');
+        fields = `<label class="field"><span>Which account</span><select id="cw-account"><option value="">Choose</option>${allowed.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.currency)})</option>`).join('')}</select></label>`;
+    } else if (choice.asks === 'person') {
+        const people = r.accounts.filter(a => a.type === 'person');
+        fields = `<label class="field"><span>Who</span><select id="cw-person"><option value="">A new name…</option>${people.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></label>
+            <label class="field"><span>New name</span><input type="text" id="cw-person-name" placeholder="Only for someone new"></label>`;
+    } else if (choice.asks === 'income_kind') {
+        fields = `<label class="field"><span>What kind of income</span><select id="cw-income">${typeOptions(r.types, null, { kind: 'income', blank: 'Choose' })}</select></label>`;
+    }
+    ask.innerHTML = `<div class="fields" style="margin-top:12px">${fields}</div>
+        <button class="btn primary block" style="margin-top:12px" data-act="this-was-save" data-tx="${txId}" data-choice="${esc(choice.name)}">Save: ${esc(choice.label)}</button>`;
+};
+ACT['this-was-save'] = async el => {
+    const body = { choice: el.dataset.choice };
+    const val = id => $('#' + id)?.value;
+    if (val('cw-type')) body.type_id = Number(val('cw-type'));
+    if (val('cw-book')) body.book = val('cw-book');
+    if (val('cw-account')) body.account_id = Number(val('cw-account'));
+    if (val('cw-person')) body.account_id = Number(val('cw-person'));
+    else if (val('cw-person-name')) body.person = val('cw-person-name').trim();
+    if (val('cw-income')) body.income_kind_id = Number(val('cw-income'));
+    const r = await act('POST', `/api/review/${el.dataset.tx}/label`, body, 'Labelled');
+    if (r) { closeSheet(); rerender(); }
+};
+
+// "This was…" for a row with no type: the resolve step, with the type suggestion.
 function suggestPattern(description) {
-    if (isTransferLikeDescription(description)) {
-        return '';
-    }
-    // Extract a useful merchant pattern from the description
-    // Strip trailing reference numbers and clean up
-    let pattern = description.toUpperCase();
-    // Remove common suffixes: country codes, dates, reference numbers
-    pattern = pattern.replace(/\s+(SG|SGP|SIN|US|USA|GB|GBR|AU|AUS)\s*$/i, '');
-    pattern = pattern.replace(/\s+\d{2}\/\d{2}$/, '');  // trailing dates
-    // Take first meaningful segment (before reference numbers)
+    let pattern = (description || '').toUpperCase();
+    if (/\b(PAYNOW|FAST PAYMENT|TRANSFER|I-BANK|GIRO)\b/.test(pattern)) return '';
+    pattern = pattern.replace(/\s+(SG|SGP|SIN|US|USA|GB|GBR|AU|AUS)\s*$/i, '').replace(/\s+\d{2}\/\d{2}$/, '');
     const parts = pattern.split(/\s+/);
-    // Find where "noise" starts (long alphanumeric strings, pure numbers)
     let cutoff = parts.length;
     for (let i = 1; i < parts.length; i++) {
-        if (/^[A-Z0-9]{8,}$/.test(parts[i]) || /^\d+$/.test(parts[i])) {
-            cutoff = i;
-            break;
-        }
+        if (/^[A-Z0-9]{8,}$/.test(parts[i]) || /^\d+$/.test(parts[i])) { cutoff = i; break; }
     }
     return parts.slice(0, Math.max(cutoff, 2)).join(' ');
 }
+function titleCase(s) { return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); }
 
-// ---- Resolve Transaction Modal ----
-// Unified flow: pick/create service → book and type auto-fill → rule pattern → one save
-
-let resolveModalTxId = null;
-let resolveCascadeCountToken = 0;
-async function openResolveModal(txId, description) {
-    resolveModalTxId = txId;
-
-    // Show the description being resolved
-    document.getElementById('resolve-modal-desc').textContent =
-        `Resolve: "${description}"`;
-
-    // Auto-suggest rule pattern from description
-    document.getElementById('resolve-modal-pattern').value = suggestPattern(description);
-    document.getElementById('resolve-modal-match').value = 'contains';
-
-    // Initialize picker and clear
-    const picker = getResolveServicePicker();
-    picker.clear();
-    document.getElementById('resolve-cat-hint').style.display = 'none';
-    const defaultScope = document.querySelector('input[name="resolve-scope"][value="transaction"]');
-    if (defaultScope) defaultScope.checked = true;
-
-    // Populate book and type dropdowns (for new services or manual override)
-    populateTypeSelect('resolve-modal-type', { placeholder: '-- Select type --' });
-    populateBookSelect('resolve-modal-book', { placeholder: '-- Book --' });
-
-    // Try to auto-match service from description
-    await autoMatchService(description);
-    await showResolveSuggestion(txId);
-    updateResolveCascade();
-
-    // Show modal and focus service input
-    document.getElementById('resolve-modal').style.display = 'flex';
-    picker.input.focus();
-}
-
-function onResolveTypeChange() {
-    // A type proposes the book when none is chosen; Software & AI tools
-    // proposes none, and the save is refused until the operator says.
-    proposeBookInto('resolve-modal-book', document.getElementById('resolve-modal-type').value);
-    updateResolveCascade();
-}
-
-function updateResolveCascade() {
-    const cascadeEl = document.getElementById('resolve-cascade');
-    const warningEl = document.getElementById('resolve-cascade-warning');
-    const countEl = document.getElementById('resolve-cascade-count');
-    const picker = getResolveServicePicker();
-    const { id: serviceId, name: serviceName } = picker.getValue();
-    const typeRaw = document.getElementById('resolve-modal-type').value;
-    const typeId = typeRaw ? parseInt(typeRaw) : null;
-    const book = document.getElementById('resolve-modal-book').value || null;
-    const pattern = document.getElementById('resolve-modal-pattern').value.trim();
-    const ruleRadio = document.querySelector('input[name="resolve-scope"][value="rule"]');
-    const txRadio = document.querySelector('input[name="resolve-scope"][value="transaction"]');
-    const serviceDefaultRadio = document.querySelector('input[name="resolve-scope"][value="service_default"]');
-
-    const existingService = serviceId
-        ? allServicesList.find(s => s.id === serviceId)
-        : allServicesList.find(s => s.name.toLowerCase() === serviceName.toLowerCase());
-    const labelText = (bookName, typeName) => [bookName, typeName].filter(Boolean).join(' · ');
-    const defaultLabel = existingService
-        ? labelText(existingService.book, existingService.display_type || typeDisplayName(existingService.type_id))
-        : '';
-    const selectedLabel = labelText(book, typeDisplayName(typeId));
-    const differs = existingService && typeId && (
-        existingService.type_id !== typeId || (book && existingService.book !== book)
-    );
-
-    if (ruleRadio) {
-        ruleRadio.disabled = !pattern;
-        if (!pattern && ruleRadio.checked && txRadio) txRadio.checked = true;
-    }
-
-    if (differs) {
-        warningEl.textContent =
-            `Service "${existingService.name}" defaults to "${defaultLabel || 'no type'}". ` +
-            `You selected "${selectedLabel}".`;
-    } else if (existingService) {
-        warningEl.textContent = defaultLabel
-            ? `Service "${existingService.name}" defaults to "${defaultLabel}".`
-            : `Service "${existingService.name}" does not have a default type yet.`;
-    } else if (serviceName && typeId) {
-        warningEl.textContent = pattern
-            ? `Create "${serviceName}" and choose whether "${selectedLabel}" applies only here, to this pattern, or as the service default.`
-            : `Create "${serviceName}" and keep it transaction-only for now, unless you want a reusable rule later.`;
-    } else {
-        warningEl.textContent = pattern
-            ? 'Choose whether this book and type are transaction-only, a reusable rule override, or the new service default.'
-            : 'Transaction-only is safest when you are not creating a reusable rule.';
-    }
-
-    countEl.textContent = '';
-    cascadeEl.classList.remove('hidden');
-
-    const countToken = ++resolveCascadeCountToken;
-    if (existingService && serviceDefaultRadio) {
-        fetch(`/api/services/${existingService.id}/transactions`)
-            .then(r => r.json())
-            .then(data => {
-                if (countToken !== resolveCascadeCountToken) return;
-                const count = Array.isArray(data) ? data.length : 0;
-                countEl.textContent = count ? ` (${count} linked transactions)` : '';
-            }).catch(() => {});
-    }
-}
-
-async function autoMatchService(description) {
-    // Try to find an existing service whose name appears in the description
-    await ensureServicesListLoaded();
-    // Services cache populated for picker
-
-    const descUpper = description.toUpperCase();
-    const sorted = [...allServicesList].sort((a, b) => b.name.length - a.name.length);
-    for (const svc of sorted) {
-        if (descUpper.includes(svc.name.toUpperCase())) {
-            const picker = getResolveServicePicker();
-            picker.setValue(svc.name, svc.id);
-            onResolveServiceChange(svc.name);
-            return;
-        }
-    }
-}
-
-function onResolveServiceChange(value) {
-    const trimmed = (value || '').trim();
-    const match = allServicesList.find(
-        s => s.name.toLowerCase() === trimmed.toLowerCase()
-    );
-    const typeSelect = document.getElementById('resolve-modal-type');
-    const bookSelect = document.getElementById('resolve-modal-book');
-    const catHint = document.getElementById('resolve-cat-hint');
-
-    // A known service brings its default book and type.
-    if (match && match.type_id) {
-        typeSelect.value = String(match.type_id);
-        bookSelect.value = match.book || '';
-        catHint.style.display = 'block';
-    } else {
-        catHint.style.display = 'none';
-    }
-    updateResolveCascade();
-}
-
-// ---- Type suggestion (suggest-only: the operator confirms or corrects) ----
-
+let resolveTxId = null;
 let resolveSuggestionVisible = false;
-
-function updateSuggestButton() {
-    const btn = document.getElementById('suggest-types-btn');
-    if (!btn) return;
-    const onNoTypeList = typeFilterSelections.includes(UNTYPED_FILTER);
-    btn.style.display = suggestionsEnabled && onNoTypeList ? '' : 'none';
+ACT.resolve = async el => {
+    const txId = Number(el.dataset.tx);
+    const row = await findRow(txId);
+    if (!row) { toast('That row is no longer waiting', { bad: true }); return; }
+    openResolve(row);
+};
+async function openResolve(row) {
+    const [r, services] = await Promise.all([refs(), servicesList()]);
+    resolveTxId = row.id;
+    const pattern = suggestPattern(row.description);
+    const minor = toMinor(row.amount_sgd, row.currency);
+    openSheet(minor < 0 ? 'Money in · this was…' : 'Money out · this was…', `${rowHead(row)}
+        <div class="fields">
+            <label class="field"><span>Merchant</span><input type="text" id="rs-merchant" list="rs-merchants" value="${esc(row.service_name || titleCase(pattern || row.description))}" autocomplete="off"></label>
+            <datalist id="rs-merchants">${services.map(s => `<option value="${esc(s.name)}">`).join('')}</datalist>
+            <label class="field"><span>Type</span><select id="rs-type">${typeOptions(r.types, row.type_id)}</select></label>
+            <p class="small muted" id="resolve-suggestion" hidden></p>
+            <label class="field"><span>Book</span><select id="rs-book">${bookOptions(r.books, null, 'As the merchant or type says')}</select></label>
+            <fieldset class="fields" style="border:0;padding:0;margin:0"><legend class="small" style="font-weight:600;color:var(--text-secondary);margin-bottom:4px">Applies to</legend>
+                <label class="check"><input type="radio" name="rs-scope" value="service_default" checked> Every row of this merchant (its default)</label>
+                <label class="check"><input type="radio" name="rs-scope" value="transaction"> This row only</label>
+                <label class="check"><input type="radio" name="rs-scope" value="rule"> Rows matching the pattern below</label></fieldset>
+            <div class="fields two"><label class="field"><span>Pattern</span><input type="text" id="rs-pattern" value="${esc(pattern)}"></label>
+                <label class="field"><span>Match</span><select id="rs-match"><option value="contains">contains</option><option value="startswith">starts with</option></select></label></div>
+        </div>
+        <button class="btn primary block" data-act="resolve-save">Save</button>`);
+    $('#rs-merchant').addEventListener('change', () => {
+        const svc = services.find(s => s.name.toLowerCase() === $('#rs-merchant').value.trim().toLowerCase());
+        if (svc && svc.type_id && !$('#rs-type').value) $('#rs-type').value = String(svc.type_id);
+    });
+    showResolveSuggestion(row.id);
 }
 
-// What the stored answer gives the dialog: a pre-filled type, three to pick
-// from, or nothing. It fills the type field only; service, pattern, scope and
-// book stay the operator's.
+/** What fin's stored type suggestion offers for the row: a type to pre-fill,
+ *  three to offer, or nothing. The route is the server's; nothing is decided here. */
 async function showResolveSuggestion(txId) {
     resolveSuggestionVisible = false;
     const el = document.getElementById('resolve-suggestion');
-    el.style.display = 'none';
+    if (!el) return;
+    el.hidden = true;
     el.textContent = '';
-    if (!suggestionsEnabled) return;
-
-    const typeSelect = document.getElementById('resolve-modal-type');
-    if (typeSelect.value) return; // a known service already filled it
-
+    const typeSelect = document.getElementById('rs-type');
+    if (typeSelect.value) return;
     let suggestion;
-    try {
-        suggestion = await fetch(`/api/transactions/${txId}/suggestion`).then(r => r.json());
-    } catch (_) {
-        return;
-    }
-    if (resolveModalTxId !== txId || !suggestion || !suggestion.types || !suggestion.types.length) return;
-
-    const pct = p => `${Math.round(p * 100)}%`;
+    try { suggestion = await get(`/api/transactions/${txId}/suggestion`); } catch (_) { return; }
+    if (resolveTxId !== txId || !suggestion || !suggestion.types || !suggestion.types.length) return;
+    const share = p => `${Math.round(p * 100)}%`;
     if (suggestion.route === 'prefill') {
         const top = suggestion.types[0];
         typeSelect.value = String(top.type_id);
-        onResolveTypeChange();
-        el.textContent = `Suggested: ${top.name} (${pct(top.probability)}). Confirm or change it.`;
+        el.textContent = `fin's guess: ${top.name} (${share(top.probability)}). Keep it or change it.`;
     } else if (suggestion.route === 'top3') {
-        el.textContent = 'Suggested: ';
+        el.textContent = 'fin’s guesses: ';
         suggestion.types.forEach(t => {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'btn btn-sm';
-            btn.style.marginRight = '4px';
-            btn.textContent = `${t.name} (${pct(t.probability)})`;
-            btn.onclick = () => {
-                typeSelect.value = String(t.type_id);
-                onResolveTypeChange();
-            };
-            el.appendChild(btn);
+            const b = document.createElement('button');
+            b.type = 'button'; b.className = 'btn sm'; b.style.marginRight = '6px';
+            b.textContent = `${t.name} (${share(t.probability)})`;
+            b.onclick = () => { typeSelect.value = String(t.type_id); };
+            el.appendChild(b);
         });
     } else {
         return;
     }
-    el.style.display = 'block';
+    el.hidden = false;
     resolveSuggestionVisible = true;
 }
 
-// Two steps. The first click writes the merchant names to a local file and
-// sends nothing; only the operator's second, separate confirmation sends.
-async function startTypeSuggestions() {
-    const btn = document.getElementById('suggest-types-btn');
-    btn.disabled = true;
-    try {
-        const prepared = await apiFetch('/api/suggestions/prepare', { method: 'POST' });
-        if (!prepared) return;
-        if (!prepared.count) {
-            showToast('No new merchant names to ask about.', 'info');
-            return;
-        }
-        const send = await showConfirmDialog(
-            'Read the list before anything is sent',
-            `<strong>${prepared.count}</strong> merchant names were written to<br>` +
-            `<code>${escapeHtml(prepared.file)}</code><br><br>` +
-            `Nothing has been sent. Open the file, delete any line that is a person's name ` +
-            `or that you do not want sent, and save it. Each remaining line is then sent on ` +
-            `its own, with the type list and nothing else.`,
-            { okLabel: 'I have read it: send', cancelLabel: 'Not now' }
-        );
-        if (!send) return;
-
-        const result = await apiFetch('/api/suggestions/send', { method: 'POST' });
-        if (!result) return;
-        const parts = [`${result.sent} merchant names answered`];
-        if (result.stopped) parts.push(`Stopped: ${result.stopped}. ${result.remaining} not sent`);
-        showToast(parts.join('. '), result.stopped ? 'warn' : 'info', 6000);
-    } finally {
-        btn.disabled = false;
+ACT['resolve-save'] = async () => {
+    const services = await servicesList();
+    const name = $('#rs-merchant').value.trim();
+    const typeId = Number($('#rs-type').value);
+    if (!name) { toast('Say which merchant it was', { bad: true }); return; }
+    if (!typeId) { toast('Choose a type', { bad: true }); return; }
+    const scope = $('input[name="rs-scope"]:checked').value;
+    const body = { tx_id: resolveTxId, service_name: name, type_id: typeId, apply_scope: scope,
+        pattern: $('#rs-pattern').value.trim(), match_type: $('#rs-match').value, suggestion_visible: resolveSuggestionVisible };
+    const book = $('#rs-book').value;
+    if (book) body.book = book;
+    const svc = services.find(s => s.name.toLowerCase() === name.toLowerCase());
+    if (svc) body.service_id = svc.id;
+    if (scope === 'rule' && !body.pattern) { toast('A rule needs a pattern', { bad: true }); return; }
+    const r = await act('POST', '/api/transactions/resolve', body, 'Saved');
+    if (r) {
+        if (r.data.backfilled) toast(`${plural(r.data.backfilled, 'other matching row')} took the same label`);
+        closeSheet(); rerender();
     }
-}
+};
 
-function closeResolveModal() {
-    document.getElementById('resolve-modal').style.display = 'none';
-    resolveModalTxId = null;
-    resolveSuggestionVisible = false;
-    document.getElementById('resolve-cascade-warning').textContent = '';
-    document.getElementById('resolve-cascade-count').textContent = '';
-}
-
-// In-app confirm dialog (replaces browser confirm()). Returns a promise that resolves true/false.
-function showConfirmDialog(title, bodyHtml, {okLabel = 'Continue', cancelLabel = 'Cancel'} = {}) {
-    return new Promise(resolve => {
-        document.getElementById('confirm-dialog-title').textContent = title;
-        document.getElementById('confirm-dialog-body').innerHTML = bodyHtml;
-        const okBtn = document.getElementById('confirm-dialog-ok');
-        const cancelBtn = document.getElementById('confirm-dialog-cancel');
-        okBtn.textContent = okLabel;
-        cancelBtn.textContent = cancelLabel;
-
-        const cleanup = (result) => {
-            closeModalEl('confirm-dialog');
-            resolve(result);
-        };
-        okBtn.onclick = () => cleanup(true);
-        cancelBtn.onclick = () => cleanup(false);
-        openModalEl('confirm-dialog', () => cleanup(false));
-    });
-}
-
-function showToast(message, type = 'info', duration = 4000) {
-    const container = document.getElementById('toast-container');
-    if (!container) return;
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    toast.textContent = message;
-    container.appendChild(toast);
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transition = 'opacity 0.3s';
-        setTimeout(() => toast.remove(), 300);
-    }, duration);
-}
-
-async function saveResolveModal() {
-    const picker = getResolveServicePicker();
-    const { id: pickedServiceId, name: serviceName } = picker.getValue();
-    const typeId = parseInt(document.getElementById('resolve-modal-type').value);
-    const book = document.getElementById('resolve-modal-book').value || null;
-    const pattern = document.getElementById('resolve-modal-pattern').value.trim();
-    const matchType = document.getElementById('resolve-modal-match').value;
-
-    if (!serviceName) { alert('Please enter a service name.'); return; }
-
-    const btn = document.getElementById('resolve-modal-save');
-    btn.disabled = true;
-    btn.textContent = 'Resolving...';
-
-    try {
-        if (!typeId) { alert('Please select a type.'); return; }
-
-        const existingService = pickedServiceId
-            ? allServicesList.find(s => s.id === pickedServiceId)
-            : allServicesList.find(s => s.name.toLowerCase() === serviceName.toLowerCase());
-        const applyScope = document.querySelector('input[name="resolve-scope"]:checked')?.value || 'transaction';
-        if (applyScope === 'rule' && !pattern) {
-            alert('Pattern is required for a rule override.');
-            return;
-        }
-
-        // Resolve the transaction (create service/rule if needed)
-        const payload = {
-            tx_id: resolveModalTxId,
-            service_name: serviceName,
-            pattern,
-            match_type: matchType,
-            type_id: typeId,
-            apply_scope: applyScope,
-        };
-        // With no book chosen the server takes the service's, or the one the
-        // type proposes, and refuses a type that proposes none.
-        if (book) payload.book = book;
-        if (existingService) payload.service_id = existingService.id;
-        // Kept with the stored answer: was a suggestion on screen for this choice?
-        payload.suggestion_visible = resolveSuggestionVisible;
-
-        const data = await apiFetch('/api/transactions/resolve', { method: 'POST', body: payload });
-        if (!data) return;
-
-        // Toast feedback
-        const parts = [];
-        const scopeMessage = {
-            transaction: 'Saved as transaction-only',
-            rule: 'Saved as a rule override',
-            service_default: 'Updated the service default',
-        }[applyScope];
-        if (scopeMessage) parts.push(scopeMessage);
-        if (!existingService) parts.push(`Created service "${serviceName}"`);
-        if (data.backfilled > 0) parts.push(`${data.backfilled} matching transactions updated`);
-        const hint = spendFilterHint(data.book);
-        if (hint) parts.push(hint);
-        if (parts.length) showToast(parts.join('. '), 'info', 5000);
-
-        allServicesList = null;
-        allServicesCache = [];
-        closeResolveModal();
-        txPage(0);
-
-    } finally {
-        btn.disabled = false;
-        btn.textContent = 'Resolve';
-    }
-}
-
-// ============================================================
-// IMPORT
-// ============================================================
-
-// Drag & drop
-document.addEventListener('DOMContentLoaded', () => {
-    const zone = document.getElementById('upload-zone');
-    const fileInput = document.getElementById('file-input');
-
-    zone.addEventListener('click', () => fileInput.click());
-    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
-    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-    zone.addEventListener('drop', e => {
-        e.preventDefault();
-        zone.classList.remove('dragover');
-        handleFiles(e.dataTransfer.files);
-    });
-    fileInput.addEventListener('change', () => handleFiles(fileInput.files));
-});
-
-function handleFiles(fileList) {
-    selectedFiles = [...fileList];
-    const listEl = document.getElementById('file-list');
-    listEl.innerHTML = selectedFiles.map(f =>
-        `<div style="padding:4px 0;font-size:13px;color:var(--text-secondary);">📄 ${escapeHtml(f.name)} <span class="text-muted">(${(f.size / 1024).toFixed(0)} KB)</span></div>`
-    ).join('');
-    document.getElementById('upload-btn').style.display = selectedFiles.length ? 'block' : 'none';
-}
-
-async function uploadFiles() {
-    if (!selectedFiles.length) return;
-
-    const uploadBtn = document.getElementById('upload-btn');
-    uploadBtn.textContent = 'Parsing...';
-    uploadBtn.disabled = true;
-
-    const formData = new FormData();
-    selectedFiles.forEach(f => formData.append('files', f));
-
-    try {
-        const res = await fetch('/api/import/upload', { method: 'POST', body: formData });
-        const data = await res.json();
-
-        if (data.error) {
-            alert('Upload error: ' + data.error);
-            return;
-        }
-
-        currentImportId = data.import_id;
-        currentImportData = data;
-        importServices = data.services || [];
-        renderImportPreview(data);
-    } catch (err) {
-        alert('Upload failed: ' + err.message);
-    } finally {
-        uploadBtn.textContent = 'Upload & Parse';
-        uploadBtn.disabled = false;
-    }
-}
-
-function renderImportPreview(data) {
-    document.getElementById('import-upload-card').classList.add('hidden');
-    document.getElementById('import-preview').classList.remove('hidden');
-
-    // Stats
-    document.getElementById('preview-stats').innerHTML = `
-        <div class="preview-stat"><strong>${data.stats.total}</strong> Total</div>
-        <div class="preview-stat"><strong class="text-success">${data.stats.typed}</strong> Typed</div>
-        <div class="preview-stat"><strong class="text-warning">${data.stats.untyped}</strong> No type</div>
-        <div class="preview-stat"><strong class="text-muted">${data.stats.skipped}</strong> Skipped</div>
-        ${data.stats.review_each_time ? `<div class="preview-stat"><strong class="text-warning">${data.stats.review_each_time}</strong> Check type (mixed merchant)</div>` : ''}
-        ${data.errors.length ? `<div class="preview-stat text-error">${data.errors.length} errors</div>` : ''}
-    `;
-
-    // Groups
-    const groupsEl = document.getElementById('preview-groups');
-    groupsEl.innerHTML = '';
-
-    // Files that could not be imported. A statement whose rows do not add up
-    // to its own closing balance is shown with its tie line.
-    data.errors.forEach(err => {
-        const div = document.createElement('div');
-        div.className = 'account-group';
-        div.innerHTML = err.tie ? `
-            <div class="account-group-header">
-                <span class="account-group-name">${escapeHtml(err.tie.account)} · ${escapeHtml(err.tie.closing_date || '')} · ${err.tie.rows} rows</span>
-            </div>
-            ${tieLineHtml(err.tie)}
-            <div class="text-error" style="padding:4px 16px 12px;font-size:13px;">
-                This statement cannot be imported: its rows do not add up to its own closing balance.
-                A row was probably missed when the file was read. <span class="text-muted">(${escapeHtml(err.file)})</span>
-            </div>
-        ` : `
-            <div class="account-group-header">
-                <span class="account-group-name">${escapeHtml(err.file)}</span>
-            </div>
-            <div class="text-error" style="padding:4px 16px 12px;font-size:13px;">${escapeHtml(err.error)}</div>
-        `;
-        groupsEl.appendChild(div);
-    });
-
-    data.groups.forEach((group, gi) => {
-        const statements = group.statements || [];
-        // A group whose rows were all checked against a statement has no skip control.
-        const allChecked = statements.length > 0 && group.transactions.every(tx => tx.statement != null);
-        const div = document.createElement('div');
-        div.className = 'account-group';
-        div.innerHTML = `
-            <div class="account-group-header">
-                <span class="account-group-name">${escapeHtml(group.account)}</span>
-                <div class="account-group-stats">
-                    <span>${group.total} transactions</span>
-                    <span class="text-success">${group.typed} typed</span>
-                    <span class="text-warning">${group.untyped} no type</span>
-                    ${group.tie === 'ties' ? '' : '<span class="text-muted">not checked</span>'}
-                </div>
-            </div>
-            ${statements.map(tieLineHtml).join('')}
-            ${statements.length ? '<div class="text-muted" style="padding:0 16px 8px;font-size:12px;">every row is imported; none is skipped</div>' : ''}
-            <div class="preview-table-wrap">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th style="width:40px;">${allChecked ? '' : `<input type="checkbox" checked onchange="toggleGroupSkip(${gi}, this.checked)">`}</th>
-                            <th>Date</th>
-                            <th>Description</th>
-                            <th style="text-align:right">Amount</th>
-                            <th>Service</th>
-                            <th>Book</th>
-                            <th>Type</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody id="preview-group-${gi}"></tbody>
-                </table>
-            </div>
-        `;
-        groupsEl.appendChild(div);
-
-        const tbody = document.getElementById(`preview-group-${gi}`);
-        group.transactions.forEach((tx, ti) => {
-            const tr = document.createElement('tr');
-            if (tx._skip) tr.style.opacity = '0.4';
-            tr.innerHTML = `
-                <td>${tx.statement != null ? '' : `<input type="checkbox" ${tx._skip ? '' : 'checked'} data-gi="${gi}" data-ti="${ti}" onchange="toggleTxSkip(${gi}, ${ti}, this.checked)">`}</td>
-                <td class="col-date">${tx.date}</td>
-                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
-                <td class="col-amount">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(group.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
-                <td class="col-service">
-                    <input type="text" class="svc-input" list="svc-datalist"
-                        value="${escapeHtml(tx.service_name || '')}"
-                        placeholder="Type to search..."
-                        data-gi="${gi}" data-ti="${ti}"
-                        onchange="setServiceOverride(${gi}, ${ti}, this.value)"
-                        oninput="setServiceOverride(${gi}, ${ti}, this.value)">
-                </td>
-                <td>
-                    <select class="cat-select book-select" data-gi="${gi}" data-ti="${ti}" onchange="setBookOverride(${gi}, ${ti}, this.value)">
-                        ${buildBookDropdownHtml({placeholder: '--', selectedBook: tx.book})}
-                    </select>
-                </td>
-                <td>
-                    <select class="cat-select type-select ${tx.status === 'untyped' ? 'unresolved' : ''}" data-gi="${gi}" data-ti="${ti}" onchange="setTypeOverride(${gi}, ${ti}, this.value)">
-                        ${buildTypeDropdownHtml({placeholder: '-- Select --', selectedId: tx.type_id})}
-                    </select>
-                </td>
-                <td><span class="badge badge-${statusBadgeClass(tx.status)} status-badge">${importStatusLabel(tx.status)}</span>${tx.review_each_time ? ' <span class="badge badge-warning" title="Mixed merchant: check this row\'s type">check type</span>' : ''}</td>
-            `;
-            tbody.appendChild(tr);
-        });
-    });
-
-    // Add shared datalist for service input autocomplete
-    let datalist = document.getElementById('svc-datalist');
-    if (datalist) datalist.remove();
-    datalist = document.createElement('datalist');
-    datalist.id = 'svc-datalist';
-    importServices.forEach(s => {
-        const opt = document.createElement('option');
-        opt.value = s.name;
-        opt.label = s.type_name || '';
-        datalist.appendChild(opt);
-    });
-    document.body.appendChild(datalist);
-
-    updateConfirmBar();
-}
-
-// The tie line of a statement in the import preview: opening, what the rows
-// add up to, closing, and whether they tie.
-function tieLineHtml(line) {
-    const verdict = line.status === 'ties'
-        ? '<strong class="text-success">TIES</strong>'
-        : `<strong class="text-error">OFF BY ${escapeHtml(line.difference)}</strong>`;
-    return `
-        <div style="padding:4px 16px 8px;font-size:13px;color:var(--text-secondary);">
-            Opening <strong>${escapeHtml(line.opening)}</strong>
-            &nbsp; rows add up to <strong>${escapeHtml(line.rows_sum)}</strong>
-            &nbsp; closing <strong>${escapeHtml(line.closing)}</strong>
-            &nbsp; ${verdict}
-            <span class="text-muted">&nbsp; ${line.rows} rows${line.closing_date ? ' · to ' + escapeHtml(line.closing_date) : ''}</span>
-        </div>
-    `;
-}
-
-// Status badge colour and wording for an import preview row.
-function statusBadgeClass(status) {
-    return status === 'typed' ? 'success'
-        : (status === 'transfer' || status === 'movement') ? 'muted' : 'warning';
-}
-
-function importStatusLabel(status) {
-    return status === 'untyped' ? 'no type' : status === 'review' ? 'to review' : status;
-}
-
-// What a preview row with no type is shown as: the flow that holds it out of
-// spending, or 'untyped'.
-function untypedImportStatus(tx) {
-    return ['transfer', 'payment', 'movement', 'review'].includes(tx.flow_type) ? tx.flow_type : 'untyped';
-}
-
-// The <select> of one kind ('book-select' or 'type-select') on a preview row.
-function importRowSelect(gi, ti, kind) {
-    return document.querySelector(`select.${kind}[data-gi="${gi}"][data-ti="${ti}"]`);
-}
-
-// Service picker: when user types/selects a service, auto-fill its book and type
-function setServiceOverride(gi, ti, value) {
-    const tx = currentImportData.groups[gi].transactions[ti];
-    const trimmed = value.trim();
-
-    // Look up in existing services (case-insensitive)
-    const match = importServices.find(s => s.name.toLowerCase() === trimmed.toLowerCase());
-    if (match) {
-        tx.service_id = match.id;
-        tx.service_name = match.name;
-        tx._new_service = null;
-        // Auto-fill book and type from the service's defaults
-        if (match.type_id) {
-            tx.type_id = match.type_id;
-            tx.type_name = match.type_name;
-            tx.book = match.book || null;
-            const typeSelect = importRowSelect(gi, ti, 'type-select');
-            if (typeSelect) { typeSelect.value = match.type_id; typeSelect.classList.remove('unresolved'); }
-            const bookSelect = importRowSelect(gi, ti, 'book-select');
-            if (bookSelect) bookSelect.value = match.book || '';
-            tx.status = 'typed';
-            updateStatusBadge(gi, ti, 'typed');
-        }
-    } else if (trimmed) {
-        // New service — will be created on commit
-        tx.service_id = null;
-        tx.service_name = trimmed;
-        tx._new_service = trimmed;
-    } else {
-        tx.service_id = null;
-        tx.service_name = null;
-        tx._new_service = null;
-    }
-}
-
-function updateStatusBadge(gi, ti, status) {
-    const row = document.querySelectorAll(`#preview-group-${gi} tr`)[ti];
+ACT['mixed-yes'] = async el => {
+    const row = await findRow(Number(el.dataset.tx));
     if (!row) return;
-    const badge = row.querySelector('.status-badge');
-    if (badge) {
-        badge.className = `badge badge-${statusBadgeClass(status)} status-badge`;
-        badge.textContent = importStatusLabel(status);
-    }
-}
+    const r = await act('PUT', `/api/transactions/${row.id}`, { type_id: row.type_id, book: row.book }, `Kept ${row.display_type || 'its type'}`);
+    if (r) rerender();
+};
 
-function toggleGroupSkip(gi, checked) {
-    currentImportData.groups[gi].transactions.forEach((tx, ti) => {
-        if (tx.statement != null) return;  // a row checked against its statement is always imported
-        tx._skip = !checked;
-        const cb = document.querySelector(`[data-gi="${gi}"][data-ti="${ti}"]`);
-        if (cb && cb.type === 'checkbox') cb.checked = checked;
+ACT.aside = async el => {
+    const aside = el.dataset.aside === '1';
+    const r = await send('POST', `/api/statements/refused/${el.dataset.id}/set-aside`, { aside });
+    if (!r.ok) { toast(r.data.error || 'That did not work', { bad: true }); return; }
+    toast(aside ? 'Set aside. It stays marked refused on its account.' : 'Back in the queue.');
+    closeSheet(); rerender();
+};
+
+function refusedSum(f) {
+    const cur = f.currency;
+    return `<table class="sum"><tbody>
+        <tr><td class="op"></td><td>Opening balance it states</td><td class="r">${esc(money(f.opening_minor, cur))}</td></tr>
+        <tr><td class="op">${f.rows_minor < 0 ? '−' : '+'}</td><td>its ${plural(f.rows, 'row')}</td><td class="r">${esc(money(Math.abs(f.rows_minor), cur))}</td></tr>
+        <tr class="eq"><td class="op">=</td><td>what the rows make it</td><td class="r">${esc(money(f.opening_minor + f.rows_minor, cur))}</td></tr>
+        <tr><td class="op"></td><td>Closing balance it states</td><td class="r">${esc(money(f.closing_minor, cur))}</td></tr>
+        <tr class="gap"><td class="op">≠</td><td>off by</td><td class="r">${esc(money(Math.abs(f.difference_minor), cur))}</td></tr></tbody></table>`;
+}
+ACT['refused-sum'] = async el => {
+    const all = (await get('/api/statements/refused')).refused;
+    const f = all.find(x => String(x.id) === el.dataset.id);
+    if (!f) return;
+    openSheet(`Refused: ${esc(f.account_name)}`, `<p>The ${esc(day(f.statement_date))} statement does not tie, so none of its rows was written.
+        The balance rests on the last statement that tied, plus the rows since.</p>${refusedSum(f)}
+        <p class="small muted">A row was probably missed when the file was read. Import a fixed file and it goes through the same tie check.</p>
+        <div class="row">${f.set_aside ? `<button class="btn" data-act="aside" data-id="${f.id}" data-aside="0">Bring it back</button>`
+            : `<button class="btn primary" data-act="aside" data-id="${f.id}" data-aside="1">Known, leave it</button>`}
+            <a class="btn" href="#/books/import">Import a fixed file</a>
+            ${f.account_id ? `<a class="btn quiet" href="#/books/account/${f.account_id}">The account</a>` : ''}</div>`,
+    { sub: `refused at upload ${esc(when(f.refused_at))}${f.set_aside ? ' · set aside' : ''}` });
+};
+
+ACT['bill-pause'] = async el => {
+    const r = await act('PUT', `/api/subscriptions/${el.dataset.sub}`, { status: 'paused' }, 'Bill marked paused');
+    if (r) rerender();
+};
+
+// Enter a figure: one sheet, opened from the queue, an account's page and Lists.
+ACT.figure = async el => openFigure(el.dataset.account ? Number(el.dataset.account) : null);
+async function openFigure(accountId) {
+    const r = await refs();
+    const takes = r.accounts.filter(a => a.takes_a_figure && a.status !== 'archived');
+    const chosen = takes.find(a => a.id === accountId) || takes[0];
+    if (!chosen) { toast('No account takes a figure: add a loan, a holding, a company or a person in Lists', { bad: true }); return; }
+    const owedHint = a => a.type === 'loan' ? 'What is owed. It is saved as owed (negative).' : a.type === 'holding' ? 'What it is worth.' : 'The balance.';
+    openSheet('Enter a figure', `<div class="fields">
+        <label class="field"><span>Account</span><select id="fg-account">${takes.map(a => `<option value="${a.id}"${a.id === chosen.id ? ' selected' : ''}>${esc(a.name)} · ${esc(a.type)} · ${esc(a.currency)}</option>`).join('')}</select></label>
+        <label class="field"><span>Amount in <b id="fg-cur">${esc(SIGNS[chosen.currency] || chosen.currency)}</b></span><input type="text" inputmode="decimal" id="fg-amount" placeholder="0.00"></label>
+        <p class="small muted" id="fg-hint">${esc(owedHint(chosen))}</p>
+        <label class="field"><span>On</span><input type="date" id="fg-date" value="${todayIso()}"></label>
+        <label class="field"><span>Note</span><input type="text" id="fg-note" placeholder="Where the figure came from"></label></div>
+        <button class="btn primary block" data-act="figure-save">Save the figure</button>
+        <p class="small muted">A figure you enter is the fact: nothing checks it. It shows as “your figure” with its date, and turns stale after ${STALE_DAYS} days.</p>`);
+    $('#fg-account').addEventListener('change', () => {
+        const a = r.accountById.get(Number($('#fg-account').value));
+        $('#fg-cur').textContent = SIGNS[a.currency] || a.currency;
+        $('#fg-hint').textContent = owedHint(a);
     });
-    updateConfirmBar();
+}
+ACT['figure-save'] = async () => {
+    const body = { account_id: Number($('#fg-account').value), amount: $('#fg-amount').value.replace(/[, ]/g, ''), date: $('#fg-date').value };
+    const note = $('#fg-note').value.trim();
+    if (note) body.note = note;
+    const r = await act('POST', '/api/anchors', body, 'Figure entered');
+    if (r) { if (r.data.message) toast(r.data.message); closeSheet(); rerender(); }
+};
+
+// ---------------------------------------------------------------------------
+// Books: the balance sheet, as at a month's end, and its month check
+// ---------------------------------------------------------------------------
+
+const CHECK_ORDER = { off: 0, not_checked: 1, none: 2, ties: 3 };
+function sortKey(line, key) {
+    if (key === 'rests') return line.rests_on ? -line.rests_on.age_days : -99999;     // oldest first
+    if (key === 'check') return CHECK_ORDER[line.check?.status || 'none'];
+    if (key === 'value') return -(line.value_minor ?? -Infinity);
+    return 0;
 }
 
-function toggleTxSkip(gi, ti, checked) {
-    currentImportData.groups[gi].transactions[ti]._skip = !checked;
-    const row = document.querySelector(`[data-gi="${gi}"][data-ti="${ti}"]`).closest('tr');
-    if (row) row.style.opacity = checked ? '1' : '0.4';
-    updateConfirmBar();
+function marginNote(line, refused) {
+    const notes = [];
+    if (line.since) notes.push(`rolled forward: ${esc(line.since)}`);
+    if (line.since_label && line.rows_since) notes.push(`${plural(line.rows_since, 'row')} ${esc(line.since_label)}`);
+    if (line.made_of) notes.push(esc(line.made_of.text));
+    if (line.rate) notes.push(esc(line.rate.text));
+    if (line.left_out && line.balance !== 'no figure') notes.push(`left out: ${esc(line.left_out)}`);
+    if (line.note) notes.push(esc(line.note));
+    if (line.archived) notes.push('archived');
+    if (refused) notes.push(`${tag(refused.set_aside ? 'aside' : 'refused', `${day(refused.statement_date, { year: false })} statement refused`, { act: 'refused-sum', data: { id: refused.id } })}`);
+    return notes.join(' · ');
 }
 
-function setTypeOverride(gi, ti, typeId) {
-    const tx = currentImportData.groups[gi].transactions[ti];
-    tx.type_id = typeId ? parseInt(typeId) : null;
-    tx.type_name = typeId ? typeDisplayName(parseInt(typeId)) : null;
-    tx.status = typeId ? 'typed' : untypedImportStatus(tx);
-
-    // With no book on the row yet, take the one the type proposes.
-    if (typeId && !tx.book) {
-        const proposed = proposedBook(typeId);
-        if (proposed) {
-            tx.book = proposed;
-            const bookSelect = importRowSelect(gi, ti, 'book-select');
-            if (bookSelect) bookSelect.value = proposed;
-        }
-    }
-
-    updateStatusBadge(gi, ti, tx.status);
-    const select = importRowSelect(gi, ti, 'type-select');
-    if (select) select.classList.toggle('unresolved', tx.status === 'untyped');
-
-    updateConfirmBar();
-}
-
-function setBookOverride(gi, ti, book) {
-    currentImportData.groups[gi].transactions[ti].book = book || null;
-}
-
-function updateConfirmBar() {
-    if (!currentImportData) return;
-    let active = 0, total = 0;
-    currentImportData.groups.forEach(g => {
-        g.transactions.forEach(tx => {
-            total++;
-            if (!tx._skip) active++;
-        });
-    });
-    document.getElementById('confirm-info').innerHTML =
-        `<strong>${active}</strong> of ${total} transactions will be committed`;
-    // Nothing to import (every statement was refused): Confirm is off.
-    const confirmBtn = document.querySelector('.confirm-bar .btn-primary');
-    if (confirmBtn) confirmBtn.disabled = currentImportData.groups.length === 0;
-}
-
-function discardImport() {
-    currentImportId = null;
-    currentImportData = null;
-    selectedFiles = [];
-    document.getElementById('import-upload-card').classList.remove('hidden');
-    document.getElementById('import-preview').classList.add('hidden');
-    document.getElementById('file-list').innerHTML = '';
-    document.getElementById('upload-btn').style.display = 'none';
-    document.getElementById('file-input').value = '';
-}
-
-async function confirmImport() {
-    if (!currentImportData) return;
-
-    // Warn about transactions with no type
-    let untypedCount = 0, activeCount = 0;
-    for (const g of currentImportData.groups) {
-        for (const tx of g.transactions) {
-            if (tx._skip) continue;
-            activeCount++;
-            if (!tx.type_id) untypedCount++;
-        }
-    }
-    if (untypedCount > 0) {
-        const proceed = await showConfirmDialog(
-            'Transactions With No Type',
-            `<strong>${untypedCount}</strong> of ${activeCount} transactions have no type.<br><br>They'll be imported without one — you can resolve them later from the Dashboard.`,
-            {okLabel: 'Import Anyway', cancelLabel: 'Go Back'}
-        );
-        if (!proceed) return;
-    }
-
-    // Collect new services to create (deduped by name)
-    const newServicesMap = {};
-    for (const g of currentImportData.groups) {
-        for (const tx of g.transactions) {
-            if (tx._skip) continue;
-            if (tx._new_service && tx.type_id) {
-                const key = tx._new_service.toLowerCase();
-                if (!newServicesMap[key]) {
-                    // The new service's defaults are this row's book and type.
-                    newServicesMap[key] = {
-                        name: tx._new_service,
-                        book: tx.book || null,
-                        type_id: tx.type_id,
-                        description: tx.description,
-                    };
-                }
-            }
-        }
-    }
-
-    const body = {
-        import_id: currentImportId,
-        groups: currentImportData.groups.map(g => ({
-            account: g.account,
-            // The currency the upload stated: a new account is created in it.
-            currency: g.currency,
-            transactions: g.transactions,
-            statements: g.statements || [],
-        })),
-        new_rules: [],
-        new_services: Object.values(newServicesMap),
+async function viewSheet() {
+    const [sheet, q, r] = await Promise.all([sheetFor(S.month), loadQueue(), refs()]);
+    const refusedBy = q.refusedBy;
+    const allLines = sheet.sections.flatMap(s => s.lines);
+    const needCount = allLines.filter(l => lineNeedsLook(l, refusedBy)).length;
+    const sorted = lines => {
+        if (!S.sheetSort.key) return lines;
+        const dir = S.sheetSort.dir === 'asc' ? 1 : -1;
+        return [...lines].sort((a, b) => (sortKey(a, S.sheetSort.key) - sortKey(b, S.sheetSort.key)) * dir);
     };
+    const shown = line => !S.needsLook || lineNeedsLook(line, refusedBy);
+    const sortBtn = (key, label) => `<button data-act="sheet-sort" data-key="${key}"${S.sheetSort.key === key ? ` data-dir="${S.sheetSort.dir}"` : ''}>${label}</button>`;
 
-    const confirmBtn = document.querySelector('.confirm-bar .btn-primary');
-    confirmBtn.textContent = 'Committing...';
-    confirmBtn.disabled = true;
-
-    try {
-        const result = await apiFetch('/api/import/confirm', { method: 'POST', body });
-        if (!result) return;
-
-        const dupMsg = result.duplicates_skipped ? ` (${result.duplicates_skipped} duplicates skipped)` : '';
-        const anchorMsg = result.anchors_written
-            ? ` ${result.anchors_written} closing balance${result.anchors_written === 1 ? '' : 's'} anchored.`
-            : '';
-        const svcMsg = result.services_created ? ` ${result.services_created} new services created.` : '';
-        const guardrailMsg = result.rules_skipped_generic
-            ? ` ${result.rules_skipped_generic} generic transfer rule${result.rules_skipped_generic === 1 ? '' : 's'} skipped.`
-            : '';
-        showToast(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${anchorMsg}${svcMsg}${guardrailMsg}`, 'success', 6000);
-        discardImport();
-        await loadReferenceData();
-    } catch (err) {
-        showToast('Commit failed: ' + err.message, 'error', 6000);
-    } finally {
-        confirmBtn.textContent = 'Confirm & Commit';
-        confirmBtn.disabled = false;
-        updateConfirmBar();
-    }
-}
-
-// ============================================================
-// STATEMENT COVERAGE
-// ============================================================
-
-async function loadCoverage() {
-    const container = document.getElementById('coverage-matrix');
-    const summary = document.getElementById('coverage-summary');
-
-    try {
-        const res = await fetch('/api/statements/coverage?months=6');
-        const data = await res.json();
-
-        // Summary line — targets previous month (last closed billing cycle)
-        const { target_month, covered, total } = data.summary;
-        const monthLabel = formatMonthLabel(target_month);
-        const missing = total - covered;
-        if (missing > 0) {
-            summary.innerHTML = `<strong>${covered}</strong> of <strong>${total}</strong> accounts covered for ${monthLabel} — <span class="coverage-gap">${missing} missing</span>`;
-        } else {
-            summary.innerHTML = `<strong>${covered}</strong> of <strong>${total}</strong> accounts covered for ${monthLabel} — all clear`;
-        }
-
-        // Build table
-        const monthHeaders = data.months.map(m => {
-            const cls = m === target_month ? ' class="coverage-target-month"' : '';
-            return `<th${cls}>${formatMonthLabel(m)}</th>`;
-        }).join('');
-        let rows = '';
-        for (const acct of data.accounts) {
-            const typeLabel = acct.type === 'bank' ? 'bank' : 'cc';
-            let cells = '';
-            for (const m of data.months) {
-                const cell = data.matrix[acct.id]?.[m];
-                const isTarget = m === target_month;
-                if (cell && cell.imported) {
-                    const tooltip = [cell.filename, cell.date ? formatCoverageDate(cell.date) : ''].filter(Boolean).join(' — ');
-                    cells += `<td><span class="coverage-cell-ok" title="${escapeHtml(tooltip)}">&#10003;</span></td>`;
-                } else {
-                    cells += `<td><span class="coverage-cell-missing${isTarget ? ' coverage-target' : ''}">&#9675;</span></td>`;
-                }
-            }
-            rows += `<tr><td>${escapeHtml(acct.short_name)}<span class="coverage-acct-type">${typeLabel}</span></td>${cells}</tr>`;
-        }
-
-        container.innerHTML = `
-            <table class="coverage-table">
-                <thead><tr><th>Account</th>${monthHeaders}</tr></thead>
-                <tbody>${rows}</tbody>
-            </table>
-        `;
-    } catch (err) {
-        container.innerHTML = '<div class="text-muted">Failed to load coverage data</div>';
-    }
-}
-
-function formatMonthLabel(ym) {
-    // "2026-03" → "Mar 26"
-    const [y, m] = ym.split('-');
-    return MONTH_NAMES[parseInt(m)] + ' ' + y.slice(2);
-}
-
-function formatCoverageDate(dateStr) {
-    // "2026-03-07 11:38:40" → "7 Mar"
-    if (!dateStr) return '';
-    const d = new Date(dateStr);
-    if (isNaN(d)) return '';
-    return d.getDate() + ' ' + MONTH_NAMES[d.getMonth() + 1];
-}
-
-// ============================================================
-// HISTORY
-// ============================================================
-
-async function loadHistory() {
-    const res = await fetch('/api/import/history');
-    const data = await res.json();
-
-    const tbody = document.getElementById('history-body');
-    const emptyEl = document.getElementById('history-empty');
-
-    if (!data.length) {
-        tbody.innerHTML = '';
-        emptyEl.classList.remove('hidden');
-        return;
-    }
-    emptyEl.classList.add('hidden');
-
-    tbody.innerHTML = data.map(imp => `
-        <tr>
-            <td class="text-mono">${imp.id}</td>
-            <td>${imp.filenames.map(f => escapeHtml(f)).join(', ')}</td>
-            <td style="font-size:12px;">${imp.accounts.map(a => escapeHtml(a)).join(', ')}</td>
-            <td>${imp.categorized_lines}/${imp.total_lines}</td>
-            <td><span class="badge badge-${imp.status}">${imp.status}</span></td>
-            <td class="col-date">${imp.created_at || ''}</td>
-        </tr>
-        ${imp.result ? `<tr><td colspan="6"><div class="history-detail">${escapeHtml(JSON.stringify(imp.result))}</div></td></tr>` : ''}
-    `).join('');
-}
-
-// ============================================================
-// MERCHANT RULES
-// ============================================================
-
-let allRules = [];
-
-async function ensureServicesListLoaded() {
-    if (!allServicesList || !allServicesList.length) {
-        const res = await fetch('/api/services');
-        allServicesList = await res.json();
-    }
-}
-
-async function loadRules() {
-    const res = await fetch('/api/rules');
-    allRules = await res.json();
-    renderRules(allRules);
-
-    // Service picker datalist populated lazily on focus
-}
-
-function filterRules() {
-    const q = document.getElementById('rules-search').value.toLowerCase();
-    if (!q) {
-        renderRules(allRules);
-        return;
-    }
-    const filtered = allRules.filter(r =>
-        r.pattern.toLowerCase().includes(q) ||
-        (r.service_name || '').toLowerCase().includes(q) ||
-        (r.display_type || '').toLowerCase().includes(q) ||
-        (r.book || '').toLowerCase().includes(q)
-    );
-    renderRules(filtered);
-}
-
-function renderRules(rules) {
-    document.getElementById('rules-count').textContent = `${rules.length} rules`;
-
-    // Group by display_type (Parent > Sub or just Parent)
-    const groups = {};
-    rules.forEach(r => {
-        const key = r.display_type || NO_TYPE_LABEL;
-        if (!groups[key]) groups[key] = { parentName: r.parent_type, typeName: r.type_name || NO_TYPE_LABEL, rules: [] };
-        groups[key].rules.push(r);
-    });
-
-    const container = document.getElementById('rules-accordion');
-    container.innerHTML = '';
-
-    Object.keys(groups).sort().forEach(key => {
-        const g = groups[key];
-        const groupEl = document.createElement('div');
-        groupEl.className = 'rules-acc-group';
-
-        // Title: show "Parent > Sub" with styling
-        let titleHtml;
-        if (g.parentName) {
-            titleHtml = `${escapeHtml(g.parentName)}<span class="acc-sub"> > ${escapeHtml(g.typeName)}</span>`;
-        } else {
-            titleHtml = escapeHtml(g.typeName);
-        }
-
-        groupEl.innerHTML = `
-            <div class="rules-acc-header" onclick="toggleAccordion(this)">
-                <div style="display:flex;align-items:center;">
-                    <span class="acc-arrow">&#9654;</span>
-                    <span class="rules-acc-title">${titleHtml}</span>
-                </div>
-                <span class="rules-acc-count">${g.rules.length} rules</span>
-            </div>
-            <div class="rules-acc-body">
-                <table class="data-table rules-table">
-                    <thead>
-                        <tr>
-                            <th style="width:28%;">Pattern</th>
-                            <th style="width:18%;">Service</th>
-                            <th style="width:10%;">Match</th>
-                            <th style="width:5%;">Pri</th>
-                            <th style="width:14%;">Amount</th>
-                            <th style="width:8%;">Conf</th>
-                            <th style="width:17%;text-align:right;">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${g.rules.map(r => {
-                            let amtStr = '';
-                            if (r.min_amount != null && r.max_amount != null) {
-                                amtStr = '$' + r.min_amount.toLocaleString() + '–$' + r.max_amount.toLocaleString();
-                            } else if (r.min_amount != null) {
-                                amtStr = '\u2265 $' + r.min_amount.toLocaleString();
-                            } else if (r.max_amount != null) {
-                                amtStr = '\u2264 $' + r.max_amount.toLocaleString();
-                            }
-                            const serviceHtml = `${escapeHtml(r.service_name || '')}${bookBadgeHtml(r.book)}${
-                                (r.type_override_id || r.book_override)
-                                    ? ' <span class="badge badge-muted" style="font-size:10px;margin-left:6px;">override</span>'
-                                    : ''
-                            }`;
-                            return `
-                            <tr>
-                                <td class="text-mono" style="font-size:12px;">${escapeHtml(r.pattern)}</td>
-                                <td style="font-size:12px;">${serviceHtml}</td>
-                                <td style="font-size:12px;color:var(--text-tertiary);">${r.match_type}</td>
-                                <td style="font-size:12px;color:${r.priority > 0 ? 'var(--camel)' : 'var(--text-tertiary)'};">${r.priority || ''}</td>
-                                <td style="font-size:12px;color:${amtStr ? 'var(--camel)' : 'var(--text-tertiary)'};">${amtStr || '\u2014'}</td>
-                                <td style="font-size:12px;color:var(--text-tertiary);">${r.confidence}</td>
-                                <td style="text-align:right;white-space:nowrap;">
-                                    <button class="btn btn-sm" onclick="editRule(${r.id})" style="margin-right:4px;">Edit</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteRule(${r.id})">Del</button>
-                                </td>
-                            </tr>`;
-                        }).join('')}
-                    </tbody>
-                </table>
-            </div>
-        `;
-        container.appendChild(groupEl);
-    });
-}
-
-function toggleAccordion(header) {
-    header.classList.toggle('open');
-    const body = header.nextElementSibling;
-    body.classList.toggle('open');
-}
-
-function toggleRuleForm() {
-    openCreateRuleModal();
-}
-
-async function openCreateRuleModal() {
-    await openRuleModal();
-}
-
-async function editRule(ruleId) {
-    const rule = allRules.find(r => r.id === ruleId);
-    if (!rule) return;
-
-    await openRuleModal(rule);
-}
-
-async function openRuleModal(rule = null) {
-    await ensureServicesListLoaded();
-    const isCreate = !rule;
-    const ruleFields = {
-        id: rule?.id || '',
-        pattern: rule?.pattern || '',
-        match: rule?.match_type || 'contains',
-        priority: rule?.priority || 0,
-        min: rule?.min_amount || '',
-        max: rule?.max_amount || '',
-    };
-    for (const [k, v] of Object.entries(ruleFields)) document.getElementById(`edit-rule-${k}`).value = v;
-    populateTypeSelect('edit-rule-type-override', {
-        placeholder: 'Use service default', selectedId: rule?.type_override_id || ''
-    });
-    populateBookSelect('edit-rule-book-override', {
-        placeholder: 'Use service default', selectedBook: rule?.book_override || null
-    });
-
-    const picker = getEditRuleServicePicker();
-    if (rule) {
-        picker.setValue(rule.service_name || '', rule.service_id || null);
-    } else {
-        picker.clear();
-    }
-    updateEditRuleServiceMeta(rule?.service_id || null);
-
-    document.getElementById('rule-modal-title').textContent = isCreate ? '/ New Merchant Rule' : '/ Edit Merchant Rule';
-    document.getElementById('rule-modal-save').textContent = isCreate ? 'Create Rule' : 'Save';
-
-    document.getElementById('edit-rule-modal').style.display = 'flex';
-    document.getElementById('edit-rule-pattern').focus();
-}
-
-function updateEditRuleServiceMeta(serviceId) {
-    const svc = (allServicesList || []).find(s => s.id === serviceId);
-    const defaultLabel = svc ? [svc.book, svc.display_type].filter(Boolean).join(' · ') : '';
-    document.getElementById('edit-rule-cat-display').textContent =
-        defaultLabel
-            ? `Service default: ${defaultLabel}. Leave override blank to inherit it.`
-            : 'Leave override blank to use the service default.';
-}
-
-function closeEditRuleModal() {
-    document.getElementById('edit-rule-modal').style.display = 'none';
-}
-
-async function saveRuleModal() {
-    const ruleId = document.getElementById('edit-rule-id').value;
-    const picker = getEditRuleServicePicker();
-    const { id: serviceId } = picker.getValue();
-
-    const pattern = document.getElementById('edit-rule-pattern').value.trim();
-    if (!pattern) {
-        alert('Pattern is required.');
-        return;
-    }
-    if (!serviceId) {
-        alert('Service is required.');
-        return;
-    }
-
-    const payload = {
-        pattern,
-        match_type: document.getElementById('edit-rule-match').value,
-        priority: parseInt(document.getElementById('edit-rule-priority').value) || 0,
-        min_amount: parseFloat(document.getElementById('edit-rule-min').value) || null,
-        max_amount: parseFloat(document.getElementById('edit-rule-max').value) || null,
-        type_override_id: parseInt(document.getElementById('edit-rule-type-override').value) || null,
-        book_override: document.getElementById('edit-rule-book-override').value || null,
-    };
-    if (serviceId) payload.service_id = serviceId;
-
-    if (ruleId) {
-        await apiFetch(`/api/rules/${ruleId}`, { method: 'PUT', body: payload });
-    } else {
-        await apiFetch('/api/rules', { method: 'POST', body: payload });
-    }
-    closeEditRuleModal();
-    await loadRules();
-}
-
-async function deleteRule(ruleId) {
-    if (!confirm('Delete this rule?')) return;
-    await apiFetch(`/api/rules/${ruleId}`, { method: 'DELETE' });
-    await loadRules();
-}
-
-async function recategorizeAll() {
-    if (!confirm('Re-run all merchant rules against existing transactions? This will update book and type based on current rules. Rows you labelled by hand are left alone.')) return;
-    const btn = document.getElementById('recategorize-btn');
-    btn.disabled = true;
-    btn.textContent = 'Running...';
-    try {
-        const res = await fetch('/api/rules/recategorize', { method: 'POST' });
-        const data = await res.json();
-        alert(`Done: ${data.updated} transactions updated, ${data.unchanged} unchanged.`);
-        loadDashboard();
-    } finally {
-        btn.disabled = false;
-        btn.textContent = 'Re-run All Rules';
-    }
-}
-
-// ============================================================
-// CHART-TABLE LINKING
-// ============================================================
-
-function toggleChartFilter(type, period, source) {
-    // Donut click: period=null (all periods for this type)
-    // Bar click: period=specific month
-
-    // If donut click for a type that already has a period-null entry, remove it (toggle off)
-    // If bar click for same type that has period-null, narrow to this specific period
-    const sel = chartFilter.selections;
-
-    if (source === 'doughnut') {
-        // Check if this type already has an all-periods entry
-        const allIdx = sel.findIndex(s => s.type === type && s.period === null);
-        if (allIdx >= 0) {
-            // Toggle off
-            sel.splice(allIdx, 1);
-        } else {
-            // Remove any period-specific entries for this type (donut replaces them)
-            for (let i = sel.length - 1; i >= 0; i--) {
-                if (sel[i].type === type) sel.splice(i, 1);
-            }
-            sel.push({ type, period: null });
-        }
-    } else {
-        // Bar click — specific period
-        // If type has an all-periods entry, narrow to this specific period
-        const allIdx = sel.findIndex(s => s.type === type && s.period === null);
-        if (allIdx >= 0) {
-            sel.splice(allIdx, 1);
-            sel.push({ type, period });
-        } else {
-            // Toggle this specific (type, period) pair
-            const exactIdx = sel.findIndex(s => s.type === type && s.period === period);
-            if (exactIdx >= 0) {
-                sel.splice(exactIdx, 1);
-            } else {
-                sel.push({ type, period });
-            }
-        }
-    }
-
-    if (sel.length === 0) {
-        clearChartFilter();
-        return;
-    }
-
-    updateChartHighlights();
-    renderFilterChip();
-    updateCatFilterDisplay();
-    txCurrentPage = 1;
-    txPage(0);
-    scrollToTable();
-}
-
-function clearChartFilter() {
-    chartFilter = { selections: [] };
-    renderFilterChip();
-    updateChartHighlights();
-    updateCatFilterDisplay();
-    txCurrentPage = 1;
-    txPage(0);
-}
-
-// Helper: extract unique types from selections
-function getChartFilterTypes() {
-    return [...new Set(chartFilter.selections.map(s => s.type))];
-}
-
-// The `types` query value for the transaction list: chart selections take
-// precedence over the multi-select dropdown. The charts' "No type" slice is
-// the list of rows with no type.
-function activeTypesParam() {
-    const chartTypes = getChartFilterTypes();
-    const active = chartTypes.length > 0 ? chartTypes : typeFilterSelections;
-    return active.map(t => (t === NO_TYPE_LABEL ? UNTYPED_FILTER : t)).join(',');
-}
-
-// Helper: compute date range from period-specific selections
-// If any selection has period=null, no date narrowing (all periods)
-function getChartFilterDateRange() {
-    if (chartFilter.selections.length === 0) return {};
-    // If any selection is all-periods, don't narrow dates
-    if (chartFilter.selections.some(s => s.period === null)) return {};
-    // Collect all unique periods, compute union date range
-    const periods = [...new Set(chartFilter.selections.map(s => s.period))];
-    let earliest = null, latest = null;
-    for (const p of periods) {
-        const range = periodToDateRange(p);
-        if (range.start && (!earliest || range.start < earliest)) earliest = range.start;
-        if (range.end && (!latest || range.end > latest)) latest = range.end;
-    }
-    return { start: earliest, end: latest };
-}
-
-function updateChartHighlights() {
-    const hasFilter = chartFilter.selections.length > 0;
-    const selectedCats = getChartFilterTypes();
-    const selectedPeriods = chartFilter.selections
-        .filter(s => s.period !== null)
-        .map(s => s.period);
-    const hasAllPeriods = chartFilter.selections.some(s => s.period === null);
-
-    // Bar chart highlights
-    if (monthlyChart) {
-        monthlyChart.data.datasets.forEach((ds, i) => {
-            const baseColor = typeColorMap[ds.label] || CAT_COLORS[i % CAT_COLORS.length];
-            if (!hasFilter) {
-                ds.backgroundColor = baseColor;
-                ds.borderColor = 'transparent';
-                ds.borderWidth = 0;
-            } else if (selectedCats.includes(ds.label)) {
-                // This type is selected — highlight its bars
-                // If all-periods or no period filter, highlight all bars
-                // If period-specific, only highlight matching period bars
-                const catSelections = chartFilter.selections.filter(s => s.type === ds.label);
-                const catAllPeriods = catSelections.some(s => s.period === null);
-                if (catAllPeriods) {
-                    // All bars for this type highlighted
-                    ds.backgroundColor = baseColor;
-                    ds.borderColor = '#ededed';
-                    ds.borderWidth = 1.5;
-                } else {
-                    // Only highlight bars at selected periods
-                    const catPeriods = catSelections.map(s => s.period);
-                    ds.backgroundColor = monthlyPeriods.map(p =>
-                        catPeriods.includes(p) ? baseColor : hexToRgba(baseColor, 0.15)
-                    );
-                    ds.borderColor = monthlyPeriods.map(p =>
-                        catPeriods.includes(p) ? '#ededed' : 'transparent'
-                    );
-                    ds.borderWidth = monthlyPeriods.map(p =>
-                        catPeriods.includes(p) ? 1.5 : 0
-                    );
-                }
-            } else {
-                ds.backgroundColor = hexToRgba(baseColor, 0.15);
-                ds.borderColor = 'transparent';
-                ds.borderWidth = 0;
-            }
-        });
-        monthlyChart.update();
-    }
-
-    // Doughnut highlights
-    if (typeChart) {
-        const ds = typeChart.data.datasets[0];
-        const labels = typeChart.data.labels;
-        if (!hasFilter) {
-            ds.backgroundColor = labels.map(label => typeColorMap[label] || CAT_COLORS[0]);
-            ds.offset = 0;
-        } else {
-            ds.backgroundColor = labels.map(label => {
-                const base = typeColorMap[label] || CAT_COLORS[0];
-                return selectedCats.includes(label) ? base : hexToRgba(base, 0.15);
-            });
-            ds.offset = labels.map(label =>
-                selectedCats.includes(label) ? 8 : 0
-            );
-        }
-        typeChart.update();
-    }
-}
-
-function renderFilterChip() {
-    const el = document.getElementById('chart-filter-chip');
-    if (!el) return;
-
-    if (!chartFilter.selections.length) {
-        el.classList.add('hidden');
-        return;
-    }
-
-    // Build chips: one per selected type, show period if specific
-    const chips = chartFilter.selections.map(s => {
-        const label = s.period ? `${escapeHtml(s.type)} · ${escapeHtml(formatPeriodLabel(s.period))}` : escapeHtml(s.type);
-        return `<span class="chip-cat" onclick="removeChartSelection('${escapeHtml(s.type)}', ${s.period ? "'" + escapeHtml(s.period) + "'" : 'null'})">${label}<span class="chip-x">&times;</span></span>`;
+    const table = sheet.sections.map(section => {
+        const lines = sorted(section.lines.filter(shown));
+        if (!lines.length && S.needsLook) return '';
+        const rows = lines.map(line => `<tr>
+            <td><a href="#/books/account/${line.account_id}">${esc(line.name)}</a></td>
+            <td class="r num">${line.currency !== 'SGD' && line.balance_minor !== null ? esc(money(line.balance_minor, line.currency)) : ''}</td>
+            <td class="r num">${line.in_total ? esc(money(line.value_minor, 'SGD')) : line.counted_in ? '<span class="muted">counted above</span>' : tag('nofig', line.balance === 'no figure' ? 'no figure' : 'left out', fixFor(line))}</td>
+            <td class="tick">${tickOf(line)}</td>
+            <td>${restsOn(line)}</td>
+            <td>${checkMarker(line)}</td>
+            <td class="margin-note">${marginNote(line, refusedBy.get(line.account_id))}</td></tr>`).join('');
+        return `<tr class="section"><td colspan="7">${esc(section.heading)}${section.owed ? ' <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:500">negative: what we owe</span>' : ''}</td></tr>${rows}
+            ${S.needsLook ? '' : `<tr class="total"><td>${section.owed ? 'Total owed' : 'Total'}</td><td></td><td class="r num">${esc(money(section.total_minor, 'SGD'))}</td><td colspan="4" class="small muted">${section.left_out.length ? `left out: ${section.left_out.map(l => esc(l.name)).join(', ')}` : ''}</td></tr>`}`;
     }).join('');
 
-    el.innerHTML = `
-        <span class="chip-label">Showing</span>
-        <span class="chip-cats">${chips}</span>
-        <button class="chip-clear" onclick="clearChartFilter()" title="Clear filter">&times;</button>
-    `;
-    el.classList.remove('hidden');
-}
-
-function removeChartSelection(type, period) {
-    const idx = chartFilter.selections.findIndex(s =>
-        s.type === type && s.period === period
-    );
-    if (idx >= 0) chartFilter.selections.splice(idx, 1);
-
-    if (chartFilter.selections.length === 0) {
-        clearChartFilter();
-    } else {
-        updateChartHighlights();
-        renderFilterChip();
-        updateCatFilterDisplay();
-        txCurrentPage = 1;
-        txPage(0);
-    }
-}
-
-function scrollToTable() {
-    const chip = document.getElementById('chart-filter-chip');
-    const target = chip && !chip.classList.contains('hidden') ? chip : document.getElementById('tx-table');
-    if (target) {
-        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-}
-
-function periodToDateRange(period) {
-    // Monthly: "2025-02"
-    const monthMatch = period.match(/^(\d{4})-(\d{2})$/);
-    if (monthMatch) {
-        const y = parseInt(monthMatch[1]), m = parseInt(monthMatch[2]);
-        const lastDay = new Date(y, m, 0).getDate();
-        return {
-            start: `${monthMatch[1]}-${monthMatch[2]}-01`,
-            end: `${monthMatch[1]}-${monthMatch[2]}-${String(lastDay).padStart(2, '0')}`
-        };
-    }
-
-    // Weekly: "2025-W08" (day-of-year / 7 based, matching backend calculation)
-    const weekMatch = period.match(/^(\d{4})-W(\d+)$/);
-    if (weekMatch) {
-        const year = parseInt(weekMatch[1]);
-        const week = parseInt(weekMatch[2]);
-        const startDay = (week - 1) * 7 + 1;
-        const endDay = week * 7;
-        const startDate = new Date(year, 0, startDay);
-        const endDate = new Date(year, 0, endDay);
-        const yearEnd = new Date(year, 11, 31);
-        const actualEnd = endDate > yearEnd ? yearEnd : endDate;
-        const fmt = d => d.toISOString().split('T')[0];
-        return { start: fmt(startDate), end: fmt(actualEnd) };
-    }
-
-    // Quarterly: "2025-Q1"
-    const qMatch = period.match(/^(\d{4})-Q(\d)$/);
-    if (qMatch) {
-        const year = qMatch[1];
-        const q = parseInt(qMatch[2]);
-        const sm = String((q - 1) * 3 + 1).padStart(2, '0');
-        const em = String(q * 3).padStart(2, '0');
-        const lastDay = new Date(parseInt(year), q * 3, 0).getDate();
-        return {
-            start: `${year}-${sm}-01`,
-            end: `${year}-${em}-${String(lastDay).padStart(2, '0')}`
-        };
-    }
-
-    return {};
-}
-
-function formatPeriodLabel(period) {
-    const monthMatch = period.match(/^(\d{4})-(\d{2})$/);
-    if (monthMatch) return `${MONTH_NAMES[parseInt(monthMatch[2])]} ${monthMatch[1]}`;
-
-    const weekMatch = period.match(/^(\d{4})-W(\d+)$/);
-    if (weekMatch) return `Week ${parseInt(weekMatch[2])}, ${weekMatch[1]}`;
-
-    const qMatch = period.match(/^(\d{4})-Q(\d)$/);
-    if (qMatch) return `Q${qMatch[2]} ${qMatch[1]}`;
-
-    return period;
-}
-
-// ============================================================
-// DASHBOARD 3-VIEW TOGGLE (Flat / By Service / By Type)
-// ============================================================
-
-let txViewMode = localStorage.getItem('fin-tx-view') || 'flat';
-// The By Type view was saved as 'category' before types replaced categories.
-if (txViewMode === 'category') txViewMode = 'type';
-
-function setTxView(mode) {
-    txViewMode = mode;
-    localStorage.setItem('fin-tx-view', mode);
-    // Update toggle buttons
-    document.querySelectorAll('.tx-view-toggle .btn-toggle').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.txview === mode);
-    });
-    // Show/hide containers
-    document.getElementById('tx-view-flat').style.display = mode === 'flat' ? '' : 'none';
-    document.getElementById('tx-view-service').style.display = mode === 'service' ? '' : 'none';
-    document.getElementById('tx-view-category').style.display = mode === 'type' ? '' : 'none';
-    // Load data for accordion views
-    if (mode === 'flat') {
-        txPage(0);
-    } else if (mode === 'service') {
-        loadServiceAccordion();
-    } else if (mode === 'type') {
-        loadTypeAccordion();
-    }
-}
-
-// Build the full transaction URL for accordion views (shared by service + type accordions).
-function buildAccordionUrl() {
-    const params = buildFilterParams();
-    const search = document.getElementById('tx-search').value;
-    let url = `/api/transactions?${params}&expense_only=true&per_page=5000&sort=date&sort_dir=desc`;
-    if (search) url += '&search=' + encodeURIComponent(search);
-    const typesParam = activeTypesParam();
-    if (typesParam) url += '&types=' + encodeURIComponent(typesParam);
-    const chartDateRange = getChartFilterDateRange();
-    if (chartDateRange.start) url += '&chart_start=' + chartDateRange.start;
-    if (chartDateRange.end) url += '&chart_end=' + chartDateRange.end;
-    return url;
-}
-
-// Build an accordion group HTML block (header + collapsible body).
-function buildAccordionGroup(label, meta, bodyHtml, extraClasses) {
-    const cls = extraClasses ? `${extraClasses} svc-accordion-item` : 'svc-accordion-item';
-    const hdrCls = extraClasses ? `${extraClasses.replace('-item', '-header').replace('-group', '-header')} svc-accordion-header` : 'svc-accordion-header';
-    return `<div class="${cls}">
-        <div class="${hdrCls}" onclick="this.parentElement.classList.toggle('open')">
-            <span class="svc-accordion-arrow">&#9654;</span>
-            ${label} <span class="svc-accordion-meta">${meta}</span>
-        </div>
-        <div class="svc-accordion-body">${bodyHtml}</div>
-    </div>`;
-}
-
-// Build a compact transaction table for accordion bodies.
-function accordionTxTable(txns) {
-    return `<table class="data-table" style="font-size:12px;">
-        <tbody>${txns.map(tx => renderAccordionTxRow(tx)).join('')}</tbody>
-    </table>`;
-}
-
-async function loadServiceAccordion() {
-    const data = await fetch(buildAccordionUrl()).then(r => r.json());
-    const txns = data.transactions.filter(tx => tx.flow_type === 'expense' || tx.flow_type === 'refund');
-
-    // Group by service
-    const groups = {};
-    const noService = [];
-    txns.forEach(tx => {
-        if (tx.service_id) {
-            const key = tx.service_id;
-            if (!groups[key]) groups[key] = { name: tx.service_name, category: tx.display_type || NO_TYPE_LABEL, txns: [], total: 0 };
-            groups[key].txns.push(tx);
-            groups[key].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
-        } else {
-            noService.push(tx);
-        }
-    });
-
-    const sorted = Object.entries(groups).sort((a, b) => a[1].name.localeCompare(b[1].name));
-    const container = document.getElementById('tx-view-service');
-    let html = '';
-    for (const [svcId, g] of sorted) {
-        html += buildAccordionGroup(
-            `<span class="svc-accordion-name">${escapeHtml(g.name)}</span>`,
-            `${escapeHtml(g.category)} &middot; ${g.txns.length} txns &middot; S$${formatAmount(g.total)}`,
-            accordionTxTable(g.txns));
-    }
-    if (noService.length) {
-        html += buildAccordionGroup(
-            '<span class="svc-accordion-name text-muted">Unlinked</span>',
-            `${noService.length} txns`, accordionTxTable(noService));
-    }
-    container.innerHTML = html || '<div class="empty-state"><div class="empty-state-text">No transactions</div></div>';
-}
-
-async function loadTypeAccordion() {
-    const data = await fetch(buildAccordionUrl()).then(r => r.json());
-    const txns = data.transactions.filter(tx => tx.flow_type === 'expense' || tx.flow_type === 'refund');
-
-    // Build 3-level: parent type → sub-type → service → transactions
-    const tree = {};
-    txns.forEach(tx => {
-        const parentCat = tx.parent_type || tx.type || NO_TYPE_LABEL;
-        const subCat = tx.parent_type ? tx.type : null;
-        const svcName = tx.service_name || 'Unlinked';
-        const svcId = tx.service_id || 0;
-
-        if (!tree[parentCat]) tree[parentCat] = { total: 0, subs: {} };
-        tree[parentCat].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
-
-        const subKey = subCat || '__direct__';
-        if (!tree[parentCat].subs[subKey]) tree[parentCat].subs[subKey] = { total: 0, services: {} };
-        tree[parentCat].subs[subKey].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
-
-        const svcKey = `${svcId}|${svcName}`;
-        if (!tree[parentCat].subs[subKey].services[svcKey]) tree[parentCat].subs[subKey].services[svcKey] = { name: svcName, txns: [], total: 0 };
-        tree[parentCat].subs[subKey].services[svcKey].txns.push(tx);
-        tree[parentCat].subs[subKey].services[svcKey].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
-    });
-
-    const container = document.getElementById('tx-view-category');
-    const sortedCats = Object.entries(tree).sort((a, b) => b[1].total - a[1].total);
-    let html = '';
-    for (const [catName, catData] of sortedCats) {
-        let innerHtml = '';
-        const sortedSubs = Object.entries(catData.subs).sort((a, b) => b[1].total - a[1].total);
-        for (const [subKey, subData] of sortedSubs) {
-            const sortedSvcs = Object.entries(subData.services).sort((a, b) => b[1].total - a[1].total);
-            let svcsHtml = '';
-            for (const [svcKey, svcData] of sortedSvcs) {
-                svcsHtml += buildAccordionGroup(
-                    escapeHtml(svcData.name),
-                    `${svcData.txns.length} txns &middot; S$${formatAmount(svcData.total)}`,
-                    accordionTxTable(svcData.txns), 'cat-l3-item');
-            }
-
-            if (subKey === '__direct__') {
-                innerHtml += svcsHtml;
-            } else {
-                innerHtml += buildAccordionGroup(
-                    escapeHtml(subKey), `S$${formatAmount(subData.total)}`,
-                    svcsHtml, 'cat-l2-group');
-            }
-        }
-
-        html += buildAccordionGroup(
-            `<strong>${escapeHtml(catName)}</strong>`, `S$${formatAmount(catData.total)}`,
-            innerHtml, 'cat-l1-group');
-    }
-    container.innerHTML = html || '<div class="empty-state"><div class="empty-state-text">No transactions</div></div>';
-}
-
-function renderAccordionTxRow(tx) {
-    const oneOffClass = tx.is_one_off ? 'tx-one-off active' : 'tx-one-off';
-    const oneOffTitle = tx.is_one_off ? 'Marked as one-off (click to unmark)' : 'Mark as one-off (excludes from burn rate)';
-    return `<tr>
-        <td style="width:90px;">${formatDate(tx.date)}</td>
-        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
-        <td>${renderTypeBadges(tx)}</td>
-        <td class="text-secondary">${tx.account_name || ''}</td>
-        <td style="text-align:right;" class="${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
-        <td style="width:28px;text-align:center;"><span class="${oneOffClass}" title="${oneOffTitle}" onclick="toggleTxOneOff(${tx.id}, this)">1x</span></td>
-        <td style="width:28px;text-align:center;"><span class="tx-edit-icon" title="Resolve / edit" onclick="showTypePicker(${tx.id}, this)">&#9998;</span></td>
-    </tr>`;
-}
-
-// Navigate to Dashboard service view and expand a specific service
-async function navigateToService(serviceId) {
-    switchTab('dashboard', { pushHistory: false });
-
-    // Get service name for search filter
-    let svcName = null;
-    if (allServicesList && allServicesList.length) {
-        const svc = allServicesList.find(s => s.id === serviceId);
-        if (svc) svcName = svc.name;
-    }
-    if (!svcName) {
-        // Fetch if not cached
-        try {
-            const res = await fetch('/api/services');
-            allServicesList = await res.json();
-            const svc = allServicesList.find(s => s.id === serviceId);
-            if (svc) svcName = svc.name;
-        } catch (e) { /* proceed without name */ }
-    }
-
-    // Set search to service name so accordion filters to it
-    if (svcName) {
-        document.getElementById('tx-search').value = svcName;
-    }
-
-    // Switch to By Service view
-    txViewMode = 'service';
-    localStorage.setItem('fin-tx-view', 'service');
-    document.querySelectorAll('.tx-view-toggle .btn-toggle').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.txview === 'service');
-    });
-    document.getElementById('tx-view-flat').style.display = 'none';
-    document.getElementById('tx-view-service').style.display = '';
-    document.getElementById('tx-view-category').style.display = 'none';
-
-    await loadServiceAccordion();
-
-    // Auto-expand the matching accordion item
-    const container = document.getElementById('tx-view-service');
-    const items = container.querySelectorAll('.svc-accordion-item');
-    for (const item of items) {
-        const nameEl = item.querySelector('.svc-accordion-name');
-        if (!nameEl) continue;
-        if (svcName && nameEl.textContent.trim() === svcName) {
-            item.classList.add('open');
-            item.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            break;
-        }
-    }
-}
-
-async function navigateToType(typeName) {
-    switchTab('dashboard', { pushHistory: false });
-
-    // Set search to type name — API searches the type's and its parent's name
-    document.getElementById('tx-search').value = typeName;
-
-    // Switch to By Type view
-    txViewMode = 'type';
-    localStorage.setItem('fin-tx-view', 'type');
-    document.querySelectorAll('.tx-view-toggle .btn-toggle').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.txview === 'type');
-    });
-    document.getElementById('tx-view-flat').style.display = 'none';
-    document.getElementById('tx-view-service').style.display = 'none';
-    document.getElementById('tx-view-category').style.display = '';
-
-    await loadTypeAccordion();
-
-    // Auto-expand the matching type
-    const container = document.getElementById('tx-view-category');
-    const items = container.querySelectorAll('.cat-l1-group');
-    for (const item of items) {
-        const header = item.querySelector('.cat-l1-header');
-        if (header && header.textContent.includes(typeName)) {
-            item.classList.add('open');
-            item.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            break;
-        }
-    }
-}
-
-// ============================================================
-// SEARCHABLE MULTI-SELECT (Type Filter)
-// ============================================================
-
-function populateTypeMultiSelect() {
-    const container = document.getElementById('cat-filter-options');
-    if (!container) return;
-
-    let html = '';
-    // Rows with no type (spending and refunds only)
-    const untypedChecked = typeFilterSelections.includes(UNTYPED_FILTER);
-    html += `<label class="ms-option ms-separator" data-name="no type">
-        <input type="checkbox" value="${UNTYPED_FILTER}" ${untypedChecked ? 'checked' : ''}> ${NO_TYPE_LABEL}
-    </label>`;
-
-    // Types grouped by parent
-    const parents = types.filter(t => !t.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-    parents.forEach(p => {
-        const checked = typeFilterSelections.includes(p.name);
-        html += `<label class="ms-option ${checked ? 'ms-checked' : ''}" data-name="${escapeHtml(p.name.toLowerCase())}">
-            <input type="checkbox" value="${escapeHtml(p.name)}" ${checked ? 'checked' : ''}> ${escapeHtml(p.name)}
-        </label>`;
-        // Sub-types indented
-        const children = types.filter(t => t.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-        children.forEach(c => {
-            const cChecked = typeFilterSelections.includes(c.name);
-            html += `<label class="ms-option ms-indent ${cChecked ? 'ms-checked' : ''}" data-name="${escapeHtml(c.name.toLowerCase())}">
-                <input type="checkbox" value="${escapeHtml(c.name)}" ${cChecked ? 'checked' : ''}> ${escapeHtml(c.name)}
-            </label>`;
-        });
-    });
-
-    container.innerHTML = html;
-}
-
-function toggleCatFilterPanel() {
-    // Don't open if chart filter is overriding
-    if (chartFilter.selections.length > 0) return;
-
-    const panel = document.getElementById('cat-filter-panel');
-    const trigger = document.getElementById('cat-filter-trigger');
-    const isOpen = !panel.classList.contains('hidden');
-
-    if (isOpen) {
-        panel.classList.add('hidden');
-        trigger.classList.remove('ms-active');
-    } else {
-        panel.classList.remove('hidden');
-        trigger.classList.add('ms-active');
-        document.getElementById('cat-filter-search').value = '';
-        filterCatOptions(); // reset search
-        document.getElementById('cat-filter-search').focus();
-    }
-}
-
-function filterCatOptions() {
-    const query = document.getElementById('cat-filter-search').value.toLowerCase();
-    const options = document.querySelectorAll('#cat-filter-options .ms-option');
-    options.forEach(opt => {
-        const name = opt.dataset.name || '';
-        opt.style.display = !query || name.includes(query) ? '' : 'none';
-    });
-}
-
-function applyCatFilter() {
-    // Read checked values
-    typeFilterSelections = [];
-    document.querySelectorAll('#cat-filter-options input[type="checkbox"]:checked').forEach(cb => {
-        typeFilterSelections.push(cb.value);
-    });
-
-    // Close panel
-    document.getElementById('cat-filter-panel').classList.add('hidden');
-    document.getElementById('cat-filter-trigger').classList.remove('ms-active');
-
-    updateCatFilterDisplay();
-    txCurrentPage = 1;
-    txPage(0);
-}
-
-function clearCatFilter() {
-    typeFilterSelections = [];
-    document.querySelectorAll('#cat-filter-options input[type="checkbox"]').forEach(cb => {
-        cb.checked = false;
-    });
-
-    document.getElementById('cat-filter-panel').classList.add('hidden');
-    document.getElementById('cat-filter-trigger').classList.remove('ms-active');
-
-    updateCatFilterDisplay();
-    txCurrentPage = 1;
-    txPage(0);
-}
-
-function updateCatFilterDisplay() {
-    updateSuggestButton();
-    const display = document.getElementById('cat-filter-display');
-    const trigger = document.getElementById('cat-filter-trigger');
-    if (!display || !trigger) return;
-
-    const chartCats = getChartFilterTypes();
-    if (chartCats.length > 0) {
-        display.textContent = `Chart: ${chartCats.join(', ')}`;
-        trigger.classList.add('ms-has-selection');
-        trigger.classList.add('ms-disabled');
-    } else if (typeFilterSelections.length === 0) {
-        display.textContent = 'All Types';
-        trigger.classList.remove('ms-has-selection');
-        trigger.classList.remove('ms-disabled');
-    } else if (typeFilterSelections.length === 1) {
-        display.textContent = typeFilterSelections[0] === UNTYPED_FILTER ? NO_TYPE_LABEL : typeFilterSelections[0];
-        trigger.classList.add('ms-has-selection');
-        trigger.classList.remove('ms-disabled');
-    } else {
-        display.textContent = `${typeFilterSelections.length} types`;
-        trigger.classList.add('ms-has-selection');
-        trigger.classList.remove('ms-disabled');
-    }
-}
-
-// Close multi-select when clicking outside
-document.addEventListener('click', e => {
-    const wrap = document.getElementById('cat-filter-wrap');
-    const panel = document.getElementById('cat-filter-panel');
-    if (wrap && panel && !wrap.contains(e.target) && !panel.classList.contains('hidden')) {
-        panel.classList.add('hidden');
-        document.getElementById('cat-filter-trigger')?.classList.remove('ms-active');
-    }
-});
-
-// ============================================================
-// TYPES MASTER TAB
-// ============================================================
-
-// The type list, read-only: it is one fixed list for every book, declared on
-// the server. Each type says what it covers and what it is not for.
-function renderTypesMaster() {
-    const parents = types.filter(t => !t.parent_id);
-    document.getElementById('type-count').textContent =
-        `${types.length} types (${parents.length} top-level)`;
-
-    const row = (t, indent) => `
-        <tr>
-            <td style="${indent ? 'padding-left:28px;' : 'font-weight:500;'}">${escapeHtml(t.name)}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${t.default_one_off ? 'one-off' : 'running'}</td>
-            <td style="font-size:12px;color:var(--text-secondary);">${escapeHtml(t.covers || '')}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(t.not_for || '')}</td>
-        </tr>`;
-
-    // Declared order, each parent followed by its sub-types
-    let html = '';
-    parents.forEach(p => {
-        html += row(p, false);
-        types.filter(t => t.parent_id === p.id).forEach(c => { html += row(c, true); });
-    });
-    document.getElementById('types-body').innerHTML = html;
-}
-
-// ============================================================
-// SERVICES MASTER TAB (CRUD)
-// ============================================================
-
-let allServicesCache = [];
-const svcSortState = { col: 'name', asc: true };
-const sortServicesMaster = createSortToggler(svcSortState, () => renderServicesMaster(true));
-
-async function renderServicesMaster(skipFetch) {
-    if (!skipFetch) {
-        const res = await fetch('/api/services');
-        allServicesCache = await res.json();
-    }
-    const search = (document.getElementById('svc-master-search')?.value || '').toLowerCase();
-
-    let filtered = allServicesCache;
-    if (search) filtered = filtered.filter(s => s.name.toLowerCase().includes(search));
-
-    // Sort
-    filtered = [...filtered].sort((a, b) => {
-        let va, vb;
-        switch (svcSortState.col) {
-            case 'type':     va = (a.display_type || '').toLowerCase(); vb = (b.display_type || '').toLowerCase(); break;
-            case 'book':     va = (a.book || '').toLowerCase(); vb = (b.book || '').toLowerCase(); break;
-            case 'notes':    va = (a.notes || '').toLowerCase(); vb = (b.notes || '').toLowerCase(); break;
-            default:         va = a.name.toLowerCase(); vb = b.name.toLowerCase();
-        }
-        if (va < vb) return svcSortState.asc ? -1 : 1;
-        if (va > vb) return svcSortState.asc ? 1 : -1;
-        return 0;
-    });
-
-    updateSortIndicators('#services-master-table', svcSortState);
-
-    const body = document.getElementById('services-master-body');
-    if (!filtered.length) {
-        body.innerHTML = '<tr><td colspan="5" style="color:var(--text-tertiary);text-align:center;padding:var(--space-6);">No services</td></tr>';
-        return;
-    }
-
-    body.innerHTML = filtered.map(s => `
-        <tr>
-            <td style="font-weight:500;">${escapeHtml(s.name)}${s.review_each_time ? ' <span class="badge badge-warning" style="font-size:10px;margin-left:6px;" title="Mixed merchant: the type of its rows is reviewed each time">mixed</span>' : ''}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(s.book || '')}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(s.display_type || '')}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(s.notes || '')}</td>
-            <td style="text-align:right;white-space:nowrap;">
-                <button class="btn btn-sm" onclick="openEditServiceModal(${s.id})">Edit</button>
-            </td>
-        </tr>
-    `).join('');
-
-    // Bind sortable headers
-    document.querySelectorAll('#services-master-table th.sortable').forEach(th => {
-        th.onclick = () => sortServicesMaster(th.dataset.sort);
-    });
-}
-
-// ============================================================
-// SERVICES MASTER — CLEANUP VIEW
-// ============================================================
-
-function switchMasterView(view) {
-    document.querySelectorAll('#tab-services-master .svc-view-btn').forEach(b => b.classList.remove('active'));
-    document.querySelector(`#tab-services-master .svc-view-btn[data-view="${view}"]`)?.classList.add('active');
-    document.getElementById('svc-master-table-view').style.display = view === 'table' ? '' : 'none';
-    document.getElementById('svc-master-cleanup-view').style.display = view === 'cleanup' ? '' : 'none';
-    if (view === 'cleanup') renderCleanupView();
-}
-
-// Heuristic: service name likely needs rename if it looks like a raw pattern
-function looksLikePattern(name) {
-    if (!name) return false;
-    // Contains * (card pattern artifact)
-    if (name.includes('*')) return true;
-    // Contains long numbers (account/reference numbers)
-    if (/\d{4,}/.test(name)) return true;
-    // All uppercase with spaces and >4 chars (raw description)
-    if (name === name.toUpperCase() && name.length > 4 && /\s/.test(name)) return true;
-    // All uppercase letters/digits/punctuation, >6 chars (e.g. "NET*SUBWAY")
-    if (/^[A-Z][A-Z0-9 .*\-/]+$/.test(name) && name.length > 6) return true;
-    return false;
-}
-
-let cleanupEdits = {}; // { svcId: newName }
-
-function renderCleanupView() {
-    const container = document.getElementById('svc-cleanup-list');
-    const search = (document.getElementById('svc-cleanup-search')?.value || '').toLowerCase();
-    const filter = document.getElementById('svc-cleanup-filter')?.value || 'all';
-
-    let services = allServicesCache;
-    if (search) {
-        services = services.filter(s =>
-            s.name.toLowerCase().includes(search) ||
-            (s.rules || []).some(r => r.pattern.toLowerCase().includes(search))
-        );
-    }
-
-    switch (filter) {
-        case 'needs-rename':
-            services = services.filter(s => looksLikePattern(s.name));
-            break;
-        case 'no-txns':
-            services = services.filter(s => !s.txn_count);
-            break;
-        case 'no-rules':
-            services = services.filter(s => !s.rule_count);
-            break;
-    }
-
-    services = [...services].sort((a, b) => a.name.localeCompare(b.name));
-
-    document.getElementById('svc-cleanup-count').textContent = `${services.length} service${services.length !== 1 ? 's' : ''}`;
-
-    if (!services.length) {
-        container.innerHTML = '<div style="padding:var(--space-4);color:var(--text-tertiary);">No services match this filter</div>';
-        return;
-    }
-
-    container.innerHTML = services.map(s => {
-        const patterns = (s.rules || []).map(r =>
-            `<span class="cleanup-pattern-tag" title="${r.match_type}">${escapeHtml(r.pattern)}</span>`
-        ).join('');
-        const editedName = cleanupEdits[s.id] !== undefined ? cleanupEdits[s.id] : s.name;
-        const isModified = cleanupEdits[s.id] !== undefined && cleanupEdits[s.id] !== s.name;
-
-        return `
-        <div class="cleanup-row" data-svc-id="${s.id}">
-            <div class="cleanup-current">
-                <div class="cleanup-current-name">${escapeHtml(s.name)}</div>
-                <div class="cleanup-patterns">${patterns || '<span style="font-size:10px;color:var(--text-muted);">no rules</span>'}</div>
-            </div>
-            <div class="cleanup-arrow">→</div>
-            <div class="cleanup-input-area">
-                <input type="text" class="cleanup-input ${isModified ? 'modified' : ''}"
-                       value="${escapeHtml(editedName)}"
-                       data-svc-id="${s.id}" data-orig="${escapeHtml(s.name)}"
-                       oninput="onCleanupEdit(this)">
-                <div class="cleanup-meta">
-                    <span>${s.txn_count || 0} txns</span>
-                    <span>${s.rule_count || 0} rules</span>
-                    <span>${escapeHtml([s.book, s.display_type].filter(Boolean).join(' · ') || '—')}</span>
-                </div>
-            </div>
-            <div class="cleanup-actions">
-                <button class="btn btn-sm" onclick="openEditServiceModal(${s.id})" title="Edit / Merge">Edit</button>
-            </div>
-        </div>`;
+    const cards = sheet.sections.map(section => {
+        const lines = sorted(section.lines.filter(shown));
+        if (!lines.length && S.needsLook) return '';
+        return `<h3 class="eyebrow" style="margin-top:16px">${esc(section.heading)}</h3>${lines.map(line => `<div class="line-card">
+            <div class="spread"><a href="#/books/account/${line.account_id}"><b>${esc(line.name)}</b></a>
+            <span class="num"><b>${line.in_total ? esc(money(line.value_minor, 'SGD')) : line.counted_in ? '' : tag('nofig', line.balance === 'no figure' ? 'no figure' : 'left out', fixFor(line))}</b></span></div>
+            ${line.currency !== 'SGD' && line.balance_minor !== null ? `<div class="small num">${esc(money(line.balance_minor, line.currency))}</div>` : ''}
+            <div class="small">${restsOn(line, { short: true })}</div>
+            <div class="row small" style="margin-top:4px">${checkMarker(line)}</div>
+            <div class="margin-note">${marginNote(line, refusedBy.get(line.account_id))}</div></div>`).join('')}
+            ${S.needsLook ? '' : `<div class="spread small" style="padding:8px 0"><b>${section.owed ? 'Total owed' : 'Total'}</b><b class="num">${esc(money(section.total_minor, 'SGD'))}</b></div>`}`;
     }).join('');
+
+    afterRender(() => drawBridge(sheet));
+    return `${booksNav('sheet')}
+    <div class="page-head"><div><span class="eyebrow">Balance sheet</span><h1>As at ${esc(day(sheet.as_at))}${S.month === currentMonth() ? ' <span class="muted small">(this month so far)</span>' : ''}</h1>
+        <p>Every balance names what it rests on. What is owed is negative, under a heading that says owed. Amounts in S$; other currencies at the saved rate.</p></div>
+        ${monthPicker()}</div>
+    <section class="card">
+        <div class="spread"><div><span class="eyebrow">Net worth</span><div class="hero-figure num" style="font-size:44px">${heroFigure(sheet.net_worth_minor, 'SGD')}</div></div>
+            <div class="row"><button class="btn" data-act="figure">Enter a figure</button><a class="btn" href="#/queue">Queue · ${q.count}</a></div></div>
+        ${sheet.note ? `<p class="small">${tag('nofig', 'left out')} ${esc(sheet.note)}</p>` : ''}
+        ${restsOnHTML(sheet)}
+    </section>
+    <section class="card">
+        <div class="spread" style="margin-bottom:10px"><h2>What we have and what we owe</h2>
+            <div class="row"><div class="seg" role="group" aria-label="Which lines">
+                <button data-act="needs-look" data-on="0" aria-pressed="${!S.needsLook}">All lines</button>
+                <button data-act="needs-look" data-on="1" aria-pressed="${S.needsLook}">Needs a look · ${needCount}</button></div>
+                <label class="field phone-only" style="min-width:160px"><select data-change="sheet-sort-select" aria-label="Sort">
+                    <option value="">Sheet order</option><option value="rests"${S.sheetSort.key === 'rests' ? ' selected' : ''}>Rests on: oldest first</option>
+                    <option value="check"${S.sheetSort.key === 'check' ? ' selected' : ''}>Check: worst first</option></select></label></div></div>
+        <div class="table-wrap sheet-table"><table class="t">
+            <thead><tr><th style="min-width:170px">Account</th><th class="r">In its currency</th><th class="r">${sortBtn('value', 'In S$')}</th><th></th><th>${sortBtn('rests', 'Rests on')}</th><th>${sortBtn('check', 'Check')}</th><th>Margin note</th></tr></thead>
+            <tbody>${table || '<tr><td colspan="7" class="empty">Nothing needs a look.</td></tr>'}</tbody>
+            ${S.needsLook ? '' : `<tfoot><tr class="total"><td>Net worth</td><td></td><td class="r num">${esc(money(sheet.net_worth_minor, 'SGD'))}</td><td colspan="4"></td></tr></tfoot>`}</table></div>
+        <div class="sheet-lines">${cards || '<p class="empty">Nothing needs a look.</p>'}</div>
+        ${sheet.currency_change && sheet.currency_change.minor ? `<p class="small" style="margin-top:12px">Currency change since ${esc(day(sheet.currency_change.from))}: <b class="num">${esc(money(sheet.currency_change.minor, 'SGD', { signed: true }))}</b></p>` : ''}
+    </section>
+    ${monthCheckHTML(sheet)}`;
 }
+ACT['needs-look'] = el => { S.needsLook = el.dataset.on === '1'; rerender(); };
+ACT['sheet-sort'] = el => {
+    const key = el.dataset.key;
+    if (S.sheetSort.key === key) {
+        if (S.sheetSort.dir === 'asc') S.sheetSort.dir = 'desc'; else S.sheetSort = { key: null, dir: 'asc' };
+    } else S.sheetSort = { key, dir: 'asc' };
+    rerender();
+};
+ACT['sheet-sort-select'] = el => { S.sheetSort = { key: el.value || null, dir: 'asc' }; rerender(); };
 
-function onCleanupEdit(input) {
-    const svcId = parseInt(input.dataset.svcId);
-    const orig = input.dataset.orig;
-    const newName = input.value.trim();
-
-    if (newName !== orig && newName) {
-        cleanupEdits[svcId] = newName;
-        input.classList.add('modified');
-    } else {
-        delete cleanupEdits[svcId];
-        input.classList.remove('modified');
+function monthCheckHTML(sheet) {
+    const mc = sheet.month_check;
+    if (!mc) return '';
+    const head = `<div class="card-head"><div><span class="eyebrow">Month check · ${esc(monthName(sheet.month))}</span>
+        <h2>Do the month’s rows account for the change in net worth?</h2></div></div>`;
+    if (!mc.available || mc.unexplained_minor === null || mc.unexplained_minor === undefined) {
+        return `<section class="card" id="month-check">${head}<p>${esc(mc.why || 'Not worked out for this month.')}</p></section>`;
     }
-
-    // Enable/disable save button
-    const count = Object.keys(cleanupEdits).length;
-    const saveBtn = document.getElementById('svc-cleanup-save');
-    saveBtn.disabled = count === 0;
-    saveBtn.textContent = count ? `Save ${count} Rename${count > 1 ? 's' : ''}` : 'Save All Renames';
+    const line = (op, label, minor, cls = '') => `<tr class="${cls}"><td class="op">${op}</td><td>${label}</td><td class="r">${esc(money(minor, 'SGD'))}</td></tr>`;
+    const signOp = m => (m < 0 ? '−' : '+');
+    const unexplained = mc.unexplained_minor;
+    const sum = `<table class="sum"><tbody>
+        ${line('', `Net worth at ${esc(day(mc.from))} <span class="muted small">(the accounts in the check)</span>`, mc.opening_minor)}
+        ${line('+', 'income', mc.income_minor)}
+        ${line('−', `household spending${mc.interest_minor ? `, with ${esc(money(mc.interest_minor, 'SGD'))} loan interest` : ''}`, mc.spending_minor)}
+        ${line(signOp(mc.currency_change_minor), 'currency change', Math.abs(mc.currency_change_minor))}
+        ${mc.outside_minor ? line(signOp(mc.outside_minor), 'money moved to or from accounts left out', Math.abs(mc.outside_minor)) : ''}
+        ${line('=', `what it should be at ${esc(day(mc.to))}`, mc.expected_minor, 'eq')}
+        ${line('', 'what it is', mc.actual_minor)}
+        <tr class="gap${unexplained === 0 ? ' zero' : ''}"><td class="op">${unexplained === 0 ? '✓' : '?'}</td><td>${unexplained === 0 ? 'it adds up' : 'unexplained'}</td><td class="r">${esc(money(unexplained, 'SGD'))}</td></tr>
+        </tbody></table>`;
+    const why = [];
+    const rv = mc.review || {};
+    if (rv.out_count) why.push(`<tr><td><span class="dir out">↗ OUT</span> ${plural(rv.out_count, 'transfer')} waiting for a label</td><td class="r num">${esc(money(rv.out_minor, 'SGD'))}</td><td><a class="link" href="#/queue">Label them</a></td></tr>`);
+    if (rv.in_count) why.push(`<tr><td><span class="dir in">↙ IN</span> ${plural(rv.in_count, 'transfer')} waiting for a label</td><td class="r num">${esc(money(rv.in_minor, 'SGD'))}</td><td><a class="link" href="#/queue">Label them</a></td></tr>`);
+    (mc.not_tying || []).forEach(l => why.push(`<tr><td>${esc(l.name)}</td><td class="r">${l.status === 'off' ? tag('off', `off by ${money(Math.abs(l.difference_minor), l.currency)}`) : tag('notchecked', l.text)}</td><td><a class="link" href="#/books/account/${l.account_id}">See the tie line</a></td></tr>`));
+    (mc.left_out || []).forEach(l => why.push(`<tr><td>${esc(l.name)} is left out of both sides</td><td class="r small">${esc(l.why)}</td><td><button class="link" data-act="figure">Enter a figure</button></td></tr>`));
+    const whyTable = `<h3 style="margin:18px 0 6px">${unexplained === 0 ? 'Still worth a look' : 'Why it does not add up'}</h3>
+        ${why.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Where to look</th><th class="r">How much</th><th>Fix</th></tr></thead><tbody>${why.join('')}</tbody></table></div>`
+            : `<p class="small muted">${unexplained === 0 ? 'Nothing: every row is labelled and every line ties.' : 'Nothing waits and every line ties: a row may be missing or mislabelled, or a figure moved.'}</p>`}`;
+    return `<section class="card" id="month-check">${head}
+        <div class="grid-2"><div>${sum}${mc.note ? `<p class="small muted" style="margin-top:8px">${esc(mc.note)}</p>` : ''}</div>
+        <div class="desk-only"><span class="eyebrow">The bridge</span><svg class="bridge" id="bridge" viewBox="0 0 520 240" role="img" aria-label="The month check as a bridge"></svg></div></div>
+        ${whyTable}</section>`;
 }
 
-async function saveCleanupRenames() {
-    const renames = Object.entries(cleanupEdits).map(([id, name]) => ({ id: parseInt(id), name }));
-    if (!renames.length) return;
-
-    if (!confirm(`Rename ${renames.length} service${renames.length > 1 ? 's' : ''}?`)) return;
-
-    const res = await fetch('/api/services/bulk-rename', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ renames }),
+/** The month check as a bridge: from the opening figure, each step up or
+ *  down, to what it should be, beside what it is. Desk only. */
+function drawBridge(sheet) {
+    const svg = $('#bridge');
+    const mc = sheet.month_check;
+    if (!svg || !mc || !mc.available || mc.unexplained_minor === null) return;
+    const steps = [
+        ['Start', mc.opening_minor, 'base'], ['Income', mc.income_minor, 'step'], ['Spending', -mc.spending_minor, 'step'],
+        ['Currency', mc.currency_change_minor, 'step'],
+    ];
+    if (mc.outside_minor) steps.push(['Outside', mc.outside_minor, 'step']);
+    steps.push(['Should be', mc.expected_minor, 'base'], ['Is', mc.actual_minor, 'actual']);
+    let running = 0;
+    const bars = steps.map(([label, v, kind]) => {
+        if (kind === 'step') { const from = running; running += v; return { label, from, to: running, v, kind }; }
+        if (kind === 'base' && label === 'Start') running = v;
+        return { label, from: 0, to: v, v, kind };
     });
-    const data = await res.json();
-
-    if (data.errors && data.errors.length) {
-        alert(`${data.updated} renamed, ${data.errors.length} errors:\n${data.errors.join('\n')}`);
-    } else {
-        alert(`${data.updated} service${data.updated !== 1 ? 's' : ''} renamed.`);
-    }
-
-    // Reset state and refresh
-    cleanupEdits = {};
-    const saveBtn = document.getElementById('svc-cleanup-save');
-    saveBtn.disabled = true;
-    saveBtn.textContent = 'Save All Renames';
-
-    // Refresh data
-    const r = await fetch('/api/services');
-    allServicesCache = await r.json();
-    allServicesList = null; // clear services tab cache too
-    renderCleanupView();
-}
-
-// Wire cleanup search debounce in initTabs
-(function() {
-    const el = document.getElementById('svc-cleanup-search');
-    if (el) el.addEventListener('input', debounce(renderCleanupView, 300));
-})();
-
-function openAddServiceModal() {
-    document.getElementById('add-svc-name').value = '';
-    document.getElementById('add-svc-notes').value = '';
-    document.getElementById('add-svc-review').checked = false;
-
-    // Populate the default book and type dropdowns
-    populateTypeSelect('add-svc-type');
-    populateBookSelect('add-svc-book');
-
-    openModalEl('add-service-modal', closeAddServiceModal);
-    document.getElementById('add-svc-name').focus();
-}
-
-function closeAddServiceModal() {
-    closeModalEl('add-service-modal');
-}
-
-async function saveNewService() {
-    const name = document.getElementById('add-svc-name').value.trim();
-    if (!name) { alert('Service name is required'); return; }
-
-    const body = {
-        name,
-        book: document.getElementById('add-svc-book').value || null,
-        type_id: parseInt(document.getElementById('add-svc-type').value) || null,
-        notes: document.getElementById('add-svc-notes').value.trim() || null,
-        review_each_time: document.getElementById('add-svc-review').checked ? 1 : 0,
-    };
-
-    const data = await apiFetch('/api/services', { method: 'POST', body });
-    if (!data) return;
-
-    closeAddServiceModal();
-    await renderServicesMaster();
-}
-
-function openEditServiceModal(svcId) {
-    const svc = allServicesCache.find(s => s.id === svcId);
-    if (!svc) return;
-
-    document.getElementById('edit-svc-id').value = svc.id;
-    document.getElementById('edit-svc-name').value = svc.name || '';
-    document.getElementById('edit-svc-notes').value = svc.notes || '';
-    document.getElementById('edit-svc-one-off').checked = !!svc.is_one_off;
-
-    document.getElementById('edit-svc-review').checked = !!svc.review_each_time;
-
-    // Populate the default book and type dropdowns
-    populateTypeSelect('edit-svc-type', {selectedId: svc.type_id});
-    populateBookSelect('edit-svc-book', {selectedBook: svc.book});
-
-    // Populate merge target dropdown (all services except this one, sorted by name)
-    const mergeSel = document.getElementById('edit-svc-merge-target');
-    mergeSel.innerHTML = '<option value="">— Select target —</option>';
-    const mergeBtn = document.getElementById('edit-svc-merge-btn');
-    const mergeInfo = document.getElementById('edit-svc-merge-info');
-    mergeBtn.disabled = true;
-    mergeInfo.textContent = '';
-
-    allServicesCache
-        .filter(s => s.id !== svcId)
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .forEach(s => {
-            mergeSel.innerHTML += `<option value="${s.id}">${s.name} (${s.txn_count || 0} txns)</option>`;
-        });
-
-    mergeSel.onchange = () => {
-        const targetId = mergeSel.value;
-        mergeBtn.disabled = !targetId;
-        if (targetId) {
-            const target = allServicesCache.find(s => s.id === parseInt(targetId));
-            mergeInfo.textContent = target
-                ? `All ${svc.txn_count || 0} txns, ${svc.rule_count || 0} rules will move to "${target.name}". This service will be deleted.`
-                : '';
-        } else {
-            mergeInfo.textContent = '';
-        }
-    };
-
-    openModalEl('edit-service-modal', closeEditServiceModal);
-}
-
-function closeEditServiceModal() {
-    closeModalEl('edit-service-modal');
-}
-
-async function saveEditService() {
-    const svcId = parseInt(document.getElementById('edit-svc-id').value);
-    const name = document.getElementById('edit-svc-name').value.trim();
-    if (!name) { alert('Service name is required'); return; }
-
-    const body = {
-        name,
-        book: document.getElementById('edit-svc-book').value || null,
-        type_id: parseInt(document.getElementById('edit-svc-type').value) || null,
-        notes: document.getElementById('edit-svc-notes').value.trim() || null,
-        is_one_off: document.getElementById('edit-svc-one-off').checked ? 1 : 0,
-        review_each_time: document.getElementById('edit-svc-review').checked ? 1 : 0,
-    };
-
-    const res = await fetch(`/api/services/${svcId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+    const values = bars.flatMap(b => [b.from, b.to]);
+    let lo = Math.min(...values), hi = Math.max(...values);
+    // A bridge from zero would flatten the steps: start just below the lowest top.
+    const tops = bars.filter(b => b.kind !== 'step').map(b => b.to);
+    const floor = Math.min(...tops, ...bars.filter(b => b.kind === 'step').flatMap(b => [b.from, b.to]));
+    lo = floor - (hi - floor) * 0.25;
+    if (hi === lo) hi = lo + 1;
+    const W = 520, H = 240, top = 18, bottom = 196, n = bars.length, bw = W / n;
+    const y = v => bottom - ((v - lo) / (hi - lo)) * (bottom - top);
+    const colour = b => b.kind === 'actual' ? 'var(--text-primary)' : b.kind === 'base' ? 'var(--border-emphasis)' : b.v >= 0 ? 'var(--ok)' : 'var(--terra)';
+    let out = '';
+    bars.forEach((b, i) => {
+        const x = i * bw + bw * 0.18, w = bw * 0.64;
+        const from = b.kind === 'step' ? b.from : lo;
+        const y1 = y(Math.max(from, b.to)), y2 = y(Math.min(from, b.to));
+        out += `<rect x="${x}" y="${y1}" width="${w}" height="${Math.max(2, y2 - y1)}" rx="3" fill="${colour(b)}"/>`;
+        out += `<text x="${x + w / 2}" y="${bottom + 16}" text-anchor="middle">${esc(b.label)}</text>`;
+        const shown = b.kind === 'step' ? money(b.v, 'SGD', { signed: true }) : money(b.v, 'SGD');
+        out += `<text x="${x + w / 2}" y="${bottom + 32}" text-anchor="middle" style="font-size:10.5px">${esc(shown.replace('S$ ', ''))}</text>`;
     });
-    if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        alert('Error: ' + (data.error || `Save failed (${res.status})`));
-        return;
+    const gap = mc.unexplained_minor;
+    if (gap) {
+        const xs = (n - 2) * bw + bw * 0.5, xe = (n - 1) * bw + bw * 0.5;
+        out += `<line x1="${xs}" x2="${xe}" y1="${y(mc.expected_minor)}" y2="${y(mc.expected_minor)}" stroke="var(--bad)" stroke-dasharray="4 3"/>`;
+        out += `<text x="${(xs + xe) / 2}" y="${Math.min(y(mc.expected_minor), y(mc.actual_minor)) - 6}" text-anchor="middle" style="fill:var(--bad);font-weight:700">? ${esc(money(gap, 'SGD'))}</text>`;
     }
-
-    closeEditServiceModal();
-    // Refresh both services caches since name, book or type may have changed
-    allServicesList = null;
-    await renderServicesMaster();
+    svg.innerHTML = out;
 }
 
-async function deleteServiceFromModal() {
-    const svcId = parseInt(document.getElementById('edit-svc-id').value);
-    const name = document.getElementById('edit-svc-name').value;
-    if (!confirm(`Delete service "${name}"?`)) return;
-
-    const data = await apiFetch(`/api/services/${svcId}`, { method: 'DELETE' });
-    if (!data) return;
-
-    closeEditServiceModal();
-    allServicesList = null;
-    await renderServicesMaster();
-}
-
-async function mergeService() {
-    const svcId = parseInt(document.getElementById('edit-svc-id').value);
-    const targetId = parseInt(document.getElementById('edit-svc-merge-target').value);
-    if (!targetId) return;
-
-    const sourceName = document.getElementById('edit-svc-name').value;
-    const target = allServicesCache.find(s => s.id === targetId);
-    if (!confirm(`Merge "${sourceName}" into "${target.name}"?\n\nAll transactions, rules, and subscriptions will be reassigned. "${sourceName}" will be deleted. This cannot be undone.`)) return;
-
-    const res = await fetch(`/api/services/${svcId}/merge`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_id: targetId }),
-    });
-    if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        alert('Error: ' + (data.error || `Merge failed (${res.status})`));
-        return;
-    }
-
-    const data = await res.json();
-    const m = data.merged;
-    alert(`Merged "${m.source}" → "${m.target}"\n${m.transactions} txns, ${m.rules} rules, ${m.subscriptions} subs reassigned.`);
-
-    closeEditServiceModal();
-    allServicesList = null;
-    await renderServicesMaster();
-}
-
-// ============================================================
-// SERVICE PICKER (reusable searchable dropdown)
-// ============================================================
-
-class ServicePicker {
-    constructor(containerEl, options = {}) {
-        this.container = typeof containerEl === 'string' ? document.getElementById(containerEl) : containerEl;
-        this.input = this.container.querySelector('.svc-picker-input');
-        this.hiddenInput = this.container.querySelector('.svc-picker-id');
-        this.dropdown = this.container.querySelector('.svc-picker-dropdown');
-        this.allowCreate = options.allowCreate || false;
-        this.onSelect = options.onSelect || null;
-        this.highlightIndex = -1;
-        this.filteredItems = [];
-        this.selectedId = null;
-        this.selectedName = '';
-
-        this.input.addEventListener('input', () => this._onInput());
-        this.input.addEventListener('focus', () => this._onInput());
-        this.input.addEventListener('keydown', e => this._onKeydown(e));
-        // Close on outside click
-        document.addEventListener('mousedown', e => {
-            if (!this.container.contains(e.target)) this._close();
-        });
-    }
-
-    async _ensureServices() {
-        if (!allServicesList || !allServicesList.length) {
-            const res = await fetch('/api/services');
-            allServicesList = await res.json();
-        }
-    }
-
-    async _onInput() {
-        await this._ensureServices();
-        const query = this.input.value.trim().toLowerCase();
-
-        // Filter and sort — exact prefix matches first, then contains
-        let items = allServicesList
-            .map(s => ({
-                id: s.id,
-                name: s.name,
-                category: [s.book, s.display_type].filter(Boolean).join(' · '),
-            }))
-            .filter(s => !query || s.name.toLowerCase().includes(query) || s.category.toLowerCase().includes(query))
-            .sort((a, b) => {
-                if (query) {
-                    const aStarts = a.name.toLowerCase().startsWith(query) ? 0 : 1;
-                    const bStarts = b.name.toLowerCase().startsWith(query) ? 0 : 1;
-                    if (aStarts !== bStarts) return aStarts - bStarts;
-                }
-                return a.name.localeCompare(b.name);
-            });
-
-        // Limit to 30 for performance
-        const shown = items.slice(0, 30);
-        this.filteredItems = shown;
-        this.highlightIndex = -1;
-
-        let html = '';
-        if (shown.length === 0 && !this.allowCreate) {
-            html = '<div class="svc-picker-empty">No services found</div>';
-        } else {
-            html = shown.map((s, i) => {
-                // Highlight matching text
-                let nameHtml = escapeHtml(s.name);
-                if (query) {
-                    const idx = s.name.toLowerCase().indexOf(query);
-                    if (idx >= 0) {
-                        nameHtml = escapeHtml(s.name.substring(0, idx))
-                            + '<span class="svc-picker-item-match">' + escapeHtml(s.name.substring(idx, idx + query.length)) + '</span>'
-                            + escapeHtml(s.name.substring(idx + query.length));
-                    }
-                }
-                return `<div class="svc-picker-item" data-index="${i}" data-id="${s.id}">
-                    <span class="svc-picker-item-name">${nameHtml}</span>
-                    <span class="svc-picker-item-cat">${escapeHtml(s.category)}</span>
-                </div>`;
-            }).join('');
-
-            if (this.allowCreate && query && !items.some(s => s.name.toLowerCase() === query)) {
-                html += `<div class="svc-picker-item create-new" data-index="${shown.length}" data-create="true">
-                    + Create "${escapeHtml(this.input.value.trim())}"
-                </div>`;
-                this.filteredItems.push({ id: null, name: this.input.value.trim(), category: '', isNew: true });
-            }
-        }
-
-        this.dropdown.innerHTML = html;
-        this.dropdown.classList.add('open');
-
-        // Wire click handlers
-        this.dropdown.querySelectorAll('.svc-picker-item').forEach(el => {
-            el.addEventListener('mousedown', e => {
-                e.preventDefault(); // prevent input blur
-                const idx = parseInt(el.dataset.index);
-                this._selectIndex(idx);
-            });
-        });
-    }
-
-    _onKeydown(e) {
-        if (!this.dropdown.classList.contains('open')) return;
-        const maxIdx = this.filteredItems.length - 1;
-
-        if (e.key === 'ArrowDown') {
-            e.preventDefault();
-            this.highlightIndex = Math.min(this.highlightIndex + 1, maxIdx);
-            this._updateHighlight();
-        } else if (e.key === 'ArrowUp') {
-            e.preventDefault();
-            this.highlightIndex = Math.max(this.highlightIndex - 1, 0);
-            this._updateHighlight();
-        } else if (e.key === 'Enter') {
-            e.preventDefault();
-            if (this.highlightIndex >= 0) {
-                this._selectIndex(this.highlightIndex);
-            }
-        } else if (e.key === 'Escape') {
-            this._close();
-        }
-    }
-
-    _updateHighlight() {
-        this.dropdown.querySelectorAll('.svc-picker-item').forEach((el, i) => {
-            el.classList.toggle('highlighted', i === this.highlightIndex);
-            if (i === this.highlightIndex) {
-                el.scrollIntoView({ block: 'nearest' });
-            }
-        });
-    }
-
-    _selectIndex(idx) {
-        const item = this.filteredItems[idx];
-        if (!item) return;
-        this.selectedId = item.id;
-        this.selectedName = item.name;
-        this.input.value = item.name;
-        this.input.classList.add('has-value');
-        this.hiddenInput.value = item.id || '';
-        this._close();
-        if (this.onSelect) this.onSelect(item);
-    }
-
-    _close() {
-        this.dropdown.classList.remove('open');
-        this.highlightIndex = -1;
-    }
-
-    setValue(name, id) {
-        this.selectedId = id;
-        this.selectedName = name;
-        this.input.value = name || '';
-        this.hiddenInput.value = id || '';
-        this.input.classList.toggle('has-value', !!name);
-    }
-
-    getValue() {
-        return { id: this.selectedId, name: this.input.value.trim() };
-    }
-
-    clear() {
-        this.selectedId = null;
-        this.selectedName = '';
-        this.input.value = '';
-        this.hiddenInput.value = '';
-        this.input.classList.remove('has-value');
-    }
-}
-
-// Generic lazy ServicePicker factory — caches by container ID
-const _pickerCache = {};
-function getServicePicker(containerId, options) {
-    if (!_pickerCache[containerId]) {
-        _pickerCache[containerId] = new ServicePicker(containerId, options || {});
-    }
-    return _pickerCache[containerId];
-}
-
-function getResolveServicePicker() {
-    return getServicePicker('resolve-svc-picker', {
-        allowCreate: true,
-        onSelect: (item) => {
-            if (item.isNew) {
-                document.getElementById('resolve-cat-hint').style.display = 'none';
-            } else {
-                onResolveServiceChange(item.name);
-            }
-        },
-    });
-}
-
-function getAddRuleServicePicker() {
-    return getServicePicker('rule-svc-picker');
-}
-
-function getEditRuleServicePicker() {
-    return getServicePicker('edit-rule-svc-picker', {
-        onSelect: (item) => updateEditRuleServiceMeta(item.id),
-    });
-}
-
-// ============================================================
-// UTILITIES
-// ============================================================
-
-function debounce(fn, ms) {
-    let timer;
-    return function(...args) {
-        clearTimeout(timer);
-        timer = setTimeout(() => fn.apply(this, args), ms);
-    };
-}
-
-function hexToRgba(hex, alpha) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-function formatDate(isoDate) {
-    // "2026-02-27" → "27 Feb 2026"
-    if (!isoDate) return '';
-    const [y, m, d] = isoDate.split('-');
-    return `${parseInt(d)} ${MONTH_NAMES[parseInt(m)]} ${y}`;
-}
-
-function formatAmount(n) {
-    if (n == null) return '0.00';
-    return Number(n).toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function escapeHtml(str) {
-    if (!str) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-}
-
-// ============================================================
-// SUBSCRIPTIONS
-// ============================================================
-
-async function loadSubscriptions() {
-    const res = await fetch('/api/subscriptions');
-    allSubs = await res.json();
-    // Cache FX rate from API response
-    if (allSubs.length && allSubs[0].fx_rate) subsFxRate = allSubs[0].fx_rate;
-    renderSubsStats(allSubs);
-    renderSubscriptions(allSubs);
-    // Bind sortable headers (idempotent — uses onclick)
-    document.querySelectorAll('#subs-table th.sortable').forEach(th => {
-        th.onclick = () => sortSubs(th.dataset.sort);
-    });
-}
-
-function setSubsFilter(filter) {
-    subsFilter = filter;
-    document.querySelectorAll('[data-subs-filter]').forEach(b => {
-        b.classList.toggle('active', b.dataset.subsFilter === filter);
-    });
-    renderSubsStats(allSubs);
-    renderSubscriptions(allSubs);
-}
-
-function setSubsSpend(spend) {
-    subsSpend = spend;
-    document.querySelectorAll('[data-subs-spend]').forEach(b => {
-        b.classList.toggle('active', b.dataset.subsSpend === spend);
-    });
-    renderSubsStats(allSubs);
-    renderSubscriptions(allSubs);
-}
-
-function renderSubsStats(subs) {
-    // Apply spend filter to stats
-    let active = subs.filter(s => s.status === 'active');
-    if (subsSpend !== 'all') active = active.filter(s => matchesBook(subsSpend, s));
-
-    const monthlyOf = (book) => active.filter(s => bookOf(s) === book).reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
-    const totalMonthly = active.reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
-    const householdMonthly = monthlyOf('Household');
-    const moomMonthly = monthlyOf('Moom');
-    const kaleshMonthly = monthlyOf('Kalesh');
-    const fxRate = subs.length ? subs[0].fx_rate : 1.35;
-
-    document.getElementById('subs-stats-row').innerHTML = `
-        <div class="stat-card">
-            <div class="stat-label">Monthly Burn</div>
-            <div class="stat-value">S$${formatAmount(totalMonthly)}</div>
-            <div class="stat-sub">${active.length} active subscriptions</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Household</div>
-            <div class="stat-value accent">S$${formatAmount(householdMonthly)}</div>
-            <div class="stat-sub">S$${formatAmount(householdMonthly * 12)}/year</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Moom</div>
-            <div class="stat-value moom">S$${formatAmount(moomMonthly)}</div>
-            <div class="stat-sub">S$${formatAmount(moomMonthly * 12)}/year</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Kalesh</div>
-            <div class="stat-value" style="color:var(--accent-pop);">S$${formatAmount(kaleshMonthly)}</div>
-            <div class="stat-sub">S$${formatAmount(kaleshMonthly * 12)}/year</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">USD → SGD Rate</div>
-            <div class="stat-value" style="font-size:22px;">${fxRate.toFixed(4)}</div>
-            <div class="stat-sub">Live rate</div>
-        </div>
-    `;
-}
-
-function formatDateDMY(dateStr) {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr + 'T00:00:00');
-    if (isNaN(d)) return dateStr;
-    const dd = String(d.getDate()).padStart(2, '0');
-    return `${dd}-${MONTH_NAMES[d.getMonth() + 1]}-${String(d.getFullYear()).slice(2)}`;
-}
-
-const sortSubs = createSortToggler(subsSortState, () => renderSubscriptions(allSubs));
-
-function renderSubscriptions(subs) {
-    let filtered = subs;
-    if (subsFilter === 'active') filtered = subs.filter(s => s.status === 'active');
-    else if (subsFilter === 'deactivated') filtered = subs.filter(s => s.status !== 'active');
-
-    // Spend filter
-    if (subsSpend !== 'all') filtered = filtered.filter(s => matchesBook(subsSpend, s));
-
-    // Sort
-    filtered = [...filtered].sort((a, b) => {
-        let va, vb;
-        switch (subsSortState.col) {
-            case 'service':   va = (a.service_name || '').toLowerCase(); vb = (b.service_name || '').toLowerCase(); break;
-            case 'type':      va = (a.display_type || '').toLowerCase(); vb = (b.display_type || '').toLowerCase(); break;
-            case 'billed':    va = a.amount || 0; vb = b.amount || 0; break;
-            case 'monthly':   va = a.monthly_sgd || 0; vb = b.monthly_sgd || 0; break;
-            case 'frequency': va = a.frequency; vb = b.frequency; break;
-            case 'card':      va = (a.account_short_name || '').toLowerCase(); vb = (b.account_short_name || '').toLowerCase(); break;
-            case 'last_paid': va = a.tx_last_paid || a.last_paid || ''; vb = b.tx_last_paid || b.last_paid || ''; break;
-            case 'renewal':   va = a.computed_renewal || a.renewal_date || ''; vb = b.computed_renewal || b.renewal_date || ''; break;
-            default:          va = (a.service_name || '').toLowerCase(); vb = (b.service_name || '').toLowerCase();
-        }
-        if (va < vb) return subsSortState.asc ? -1 : 1;
-        if (va > vb) return subsSortState.asc ? 1 : -1;
-        return 0;
-    });
-
-    updateSortIndicators('#subs-table', subsSortState);
-
-    const body = document.getElementById('subs-body');
-    const empty = document.getElementById('subs-empty');
-
-    if (!filtered.length) {
-        body.innerHTML = '';
-        empty.classList.remove('hidden');
-        return;
-    }
-    empty.classList.add('hidden');
-
-    body.innerHTML = filtered.map(s => {
-        const freqAbbr = { weekly: 'wk', biweekly: '2wk', monthly: 'mo', quarterly: 'qt', 'half-yearly': '6mo', yearly: 'yr' };
-        const freqShort = freqAbbr[s.frequency] || s.frequency;
-        const freqLabel = s.periods > 1 ? `${s.periods}x ${freqShort}` : freqShort;
-        const lastPaidRaw = s.tx_last_paid || s.last_paid || null;
-        const linkHtml = s.link ? `<a href="${escapeHtml(s.link)}" target="_blank" class="subs-link" title="Manage">Manage</a>` : '';
-        const statusClass = s.status === 'active' ? '' : 'subs-row-inactive';
-
-        // Billed = configured amount per cycle (source of truth)
-        const amt = s.amount || 0;
-        const cur = s.currency || 'SGD';
-        const currPrefix = cur === 'USD' ? 'US$' : 'S$';
-        const billedHtml = `${currPrefix}${formatAmount(amt)}`;
-
-        // Monthly equivalent (always SGD)
-        const monthlyLabel = s.is_variable
-            ? `~S$${formatAmount(s.monthly_sgd)}`
-            : `S$${formatAmount(s.monthly_sgd)}`;
-        const monthlyTitle = s.is_variable
-            ? `3-month avg from ${s.tx_months_90d} months`
-            : '';
-
-        // Last Paid: amount + date from actual transactions, with deep-link
-        const patEsc = s.match_pattern ? escapeHtml(s.match_pattern).replace(/'/g, "\\'") : '';
-        const hasTxData = !!s.tx_id;
-        const lastPaidDot = lastPaidRaw
-            ? (hasTxData ? '<span title="From transaction" style="color:var(--accent-camel);">●</span> ' : '<span title="Manual entry" style="color:var(--text-muted);">○</span> ')
-            : '';
-        let lastPaidHtml;
-        if (hasTxData) {
-            lastPaidHtml = `${lastPaidDot}<a href="#" class="subs-tx-link" onclick="navigateToTransaction('${s.tx_last_paid}','${patEsc}');return false;">S$${formatAmount(s.tx_amount)}</a> <span style="color:var(--text-tertiary);font-size:11px;">${formatDateDMY(s.tx_last_paid)}</span>`;
-        } else if (lastPaidRaw) {
-            lastPaidHtml = `${lastPaidDot}${formatDateDMY(lastPaidRaw)}`;
-        } else {
-            lastPaidHtml = '—';
-        }
-
-        // Highlight rows with renewal in next 3 days
-        const renewalDate = s.computed_renewal || s.renewal_date;
-        let renewalSoon = false;
-        if (renewalDate && s.status === 'active') {
-            const diff = (new Date(renewalDate) - new Date()) / (1000 * 60 * 60 * 24);
-            renewalSoon = diff >= 0 && diff <= 3;
-        }
-        const rowClass = [statusClass, renewalSoon ? 'subs-row-renewal-soon' : ''].filter(Boolean).join(' ');
-
-        return `<tr class="${rowClass}">
-            <td>
-                <div style="font-weight:600;font-size:13px;">${s.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${s.service_id});return false;">${escapeHtml(s.service_name || '')}</a>` : escapeHtml(s.service_name || '')}</div>
-            </td>
-            <td class="subs-col-hide-sm"><a href="#" class="cat-link" onclick="navigateToType('${escapeHtml(s.parent_type || s.type_name || '')}');return false;">${escapeHtml(s.display_type)}</a>${bookBadgeHtml(s.book)}</td>
-            <td style="text-align:right;font-size:13px;">${billedHtml}</td>
-            <td style="text-align:right;font-size:13px;font-weight:600;color:var(--accent-camel);" title="${escapeHtml(monthlyTitle)}">
-                ${monthlyLabel}
-            </td>
-            <td class="subs-col-hide-sm" style="font-size:11px;color:var(--text-tertiary);white-space:nowrap;">${freqLabel}</td>
-            <td class="subs-card-cell subs-col-hide-md" title="${escapeHtml(s.account_short_name || '')}">${escapeHtml(s.account_short_name || '')}</td>
-            <td style="font-size:12px;white-space:nowrap;">${lastPaidHtml}</td>
-            <td class="subs-col-hide-sm" style="font-size:12px;white-space:nowrap;${renewalSoon ? 'color:var(--accent-pop);font-weight:600;' : 'color:var(--text-tertiary);'}">${formatDateDMY(renewalDate)}${renewalSoon ? ' ●' : ''}</td>
-            <td style="text-align:right;white-space:nowrap;">
-                ${linkHtml}
-                <button class="btn btn-sm" onclick="openEditSubModal(${s.id})" title="Edit">Edit</button>
-                <button class="btn btn-sm" onclick="toggleSubStatus(${s.id}, '${s.status}')" title="${s.status === 'active' ? 'Deactivate' : 'Activate'}">
-                    ${s.status === 'active' ? 'Deact' : 'Act'}
-                </button>
-            </td>
-        </tr>`;
-    }).join('');
-}
-
-function toggleSubsForm() {
-    openAddSubModal();
-}
-
-// Get the first rule pattern for a service (for match_pattern auto-derivation)
-function getServiceRulePattern(serviceId) {
-    if (!allServicesList) return null;
-    const svc = allServicesList.find(s => s.id === serviceId);
-    if (svc && svc.rules && svc.rules.length) return svc.rules[0].pattern;
-    return null;
-}
-
-// Subscription ServicePicker — a subscription takes its book and type from
-// its service: show them on selection
-function _subPickerOnSelect(bookSelectId, typeSelectId, hintId) {
-    return (item) => {
-        if (!item.isNew && allServicesList) {
-            const svc = allServicesList.find(s => s.id === item.id);
-            if (svc && svc.type_id) {
-                document.getElementById(typeSelectId).value = String(svc.type_id);
-                document.getElementById(bookSelectId).value = svc.book || '';
-                document.getElementById(hintId).style.display = 'block';
-                return;
-            }
-        }
-        document.getElementById(hintId).style.display = 'none';
-    };
-}
-
-function getAddSubServicePicker() {
-    return getServicePicker('add-sub-svc-picker', {
-        allowCreate: true,
-        onSelect: _subPickerOnSelect('sub-book', 'sub-type', 'sub-cat-hint'),
-    });
-}
-
-function getEditSubServicePicker() {
-    return getServicePicker('edit-sub-svc-picker', {
-        allowCreate: true,
-        onSelect: _subPickerOnSelect('edit-sub-book', 'edit-sub-type', 'edit-sub-cat-hint'),
-    });
-}
-
-async function openAddSubModal() {
-    // Reset all fields
-    const defaults = { 'sub-amount': '', 'sub-currency': 'SGD', 'sub-frequency': 'monthly',
-        'sub-periods': '1', 'sub-card': '', 'sub-renewal': '', 'sub-status': 'active',
-        'sub-link': '', 'sub-notes': '', 'sub-start-date': '' };
-    for (const [id, val] of Object.entries(defaults)) document.getElementById(id).value = val;
-    document.getElementById('sub-cat-hint').style.display = 'none';
-
-    // Initialize ServicePicker
-    const picker = getAddSubServicePicker();
-    picker.clear();
-
-    // Populate book and type dropdowns (the service's, shown here)
-    populateTypeSelect('sub-type');
-    populateBookSelect('sub-book');
-
-    // Populate card dropdown from active accounts only
-    const cardSel = document.getElementById('sub-card');
-    cardSel.innerHTML = '<option value="">—</option>';
-    accounts.filter(a => a.status !== 'archived' && hasStatements(a)).forEach(a => {
-        cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
-    });
-
-    setupFxHint('add-sub-modal', 'sub-currency');
-
-    // Auto-suggest renewal from start date + frequency + periods (only if empty)
-    const suggestRenewal = () => {
-        const startVal = document.getElementById('sub-start-date').value;
-        const renewalEl = document.getElementById('sub-renewal');
-        if (!startVal || renewalEl.value) return;
-        renewalEl.value = calcRenewalDate(startVal,
-            document.getElementById('sub-frequency').value,
-            parseInt(document.getElementById('sub-periods').value) || 1);
-    };
-    document.getElementById('sub-start-date').onchange = suggestRenewal;
-    document.getElementById('sub-frequency').addEventListener('change', suggestRenewal);
-    document.getElementById('sub-periods').addEventListener('change', suggestRenewal);
-
-    openModalEl('add-sub-modal', closeAddSubModal);
-}
-
-function closeAddSubModal() {
-    closeModalEl('add-sub-modal');
-}
-
-async function addSubscription() {
-    const resolved = await resolveSubService(getAddSubServicePicker, 'sub-book', 'sub-type');
-    if (!resolved) return;
-    const { serviceId, book, typeId, serviceName } = resolved;
-
-    const body = readSubFormBody('sub', serviceId, serviceName);
-    const data = await apiFetch('/api/subscriptions', { method: 'POST', body });
-    if (!data) return;
-
-    const recat = await cascadeServiceLabel(serviceId, book, typeId, serviceName, 'Added subscription');
-    if (!recat) showToast(`Added subscription "${serviceName}"`, 'info');
-
-    closeAddSubModal();
-    await loadSubscriptions();
-}
-
-async function toggleSubStatus(subId, currentStatus) {
-    const newStatus = currentStatus === 'active' ? 'deactivated' : 'active';
-    await fetch(`/api/subscriptions/${subId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-    });
-    await loadSubscriptions();
-}
-
-async function navigateToTransaction(txDate, matchPattern) {
-    // Switch to Dashboard tab, set month/year, search by service/pattern
-    switchTab('dashboard', { pushHistory: false });
-
-    // Ensure flat view for transaction-level navigation
-    setTxView('flat');
-
-    // Set period filter to the transaction's month
-    const [year, month] = txDate.split('-');
-    const yearSel = document.getElementById('filter-year');
-    const monthSel = document.getElementById('filter-month');
-    if (yearSel) yearSel.value = year;
-    if (monthSel) monthSel.value = month;
-
-    // Set search to match pattern
-    const searchEl = document.getElementById('tx-search');
-    if (searchEl) searchEl.value = matchPattern || '';
-
-    // Reload dashboard with new filters (preserves search)
-    txCurrentPage = 1;
-    await loadDashboard(true);
-
-    // Scroll to table
-    setTimeout(() => {
-        const txTable = document.getElementById('tx-table');
-        if (txTable) txTable.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 300);
-}
-
-async function enrichSubscriptions() {
-    const btn = document.querySelector('#tab-subs .btn-sm');
-    btn.disabled = true;
-    btn.textContent = 'Refreshing...';
-    try {
-        const res = await fetch('/api/subscriptions/enrich', { method: 'POST' });
-        if (!res.ok) {
-            showToast('Failed to refresh subscriptions', 'warn');
-            return;
-        }
-        const data = await res.json();
-        if (data.error) {
-            showToast('Error: ' + data.error, 'warn');
-            return;
-        }
-        await loadSubscriptions();
-        showToast(`Refreshed ${data.updated || 0} subscriptions`, 'info');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = 'Refresh from Txns';
-    }
-}
-
-
-// ============================================================
-// EDIT SUBSCRIPTION MODAL
-// ============================================================
-
-async function openEditSubModal(subId) {
-    const sub = allSubs.find(s => s.id === subId);
-    if (!sub) return;
-
-    document.getElementById('edit-sub-id').value = sub.id;
-    document.getElementById('edit-sub-cat-hint').style.display = 'none';
-
-    // Initialize ServicePicker with current service
-    const picker = getEditSubServicePicker();
-    picker.setValue(sub.service_name || '', sub.service_id || null);
-
-    const fieldMap = { amount: sub.amount || '', currency: sub.currency || 'SGD', freq: sub.frequency || 'monthly',
-        periods: sub.periods || 1, 'start-date': sub.start_date || '', renewal: sub.renewal_date || '',
-        status: sub.status || 'active', link: sub.link || '', notes: sub.notes || '' };
-    for (const [k, v] of Object.entries(fieldMap)) document.getElementById(`edit-sub-${k}`).value = v;
-
-    // Populate book and type dropdowns with the service's current label
-    populateTypeSelect('edit-sub-type', {selectedId: sub.type_id});
-    populateBookSelect('edit-sub-book', {selectedBook: sub.type_id ? sub.book : null});
-
-    // Populate card dropdown from accounts (include archived if sub uses one)
-    const cardSel = document.getElementById('edit-sub-card');
-    cardSel.innerHTML = '<option value="">—</option>';
-    accounts.forEach(a => {
-        if ((a.status !== 'archived' && hasStatements(a)) || a.id === sub.account_id) {
-            cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
-        }
-    });
-    if (sub.account_id) cardSel.value = sub.account_id;
-
-    openModalEl('edit-sub-modal', closeEditSubModal);
-
-    setupFxHint('edit-sub-modal', 'edit-sub-currency');
-
-    // Auto-suggest renewal (always recalculate for edits)
-    const suggestEditRenewal = () => {
-        const startVal = document.getElementById('edit-sub-start-date').value;
-        if (!startVal) return;
-        document.getElementById('edit-sub-renewal').value = calcRenewalDate(startVal,
-            document.getElementById('edit-sub-freq').value,
-            parseInt(document.getElementById('edit-sub-periods').value) || 1);
-    };
-    document.getElementById('edit-sub-start-date').onchange = suggestEditRenewal;
-}
-
-function closeEditSubModal() {
-    closeModalEl('edit-sub-modal');
-}
-
-async function saveEditSub() {
-    const subId = parseInt(document.getElementById('edit-sub-id').value);
-    const resolved = await resolveSubService(getEditSubServicePicker, 'edit-sub-book', 'edit-sub-type');
-    if (!resolved) return;
-    const { serviceId, book, typeId, serviceName } = resolved;
-
-    if (!serviceId) { alert('Please select a service'); return; }
-
-    const body = readSubFormBody('edit-sub', serviceId, serviceName);
-    const data = await apiFetch(`/api/subscriptions/${subId}`, { method: 'PUT', body });
-    if (!data) return;
-
-    const recat = await cascadeServiceLabel(serviceId, book, typeId, serviceName, 'Updated subscription');
-    if (!recat) showToast(`Updated subscription "${serviceName}"`, 'info');
-
-    closeEditSubModal();
-    await loadSubscriptions();
-}
-
-async function deleteSubFromModal() {
-    const subId = parseInt(document.getElementById('edit-sub-id').value);
-    const picker = getEditSubServicePicker();
-    const { name: service } = picker.getValue();
-    if (!confirm(`Delete subscription "${service}"?`)) return;
-
-    const data = await apiFetch(`/api/subscriptions/${subId}`, { method: 'DELETE' });
-    if (!data) return;
-
-    closeEditSubModal();
-    await loadSubscriptions();
-}
-
-
-// ============================================================
-// ACCOUNTS TAB
-// ============================================================
-
-// An account's kind and owner come from one declaration, served by
-// /api/account-kinds and held in accountKinds.
-function kindInfo(kind) {
-    return accountKinds.kinds.find(k => k.name === kind) || {};
-}
-
-// Whether an account's rows come from imported statements (a bank account or a card).
-function hasStatements(a) {
-    return !!kindInfo(a.type).has_statements;
-}
-
-function acctKindOptions(selected) {
-    return accountKinds.kinds.map(k =>
-        `<option value="${k.name}" title="${escapeHtml(k.description)}" ${k.name === selected ? 'selected' : ''}>${k.name}</option>`
-    ).join('');
-}
-
-function acctOwnerOptions(selected) {
-    return accountKinds.owners.map(o =>
-        `<option value="${escapeHtml(o.name)}" title="${escapeHtml(o.description)}" ${o.name === selected ? 'selected' : ''}>${escapeHtml(o.name)}</option>`
-    ).join('');
-}
-
-const CURRENCY_SIGNS = { SGD: 'S$', INR: 'Rs' };
-
-// The sign a row's amount is shown with: its account's currency. A row's
-// amount_sgd key is the old name; for a rupee account it holds rupees.
-function amountSign(currency) {
-    if (!currency || currency === 'SGD') return 'S$';
-    return `${CURRENCY_SIGNS[currency] || currency} `;
-}
-
-// A stored amount (whole minor units) as text: "S$ -902,500.00". Integer
-// arithmetic only.
-function formatMinorUnits(minor, currency) {
-    const abs = Math.abs(minor);
-    const units = Math.floor(abs / 100).toLocaleString('en-US');
-    const cents = String(abs % 100).padStart(2, '0');
-    const code = currency || 'SGD';
-    return `${CURRENCY_SIGNS[code] || code} ${minor < 0 ? '-' : ''}${units}.${cents}`;
-}
-
-// What an account's balance rests on: its latest anchor, or that it has none.
-function acctRestsOn(a) {
-    if (!a.anchor) {
-        return a.takes_a_figure ? '<span style="color:var(--text-muted);">no figure</span>' : '—';
-    }
-    const source = a.anchor.source === 'supplied' ? 'your figure' : 'statement';
-    return `${formatMinorUnits(a.anchor.amount_minor, a.currency)}<br><span style="color:var(--text-muted);">${source} ${formatDate(a.anchor.date)}</span>`;
-}
-
-let editingAcctId = null;  // Track which account row is being edited
-
-function renderAccountsTab() {
-    const body = document.getElementById('acct-body');
-    const empty = document.getElementById('acct-empty');
-    const count = document.getElementById('acct-count');
-
-    const activeAccts = accounts.filter(a => a.status !== 'archived');
-    const archivedAccts = accounts.filter(a => a.status === 'archived');
-    const showArchived = document.getElementById('acct-show-archived')?.checked;
-    const visible = showArchived ? accounts : activeAccts;
-
-    count.textContent = `${activeAccts.length} active${archivedAccts.length ? `, ${archivedAccts.length} archived` : ''}`;
-
-    if (!visible.length) {
-        body.innerHTML = '';
-        empty.classList.remove('hidden');
-        return;
-    }
-    empty.classList.add('hidden');
-
-    body.innerHTML = visible.map(a => {
-        if (a.id === editingAcctId) {
-            return renderAcctEditRow(a);
-        }
-        const isArchived = a.status === 'archived';
-        const archiveBtn = isArchived
-            ? `<button class="btn btn-sm" onclick="toggleArchiveAcct(${a.id}, 'active')" title="Restore">Restore</button>`
-            : `<button class="btn btn-sm" onclick="toggleArchiveAcct(${a.id}, 'archived')" title="Archive">Archive</button>`;
-        return `<tr${isArchived ? ' style="opacity:0.5;"' : ''}>
-            <td style="font-size:13px;">${escapeHtml(a.name)}${isArchived ? ' <span class="badge badge-muted" style="font-size:10px;margin-left:6px;">archived</span>' : ''}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.short_name)}</td>
-            <td><span class="acct-type-badge acct-type-${a.type}" title="${escapeHtml(kindInfo(a.type).description || '')}">${escapeHtml(a.type)}</span></td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.owner || '')}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${a.last_four || '—'}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${a.currency || 'SGD'}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${acctRestsOn(a)}</td>
-            <td style="text-align:right;white-space:nowrap;">
-                <button class="btn btn-sm" onclick="startEditAcct(${a.id})">Edit</button>
-                ${archiveBtn}
-                <button class="btn btn-sm" onclick="deleteAccount(${a.id})" title="Delete">Del</button>
-            </td>
-        </tr>`;
-    }).join('');
-}
-
-function renderAcctEditRow(a) {
-    return `<tr class="editing-row">
-        <td><input type="text" id="edit-acct-name" value="${escapeHtml(a.name)}" style="width:100%;font-size:13px;"></td>
-        <td><input type="text" id="edit-acct-short" value="${escapeHtml(a.short_name)}" style="width:100%;font-size:12px;"></td>
-        <td>
-            <select id="edit-acct-type" style="width:100%;font-size:12px;">${acctKindOptions(a.type)}</select>
-        </td>
-        <td>
-            <select id="edit-acct-owner" style="width:100%;font-size:12px;">${acctOwnerOptions(a.owner)}</select>
-        </td>
-        <td><input type="text" id="edit-acct-last4" value="${a.last_four || ''}" maxlength="4" style="width:100%;font-size:12px;"></td>
-        <td><input type="text" id="edit-acct-currency" value="${a.currency || 'SGD'}" style="width:60px;font-size:12px;"></td>
-        <td style="font-size:12px;color:var(--text-tertiary);">${acctRestsOn(a)}</td>
-        <td style="text-align:right;white-space:nowrap;">
-            <button class="btn btn-sm btn-primary" onclick="saveEditAcct(${a.id})">Save</button>
-            <button class="btn btn-sm" onclick="cancelEditAcct()">Cancel</button>
-        </td>
-    </tr>`;
-}
-
-function toggleAcctForm() {
-    const kindSel = document.getElementById('acct-type');
-    if (!kindSel.options.length) {
-        kindSel.innerHTML = acctKindOptions('card');
-        document.getElementById('acct-owner').innerHTML = acctOwnerOptions('Household');
-    }
-    document.getElementById('acct-form').classList.toggle('hidden');
-}
-
-async function addAccount() {
-    const name = document.getElementById('acct-name').value.trim();
-    if (!name) { alert('Account name is required'); return; }
-
-    const body = {
-        name,
-        short_name: document.getElementById('acct-short').value.trim() || name,
-        type: document.getElementById('acct-type').value,
-        owner: document.getElementById('acct-owner').value,
-        last_four: document.getElementById('acct-last4').value.trim() || null,
-        currency: document.getElementById('acct-currency').value.trim() || 'SGD',
-    };
-
-    const data = await apiFetch('/api/accounts', { method: 'POST', body });
-    if (!data) return;
-
-    // Reset form
-    document.getElementById('acct-name').value = '';
-    document.getElementById('acct-short').value = '';
-    document.getElementById('acct-last4').value = '';
-    document.getElementById('acct-currency').value = 'SGD';
-    document.getElementById('acct-form').classList.add('hidden');
-
-    // Reload accounts globally
-    await reloadAccounts();
-}
-
-function startEditAcct(id) {
-    editingAcctId = id;
-    renderAccountsTab();
-}
-
-function cancelEditAcct() {
-    editingAcctId = null;
-    renderAccountsTab();
-}
-
-async function saveEditAcct(id) {
-    const body = {
-        name: document.getElementById('edit-acct-name').value.trim(),
-        short_name: document.getElementById('edit-acct-short').value.trim(),
-        type: document.getElementById('edit-acct-type').value,
-        owner: document.getElementById('edit-acct-owner').value,
-        last_four: document.getElementById('edit-acct-last4').value.trim() || null,
-        currency: document.getElementById('edit-acct-currency').value.trim() || 'SGD',
-    };
-
-    if (!body.name) { alert('Account name is required'); return; }
-
-    const data = await apiFetch(`/api/accounts/${id}`, { method: 'PUT', body });
-    if (!data) return;
-
-    editingAcctId = null;
-    await reloadAccounts();
-}
-
-async function toggleArchiveAcct(id, newStatus) {
-    const acct = accounts.find(a => a.id === id);
-    const action = newStatus === 'archived' ? 'Archive' : 'Restore';
-    if (!confirm(`${action} account "${acct ? acct.short_name : id}"?`)) return;
-
-    const data = await apiFetch(`/api/accounts/${id}`, { method: 'PUT', body: { status: newStatus } });
-    if (!data) return;
-
-    await reloadAccounts();
-}
-
-async function deleteAccount(id) {
-    const acct = accounts.find(a => a.id === id);
-    if (!confirm(`Delete account "${acct ? acct.name : id}"?`)) return;
-
-    const data = await apiFetch(`/api/accounts/${id}`, { method: 'DELETE' });
-    if (!data) return;
-
-    await reloadAccounts();
-}
-
-async function reloadAccounts() {
-    // Refresh the global accounts array and update all dependent UI
-    const acctRes = await fetch('/api/accounts').then(r => r.json());
-    accounts = acctRes;
-    populateAccountFilter();
-    renderAccountsTab();
-    // A figure entered from the balance sheet shows on it at once.
-    if (document.getElementById('tab-balance')?.classList.contains('active')) await loadBalanceSheet();
-}
-
-
-// ============================================================
-// REVIEW LIST (transfers waiting for a label)
-// ============================================================
-
-// What is waiting, money out and money in apart: "8 out · S$ 96,000.00 ·
-// 2 in · S$ 250,000.00". A side with nothing in it is not named. `prefix`
-// picks the figures: 'waiting' (the whole list) or 'held_out' (one month's).
-function waitingOutAndIn(d, prefix) {
-    const side = (name) => d[`${prefix}_${name}_count`]
-        ? [`${d[`${prefix}_${name}_count`]} ${name} · S$ ${formatAmount(d[`${prefix}_${name}_total`])}`]
-        : [];
-    return [...side('out'), ...side('in')].join(' · ');
-}
-
-// The tab button says how many transfers are waiting.
-function showReviewCount(waiting) {
-    const btn = document.getElementById('review-tab-btn');
-    if (btn) btn.textContent = waiting ? `Review list (${waiting})` : 'Review list';
-}
-
-async function refreshReviewCount() {
-    try {
-        const info = await fetch('/api/review').then(r => r.json());
-        reviewChoices = info.choices;
-        showReviewCount(info.waiting);
-    } catch (err) {
-        // The count is a convenience; the list itself reports a failure.
-    }
-}
-
-async function loadReviewList() {
-    const [info, list, kinds] = await Promise.all([
-        fetch('/api/review').then(r => r.json()),
-        // The transaction list's own amount sort: largest first.
-        fetch('/api/transactions?flow=review&sort=amount&sort_dir=desc&per_page=500').then(r => r.json()),
-        incomeKinds.length ? incomeKinds : fetch('/api/types?kind=income').then(r => r.json()),
+// ---------------------------------------------------------------------------
+// One account's page: its balance, its tie line, its figures and rows
+// ---------------------------------------------------------------------------
+
+const accountPage = { page: 1 };
+async function viewAccount(id) {
+    const [r, sheet, ties, anchorsList, refused] = await Promise.all([
+        refs(), sheetFor(S.month), get(`/api/accounts/${id}/ties`), get(`/api/anchors?account_id=${id}`), get(`/api/statements/refused?account_id=${id}`),
     ]);
-    reviewChoices = info.choices;
-    incomeKinds = kinds;
-    reviewRows = list.transactions;
-    showReviewCount(info.waiting);
+    const acct = r.accountById.get(id);
+    if (!acct) throw new Error('No such account');
+    if (accountPage.id !== id) { accountPage.id = id; accountPage.page = 1; }
+    const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}`);
+    const line = sheet.sections.flatMap(s => s.lines).find(l => l.account_id === id);
+    const cur = acct.currency || 'SGD';
 
-    const noun = info.waiting === 1 ? 'transfer' : 'transfers';
-    const shown = reviewRows.length < info.waiting ? ` · showing the largest ${reviewRows.length}` : '';
-    document.getElementById('review-heading').textContent =
-        `/ Review list · ${info.waiting} ${noun} waiting${info.waiting ? ` · ${waitingOutAndIn(info, 'waiting')}` : ''} · held out of spending · largest first${shown}`;
-
-    document.getElementById('review-empty').classList.toggle('hidden', reviewRows.length > 0);
-    document.getElementById('review-table').classList.toggle('hidden', reviewRows.length === 0);
-    document.getElementById('review-body').innerHTML = reviewRows.map(tx => `<tr>
-            <td class="col-date">${formatDate(tx.date)}</td>
-            <td class="text-secondary" style="font-size:12px;">${escapeHtml(tx.account_name || '')}</td>
-            <td class="text-secondary" style="font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
-            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
-            <td style="white-space:nowrap;">
-                <select id="review-choice-${tx.id}" style="font-size:12px;" onchange="onReviewChoice(${tx.id})">
-                    <option value="">choose</option>
-                    ${reviewChoices.map(c => `<option value="${c.name}" title="${escapeHtml(c.description)}">${escapeHtml(c.label)}</option>`).join('')}
-                </select>
-                <span id="review-detail-${tx.id}"></span>
-                <button class="btn btn-sm btn-primary hidden" id="review-save-${tx.id}" onclick="saveReviewLabel(${tx.id})">Save</button>
-            </td>
-        </tr>`).join('');
-}
-
-// The accounts a choice may name as the other side: the household's, of the
-// kinds the choice allows, and never the account the row is on.
-function reviewAccountsFor(choice, tx) {
-    return accounts.filter(a =>
-        a.status !== 'archived' && a.owner === DEFAULT_BOOK
-        && choice.kinds.includes(a.type) && a.name !== tx.account_name);
-}
-
-// Show what the chosen label asks for: a type, an account, a person, an income kind.
-function onReviewChoice(txId) {
-    const tx = reviewRows.find(r => r.id === txId);
-    const choice = reviewChoices.find(c => c.name === document.getElementById(`review-choice-${txId}`).value);
-    const detail = document.getElementById(`review-detail-${txId}`);
-    document.getElementById(`review-save-${txId}`).classList.toggle('hidden', !choice);
-    if (!choice || !tx) { detail.innerHTML = ''; return; }
-
-    if (choice.asks === 'type') {
-        detail.innerHTML = `
-            <select id="review-type-${txId}" style="font-size:12px;max-width:170px;" onchange="onReviewType(${txId})">
-                <option value="">type</option>
-                ${types.map(t => `<option value="${t.id}" title="${escapeHtml(t.covers || '')}">${escapeHtml(t.display_name)}</option>`).join('')}
-            </select>
-            <select id="review-book-${txId}" style="font-size:12px;">
-                <option value="">whose</option>
-                ${books.map(b => `<option value="${escapeHtml(b.name)}" title="${escapeHtml(b.description)}">${escapeHtml(b.name)}</option>`).join('')}
-            </select>`;
-    } else if (choice.asks === 'account') {
-        detail.innerHTML = `
-            <select id="review-account-${txId}" style="font-size:12px;max-width:220px;">
-                <option value="">which</option>
-                ${reviewAccountsFor(choice, tx).map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('')}
-            </select>`;
-    } else if (choice.asks === 'person') {
-        detail.innerHTML = `
-            <input type="text" id="review-person-${txId}" list="review-people-${txId}" placeholder="who" style="font-size:12px;width:170px;">
-            <datalist id="review-people-${txId}">
-                ${reviewAccountsFor(choice, tx).map(a => `<option value="${escapeHtml(a.name)}"></option>`).join('')}
-            </datalist>`;
-    } else if (choice.asks === 'income_kind') {
-        detail.innerHTML = `
-            <select id="review-kind-${txId}" style="font-size:12px;">
-                <option value="">what kind</option>
-                ${incomeKinds.map(k => `<option value="${k.id}" title="${escapeHtml(k.covers || '')}">${escapeHtml(k.name)}</option>`).join('')}
-            </select>`;
-    } else {
-        detail.innerHTML = '';
-    }
-}
-
-// A type proposes whose spending it is; a book already chosen is left alone.
-function onReviewType(txId) {
-    const bookSel = document.getElementById(`review-book-${txId}`);
-    const proposed = proposedBook(document.getElementById(`review-type-${txId}`).value);
-    if (bookSel && !bookSel.value && proposed) bookSel.value = proposed;
-}
-
-async function saveReviewLabel(txId) {
-    const choice = reviewChoices.find(c => c.name === document.getElementById(`review-choice-${txId}`).value);
-    if (!choice) return;
-    const body = { choice: choice.name };
-    const value = id => (document.getElementById(`${id}-${txId}`) || {}).value || '';
-
-    if (choice.asks === 'type') {
-        if (!value('review-type')) { alert('Choose a type'); return; }
-        body.type_id = parseInt(value('review-type'));
-        if (value('review-book')) body.book = value('review-book');
-    } else if (choice.asks === 'account') {
-        if (!value('review-account')) { alert('Choose which account'); return; }
-        body.account_id = parseInt(value('review-account'));
-    } else if (choice.asks === 'person') {
-        if (!value('review-person').trim()) { alert('Say who'); return; }
-        body.person = value('review-person').trim();
-    } else if (choice.asks === 'income_kind') {
-        if (!value('review-kind')) { alert('Choose what kind of income'); return; }
-        body.income_kind_id = parseInt(value('review-kind'));
+    let tieLine = '<p class="muted">No balance yet: nothing to rest on.</p>';
+    if (line && line.rests_on && line.balance_minor !== null) {
+        const anchor = anchorsList.find(a => a.date === line.rests_on.date);
+        const base = anchor ? anchor.amount_minor : null;
+        const change = base !== null ? line.balance_minor - base : null;
+        tieLine = `<table class="sum"><tbody>
+            <tr><td class="op"></td><td>${line.rests_on.source === 'supplied' ? 'your figure' : 'statement'} ${esc(day(line.rests_on.date))}</td><td class="r">${esc(money(base, cur))}</td></tr>
+            ${change !== null ? `<tr><td class="op">${change < 0 ? '−' : '+'}</td><td>${esc(line.since || 'nothing since')}</td><td class="r">${esc(money(Math.abs(change), cur))}</td></tr>` : ''}
+            <tr class="eq"><td class="op">=</td><td>balance at ${esc(day(sheet.as_at))}</td><td class="r">${esc(money(line.balance_minor, cur))}</td></tr>
+            ${cur !== 'SGD' && line.value_minor !== null ? `<tr><td class="op"></td><td class="small muted">${esc(line.rate?.text || '')}</td><td class="r">${esc(money(line.value_minor, 'SGD'))}</td></tr>` : ''}
+            </tbody></table>`;
+    } else if (line && line.made_of) {
+        tieLine = `<p>${esc(line.made_of.text)}</p><p class="num"><b>${esc(money(line.balance_minor, cur))}</b></p>`;
     }
 
-    const btn = document.getElementById(`review-save-${txId}`);
-    btn.disabled = true;
-    const data = await apiFetch(`/api/review/${txId}/label`, { method: 'POST', body });
-    btn.disabled = false;
-    if (!data) return;
-
-    const named = data.other_side_name ? `, naming ${data.other_side_name}` : '';
-    const created = data.created_account ? ' (a new account for them)' : '';
-    showToast(`Labelled: ${choice.label}${named}${created}`, 'success', 5000);
-    if (data.created_account) {
-        accounts = await fetch('/api/accounts').then(r => r.json());
-    }
-    await loadReviewList();
-}
-
-
-// ============================================================
-// BALANCE SHEET (what the household owns and owes at a month's end)
-// ============================================================
-
-const BALANCE_SHEET_START = '2026-01';   // nothing is shown for an earlier month
-let balanceMonth = null;                 // the month shown, YYYY-MM; null = this month
-
-function thisMonth() {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-}
-
-// The last day of a month written YYYY-MM, as YYYY-MM-DD.
-function monthEnd(month) {
-    const [y, m] = month.split('-').map(Number);
-    return `${month}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
-}
-
-// The months the sheet can show, newest first: this month back to the start.
-function balanceMonths() {
-    const months = [];
-    let [y, m] = thisMonth().split('-').map(Number);
-    for (;;) {
-        const month = `${y}-${String(m).padStart(2, '0')}`;
-        if (month < BALANCE_SHEET_START) break;
-        months.push(month);
-        m -= 1;
-        if (m === 0) { m = 12; y -= 1; }
-    }
-    return months;
-}
-
-function onBalanceMonth() {
-    balanceMonth = document.getElementById('balance-month').value;
-    loadBalanceSheet();
-}
-
-// What a line rests on: "statement 31 Jul 2026", with its age when the
-// anchor is not from the month shown.
-function balanceRestsOn(line) {
-    // A company or a person with no opening figure is counted from the day
-    // the sheet starts, and says so.
-    if (!line.rests_on && line.since_label) return escapeHtml(line.since_label);
-    if (!line.rests_on) return '<span class="text-muted">no figure</span>';
-    const r = line.rests_on;
-    const age = r.in_month ? '' : ` <span class="text-warning">[${r.age_days} ${r.age_days === 1 ? 'day' : 'days'} old]</span>`;
-    return `${escapeHtml(r.label)} ${formatDate(r.date)}${age}`;
-}
-
-// A company's or a person's line says what its balance is made of in place
-// of a check: opening figure, paid for it, capital, paid back.
-function balanceCheck(line) {
-    if (line.made_of) {
-        const note = line.note ? ` <span class="text-warning">${escapeHtml(line.note)}</span>` : '';
-        return `<span class="text-secondary">${escapeHtml(line.made_of.text)}</span>${note}`;
-    }
-    if (!line.check) return '';
-    const cls = { ties: 'text-success', off: 'text-warning', not_checked: 'text-muted' }[line.check.status] || '';
-    return `<span class="${cls}">${escapeHtml(line.check.text)}</span>`;
-}
-
-// A balance in another currency shows its SGD value and the rate that gives
-// it; one left out of the total is marked, and says why.
-function balanceFigure(line) {
-    if (line.balance_minor === null) return escapeHtml(line.balance);
-    if (line.rate) {
-        return `${escapeHtml(line.balance)}
-            <div class="text-secondary" style="font-size:12px;" title="${escapeHtml(line.rate.source)}">${escapeHtml(line.value)}</div>
-            <div class="text-muted" style="font-size:11px;">${escapeHtml(line.rate.text)}</div>`;
-    }
-    if (line.in_total) return escapeHtml(line.balance);
-    return `${escapeHtml(line.balance)} <span class="text-muted" title="${escapeHtml(line.left_out || '')}">*</span>`;
-}
-
-// The month's currency change, and the rate controls for the currencies the
-// sheet holds besides SGD.
-function balanceCurrencyChange(sheet) {
-    const change = sheet.currency_change;
-    if (!change || !change.lines.length) return '';
-    const currencies = [...new Set(change.lines.map(l => l.currency))];
-    const figure = change.minor === null
-        ? `<span class="text-warning">${escapeHtml(change.note)}</span>`
-        : `<span style="font-family:var(--font-mono);">${escapeHtml(change.text)}</span>
-           <span class="text-muted">${change.lines.map(l =>
-               `${escapeHtml(l.name)}: ${escapeHtml(l.opening)} at ${escapeHtml(l.end.rate)} less at ${escapeHtml(l.start.rate)}`
-           ).join('; ')}</span>`;
-    const controls = currencies.map(c => `
-        <button class="btn btn-sm" onclick="fetchRate('${escapeHtml(c)}', '${escapeHtml(sheet.as_at)}')">Fetch ${escapeHtml(c)} rate for ${formatDate(sheet.as_at)}</button>
-        <button class="btn btn-sm" onclick="enterRate('${escapeHtml(c)}', '${escapeHtml(sheet.as_at)}')">Enter it</button>`).join('');
-    return `<div style="font-size:12px;margin-top:var(--space-3);">
-            <span class="balance-net-label">Currency change</span> ${figure}
-        </div>
-        <div style="display:flex;gap:var(--space-3);margin-top:var(--space-3);">${controls}</div>`;
-}
-
-// The month check: net worth at the previous month-end, plus income, less
-// spending, plus currency change, against net worth at the month-end. The
-// difference is unexplained, shown beside the month's transfers waiting for
-// review and the lines whose check is not "ties".
-function balanceMonthCheck(sheet) {
-    const c = sheet.month_check;
-    if (!c) return '';
-    const [y, m] = c.month.split('-').map(Number);
-    const monthName = new Date(y, m - 1, 1).toLocaleString('en-GB', { month: 'long', year: 'numeric' });
-    const row = (label, figure, aside = '', cls = '') => `<tr class="${cls}">
-            <td>${label}</td>
-            <td class="col-amount">${figure === null ? '<span class="text-muted">-</span>' : escapeHtml(figure)}</td>
-            <td class="text-secondary">${aside}</td>
-        </tr>`;
-    const interest = c.interest_minor ? `(interest ${escapeHtml(c.interest)} inside)` : '';
-    const review = c.review.count
-        ? `${c.review.count} ${c.review.count === 1 ? 'transfer' : 'transfers'} dated in ${escapeHtml(monthName)} waiting in the review list
-           (out ${escapeHtml(c.review.out)}${c.review.in_count ? ` · in ${escapeHtml(c.review.in)}` : ''})`
-        : `no transfer dated in ${escapeHtml(monthName)} is waiting for review`;
-    const notTying = c.not_tying.map(l =>
-        `<div>${escapeHtml(l.name)}: ${escapeHtml(l.text)}${l.date ? ` (${formatDate(l.date)})` : ''}</div>`
-    ).join('');
-    const unexplained = c.available
-        ? row('<strong>Unexplained</strong>', c.unexplained, `<div>${review}</div>${notTying}`, 'balance-total')
-        : row('Unexplained', null, `<span class="text-warning">${escapeHtml(c.why)}</span><div>${review}</div>${notTying}`);
-    const note = c.note ? `<div class="balance-note">${escapeHtml(c.note)}</div>` : '';
-    return `<div style="margin-top:var(--space-5);">
-            <div class="balance-net-label">Month check · ${escapeHtml(monthName)}</div>
-            ${note}
-            <table class="data-table" style="font-size:12px;">
-                <tbody>
-                    ${row(`Net worth, ${formatDate(c.from)}`, c.opening)}
-                    ${row('+ income', c.income)}
-                    ${row('- spending', c.spending, interest)}
-                    ${row('+ currency change', c.currency_change, (c.currency_change_lines || []).filter(l => l.spread_minor).map(l => `${escapeHtml(l.name)}: conversion spread ${escapeHtml(l.spread)} inside`).join('; '))}
-                    ${c.outside_minor ? row('+ moved from accounts left out', c.outside, 'to or from an account with no balance at one end of the month') : ''}
-                    ${row(`= expected, ${formatDate(c.to)}`, c.expected)}
-                    ${row(`actual, ${formatDate(c.to)}`, c.actual)}
-                    ${unexplained}
-                </tbody>
-            </table>
-        </div>`;
-}
-
-// Fetch the reference rate for a day and save it; a rate already saved is kept.
-async function fetchRate(currency, day) {
-    const resp = await fetch('/api/rates/fetch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ currency, date: day }),
-    });
-    const result = await resp.json();
-    if (!resp.ok) { alert(result.error || 'The rate could not be fetched'); return; }
-    loadBalanceSheet();
-}
-
-// Enter a rate for a day by hand, in place of any saved for it.
-async function enterRate(currency, day) {
-    const rate = prompt(`SGD for 1 ${currency} on ${day} (for example 0.0153):`);
-    if (rate === null || !rate.trim()) return;
-    const resp = await fetch('/api/rates', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ currency, date: day, rate: rate.trim() }),
-    });
-    const result = await resp.json();
-    if (!resp.ok) { alert(result.error || 'The rate could not be saved'); return; }
-    loadBalanceSheet();
-}
-
-async function loadBalanceSheet() {
-    const month = balanceMonth || thisMonth();
-    const sel = document.getElementById('balance-month');
-    sel.innerHTML = balanceMonths().map(m =>
-        `<option value="${m}"${m === month ? ' selected' : ''}>${formatDate(monthEnd(m))}</option>`
-    ).join('');
-
-    const table = document.getElementById('balance-table');
-    const errorEl = document.getElementById('balance-error');
-    const noteEl = document.getElementById('balance-note');
-    const netEl = document.getElementById('balance-net-worth');
-    let sheet;
-    try {
-        sheet = await fetch(`/api/balance-sheet?month=${encodeURIComponent(month)}`).then(r => r.json());
-    } catch (err) {
-        sheet = { error: 'The balance sheet could not be loaded' };
-    }
-    if (sheet.error) {
-        table.classList.add('hidden');
-        noteEl.classList.add('hidden');
-        netEl.textContent = '';
-        document.getElementById('balance-currency-change').innerHTML = '';
-        document.getElementById('balance-month-check').innerHTML = '';
-        document.getElementById('balance-error-text').textContent = sheet.error;
-        errorEl.classList.remove('hidden');
-        return;
-    }
-    errorEl.classList.add('hidden');
-    table.classList.remove('hidden');
-
-    netEl.innerHTML = `<span class="balance-net-label">Net worth</span>
-        <span class="balance-net-figure">${escapeHtml(sheet.net_worth)}</span>
-        <span class="text-muted">as at ${formatDate(sheet.as_at)}</span>`;
-    noteEl.textContent = sheet.note || '';
-    noteEl.classList.toggle('hidden', !sheet.note);
-
-    document.getElementById('balance-body').innerHTML = sheet.sections.map(section => {
-        const lines = section.lines.map(line => `<tr>
-                <td>${escapeHtml(line.name)}${line.archived ? ' <span class="text-muted" style="font-size:11px;">archived</span>' : ''}</td>
-                <td class="col-amount${line.balance_minor === null ? ' text-muted' : ''}">${balanceFigure(line)}</td>
-                <td class="text-secondary" style="font-size:12px;">${balanceRestsOn(line)}</td>
-                <td style="font-size:12px;">${balanceCheck(line)}</td>
-                <td class="text-secondary" style="font-size:12px;">${escapeHtml(line.since || '')}</td>
-            </tr>`).join('');
-        const leftOut = section.left_out.length
-            ? `leaves out ${section.left_out.map(l => `${escapeHtml(l.name)} (${escapeHtml(l.why)})`).join('; ')}`
-            : '';
-        const empty = section.lines.length ? '' : '<tr><td colspan="5" class="text-muted" style="font-size:12px;">no accounts</td></tr>';
-        return `<tr class="balance-section"><td colspan="5">${escapeHtml(section.heading)}</td></tr>
-            ${lines}${empty}
-            <tr class="balance-total">
-                <td class="text-muted" style="font-size:12px;">total</td>
-                <td class="col-amount">${escapeHtml(section.total)}</td>
-                <td colspan="3" class="text-muted" style="font-size:12px;">${leftOut}</td>
-            </tr>`;
+    const tieRows = ties.ties.map(t => {
+        if (t.status === 'ties' || t.status === 'off') {
+            const made = t.opening_minor + t.rows_minor;
+            return `<li style="margin-bottom:12px"><div class="spread"><b>Statement ${esc(day(t.date))}</b>${t.status === 'ties' ? tag('ties', 'ties') : tag('off', `off by ${money(Math.abs(t.difference_minor), cur)}`)}</div>
+                <div class="small num wrap">${esc(money(t.opening_minor, cur))} on ${esc(day(t.opening_date, { year: false }))} ${t.rows_minor < 0 ? '−' : '+'} ${plural(t.rows, 'row')} ${esc(money(Math.abs(t.rows_minor), cur))} = ${esc(money(made, cur))}${t.status === 'ties' ? '' : `, but it states ${esc(money(t.closing_minor, cur))}`}</div></li>`;
+        }
+        if (t.status === 'your figure') return `<li style="margin-bottom:12px"><div class="spread"><b>Your figure ${esc(day(t.date))}</b>${tag('yours', 'your figure')}</div><div class="small num">${esc(money(t.closing_minor, cur))} · the fact; nothing checks it</div></li>`;
+        return `<li style="margin-bottom:12px"><div class="spread"><b>Statement ${esc(day(t.date))}</b>${tag('notchecked', 'not checked: no earlier balance')}</div><div class="small num">${esc(money(t.closing_minor, cur))}</div></li>`;
     }).join('');
 
-    document.getElementById('balance-currency-change').innerHTML = balanceCurrencyChange(sheet);
-    document.getElementById('balance-month-check').innerHTML = balanceMonthCheck(sheet);
-    document.getElementById('balance-review-link').textContent = `Review list (${sheet.review_waiting})`;
+    const refusedHTML = refused.refused.map(f => `<div class="item refused" style="margin-top:8px"><div><div class="what">${esc(day(f.statement_date))} statement ${tag(f.set_aside ? 'aside' : 'refused', f.set_aside ? 'refused · set aside' : 'refused')}</div>
+        <div class="meta">${esc(money(f.opening_minor, f.currency))} ${f.rows_minor < 0 ? '−' : '+'} ${plural(f.rows, 'row')} ${esc(money(Math.abs(f.rows_minor), f.currency))} = ${esc(money(f.opening_minor + f.rows_minor, f.currency))}, but it states ${esc(money(f.closing_minor, f.currency))}: off by ${esc(money(Math.abs(f.difference_minor), f.currency))}</div>
+        <div class="holds">None of its rows is in the books.</div></div><div></div>
+        <div class="act">${f.set_aside ? `<button class="btn sm" data-act="aside" data-id="${f.id}" data-aside="0">Bring it back</button>` : `<button class="btn sm" data-act="aside" data-id="${f.id}" data-aside="1">Known, leave it</button>`}<a class="btn sm" href="#/books/import">Import a fixed file</a></div></div>`).join('');
+
+    const figures = anchorsList.filter(a => a.source === 'supplied').map(a => `<tr><td>${esc(day(a.date))}</td><td class="r num">${esc(money(a.amount_minor, cur))}</td><td class="small">${esc(a.note || '')}</td>
+        <td class="r"><button class="btn sm" data-act="figure-fix" data-id="${a.id}" data-date="${a.date}" data-amount="${a.amount_minor}">Correct</button> <button class="btn sm danger" data-act="figure-delete" data-id="${a.id}">Delete</button></td></tr>`).join('');
+
+    const rowList = rows.transactions.map(row => rowTr(row, { account: false })).join('');
+    ACT.__rows = new Map(rows.transactions.map(x => [x.id, x]));
+    return `${booksNav('sheet')}
+    <div class="page-head"><div><a class="link small" href="#/books">← Balance sheet</a><h1>${esc(acct.name)}</h1>
+        <p>${esc(acct.type)} · ${esc(acct.owner)} · kept in ${esc(cur)}${acct.status === 'archived' ? ' · archived' : ''}</p></div>
+        <div class="row">${acct.takes_a_figure ? `<button class="btn primary" data-act="figure" data-account="${id}">Enter a figure</button>` : ''}${monthPicker()}</div></div>
+    <div class="grid-2">
+        <section class="card"><div class="card-head"><h2>Balance</h2>${line ? `<span>${tickOf(line)} ${checkMarker(line)}</span>` : ''}</div>
+            <div class="hero-figure num" style="font-size:40px">${line && line.balance_minor !== null ? heroFigure(line.balance_minor, cur) : tag('nofig', 'no figure')}</div>
+            <p class="small">Rests on: ${line ? restsOn(line) : '—'}</p><hr class="rule">${tieLine}</section>
+        <section class="card"><div class="card-head"><h2>Tie lines</h2><p>each statement drawn as a sum</p></div>
+            ${tieRows ? `<ul style="list-style:none;padding:0;margin:0">${tieRows}</ul>` : '<p class="muted">No balances held.</p>'}
+            ${refusedHTML ? `<h3 style="margin-top:12px">Refused at upload</h3>${refusedHTML}` : ''}</section>
+    </div>
+    ${figures ? `<section class="card"><div class="card-head"><h2>Your figures</h2></div><div class="table-wrap"><table class="t"><tbody>${figures}</tbody></table></div></section>` : ''}
+    <section class="card"><div class="card-head"><h2>Rows</h2><p>${plural(rows.total, 'row')} · tap a row for its note, one-off and history</p></div>
+        <div class="table-wrap"><table class="t rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Amount</th></tr></thead><tbody>${rowList || '<tr><td colspan="4" class="empty">No rows.</td></tr>'}</tbody></table></div>
+        ${pager(rows, 'account-page')}</section>`;
+}
+ACT['account-page'] = el => { accountPage.page = Number(el.dataset.page); rerender(); };
+function pager(list, actName) {
+    if (!list.pages || list.pages <= 1) return '';
+    return `<div class="pager"><span class="small muted">page ${list.page} of ${list.pages}</span>
+        <button class="btn sm" data-act="${actName}" data-page="${list.page - 1}"${list.page <= 1 ? ' disabled' : ''}>Newer</button>
+        <button class="btn sm" data-act="${actName}" data-page="${list.page + 1}"${list.page >= list.pages ? ' disabled' : ''}>Older</button></div>`;
+}
+function rowTr(row, { account = true, book = false } = {}) {
+    const minor = toMinor(row.amount_sgd, row.currency);
+    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted small">transfer</span>', payment: '<span class="muted small">card payment</span>', movement: `<span class="muted small">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted small">income</span>' }[row.flow_type];
+    const label = flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
+    return `<tr class="clickable" data-act="row" data-tx="${row.id}">
+        <td class="num">${esc(day(row.date, { year: false }))}</td>
+        <td>${esc(row.description)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
+        <td>${label}${book || (row.book && row.book !== 'Household') ? ` <span class="small muted">· ${esc(row.book || '')}</span>` : ''}</td>
+        <td class="r">${rowAmount(minor, row.currency)}</td></tr>`;
+}
+ACT['figure-fix'] = async el => {
+    const amount = prompt('The corrected figure (what is owed for a loan):', (Math.abs(Number(el.dataset.amount)) / 100).toFixed(2));
+    if (amount === null) return;
+    const r = await act('PUT', `/api/anchors/${el.dataset.id}`, { amount: amount.replace(/[, ]/g, ''), date: el.dataset.date }, 'Figure corrected');
+    if (r) rerender();
+};
+ACT['figure-delete'] = async el => {
+    if (!confirm('Delete this figure? You can undo it from Changes.')) return;
+    const r = await act('DELETE', `/api/anchors/${el.dataset.id}`, undefined, 'Figure deleted');
+    if (r) rerender();
+};
+
+// ---------------------------------------------------------------------------
+// Spending: the old dashboard's views under Books, one book or every book
+// with a total each, never one sum
+// ---------------------------------------------------------------------------
+
+const charts = [];
+function totalsByCurrency(rows) {
+    const by = {};
+    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + toMinor(row.amount_sgd, c); });
+    return by;
+}
+function totalsText(by) {
+    const parts = Object.entries(by).map(([c, m]) => money(m, c));
+    return parts.length ? parts.join(' and ') : money(0, 'SGD');
+}
+function groupRows(rows, keyOf) {
+    const groups = new Map();
+    rows.forEach(row => {
+        const k = keyOf(row);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(row);
+    });
+    return [...groups.entries()].map(([name, list]) => ({ name, list, by: totalsByCurrency(list), sgd: totalsByCurrency(list).SGD || 0 }))
+        .sort((a, b) => b.sgd - a.sgd);
 }
 
-
-// ============================================================
-// ENTER A FIGURE (a supplied anchor: an account's balance on a date)
-// ============================================================
-
-function figureAccounts() {
-    // Each account says whether it takes a figure: a bank account does only
-    // while it has no statement. One with figures already typed is offered
-    // too, so that they can be corrected or deleted.
-    return accounts.filter(a => a.status !== 'archived' && (a.takes_a_figure || a.supplied_figures > 0));
-}
-
-// The figure being corrected, or null when the dialog enters a new one.
-let figureEditingId = null;
-
-// Whole minor units as the operator types a figure, two decimals: "902500.00".
-// A loan's figure is stored negative and typed as the positive amount owed.
-function typedFigure(minor, kind) {
-    const owed = kind === 'loan' ? -minor : minor;
-    const abs = Math.abs(owed);
-    return `${owed < 0 ? '-' : ''}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
-}
-
-function setFigureEditing(anchor) {
-    figureEditingId = anchor ? anchor.id : null;
-    document.getElementById('figure-account').disabled = !!anchor;
-    document.getElementById('figure-save').textContent = anchor ? 'Save correction' : 'Save';
-}
-
-// The figures typed for the chosen account, each with Correct and Delete. A
-// statement's balance is not listed: it is never changed by hand.
-async function loadFigureHeld() {
-    const field = document.getElementById('figure-held-field');
-    const box = document.getElementById('figure-held');
-    const acct = accounts.find(a => a.id === parseInt(document.getElementById('figure-account').value));
-    if (!acct || !acct.supplied_figures) { field.style.display = 'none'; box.innerHTML = ''; return; }
-    const held = (await fetch(`/api/anchors?account_id=${acct.id}`).then(r => r.json()))
-        .filter(f => f.source === 'supplied');
-    field.style.display = held.length ? '' : 'none';
-    box.innerHTML = held.map(f => `
-        <div class="figure-held-row${f.id === figureEditingId ? ' editing' : ''}">
-            <span>${formatDate(f.date)} · ${escapeHtml(formatMinorUnits(f.amount_minor, f.currency))}${f.note ? ` <span class="text-muted">${escapeHtml(f.note)}</span>` : ''}</span>
-            <span>
-                <button class="btn btn-sm" onclick="editFigure(${f.id})">Correct</button>
-                <button class="btn btn-sm" onclick="deleteFigure(${f.id})">Delete</button>
-            </span>
-        </div>`).join('');
-    box._held = held;
-}
-
-function editFigure(id) {
-    const f = (document.getElementById('figure-held')._held || []).find(x => x.id === id);
-    if (!f) return;
-    setFigureEditing(f);
-    document.getElementById('figure-amount').value = typedFigure(f.amount_minor, f.kind);
-    document.getElementById('figure-date').value = f.date;
-    document.getElementById('figure-note').value = f.note || '';
-    showFigureResult(null);
-    loadFigureHeld();
-    document.getElementById('figure-amount').focus();
-}
-
-async function deleteFigure(id) {
-    const f = (document.getElementById('figure-held')._held || []).find(x => x.id === id);
-    if (!f) return;
-    if (!confirm(`Delete your figure of ${formatMinorUnits(f.amount_minor, f.currency)} for ${formatDate(f.date)}? The balance will rest on the figures that remain.`)) return;
-    const data = await apiFetch(`/api/anchors/${id}`, { method: 'DELETE' });
-    if (!data) return;
-    if (figureEditingId === id) setFigureEditing(null);
-    showToast(`Deleted the figure for ${formatDate(f.date)}`, 'success', 4000);
-    await reloadAccounts();
-    await loadFigureHeld();
-}
-
-function openFigureModal() {
-    const offered = figureAccounts();
-    if (!offered.length) {
-        alert('No loan, holding, company or person account, and no bank account without a statement, yet. Add one first.');
-        return;
-    }
-    const sel = document.getElementById('figure-account');
-    sel.innerHTML = offered.map(a =>
-        `<option value="${a.id}">${escapeHtml(a.name)} (${escapeHtml(a.type)})</option>`
-    ).join('');
-    document.getElementById('figure-amount').value = '';
-    document.getElementById('figure-note').value = '';
-    setFigureEditing(null);
-    showFigureResult(null);
-    loadFigureHeld();
-    const now = new Date();
-    document.getElementById('figure-date').value =
-        `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    updateFigureHint();
-    document.getElementById('figure-modal').style.display = 'flex';
-    document.getElementById('figure-amount').focus();
-}
-
-function closeFigureModal() {
-    setFigureEditing(null);
-    document.getElementById('figure-modal').style.display = 'none';
-}
-
-// After a loan figure is saved the dialog stays open and states what was
-// worked out; with nothing to state it shows the form.
-function showFigureResult(message) {
-    const result = document.getElementById('figure-result');
-    result.textContent = message || '';
-    result.style.display = message ? 'block' : 'none';
-    document.getElementById('figure-save').style.display = message ? 'none' : '';
-    document.getElementById('figure-cancel').textContent = message ? 'Close' : 'Cancel';
-}
-
-function updateFigureHint() {
-    const acct = accounts.find(a => a.id === parseInt(document.getElementById('figure-account').value));
-    const hints = {
-        loan: 'what is owed',
-        holding: 'what it is worth',
-        company: 'our money in it on that date (its opening amount)',
-        person: 'what they owe us on that date',
-        bank: 'the balance on that date',
+async function viewSpending() {
+    const sp = S.spending;
+    const r = await refs();
+    const months = monthsBack(S.month, 12);
+    const span = sp.span === 'year' ? months : [S.month];
+    const books = sp.book === 'all' ? r.books.map(b => b.name) : [sp.book];
+    const qs = book => {
+        const p = new URLSearchParams({ book, start: months[0] + '-01', end: monthEnd(S.month), expense_only: 'true', per_page: '5000', sort: 'date', sort_dir: 'desc' });
+        if (sp.search) p.set('search', sp.search);
+        if (sp.type) p.set('types', sp.type);
+        if (sp.account) p.set('account_id', sp.account);
+        if (!sp.oneOffs) p.set('exclude_one_off', 'true');
+        return p.toString();
     };
-    const sign = acct ? (CURRENCY_SIGNS[acct.currency || 'SGD'] || acct.currency) : '';
-    document.getElementById('figure-amount-hint').textContent =
-        `${(acct && hints[acct.type]) || 'what is owed, or what it is worth'}${sign ? ', in ' + sign : ''}`;
+    const lists = await Promise.all(books.map(b => get(`/api/transactions?${qs(b)}`)));
+    const perBook = books.map((book, i) => {
+        const year = lists[i].transactions;
+        const rows = year.filter(row => span.includes(row.date.slice(0, 7)));
+        return { book, year, rows, by: totalsByCurrency(rows) };
+    });
+    ACT.__rows = new Map(perBook.flatMap(b => b.rows).map(x => [x.id, x]));
+
+    const totals = `<div class="tiles">${perBook.map((b, i) => `<div class="tile ${i === 0 && b.book === r.books[0].name ? '' : 'company'}">
+        <div class="eyebrow">${esc(b.book)}${i === 0 && b.book === r.books[0].name ? ' · household spending' : ' · its costs'}</div>
+        <div class="fig num">${esc(totalsText(b.by))}</div><p>${plural(b.rows.length, 'row')} · ${span.length === 1 ? esc(monthName(S.month)) : `12 months to ${esc(monthName(S.month, { short: true }))}`}</p></div>`).join('')}</div>
+        ${perBook.length > 1 ? '<p class="never">Each book has its own total. They are never added together.</p>' : ''}`;
+
+    const body = perBook.map(b => {
+        let content;
+        if (sp.view === 'flat') {
+            content = `<div class="table-wrap"><table class="t rows"><thead><tr><th>Date</th><th>Description</th><th>Type</th><th class="r">Amount</th></tr></thead>
+                <tbody>${b.rows.slice(0, 300).map(row => rowTr(row)).join('') || '<tr><td colspan="4" class="empty">No rows.</td></tr>'}</tbody></table></div>
+                ${b.rows.length > 300 ? `<p class="small muted">The first 300 of ${b.rows.length} rows; narrow the filters to see the rest.</p>` : ''}`;
+        } else {
+            const groups = groupRows(b.rows, sp.view === 'type' ? row => row.display_type || 'No type' : row => row.service_name || row.description);
+            content = `<div class="table-wrap"><table class="t"><thead><tr><th>${sp.view === 'type' ? 'Type' : 'Merchant'}</th><th class="r">Rows</th><th class="r">Total</th><th class="r desk-only">Share</th></tr></thead><tbody>
+                ${groups.slice(0, 60).map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${g.name === 'No type' ? tag('nofig', 'No type') : esc(g.name)}</td><td class="r num">${g.list.length}</td>
+                    <td class="r num">${esc(totalsText(g.by))}</td><td class="r num desk-only">${pct(g.sgd, b.by.SGD || 0)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">No rows.</td></tr>'}</tbody></table></div>`;
+        }
+        return `<section class="card"><div class="card-head"><h2>${esc(b.book)}</h2><p>total <b class="num">${esc(totalsText(b.by))}</b> · ${plural(b.rows.length, 'row')}</p></div>
+            <div class="chart-box small"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)} by month"></canvas></div>
+            <p class="small muted" style="margin:6px 0 10px">By month, 12 months to ${esc(monthName(S.month, { short: true }))}, in S$, on its own scale. Tap a month to look at it.</p>
+            ${content}</section>`;
+    }).join('');
+
+    afterRender(() => drawSpendingCharts(perBook, months));
+    const accounts = r.accounts.filter(a => ['bank', 'card'].includes(a.type));
+    return `${booksNav('spending')}
+    <div class="page-head"><div><h1>Spending</h1><p>Household spending and each company’s costs, a book at a time or every book with its own total.</p></div>${monthPicker()}</div>
+    <section class="card"><div class="fields" style="gap:10px">
+        <div class="row"><div class="seg" role="group" aria-label="Book">${[['all', 'All books'], ...r.books.map(b => [b.name, b.name])].map(([k, l]) =>
+            `<button data-act="spend-set" data-k="book" data-v="${esc(k)}" aria-pressed="${sp.book === k}">${esc(l)}</button>`).join('')}</div>
+            <div class="seg" role="group" aria-label="View">${[['flat', 'Every row'], ['merchant', 'By merchant'], ['type', 'By type']].map(([k, l]) =>
+            `<button data-act="spend-set" data-k="view" data-v="${k}" aria-pressed="${sp.view === k}">${l}</button>`).join('')}</div>
+            <div class="seg" role="group" aria-label="Period">${[['month', monthName(S.month, { short: true })], ['year', '12 months']].map(([k, l]) =>
+            `<button data-act="spend-set" data-k="span" data-v="${k}" aria-pressed="${sp.span === k}">${esc(l)}</button>`).join('')}</div></div>
+        <div class="fields two" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+            <label class="field"><span>Search</span><input type="search" id="sp-search" value="${esc(sp.search)}" placeholder="Merchant, description or type"></label>
+            <label class="field"><span>Type</span><select data-change="spend-type"><option value="">Every type</option><option value="__untyped__"${sp.type === '__untyped__' ? ' selected' : ''}>No type</option>
+                ${r.types.filter(t => t.kind === 'spending').map(t => `<option value="${esc(t.name)}"${sp.type === t.name ? ' selected' : ''}>${esc(t.display_name || t.name)}</option>`).join('')}</select></label>
+            <label class="field"><span>Account</span><select data-change="spend-account"><option value="">Every account</option>${accounts.map(a => `<option value="${a.id}"${String(a.id) === String(sp.account) ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
+            <label class="check" style="align-self:end"><input type="checkbox" data-change="spend-oneoffs"${sp.oneOffs ? ' checked' : ''}> Include one-offs</label></div>
+        </div></section>
+    <section class="card">${totals}</section>
+    ${body}`;
 }
-
-async function saveFigure() {
-    const accountId = parseInt(document.getElementById('figure-account').value);
-    const acct = accounts.find(a => a.id === accountId);
-    // The amount goes as the text typed, less any currency sign and spaces:
-    // the server reads it exactly and refuses what is not a plain figure.
-    const amount = document.getElementById('figure-amount').value.replace(/[^0-9.,-]/g, '');
-    const date = document.getElementById('figure-date').value;
-    if (!amount) { alert('Amount is required'); return; }
-    if (!date) { alert('The date the figure is as of is required'); return; }
-
-    const btn = document.getElementById('figure-save');
-    btn.disabled = true;
-    const note = document.getElementById('figure-note').value.trim() || null;
-    const correcting = figureEditingId;
-    const data = correcting
-        ? await apiFetch(`/api/anchors/${correcting}`, { method: 'PUT', body: { amount, date, note } })
-        : await apiFetch('/api/anchors', {
-            method: 'POST',
-            body: { account_id: accountId, amount, date, note },
-        });
-    btn.disabled = false;
-    if (!data) return;
-
-    if (correcting) {
-        setFigureEditing(null);
-        if (data.message) showFigureResult(data.message); else closeFigureModal();
-        showToast(
-            `Corrected: ${acct ? acct.name : data.anchor.account_name} ${formatMinorUnits(data.anchor.amount_minor, data.anchor.currency)} as of ${formatDate(data.anchor.date)}`,
-            'success', 6000
-        );
-        await reloadAccounts();
-        return;
-    }
-
-    if (data.message) {
-        showFigureResult(data.message);
-    } else {
-        closeFigureModal();
-    }
-    const shown = formatMinorUnits(data.anchor.amount_minor, data.anchor.currency);
-    const name = acct ? acct.name : data.anchor.account_name;
-    showToast(
-        data.created
-            ? `Saved: ${name} ${shown} as of ${formatDate(data.anchor.date)}`
-            : `${name} already had ${shown} for ${formatDate(data.anchor.date)}; nothing changed`,
-        data.created ? 'success' : 'info', 6000
-    );
-    await reloadAccounts();
-    await loadFigureHeld();
-}
-
-// ---------------------------------------------------------------------------
-// Backup warning (fin-online D3): shown when backups are not configured
-// (hosted only, never in local-dev) or none has succeeded in 36 hours. The
-// server decides; this only shows it.
-// ---------------------------------------------------------------------------
-document.addEventListener('DOMContentLoaded', async () => {
-    try {
-        const res = await fetch('/api/backups/status');
-        if (!res.ok) return;
-        const status = await res.json();
-        if (!status.warning) return;
-        const banner = document.createElement('div');
-        banner.className = 'backup-warning';
-        banner.setAttribute('role', 'status');
-        banner.textContent = `Backups: ${status.warning}` +
-            (status.last_success_at ? ` (last success ${status.last_success_at})` : '');
-        document.querySelector('.app-header')?.after(banner);
-    } catch (_) { /* no banner if the status cannot be read */ }
+function setSpending(k, v) { S.spending[k] = v; store.set('spending', S.spending); rerender(); }
+ACT['spend-set'] = el => setSpending(el.dataset.k, el.dataset.v);
+ACT['spend-type'] = el => setSpending('type', el.value);
+ACT['spend-account'] = el => setSpending('account', el.value);
+ACT['spend-oneoffs'] = el => setSpending('oneOffs', el.checked);
+ACT['spend-drill'] = el => {
+    if (el.dataset.view === 'type') { S.spending.type = el.dataset.key === 'No type' ? '__untyped__' : el.dataset.key; S.spending.search = ''; }
+    else { S.spending.search = el.dataset.key; }
+    S.spending.view = 'flat'; store.set('spending', S.spending); rerender();
+};
+document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'sp-search') setSpending('search', e.target.value.trim());
 });
+document.addEventListener('search', e => { if (e.target.id === 'sp-search') setSpending('search', e.target.value.trim()); }, true);
+
+function drawSpendingCharts(perBook, months) {
+    charts.splice(0).forEach(c => c.destroy());
+    if (typeof Chart === 'undefined') return;
+    const ink = getComputedStyle(document.documentElement).getPropertyValue('--text-tertiary').trim() || '#6e5f48';
+    perBook.forEach((b, i) => {
+        const canvas = document.getElementById(`chart-${b.book}`);
+        if (!canvas) return;
+        const sums = months.map(m => b.year.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD')
+            .reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0) / 100);
+        const fill = i === 0 ? '#8a7a62' : '#c9a774';
+        charts.push(new Chart(canvas, {
+            type: 'bar',
+            data: { labels: months.map(m => MONTHS[Number(m.slice(5)) - 1]), datasets: [{ label: `${b.book}, S$`, data: sums,
+                backgroundColor: months.map(m => m === S.month ? '#2c2418' : fill), borderRadius: 3 }] },
+            options: {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => money(Math.round(c.raw * 100), 'SGD') } } },
+                scales: { x: { grid: { display: false }, ticks: { color: ink } }, y: { ticks: { color: ink, callback: v => `S$ ${v >= 1000 ? (v / 1000) + 'k' : v}` }, grid: { color: 'rgba(0,0,0,0.05)' } } },
+                onClick: (_e, els) => { if (els.length) { S.month = months[els[0].index]; store.set('month', S.month); rerender(); } },
+            },
+        }));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Bills: the subscriptions, under Spending. A missed renewal is a queue item.
+// ---------------------------------------------------------------------------
+
+async function viewBills() {
+    const [subs, r] = await Promise.all([get('/api/subscriptions'), refs()]);
+    const active = subs.filter(s => s.status === 'active');
+    const perBook = {};
+    active.forEach(s => { const b = s.book || r.books[0].name; perBook[b] = (perBook[b] || 0) + toMinor(s.monthly_sgd, 'SGD'); });
+    ACT.__subs = new Map(subs.map(s => [s.id, s]));
+    const rows = subs.map(s => {
+        const missed = billMissed(s);
+        const cur = s.currency || 'SGD';
+        return `<tr class="clickable" data-act="bill" data-id="${s.id}">
+            <td><b>${esc(s.service_name || s.match_pattern)}</b><div class="small muted">${esc(s.book || '')}${s.display_type ? ' · ' + esc(s.display_type) : ''}</div></td>
+            <td class="r num">${esc(money(toMinor(s.amount, cur), cur))}${s.is_variable ? '<div class="small muted">varies</div>' : ''}</td>
+            <td>${esc(s.periods > 1 ? `every ${s.periods} ${s.frequency.replace('ly', '').replace('month', 'months').replace('year', 'years').replace('quarter', 'quarters')}` : s.frequency)}</td>
+            <td class="r num desk-only">${esc(money(toMinor(s.monthly_sgd, 'SGD'), 'SGD'))}</td>
+            <td class="desk-only small">${esc(s.account_name || '')}</td>
+            <td class="num">${esc(day(s.tx_last_paid || s.last_paid))}</td>
+            <td class="num">${s.status === 'active' ? esc(day(s.computed_renewal)) : '—'}</td>
+            <td>${missed ? tag('stale', `missed: due ${day(missed.due, { year: false })}`, { href: '#/queue' }) : s.status === 'active' ? '<span class="small">active</span>' : tag('yours', s.status)}</td></tr>`;
+    }).join('');
+    return `${booksNav('bills')}
+    <div class="page-head"><div><h1>Bills</h1><p>What renews and when, from the rows that pay it. A renewal with no payment seen goes to the queue.</p></div>
+        <button class="btn primary" data-act="bill" data-id="">Add a bill</button></div>
+    <section class="card"><div class="tiles">${Object.entries(perBook).map(([b, m]) => `<div class="tile"><div class="eyebrow">${esc(b)}</div><div class="fig num">${esc(money(m, 'SGD'))}</div><p>a month, active bills</p></div>`).join('')}</div>
+        <p class="never">Monthly figures in S$ at the bill's own rate; each book's bills are their own total.</p></section>
+    <section class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Bill</th><th class="r">Amount</th><th>How often</th><th class="r desk-only">A month</th><th class="desk-only">Paid from</th><th>Last paid</th><th>Next</th><th>State</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="8" class="empty">No bills yet.</td></tr>'}</tbody></table></div></section>`;
+}
+ACT.bill = async el => {
+    const [r, services] = await Promise.all([refs(), servicesList()]);
+    const s = el.dataset.id ? ACT.__subs.get(Number(el.dataset.id)) : null;
+    const sel = (id, opts, v) => `<select id="${id}">${opts.map(([k, l]) => `<option value="${esc(k)}"${String(k) === String(v ?? '') ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+    openSheet(s ? esc(s.service_name || 'Bill') : 'Add a bill', `<div class="fields">
+        <label class="field"><span>Merchant</span>${sel('bl-svc', [['', 'Choose'], ...services.map(x => [x.id, x.name])], s?.service_id)}</label>
+        <div class="fields two"><label class="field"><span>Amount</span><input type="text" inputmode="decimal" id="bl-amount" value="${s ? esc(s.amount) : ''}"></label>
+            <label class="field"><span>Currency</span>${sel('bl-cur', ['SGD', 'USD', 'INR', 'EUR', 'GBP', 'AUD'].map(c => [c, c]), s?.currency || 'SGD')}</label></div>
+        <div class="fields two"><label class="field"><span>How often</span>${sel('bl-freq', [['monthly', 'monthly'], ['quarterly', 'quarterly'], ['yearly', 'yearly']], s?.frequency || 'monthly')}</label>
+            <label class="field"><span>Every how many</span><input type="number" min="1" id="bl-periods" value="${s ? s.periods : 1}"></label></div>
+        <label class="field"><span>Paid from</span>${sel('bl-acct', [['', '—'], ...r.accounts.filter(a => ['bank', 'card'].includes(a.type)).map(a => [a.id, a.name])], s?.account_id)}</label>
+        <div class="fields two"><label class="field"><span>Renews on</span><input type="date" id="bl-renew" value="${esc(s?.renewal_date || '')}"></label>
+            <label class="field"><span>State</span>${sel('bl-status', [['active', 'active'], ['paused', 'paused'], ['deactivated', 'stopped']], s?.status || 'active')}</label></div>
+        <label class="field"><span>Matches rows containing</span><input type="text" id="bl-pattern" value="${esc(s?.match_pattern || '')}"></label>
+        <label class="field"><span>Where to manage it</span><input type="url" id="bl-link" value="${esc(s?.link || '')}"></label>
+        <label class="field"><span>Note</span><input type="text" id="bl-notes" value="${esc(s?.notes || '')}"></label></div>
+        <div class="row"><button class="btn primary" data-act="bill-save" data-id="${s ? s.id : ''}">Save</button>${s ? `<button class="btn danger" data-act="bill-delete" data-id="${s.id}">Delete</button>` : ''}</div>`);
+};
+ACT['bill-save'] = async el => {
+    const v = id => $('#' + id).value.trim();
+    if (!v('bl-svc')) { toast('Choose the merchant', { bad: true }); return; }
+    const body = { service_id: Number(v('bl-svc')), amount: Number(v('bl-amount') || 0), currency: v('bl-cur'), frequency: v('bl-freq'),
+        periods: Number(v('bl-periods') || 1), account_id: v('bl-acct') ? Number(v('bl-acct')) : null, renewal_date: v('bl-renew') || null,
+        status: v('bl-status'), match_pattern: v('bl-pattern') || null, link: v('bl-link') || null, notes: v('bl-notes') || null };
+    const r = el.dataset.id ? await act('PUT', `/api/subscriptions/${el.dataset.id}`, body, 'Bill saved') : await act('POST', '/api/subscriptions', body, 'Bill added');
+    if (r) { closeSheet(); rerender(); }
+};
+ACT['bill-delete'] = async el => {
+    if (!confirm('Delete this bill? You can undo it from Changes.')) return;
+    const r = await act('DELETE', `/api/subscriptions/${el.dataset.id}`, undefined, 'Bill deleted');
+    if (r) { closeSheet(); rerender(); }
+};
+
+// ---------------------------------------------------------------------------
+// Lists: types, merchants (clean-up), rules (edit), accounts (add, a figure)
+// ---------------------------------------------------------------------------
+
+const listState = { search: '', filter: 'all' };
+async function viewLists(tab) {
+    const tabs = [['merchants', 'Merchants'], ['rules', 'Rules'], ['accounts', 'Accounts'], ['types', 'Types']];
+    const head = `${booksNav('lists')}<div class="page-head"><div><h1>Lists</h1><p>What the rules and labels are made of. Every change here lands in Changes, with Undo.</p></div></div>
+        <div class="chips" style="margin-bottom:16px">${tabs.map(([k, l]) => `<a class="chip" href="#/books/lists/${k}" aria-pressed="${k === tab}">${l}</a>`).join('')}</div>`;
+    const search = placeholder => `<label class="field" style="max-width:360px"><span class="sr-only">Search</span><input type="search" id="ls-search" value="${esc(listState.search)}" placeholder="${placeholder}"></label>`;
+    const r = await refs();
+    const needle = listState.search.toLowerCase();
+
+    if (tab === 'types') {
+        const block = kind => r.types.filter(t => t.kind === kind).map(t => `<tr><td><b>${esc(t.display_name || t.name)}</b></td><td class="small">${esc(t.covers)}</td>
+            <td class="small muted">${esc(t.not_for || '')}</td><td class="small">${esc(t.proposed_book || 'any book')}${t.default_one_off ? ' · one-off' : ''}</td></tr>`).join('');
+        return `${head}<section class="card"><div class="card-head"><h2>Types</h2><p>One list serves every book. The list is declared in fin’s code.</p></div>
+            <div class="table-wrap"><table class="t"><thead><tr><th>Type</th><th>Covers</th><th>Not for</th><th>Book</th></tr></thead><tbody>${block('spending')}</tbody></table></div></section>
+            <section class="card"><div class="card-head"><h2>Income kinds</h2></div><div class="table-wrap"><table class="t"><tbody>${block('income')}</tbody></table></div></section>`;
+    }
+    if (tab === 'accounts') {
+        const rows = r.accounts.map(a => `<tr><td><a href="#/books/account/${a.id}"><b>${esc(a.name)}</b></a></td><td>${esc(a.type)}</td><td>${esc(a.owner)}</td><td>${esc(a.currency)}</td>
+            <td class="small">${a.anchor ? `${a.anchor.source === 'supplied' ? 'your figure' : 'statement'} ${esc(day(a.anchor.date))}: <span class="num">${esc(money(a.anchor.amount_minor, a.currency))}</span>` : tag('nofig', 'no figure')}</td>
+            <td class="r">${a.takes_a_figure ? `<button class="btn sm" data-act="figure" data-account="${a.id}">Enter a figure</button> ` : ''}<button class="btn sm" data-act="account-edit" data-id="${a.id}">Edit</button></td></tr>`).join('');
+        return `${head}<section class="card"><div class="card-head"><h2>Accounts</h2><button class="btn primary" data-act="account-edit" data-id="">Add an account</button></div>
+            <div class="table-wrap"><table class="t"><thead><tr><th>Account</th><th>Kind</th><th>Whose</th><th>Currency</th><th>Latest balance held</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+    }
+    if (tab === 'rules') {
+        const rules = await get('/api/rules');
+        const shown = rules.filter(x => !needle || `${x.pattern} ${x.service_name}`.toLowerCase().includes(needle));
+        ACT.__rules = new Map(rules.map(x => [x.id, x]));
+        const rows = shown.slice(0, 200).map(x => `<tr class="clickable" data-act="rule" data-id="${x.id}"><td class="num"><b>${esc(x.pattern)}</b></td><td class="small">${esc(x.match_type)}</td>
+            <td>${esc(x.service_name || '')}</td><td class="small">${esc(x.book_override || x.book || '')}${x.type_override_id || x.type_name ? ' · ' + esc(x.type_override_id ? r.typeById.get(x.type_override_id)?.name : x.type_name) : ''}${x.book_override || x.type_override_id ? ' ' + tag('yours', 'overrides') : ''}</td>
+            <td class="small num">${x.min_amount !== null || x.max_amount !== null ? `${x.min_amount ?? '…'} to ${x.max_amount ?? '…'}` : ''}</td></tr>`).join('');
+        return `${head}<section class="card"><div class="card-head">${search('Search patterns or merchants')}
+            <div class="row"><button class="btn" data-act="rerun-rules">Re-run every rule</button><button class="btn primary" data-act="rule" data-id="">Add a rule</button></div></div>
+            <p class="small muted">${shown.length} of ${rules.length} rules${shown.length > 200 ? ' · the first 200 shown' : ''}. A rule gives a row its merchant, and with it a book and type.</p>
+            <div class="table-wrap"><table class="t"><thead><tr><th>Pattern</th><th>Match</th><th>Merchant</th><th>Sets</th><th>Amount range</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+    }
+    // merchants
+    const services = await servicesList();
+    const filters = { all: () => true, untyped: s => !s.type_id, mixed: s => s.review_each_time, hidden: s => s.exclude_from_expense_views, unused: s => !s.txn_count };
+    const shown = services.filter(filters[listState.filter] || filters.all).filter(s => !needle || s.name.toLowerCase().includes(needle));
+    ACT.__services = new Map(services.map(s => [s.id, s]));
+    const rows = shown.slice(0, 200).map(s => `<tr class="clickable" data-act="merchant" data-id="${s.id}"><td><b>${esc(s.name)}</b></td><td>${esc(s.book || '')}</td>
+        <td>${s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type')}</td><td class="r num">${s.txn_count}</td><td class="r num">${s.rule_count}</td>
+        <td>${s.review_each_time ? tag('notchecked', 'mixed') : ''} ${s.exclude_from_expense_views ? tag('yours', 'hidden') : ''} ${s.is_one_off ? tag('yours', 'one-off') : ''}</td></tr>`).join('');
+    const chip = (k, l, n) => `<button class="chip" data-act="list-filter" data-f="${k}" aria-pressed="${listState.filter === k}">${l} <span class="n">${n}</span></button>`;
+    return `${head}<section class="card"><div class="card-head">${search('Search merchants')}</div>
+        <div class="chips" style="margin-bottom:12px">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('mixed', 'Mixed', services.filter(filters.mixed).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
+        <div class="table-wrap"><table class="t"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty">None.</td></tr>'}</tbody></table></div>
+        ${shown.length > 200 ? `<p class="small muted">The first 200 of ${shown.length}; search to narrow.</p>` : ''}</section>`;
+}
+ACT['list-filter'] = el => { listState.filter = el.dataset.f; rerender(); };
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'ls-search') { listState.search = e.target.value.trim(); rerender(); } });
+document.addEventListener('search', e => { if (e.target.id === 'ls-search') { listState.search = e.target.value.trim(); rerender(); } }, true);
+
+ACT.merchant = async el => {
+    const r = await refs();
+    const s = ACT.__services.get(Number(el.dataset.id));
+    const others = [...ACT.__services.values()].filter(x => x.id !== s.id);
+    openSheet(esc(s.name), `<div class="fields">
+        <label class="field"><span>Name</span><input type="text" id="mc-name" value="${esc(s.name)}"></label>
+        <div class="fields two"><label class="field"><span>Book</span><select id="mc-book">${bookOptions(r.books, s.book, '—')}</select></label>
+            <label class="field"><span>Type</span><select id="mc-type">${typeOptions(r.types, s.type_id, { blank: 'No type' })}</select></label></div>
+        <label class="check"><input type="checkbox" id="mc-mixed"${s.review_each_time ? ' checked' : ''}> Mixed merchant: look at its rows each time</label>
+        <label class="check"><input type="checkbox" id="mc-hidden"${s.exclude_from_expense_views ? ' checked' : ''}> Hide from spending lists (never from a sum)</label>
+        <label class="check"><input type="checkbox" id="mc-oneoff"${s.is_one_off ? ' checked' : ''}> One-off</label>
+        <p class="small muted">${plural(s.txn_count, 'row')} · ${plural(s.rule_count, 'rule')}${(s.rules || []).length ? ': ' + s.rules.map(x => esc(x.pattern)).join(', ') : ''}. A change of book or type is written to the rows that take their label from it.</p></div>
+        <button class="btn primary block" data-act="merchant-save" data-id="${s.id}">Save</button>
+        <hr class="rule"><h3>Clean up</h3>
+        <div class="fields two"><label class="field"><span>Merge into</span><select id="mc-target"><option value="">Choose a merchant</option>${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>
+            <button class="btn" style="align-self:end" data-act="merchant-merge" data-id="${s.id}">Merge</button></div>
+        <button class="btn danger" data-act="merchant-delete" data-id="${s.id}">Delete this merchant</button>`);
+};
+ACT['merchant-save'] = async el => {
+    const body = { name: $('#mc-name').value.trim(), book: $('#mc-book').value || null, type_id: $('#mc-type').value ? Number($('#mc-type').value) : null,
+        review_each_time: $('#mc-mixed').checked ? 1 : 0, exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0, is_one_off: $('#mc-oneoff').checked ? 1 : 0 };
+    const r = await act('PUT', `/api/services/${el.dataset.id}`, body, 'Merchant saved');
+    if (r) { closeSheet(); rerender(); }
+};
+ACT['merchant-merge'] = async el => {
+    const target = $('#mc-target').value;
+    if (!target) { toast('Choose the merchant to merge into', { bad: true }); return; }
+    const r = await act('POST', `/api/services/${el.dataset.id}/merge`, { target_id: Number(target) }, 'Merged');
+    if (r) { closeSheet(); rerender(); }
+};
+ACT['merchant-delete'] = async el => {
+    if (!confirm('Delete this merchant? You can undo it from Changes.')) return;
+    const r = await act('DELETE', `/api/services/${el.dataset.id}`, undefined, 'Merchant deleted');
+    if (r) { closeSheet(); rerender(); }
+};
+
+ACT.rule = async el => {
+    const [r, services] = await Promise.all([refs(), servicesList()]);
+    const x = el.dataset.id ? ACT.__rules.get(Number(el.dataset.id)) : null;
+    openSheet(x ? `Rule: ${esc(x.pattern)}` : 'Add a rule', `<div class="fields">
+        <div class="fields two"><label class="field"><span>Pattern</span><input type="text" id="rl-pattern" value="${esc(x?.pattern || '')}"></label>
+            <label class="field"><span>Match</span><select id="rl-match">${['contains', 'startswith', 'exact'].map(m => `<option value="${m}"${(x?.match_type || 'contains') === m ? ' selected' : ''}>${m === 'startswith' ? 'starts with' : m}</option>`).join('')}</select></label></div>
+        <label class="field"><span>Merchant</span><select id="rl-svc"><option value="">Choose</option>${services.map(s => `<option value="${s.id}"${s.id === x?.service_id ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+        <div class="fields two"><label class="field"><span>Book, in place of the merchant’s</span><select id="rl-book">${bookOptions(r.books, x?.book_override, 'The merchant’s')}</select></label>
+            <label class="field"><span>Type, in place of the merchant’s</span><select id="rl-type">${typeOptions(r.types, x?.type_override_id, { blank: 'The merchant’s' })}</select></label></div>
+        <div class="fields two"><label class="field"><span>Only from (amount)</span><input type="text" inputmode="decimal" id="rl-min" value="${x?.min_amount ?? ''}"></label>
+            <label class="field"><span>Only up to (amount)</span><input type="text" inputmode="decimal" id="rl-max" value="${x?.max_amount ?? ''}"></label></div></div>
+        <div class="row"><button class="btn primary" data-act="rule-save" data-id="${x ? x.id : ''}">Save</button>${x ? `<button class="btn danger" data-act="rule-delete" data-id="${x.id}">Delete</button>` : ''}</div>
+        <p class="small muted">Rows already labelled by hand keep their labels. Re-run every rule to apply a change to the rows the rules labelled.</p>`);
+};
+ACT['rule-save'] = async el => {
+    const v = id => $('#' + id).value.trim();
+    if (!v('rl-svc')) { toast('Choose the merchant', { bad: true }); return; }
+    const body = { pattern: v('rl-pattern'), match_type: v('rl-match'), service_id: Number(v('rl-svc')), book_override: v('rl-book') || null,
+        type_override_id: v('rl-type') ? Number(v('rl-type')) : null, min_amount: v('rl-min') || null, max_amount: v('rl-max') || null };
+    const r = el.dataset.id ? await act('PUT', `/api/rules/${el.dataset.id}`, body, 'Rule saved') : await act('POST', '/api/rules', body, 'Rule added');
+    if (r) { closeSheet(); rerender(); }
+};
+ACT['rule-delete'] = async el => {
+    if (!confirm('Delete this rule? You can undo it from Changes.')) return;
+    const r = await act('DELETE', `/api/rules/${el.dataset.id}`, undefined, 'Rule deleted');
+    if (r) { closeSheet(); rerender(); }
+};
+ACT['rerun-rules'] = async () => {
+    if (!confirm('Re-run every rule on the rows the rules labelled? Rows you labelled by hand are left alone. It is one change in Changes, with Undo.')) return;
+    const r = await act('POST', '/api/rules/recategorize', {}, 'Rules re-run');
+    if (r) rerender();
+};
+
+ACT['account-edit'] = async el => {
+    const r = await refs();
+    const a = el.dataset.id ? r.accountById.get(Number(el.dataset.id)) : null;
+    const opt = (list, v) => list.map(x => `<option value="${esc(x.name)}"${x.name === v ? ' selected' : ''}>${esc(x.name)} · ${esc(x.description)}</option>`).join('');
+    openSheet(a ? esc(a.name) : 'Add an account', `<div class="fields">
+        <label class="field"><span>Name</span><input type="text" id="ac-name" value="${esc(a?.name || '')}"></label>
+        ${a ? '' : `<label class="field"><span>Kind</span><select id="ac-kind">${opt(r.kinds.kinds, 'bank')}</select></label>
+        <label class="field"><span>Whose</span><select id="ac-owner">${opt(r.kinds.owners, 'Household')}</select></label>
+        <label class="field"><span>Currency</span><select id="ac-cur">${['SGD', 'INR', 'USD'].map(c => `<option>${c}</option>`).join('')}</select></label>`}
+        <label class="field"><span>Last four digits</span><input type="text" inputmode="numeric" maxlength="4" id="ac-last4" value="${esc(a?.last_four || '')}"></label>
+        ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}</div>
+        <button class="btn primary block" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>
+        ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`);
+};
+ACT['account-save'] = async el => {
+    const name = $('#ac-name').value.trim();
+    if (!name) { toast('Give it a name', { bad: true }); return; }
+    let r;
+    if (el.dataset.id) {
+        r = await act('PUT', `/api/accounts/${el.dataset.id}`, { name, last_four: $('#ac-last4').value.trim() || null, status: $('#ac-archived').checked ? 'archived' : 'active' }, 'Account saved');
+    } else {
+        r = await act('POST', '/api/accounts', { name, type: $('#ac-kind').value, owner: $('#ac-owner').value, currency: $('#ac-cur').value, last_four: $('#ac-last4').value.trim() || null }, 'Account added');
+    }
+    if (r) { closeSheet(); rerender(); }
+};
+
+// ---------------------------------------------------------------------------
+// Import: three results, each drawn as a sum; a drop strip on the desk
+// ---------------------------------------------------------------------------
+
+const importState = { preview: null, done: null, busy: false };
+async function viewImport() {
+    const past = await get('/api/import/history').catch(() => []);
+    const p = importState.preview;
+    afterRender(wireDrop);
+    return `${booksNav('import')}
+    <div class="page-head"><div><h1>Import</h1><p>Statements go through one tie check: opening balance and the rows must come to the closing balance, exactly. One that does not tie is refused whole.</p></div></div>
+    <section class="card">
+        <div class="drop desk-only" id="drop">Drop statement files here, or <label class="link" for="imp-files" style="cursor:pointer">choose them</label>.</div>
+        <div class="phone-only"><label class="btn primary block" for="imp-files">Choose statement files</label></div>
+        <input type="file" id="imp-files" multiple hidden data-change="import-files">
+        ${importState.busy ? '<p class="loading">Reading…</p>' : ''}
+    </section>
+    ${p ? importPreviewHTML(p) : ''}
+    ${importState.done ? `<section class="card"><p class="notice">${esc(importState.done)}</p></section>` : ''}
+    <section class="card"><div class="card-head"><h2>Past imports</h2></div>
+        <div class="table-wrap"><table class="t"><thead><tr><th>When</th><th>Accounts</th><th class="r">Rows</th><th>State</th></tr></thead><tbody>
+        ${past.map(b => `<tr><td>${esc(when(b.created_at))}</td><td class="small">${b.accounts.map(esc).join(', ')}</td><td class="r num">${b.total_lines}</td><td>${esc(b.status)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">None yet.</td></tr>'}
+        </tbody></table></div></section>`;
+}
+function wireDrop() {
+    const zone = $('#drop');
+    if (!zone) return;
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('over'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+    zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('over'); uploadFiles(e.dataTransfer.files); });
+}
+ACT['import-files'] = el => uploadFiles(el.files);
+async function uploadFiles(files) {
+    if (!files || !files.length) return;
+    const form = new FormData();
+    Array.from(files).forEach(f => form.append('files', f));
+    importState.busy = true; importState.done = null; rerender();
+    const r = await send('POST', '/api/import/upload', form);
+    importState.busy = false;
+    if (!r.ok) { toast(r.data.error || 'fin could not read those files', { bad: true }); rerender(); return; }
+    importState.preview = r.data;
+    rerender();
+}
+function tieSum(t, cur, { refused = false } = {}) {
+    const made = t.opening_minor + t.rows_minor;
+    return `<table class="sum small"><tbody>
+        <tr><td class="op"></td><td>opening ${t.opening_date ? esc(day(t.opening_date, { year: false })) : ''}</td><td class="r">${esc(money(t.opening_minor, cur))}</td></tr>
+        <tr><td class="op">${t.rows_minor < 0 ? '−' : '+'}</td><td>${plural(t.rows, 'row')}</td><td class="r">${esc(money(Math.abs(t.rows_minor), cur))}</td></tr>
+        <tr class="eq"><td class="op">=</td><td>${refused ? 'what the rows make it' : 'closing'}</td><td class="r">${esc(money(made, cur))}</td></tr>
+        ${refused ? `<tr><td class="op"></td><td>closing it states</td><td class="r">${esc(money(t.closing_minor, cur))}</td></tr>
+            <tr class="gap"><td class="op">≠</td><td>off by</td><td class="r">${esc(money(Math.abs(t.difference_minor), cur))}</td></tr>` : ''}
+        </tbody></table>`;
+}
+function importPreviewHTML(p) {
+    const ties = p.groups.filter(g => g.tie === 'ties');
+    const unchecked = p.groups.filter(g => g.tie !== 'ties' && g.total);
+    const refused = p.errors.filter(e => e.tie);
+    const unread = p.errors.filter(e => !e.tie);
+    const rows = p.groups.reduce((a, g) => a + g.transactions.length, 0);
+    const card = (cls, title, n, body) => `<section class="card result"><h3>${title}</h3><div class="big">${n}</div>${body}</section>`;
+    const tiesBody = ties.map(g => g.statements.map(t => `<div style="margin-top:10px"><b>${esc(g.account)}</b> ${tag('ties', 'ties')}<div class="small muted">statement ${esc(day(t.closing_date))}</div>${tieSum(t, g.currency)}</div>`).join('')).join('') || '<p class="small muted">None.</p>';
+    const refusedBody = refused.map(e => `<div style="margin-top:10px"><b>${esc(e.tie.account)}</b> ${tag('refused', 'refused')}<div class="small muted">statement ${esc(day(e.tie.closing_date))}: none of its rows will be imported</div>${tieSum(e.tie, e.tie.currency, { refused: true })}</div>`).join('') || '<p class="small muted">None.</p>';
+    const uncheckedBody = unchecked.map(g => `<div style="margin-top:10px"><b>${esc(g.account)}</b> ${tag('notchecked', 'not checked')}
+        <div class="small muted">it states no balance: ${plural(g.total, 'row')} come in unchecked</div>
+        <table class="sum small"><tbody><tr><td class="op"></td><td>${plural(g.total, 'row')}, money out</td><td class="r">${esc(money(g.transactions.filter(t => t.amount_sgd > 0).reduce((a, t) => a + toMinor(t.amount_sgd, g.currency), 0), g.currency))}</td></tr>
+        <tr><td class="op"></td><td>money in</td><td class="r">${esc(money(g.transactions.filter(t => t.amount_sgd < 0).reduce((a, t) => a - toMinor(t.amount_sgd, g.currency), 0), g.currency))}</td></tr>
+        <tr class="eq"><td class="op">?</td><td>no stated balance to check against</td><td class="r"></td></tr></tbody></table></div>`).join('') || '<p class="small muted">None.</p>';
+    const groupsHTML = p.groups.filter(g => g.transactions.length).map(g => `<details class="card"><summary><b>${esc(g.account)}</b> · ${plural(g.transactions.length, 'row')} · ${g.typed} with a type, ${g.untyped} without</summary>
+        <div class="table-wrap" style="margin-top:10px"><table class="t rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Amount</th></tr></thead><tbody>
+        ${g.transactions.map(t => `<tr><td class="num">${esc(day(t.date, { year: false }))}</td><td>${esc(t.description)}</td><td class="small">${t.type_name ? esc(t.type_name) : t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.flow_type !== 'expense' ? esc(t.flow_type) : tag('nofig', 'no type')}</td>
+            <td class="r">${rowAmount(toMinor(t.amount_sgd, g.currency), g.currency)}</td></tr>`).join('')}</tbody></table></div></details>`).join('');
+    return `<div class="results">${card('ties', `${tag('ties', 'Ties')}`, ties.length, tiesBody)}${card('off', `${tag('off', 'Off by')}`, refused.length, refusedBody)}${card('notchecked', `${tag('notchecked', 'Not checked')}`, unchecked.length, uncheckedBody)}</div>
+        ${unread.length ? `<section class="card"><p class="notice bad">${unread.map(e => `${esc(e.file)}: ${esc(e.error)}`).join('<br>')}</p></section>` : ''}
+        ${rows ? `<section class="card"><div class="spread"><p>${plural(rows, 'row')} ready. A refused statement stays in the queue until a file that ties is imported.</p>
+            <div class="row"><button class="btn" data-act="import-clear">Start again</button><button class="btn primary" data-act="import-confirm">Import ${plural(rows, 'row')}</button></div></div></section>${groupsHTML}`
+            : `<section class="card"><p>Nothing to import.</p><button class="btn" data-act="import-clear">Start again</button></section>`}`;
+}
+ACT['import-clear'] = () => { importState.preview = null; importState.done = null; rerender(); };
+ACT['import-confirm'] = async el => {
+    const p = importState.preview;
+    el.disabled = true;
+    const r = await send('POST', '/api/import/confirm', {
+        import_id: p.import_id,
+        groups: p.groups.map(g => ({ account: g.account, transactions: g.transactions, statements: g.statements || [] })),
+    });
+    if (!r.ok) { el.disabled = false; toast(r.data.error || 'Nothing was imported', { bad: true }); return; }
+    importState.preview = null;
+    importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}. It is one change in Changes, with Undo.`;
+    toast('Imported', { undo: r.change });
+    rerender();
+};
+
+// ---------------------------------------------------------------------------
+// Changes: every write, yours and Claude's, one undoable list
+// ---------------------------------------------------------------------------
+
+function whoTag(e) {
+    if (e.via === 'chat') return tag('claude', 'Claude', { title: e.actor });
+    return tag('you', 'you', { title: 'in fin' });
+}
+function entryState(e) {
+    if (e.undone_by) return `<span class="small muted">undone by #${e.undone_by}</span>`;
+    if (e.blocked_by) {
+        return `<div class="refusal"><b>⊘ Undo refused</b>: change #${e.blocked_by.id} (${esc(e.blocked_by.summary || 'no summary')}, ${esc(when(e.blocked_by.at))}) touched the same rows. Undo that one first.
+            <button class="link" data-act="trace" data-entry="${e.id}" data-blocker="${e.blocked_by.id}">Show where</button></div>`;
+    }
+    return `<button class="btn sm" data-act="undo" data-entry="${e.id}">${e.undoes ? 'Undo the undo' : 'Undo'}</button>`;
+}
+function entryMatches(e, mark) {
+    const f = S.changes;
+    if (f.who === 'claude' && e.via !== 'chat') return false;
+    if (f.who === 'you' && e.via === 'chat') return false;
+    if (f.state === 'can' && (e.undone_by || e.blocked_by)) return false;
+    if (f.state === 'undone' && !e.undone_by) return false;
+    if (f.state === 'refused' && !e.blocked_by) return false;
+    if (f.state === 'undos' && !e.undoes) return false;
+    if (f.newOnly && !(e.id > (mark || 0))) return false;
+    if (f.asked && !e.asked_first) return false;
+    return true;
+}
+
+async function viewChanges() {
+    const [h, settings] = await Promise.all([get('/api/history?limit=300&blockers=1', { fresh: true }), get('/api/settings', { fresh: true })]);
+    if (!S.onChanges) {
+        // The divider stays where the mark was when the page was opened; opening it is looking.
+        S.onChanges = true;
+        S.lastSeenMark = h.last_looked;
+        if (h.newest && h.newest !== h.last_looked) {
+            send('POST', '/api/changes/looked', { upto: h.newest }).then(() => refreshFrame());
+        }
+    }
+    const mark = S.lastSeenMark;
+    const entries = h.entries;
+    const shown = entries.filter(e => entryMatches(e, mark));
+    const count = fn => entries.filter(fn).length;
+    let dividerDone = mark === null;
+    const items = shown.map(e => {
+        let divider = '';
+        if (!dividerDone && e.id <= mark) {
+            dividerDone = true;
+            if (shown.indexOf(e) > 0) divider = `<li class="divider" role="separator">You last looked here</li>`;
+        }
+        const open = S.changes.open.has(e.id);
+        return `${divider}<li class="entry${e.via === 'chat' ? ' claude' : ''}${e.undone_by ? ' undone' : ''}" id="entry-${e.id}">
+            <div class="entry-row">
+                <label class="sel"><input type="checkbox" data-entry="${e.id}" aria-label="Select change ${e.id}"${e.undone_by || e.blocked_by ? ' disabled' : ''}></label>
+                <div class="when small">${esc(when(e.at))} ${whoTag(e)}</div>
+                <div class="summary"><button data-act="entry-open" data-entry="${e.id}" aria-expanded="${open}">${esc(e.summary || 'A change')}
+                    ${e.asked_first ? tag('asked', 'asked first, yes in chat') : ''}${e.undoes ? ` <span class="small muted">· undid #${e.undoes}</span>` : ''}</button>
+                    <span class="small muted">#${e.id}${e.via === 'chat' ? ' · ' + esc(e.actor) : ''}</span></div>
+                <div class="rows num small r">${plural(e.rows, 'row')}</div>
+                <div class="act">${entryState(e)}</div>
+            </div>
+            <div class="entry-detail" id="detail-${e.id}"${open ? '' : ' hidden'}>${open ? '<p class="loading">Loading…</p>' : ''}</div></li>`;
+    }).join('');
+    afterRender(() => S.changes.open.forEach(id => fillEntry(id)));
+
+    const f = S.changes;
+    const chip = (k, v, label, n) => `<button class="chip" data-act="changes-filter" data-k="${k}" data-v="${v}" aria-pressed="${String(f[k]) === String(v)}">${label}${n !== undefined ? ` <span class="n">${n}</span>` : ''}</button>`;
+    const newCount = count(e => e.id > (mark || 0));
+    return `<div class="page-head"><div><h1>Recent changes</h1><p>Every write, yours and Claude’s, in one undoable list. There is no confirm screen: you check here, and undo.</p></div></div>
+    <section class="card">
+        <div class="spread"><button class="switch" role="switch" aria-checked="${settings.claude_may_write}" data-act="claude-switch">
+            <span class="track" aria-hidden="true"></span> Claude may write</button>
+            <p class="small" style="flex:1 1 260px">${settings.claude_may_write
+                ? 'Claude writes to fin straight from chat; each write lands here with Undo. Over ' + h.many_rows + ' rows, Claude says the count in chat and waits for your yes.'
+                : 'Off: every write from chat is refused and changes nothing. Reads still work. Only you can turn it back on, here.'}</p></div>
+        ${mark !== null && newCount ? `<p class="notice" style="margin-top:12px;background:var(--claude-subtle)">✳ <b>${plural(newCount, 'change')}</b> since you last looked are above the dashed line.</p>` : ''}
+    </section>
+    <section class="card">
+        <div class="chips" style="margin-bottom:8px"><span class="small muted" style="align-self:center">Who</span>${chip('who', 'all', 'Everyone', entries.length)}${chip('who', 'claude', 'Claude', count(e => e.via === 'chat'))}${chip('who', 'you', 'You', count(e => e.via !== 'chat'))}</div>
+        <div class="chips" style="margin-bottom:8px"><span class="small muted" style="align-self:center">Undo</span>${chip('state', 'any', 'Any')}${chip('state', 'can', 'Can undo', count(e => !e.undone_by && !e.blocked_by))}${chip('state', 'refused', 'Undo refused', count(e => e.blocked_by))}${chip('state', 'undone', 'Undone', count(e => e.undone_by))}${chip('state', 'undos', 'Undos', count(e => e.undoes))}</div>
+        <div class="chips"><button class="chip" data-act="changes-toggle" data-k="newOnly" aria-pressed="${f.newOnly}">New since you last looked <span class="n">${newCount}</span></button>
+            <button class="chip" data-act="changes-toggle" data-k="asked" aria-pressed="${f.asked}">Asked first in chat <span class="n">${count(e => e.asked_first)}</span></button></div>
+        <div class="spread" style="margin-top:14px"><span class="small muted">${shown.length} of ${entries.length} changes · tap one for before → after</span>
+            <button class="btn" data-act="batch-undo">Undo selected</button></div>
+        <ul class="log" style="margin-top:8px">${items || '<li class="empty">No changes match.</li>'}</ul>
+        <p class="small muted" style="margin-top:10px">Undo is refused when a later change touched the same rows; the refusal names that change. Undo selected runs newest first and stops at the first refusal. An undo is a change too, and can be undone.</p>
+    </section>`;
+}
+window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/changes')) S.onChanges = false; });
+ACT['changes-filter'] = el => { S.changes[el.dataset.k] = el.dataset.v; rerender(); };
+ACT['changes-toggle'] = el => { S.changes[el.dataset.k] = !S.changes[el.dataset.k]; rerender(); };
+ACT['claude-switch'] = async el => {
+    const on = el.getAttribute('aria-checked') !== 'true';
+    const r = await send('PUT', '/api/settings/claude-write', { on });
+    if (!r.ok) { toast(r.data.error || 'That did not work', { bad: true }); return; }
+    toast(on ? 'Claude may write again.' : 'Claude’s writes are off. Reads still work.');
+    rerender();
+};
+ACT['entry-open'] = el => {
+    const id = Number(el.dataset.entry);
+    const box = $(`#detail-${id}`);
+    if (S.changes.open.has(id)) { S.changes.open.delete(id); box.hidden = true; el.setAttribute('aria-expanded', 'false'); return; }
+    S.changes.open.add(id); box.hidden = false; el.setAttribute('aria-expanded', 'true');
+    box.innerHTML = '<p class="loading">Loading…</p>';
+    fillEntry(id);
+};
+
+const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
+const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'flow', is_one_off: 'one-off', notes: 'note',
+    amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'mixed',
+    exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement' };
+async function shownValue(table, field, value, row, ctx) {
+    if (value === null || value === undefined || value === '') return '<span class="none">none</span>';
+    if (field === 'type_id' || field === 'type_override_id') return esc(ctx.r.typeById.get(value)?.display_name || `type ${value}`);
+    if (field === 'other_side_id' || field === 'account_id') return esc(ctx.r.accountById.get(value)?.name || `account ${value}`);
+    if (field === 'service_id') return esc(ctx.services.find(s => s.id === value)?.name || `merchant ${value}`);
+    if (['is_one_off', 'review_each_time', 'exclude_from_expense_views'].includes(field)) return value ? 'yes' : 'no';
+    if (table === 'anchors' && field === 'amount') return esc(money(value, ctx.r.accountById.get(row.account_id)?.currency || 'SGD'));
+    if (field === 'amount_minor' || field.endsWith('_amount_minor')) return esc(money(value, 'SGD'));
+    if (/date$/.test(field) && typeof value === 'string') return esc(day(value));
+    return esc(String(value));
+}
+function rowLabel(table, row, ctx) {
+    if (!row) return table;
+    if (table === 'transactions') return `${esc(row.description)} <span class="muted small">· ${esc(day(row.date, { year: false }))}</span>`;
+    if (table === 'anchors') return `figure for ${esc(ctx.r.accountById.get(row.account_id)?.name || 'an account')} on ${esc(day(row.date))}`;
+    if (table === 'services') return `merchant ${esc(row.name)}`;
+    if (table === 'merchant_rules') return `rule ${esc(row.pattern)}`;
+    if (table === 'accounts') return `account ${esc(row.name)}`;
+    if (table === 'statements') return `statement of ${esc(ctx.r.accountById.get(row.account_id)?.name || 'an account')}, ${esc(day(row.statement_date))}`;
+    if (table === 'subscriptions') return `bill ${esc(ctx.services.find(s => s.id === row.service_id)?.name || row.match_pattern || '')}`;
+    if (table === 'rates') return `rate ${esc(row.pair)} ${esc(day(row.date))}`;
+    return `${esc(table)} ${row.id}`;
+}
+async function changeRowsHTML(entry, { only = null } = {}) {
+    const ctx = { r: await refs(), services: await servicesList() };
+    const changes = only ? entry.changes.filter(c => c.table === only.table && c.row_id === only.row_id) : entry.changes;
+    const out = [];
+    for (const c of changes.slice(0, 60)) {
+        const row = c.after || c.before;
+        let what;
+        if (c.op === 'update') {
+            const fields = Object.keys(c.after).filter(k => !SKIP_FIELDS.has(k) && JSON.stringify(c.before[k]) !== JSON.stringify(c.after[k]));
+            const parts = [];
+            for (const k of fields) parts.push(`<span class="ba"><span class="small muted">${esc(FIELD_WORDS[k] || k.replace(/_/g, ' '))}</span> <span class="before">${await shownValue(c.table, k, c.before[k], c.before, ctx)}</span> → <span class="after">${await shownValue(c.table, k, c.after[k], c.after, ctx)}</span></span>`);
+            what = parts.join(' &nbsp; ') || '<span class="muted small">how it is labelled (no field you see changed)</span>';
+        } else if (c.op === 'insert') {
+            what = `<span class="ba"><span class="after">added</span>${c.table === 'transactions' ? ` ${await shownValue(c.table, 'amount_minor', c.after.amount_minor, c.after, ctx)}` : c.table === 'anchors' ? ` ${await shownValue(c.table, 'amount', c.after.amount, c.after, ctx)}` : ''}</span>`;
+        } else {
+            what = `<span class="ba"><span class="before">removed</span></span>`;
+        }
+        const history = c.table === 'transactions' ? ` <button class="link small" data-act="row" data-tx="${c.row_id}">this row’s history</button>` : '';
+        out.push(`<tr><td>${rowLabel(c.table, row, ctx)}${history}</td><td>${what}</td></tr>`);
+    }
+    const more = changes.length > 60 ? `<p class="small muted">+ ${changes.length - 60} more rows.</p>` : '';
+    return `<div class="table-wrap"><table class="t"><thead><tr><th>Row</th><th>Before → after</th></tr></thead><tbody>${out.join('')}</tbody></table></div>${more}`;
+}
+async function fillEntry(id) {
+    const box = $(`#detail-${id}`);
+    if (!box) return;
+    try {
+        const entry = await get(`/api/history/${id}`, { fresh: true });
+        box.innerHTML = `<p class="small muted" style="margin-bottom:6px">${esc(when(entry.at))} · ${entry.via === 'chat' ? `Claude (${esc(entry.actor)})` : 'you, in fin'} · ${plural(entry.rows, 'row')}${entry.asked_first ? ` · over ${entry.rows > 20 ? 20 : entry.rows} rows: Claude said the count in chat and you said yes` : ''}</p>${await changeRowsHTML(entry)}`;
+    } catch (err) { box.innerHTML = `<p class="notice bad">${esc(err.message)}</p>`; }
+}
+
+async function undoEntry(id, { quiet = false } = {}) {
+    const r = await send('POST', `/api/history/${id}/undo`);
+    if (!r.ok) {
+        if (!quiet) toast(r.data.error || 'Undo refused; nothing was changed', { bad: true, ms: 9000 });
+        refreshFrame();
+        if (location.hash.startsWith('#/changes')) rerender();
+        return null;
+    }
+    if (!quiet) toast(`Undone: change #${id}`, { undo: r.data.by });
+    refreshFrame();
+    rerender();
+    return r.data;
+}
+ACT.undo = el => undoEntry(Number(el.dataset.entry));
+ACT['batch-undo'] = async () => {
+    const ids = $$('.log input[type="checkbox"]:checked').map(x => Number(x.dataset.entry)).sort((a, b) => b - a);
+    if (!ids.length) { toast('Tick the changes to undo first'); return; }
+    let done = 0;
+    for (const id of ids) {
+        const r = await send('POST', `/api/history/${id}/undo`);
+        if (!r.ok) { toast(`Undid ${done} of ${ids.length}. #${id} was refused: ${r.data.error || ''}`, { bad: true, ms: 10000 }); break; }
+        done += 1;
+    }
+    if (done === ids.length) toast(`Undid ${plural(done, 'change')}. Each undo is in the list and can itself be undone.`);
+    refreshFrame(); rerender();
+};
+
+// A refused undo, traced: the rows the blocker shares with the entry, and
+// that row's own timeline with the blocker marked.
+ACT.trace = async el => {
+    const id = Number(el.dataset.entry), blockerId = Number(el.dataset.blocker);
+    const [entry, blocker] = await Promise.all([get(`/api/history/${id}`, { fresh: true }), get(`/api/history/${blockerId}`, { fresh: true })]);
+    const theirs = new Set(blocker.changes.map(c => `${c.table}:${c.row_id}`));
+    const shared = entry.changes.find(c => theirs.has(`${c.table}:${c.row_id}`));
+    if (!shared) { toast('The rows they share could not be found'); return; }
+    if (shared.table === 'transactions') return openRowSheet(shared.row_id, { blocker: blockerId, blocked: id });
+    openTimeline(shared.table, shared.row_id, { blocker: blockerId, blocked: id });
+};
+
+async function timelineHTML(table, rowId, { blocker = null, blocked = null } = {}) {
+    const list = (await get(`/api/history/row/${table}/${rowId}`, { fresh: true })).entries;
+    const details = await Promise.all(list.slice(0, 12).map(e => get(`/api/history/${e.id}`, { fresh: true })));
+    const items = [];
+    for (let i = 0; i < details.length; i++) {
+        const e = details[i];
+        const isBlocker = e.id === blocker;
+        items.push(`<li class="${e.via === 'chat' ? 'claude' : ''}${isBlocker ? ' blocker' : ''}">
+            <div class="small">${esc(when(e.at))} ${whoTag(e)} <span class="muted">#${e.id}</span>${e.undone_by ? ' <span class="muted">· undone</span>' : ''}</div>
+            <div><b>${esc(e.summary)}</b></div>
+            ${isBlocker ? `<p class="refusal">This is why change #${blocked} cannot be undone: it changed this row later. Undo #${e.id} first.</p>` : ''}
+            ${await changeRowsHTML(e, { only: { table, row_id: rowId } })}
+            ${e.id === blocked ? '<p class="refusal small">The change whose undo was refused.</p>' : ''}</li>`);
+    }
+    return items.length ? `<ul class="timeline">${items.join('')}</ul>${list.length > 12 ? `<p class="small muted">+ ${list.length - 12} older.</p>` : ''}`
+        : '<p class="small muted">No change has touched it since it came in.</p>';
+}
+async function openTimeline(table, rowId, opts) {
+    openSheet('Its own history', '<p class="loading">Loading…</p>');
+    sheetBody().innerHTML = await timelineHTML(table, rowId, opts);
+}
+
+// One row: its facts, its note, the one-off toggle, "This was…", and its history.
+ACT.row = el => openRowSheet(Number(el.dataset.tx));
+async function openRowSheet(txId, opts = {}) {
+    openSheet('A row', '<p class="loading">Loading…</p>');
+    const found = (await get(`/api/transactions?tx_id=${txId}`, { fresh: true })).transactions[0];
+    if (!found) { sheetBody().innerHTML = '<p class="notice">This row is no longer in the books (an import was undone, perhaps).</p>' + await timelineHTML('transactions', txId, opts); return; }
+    ACT.__lastRow = found;
+    const label = found.flow_type === 'review' ? tag('nofig', 'waiting for a label') : found.display_type ? esc(found.display_type) : (['expense', 'refund'].includes(found.flow_type) ? tag('nofig', 'no type') : esc(found.flow_type));
+    $('#sheet-title').textContent = found.description;
+    sheetBody().innerHTML = `${rowHead(found)}
+        <table class="t small"><tbody>
+            <tr><td class="muted">Book</td><td>${esc(found.book || '')}</td></tr>
+            <tr><td class="muted">Type</td><td>${label}</td></tr>
+            <tr><td class="muted">Flow</td><td>${esc(found.flow_type)}${found.other_side_name ? ' · ' + esc(found.other_side_name) : ''}</td></tr>
+            <tr><td class="muted">Merchant</td><td>${esc(found.service_name || '—')}</td></tr>
+            <tr><td class="muted">Labelled by</td><td>${esc({ manual: 'you or Claude, by hand', service_default: 'its merchant', rule_override: 'a rule', fallback: 'its wording', derived: 'worked out from figures', auto: 'the rules' }[found.cat_source] || found.cat_source || '')}</td></tr>
+        </tbody></table>
+        <div class="row"><button class="btn primary" data-act="${found.flow_type === 'review' ? 'this-was' : 'resolve'}" data-tx="${found.id}">This was…</button>
+            <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off</label></div>
+        <label class="field"><span>Note</span><textarea id="row-note">${esc(found.notes || '')}</textarea></label>
+        <button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>
+        <h3>Its own history</h3><div id="row-history"><p class="loading">Loading…</p></div>`;
+    $('#row-history').innerHTML = await timelineHTML('transactions', txId, opts);
+    if (opts.blocker) $('#row-history .blocker')?.scrollIntoView({ block: 'center' });
+}
+ACT['row-note'] = async el => {
+    const r = await act('PUT', `/api/transactions/${el.dataset.tx}`, { notes: $('#row-note').value.trim() || null }, 'Note saved');
+    if (r) openRowSheet(Number(el.dataset.tx));
+};
+ACT['row-oneoff'] = async el => {
+    const r = await act('PUT', `/api/transactions/${el.dataset.tx}`, { is_one_off: el.checked ? 1 : 0 }, el.checked ? 'Marked one-off' : 'No longer one-off');
+    if (r) openRowSheet(Number(el.dataset.tx));
+};
