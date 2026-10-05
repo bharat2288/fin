@@ -127,3 +127,18 @@ def test_correcting_or_deleting_a_loan_figure_works_the_interest_out_again(clien
 
     assert client.delete(f"/api/anchors/{later['id']}").status_code == 200
     assert derived(client) == []
+
+
+def test_a_typed_bank_figure_cannot_be_moved_onto_the_days_its_statements_cover(client):
+    bank = make_account(client, BANK, "bank", last_four="0002")
+    enter(client, bank, "1000.00", "2026-07-31")
+    bring_in(client, BANK, [("2026-08-05", "SAMPLE GROCER", 10_000)],
+             opening=100_000, closing=90_000)
+    typed = next(f for f in figures(client, bank) if f["source"] == "supplied")
+
+    resp = client.put(f"/api/anchors/{typed['id']}", json={"date": "2026-09-15", "amount": "5.00"})
+
+    assert resp.status_code == 400
+    assert next(f for f in figures(client, bank) if f["id"] == typed["id"]) == typed
+    # Earlier is fine.
+    assert client.put(f"/api/anchors/{typed['id']}", json={"date": "2026-07-30"}).status_code == 200

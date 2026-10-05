@@ -769,6 +769,24 @@ def _typed_figure(account, amount) -> int:
     return amount_minor
 
 
+def _figure_date_allowed(conn, account, on: str) -> None:
+    """Refuse moving a typed figure for a bank account that holds statements
+    onto a day its statements cover: as a new figure is refused once it has
+    one, a corrected one may only sit before its first statement."""
+    if account["type"] not in account_kind.SUPPLIED_UNTIL_STATEMENT_KINDS:
+        return
+    first = conn.execute(
+        "SELECT MIN(d) FROM (SELECT statement_date AS d FROM statements WHERE account_id = ? "
+        "UNION ALL SELECT date FROM anchors WHERE account_id = ? AND source = ?)",
+        (account["id"], account["id"], anchors.STATEMENT),
+    ).fetchone()[0]
+    if first is not None and on >= first:
+        raise anchors.InvalidAnchor(
+            f"a {account['type']} account rests on its statements from {first}; "
+            "a figure you entered can only be dated before that"
+        )
+
+
 def _anchor_account(conn, anchor_id: int):
     return conn.execute(
         "SELECT a.id, a.name, a.type, a.currency FROM anchors n "
@@ -801,6 +819,8 @@ def api_anchors_replace(anchor_id: int):
                 _typed_figure(account, data["amount"]) if "amount" in data else held["amount"]
             )
             on = data["date"] if "date" in data else held["date"]
+            if "date" in data and on != held["date"]:
+                _figure_date_allowed(conn, account, anchors.checked_date(on))
             replaced = anchors.replace(
                 conn, anchor_id, on, amount_minor,
                 ((note or "").strip() or None) if note_sent else held["note"],
