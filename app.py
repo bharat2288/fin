@@ -580,7 +580,16 @@ def api_history_undo(entry_id: int):
             done = history.undo(conn, entry_id, g.change_entry)
         except history.UndoRefused as e:
             return jsonify({"error": str(e)}), 409
+        touched = {r[0] for r in conn.execute(
+            "SELECT DISTINCT tbl FROM change_rows WHERE entry_id = ?", (entry_id,))}
+    # The merchant-rule cache reads rules and their merchants: an undo that
+    # wrote either back leaves it stale. The chat's undo runs this route too.
+    if touched & _RULE_CACHE_TABLES:
+        db.invalidate_rules_cache()
     return jsonify({"ok": True, **done})
+
+
+_RULE_CACHE_TABLES = frozenset({"merchant_rules", "services"})
 
 
 # ---------------------------------------------------------------------------

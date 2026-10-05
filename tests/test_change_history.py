@@ -368,3 +368,18 @@ def test_discarding_an_undo_puts_the_change_back_in_force_in_one_transaction(imp
     assert undone_by is None
     assert {t["id"]: t["book"] for t in imported.get("/api/transactions?per_page=50").get_json()["transactions"]}[
         tx["id"]] == "Moom"
+
+
+def test_undoing_a_merchant_rule_leaves_no_stale_rule_in_the_cache(imported):
+    svc = imported.post("/api/services", json={"name": "Sample Rule Merchant"}).get_json()
+    added = imported.post("/api/rules", json={"pattern": "SAMPLE RULE PATTERN", "service_id": svc["id"]})
+    assert added.status_code == 200, added.get_json()
+    conn = db.get_connection()
+    try:
+        assert any(r["pattern"] == "SAMPLE RULE PATTERN" for r in db._get_rules(conn))  # cached
+
+        assert imported.post(f"/api/history/{added.headers['X-Fin-Change']}/undo").status_code == 200
+
+        assert not any(r["pattern"] == "SAMPLE RULE PATTERN" for r in db._get_rules(conn))
+    finally:
+        conn.close()
