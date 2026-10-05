@@ -12,6 +12,7 @@ import re
 import sys
 from pathlib import Path
 
+import money
 from parse_dbs import ParsedTransaction, ParsedStatement
 
 
@@ -151,7 +152,7 @@ def parse_citi_csv(filepath: str) -> ParsedStatement:
 
         # Citi: negative = expense, positive = payment/credit
         # Our convention: positive = expense, negative = credit
-        amount_sgd = -float(amount_str.replace(",", ""))
+        amount_minor = -money.parse_minor(amount_str)
 
         # Clean description and extract FX info
         description = _clean_description(description_raw)
@@ -163,7 +164,7 @@ def parse_citi_csv(filepath: str) -> ParsedStatement:
         tx = ParsedTransaction(
             date=tx_date,
             description=description,
-            amount_sgd=amount_sgd,
+            amount_minor=amount_minor,
             amount_foreign=amount_foreign,
             currency_foreign=currency_foreign,
             is_payment=is_payment,

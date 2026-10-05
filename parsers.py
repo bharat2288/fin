@@ -109,7 +109,7 @@ def handle_vantage_split(statements: list) -> list:
             bs_fingerprints = set()
             for stmt in by_card[bs_card]:
                 for tx in stmt.transactions:
-                    bs_fingerprints.add((tx.date, tx.description, tx.amount_sgd))
+                    bs_fingerprints.add((tx.date, tx.description, tx.amount_minor))
 
             # Tag combined transactions
             from parse_dbs import ParsedTransaction, ParsedStatement
@@ -118,14 +118,17 @@ def handle_vantage_split(statements: list) -> list:
 
             for stmt in by_card[combined_card]:
                 for tx in stmt.transactions:
-                    fp = (tx.date, tx.description, tx.amount_sgd)
+                    fp = (tx.date, tx.description, tx.amount_minor)
                     if fp in bs_fingerprints:
                         bs_txns.append(tx)
                         bs_fingerprints.discard(fp)
                     else:
                         mk_txns.append(tx)
 
-            # Create split statements
+            # Create split statements, on the same accounts the PDF files
+            # each cardholder's rows on (card_balance.py): the main
+            # cardholder's on the account the card's one balance sits on,
+            # the other's on theirs.
             combined_name = by_card[combined_card][0].accounts[0]
             mk_name = combined_name.replace(
                 combined_name.split()[-1],
@@ -135,6 +138,21 @@ def handle_vantage_split(statements: list) -> list:
                 combined_name.split()[-1],
                 combined_name.split()[-1] + " (BS)",
             )
+            import re
+
+            import card_balance
+
+            fours = re.findall(r"\d{4}", combined_name)
+            four = fours[-1] if fours else None
+            balance_name = card_balance.balance_account(four)
+            others = [
+                part for part, whole in card_balance.part_of_names().items()
+                if whole == balance_name and any(
+                    account == part for (f, _), account in card_balance.CARDHOLDER_ACCOUNTS.items() if f == four
+                )
+            ]
+            if balance_name and len(others) == 1:
+                bs_name, mk_name = balance_name, others[0]
 
             for tx in mk_txns:
                 tx.card_info = mk_name
@@ -169,7 +187,12 @@ def handle_vantage_split(statements: list) -> list:
 def _register_builtins():
     """Register all built-in parsers. Called once at import time."""
 
-    # PDF parsers — order matters: specific detectors first, DBS as fallback
+    # PDF parsers — order matters: specific detectors first, DBS as fallback.
+    # HDFC sits first: it also claims a PDF that will not open without a
+    # password, so that its refusal names the variable the password comes from.
+    from parse_hdfc import detect_hdfc_pdf, parse_hdfc_pdf
+    register("HDFC PDF", ".pdf", detect_fn=detect_hdfc_pdf, parse_fn=parse_hdfc_pdf)
+
     from parse_uob import detect_uob_pdf, parse_uob_pdf
     register("UOB PDF", ".pdf", detect_fn=detect_uob_pdf, parse_fn=parse_uob_pdf)
 

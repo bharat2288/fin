@@ -25,7 +25,9 @@
     <nav class="tab-bar">
         <div class="tab-bar-main">
             <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+            <button class="tab-btn" data-tab="balance">Balance sheet</button>
             <button class="tab-btn" data-tab="subs">Subscriptions</button>
+            <button class="tab-btn" data-tab="review" id="review-tab-btn">Review list</button>
         </div>
         <div class="tab-bar-actions">
             <button class="tab-icon-btn" data-tab="import" title="Import Statements">
@@ -36,7 +38,7 @@
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
                 </button>
                 <div class="masters-menu" id="masters-menu">
-                    <button class="masters-item" data-tab="categories">Categories</button>
+                    <button class="masters-item" data-tab="types">Types</button>
                     <button class="masters-item" data-tab="services-master">Services</button>
                     <button class="masters-item" data-tab="rules">Rules</button>
                     <button class="masters-item" data-tab="accounts">Accounts</button>
@@ -78,9 +80,9 @@
                     <span class="filter-section-label">View</span>
                     <div class="filter-controls">
                         <button class="btn btn-toggle" data-filter="all" onclick="setSpendFilter('all')">All</button>
-                        <button class="btn btn-toggle active" data-filter="personal" onclick="setSpendFilter('personal')">Personal</button>
-                        <button class="btn btn-toggle" data-filter="moom" onclick="setSpendFilter('moom')">Moom</button>
-                        <button class="btn btn-toggle" data-filter="kalesh" onclick="setSpendFilter('kalesh')">Kalesh</button>
+                        <button class="btn btn-toggle active" data-filter="Household" onclick="setSpendFilter('Household')">Household</button>
+                        <button class="btn btn-toggle" data-filter="Moom" onclick="setSpendFilter('Moom')">Moom</button>
+                        <button class="btn btn-toggle" data-filter="Kalesh" onclick="setSpendFilter('Kalesh')">Kalesh</button>
                     </div>
                 </div>
                 <div class="filter-section">
@@ -92,15 +94,15 @@
                     </div>
                 </div>
                 <div class="filter-section">
-                    <span class="filter-section-label">Category</span>
+                    <span class="filter-section-label">Type</span>
                     <div class="filter-controls">
                         <div class="ms-wrap" id="cat-filter-wrap">
                             <div class="ms-trigger" id="cat-filter-trigger" onclick="toggleCatFilterPanel()">
-                                <span class="ms-display" id="cat-filter-display">All Categories</span>
+                                <span class="ms-display" id="cat-filter-display">All Types</span>
                                 <span class="ms-arrow">&#9662;</span>
                             </div>
                             <div class="ms-panel hidden" id="cat-filter-panel">
-                                <input type="text" class="ms-search" id="cat-filter-search" placeholder="Search categories..." oninput="filterCatOptions()">
+                                <input type="text" class="ms-search" id="cat-filter-search" placeholder="Search types..." oninput="filterCatOptions()">
                                 <div class="ms-options" id="cat-filter-options"></div>
                                 <div class="ms-footer">
                                     <button class="btn btn-sm" onclick="clearCatFilter()">Clear</button>
@@ -117,7 +119,7 @@
                             <span class="ds-toggle"><input type="checkbox" id="filter-one-off" onchange="applyDashboardFilters()"><span class="ds-toggle__track"></span></span>
                             Excl. one-offs
                         </label>
-                        <button class="btn btn-toggle" id="subcategory-toggle" onclick="toggleSubcategories()">Subcategories</button>
+                        <button class="btn btn-toggle" id="subcategory-toggle" onclick="toggleSubtypes()">Sub-types</button>
                     </div>
                 </div>
             </div>
@@ -138,7 +140,7 @@
                 </div>
                 <div class="chart-card">
                     <div class="chart-header">
-                        <span class="chart-title">By Category</span>
+                        <span class="chart-title">By Type</span>
                     </div>
                     <div class="chart-canvas-wrap">
                         <canvas id="chart-categories" height="320"></canvas>
@@ -154,11 +156,13 @@
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
                     <div class="section-label" style="margin-bottom:0;">/ Transactions</div>
                     <div style="display:flex;align-items:center;gap:12px;">
+                        <!-- Shown only with the suggestion key present and the list filtered to rows with no type -->
+                        <button class="btn btn-sm" id="suggest-types-btn" style="display:none;" onclick="startTypeSuggestions()" title="Ask for a type suggestion for merchants no rule knows. Nothing is sent until you have read the list.">Suggest types</button>
                         <input type="text" id="tx-search" placeholder="Search services or descriptions..." style="width:220px;font-size:12px;">
                     <div class="tx-view-toggle">
                         <button class="btn btn-toggle active" data-txview="flat" onclick="setTxView('flat')">Flat</button>
                         <button class="btn btn-toggle" data-txview="service" onclick="setTxView('service')">By Service</button>
-                        <button class="btn btn-toggle" data-txview="category" onclick="setTxView('category')">By Category</button>
+                        <button class="btn btn-toggle" data-txview="type" onclick="setTxView('type')">By Type</button>
                     </div>
                     </div>
                 </div>
@@ -169,7 +173,7 @@
                             <tr>
                                 <th class="sortable" data-sort="date" style="width:110px;" onclick="toggleSort('date')">Date <span class="sort-arrow">▼</span></th>
                                 <th class="sortable" data-sort="service" style="width:22%;" onclick="toggleSort('service')">Service <span class="sort-arrow"></span></th>
-                                <th class="sortable" data-sort="category" style="width:14%;" onclick="toggleSort('category')">Category <span class="sort-arrow"></span></th>
+                                <th class="sortable" data-sort="type" style="width:14%;" onclick="toggleSort('type')">Type <span class="sort-arrow"></span></th>
                                 <th class="sortable" data-sort="description" style="width:18%;" onclick="toggleSort('description')">Description <span class="sort-arrow"></span></th>
                                 <th class="sortable" data-sort="account" style="width:12%;" onclick="toggleSort('account')">Account <span class="sort-arrow"></span></th>
                                 <th class="sortable" data-sort="amount" style="text-align:right;width:110px;" onclick="toggleSort('amount')">Amount <span class="sort-arrow"></span></th>
@@ -215,7 +219,7 @@
                     <div class="upload-zone-icon">📄</div>
                     <div class="upload-zone-text">Drop statement files here or click to browse</div>
                     <div class="upload-zone-hint">Accepts DBS (CSV, PDF), Citi (CSV), UOB (PDF) — multiple files OK</div>
-                    <input type="file" id="file-input" multiple accept=".csv,.pdf" style="display:none">
+                    <input type="file" id="file-input" multiple accept=".csv,.pdf,.xls" style="display:none">
                 </div>
                 <div style="display:flex;justify-content:flex-end;margin-top:16px;">
                     <button class="btn-primary btn" id="upload-btn" onclick="uploadFiles()" style="display:none">Upload &amp; Parse</button>
@@ -228,37 +232,6 @@
                 <div class="preview-stats" id="preview-stats"></div>
 
                 <div id="preview-groups"></div>
-
-                <!-- New Category mini-modal (shared by all import preview rows) -->
-                <div class="modal-overlay" id="import-new-cat-modal" style="display:none;">
-                    <div class="modal" style="max-width:400px;">
-                        <div class="modal-header">
-                            <span class="section-label" style="margin-bottom:0;">/ New Category</span>
-                            <button class="modal-close" onclick="closeImportNewCatModal()">&times;</button>
-                        </div>
-                        <div class="modal-body">
-                            <div class="modal-field">
-                                <label>Name</label>
-                                <input type="text" id="import-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
-                            </div>
-                            <div class="modal-field">
-                                <label>Parent (optional)</label>
-                                <select id="import-new-cat-parent" style="width:100%;"></select>
-                            </div>
-                            <div class="modal-field">
-                                <label>Type</label>
-                                <select id="import-new-cat-type" style="width:100%;">
-                                    <option value="1">Personal</option>
-                                    <option value="0">Business</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button class="btn" onclick="closeImportNewCatModal()">Cancel</button>
-                            <button class="btn btn-primary" onclick="saveImportNewCategory()">Create</button>
-                        </div>
-                    </div>
-                </div>
 
                 <!-- Confirm Bar -->
                 <div class="confirm-bar" id="confirm-bar">
@@ -313,10 +286,10 @@
                         <button class="btn btn-toggle" data-subs-filter="all" onclick="setSubsFilter('all')">All</button>
                         <button class="btn btn-toggle" data-subs-filter="deactivated" onclick="setSubsFilter('deactivated')">Deactivated</button>
                         <span style="width:1px;height:20px;background:var(--border-primary);margin:0 4px;"></span>
-                        <button class="btn btn-toggle active" data-subs-spend="personal" onclick="setSubsSpend('personal')">Personal</button>
+                        <button class="btn btn-toggle active" data-subs-spend="Household" onclick="setSubsSpend('Household')">Household</button>
                         <button class="btn btn-toggle" data-subs-spend="all" onclick="setSubsSpend('all')">All</button>
-                        <button class="btn btn-toggle" data-subs-spend="moom" onclick="setSubsSpend('moom')">Moom</button>
-                        <button class="btn btn-toggle" data-subs-spend="kalesh" onclick="setSubsSpend('kalesh')">Kalesh</button>
+                        <button class="btn btn-toggle" data-subs-spend="Moom" onclick="setSubsSpend('Moom')">Moom</button>
+                        <button class="btn btn-toggle" data-subs-spend="Kalesh" onclick="setSubsSpend('Kalesh')">Kalesh</button>
                     </div>
                     <div style="display:flex;gap:8px;">
                         <button class="btn btn-sm" onclick="enrichSubscriptions()">Refresh from Txns</button>
@@ -334,7 +307,7 @@
                         <thead>
                             <tr>
                                 <th class="sortable" data-sort="service">Service</th>
-                                <th class="sortable subs-col-hide-sm" data-sort="category">Category</th>
+                                <th class="sortable subs-col-hide-sm" data-sort="type">Type</th>
                                 <th class="sortable" data-sort="billed" style="text-align:right;">Billed</th>
                                 <th class="sortable" data-sort="monthly" style="text-align:right;">Monthly</th>
                                 <th class="sortable subs-col-hide-sm" data-sort="frequency">Freq</th>
@@ -358,46 +331,29 @@
     <!-- Services tab removed — absorbed into Dashboard 3-view toggle (V1b/V1c) -->
 
     <!-- ============================================================
-         CATEGORIES MASTER TAB
+         TYPES MASTER TAB (the type list: one list for every book)
          ============================================================ -->
-    <div id="tab-categories" class="tab-content">
+    <div id="tab-types" class="tab-content">
         <div class="container">
-            <div class="section-label">/ Categories</div>
+            <div class="section-label">/ Types</div>
             <div class="card" style="margin-bottom:24px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-                    <span class="text-secondary" id="cat-count" style="font-size:12px;"></span>
-                    <button class="btn btn-sm" id="cat-toggle-form" onclick="toggleCatForm()">+ Add Category</button>
+                    <span class="text-secondary" id="type-count" style="font-size:12px;"></span>
+                    <span class="text-secondary" style="font-size:12px;">One list for every book. The list is fixed; a row's book says whose spending it is.</span>
                 </div>
-
-                <!-- Add Category Form (hidden by default) -->
-                <div id="cat-form" class="hidden" style="margin-bottom:16px;">
-                    <div class="rule-form" style="margin-bottom:0;">
-                        <div>
-                            <label>Name</label>
-                            <input type="text" id="cat-new-name" placeholder="e.g. Coffee" style="width:100%;">
-                        </div>
-                        <div>
-                            <label>Parent (optional)</label>
-                            <select id="cat-new-parent" style="width:100%;">
-                                <option value="">-- Top-level --</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label>Type</label>
-                            <select id="cat-new-personal" style="width:100%;">
-                                <option value="1">Personal</option>
-                                <option value="0">Business</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label>&nbsp;</label>
-                            <button class="btn btn-primary btn-sm" onclick="addCategory()">Create</button>
-                        </div>
-                    </div>
+                <div style="max-height:600px;overflow-y:auto;">
+                    <table class="data-table" id="types-table">
+                        <thead>
+                            <tr>
+                                <th style="width:22%;">Type</th>
+                                <th style="width:10%;">Default</th>
+                                <th style="width:38%;">Covers</th>
+                                <th style="width:30%;">Not for</th>
+                            </tr>
+                        </thead>
+                        <tbody id="types-body"></tbody>
+                    </table>
                 </div>
-
-                <!-- Category Tree -->
-                <div id="cat-tree" style="max-height:400px;overflow-y:auto;"></div>
             </div>
         </div>
     </div>
@@ -424,7 +380,8 @@
                         <thead>
                             <tr>
                                 <th class="sortable" data-sort="name">Service</th>
-                                <th class="sortable" data-sort="category">Category</th>
+                                <th class="sortable" data-sort="book">Book</th>
+                                <th class="sortable" data-sort="type">Type</th>
                                 <th class="sortable" data-sort="notes">Notes</th>
                                 <th style="text-align:right;">Actions</th>
                             </tr>
@@ -463,7 +420,7 @@
                 <div class="rules-toolbar">
                     <input type="text" class="rules-search" id="rules-search" placeholder="Search rules..." oninput="filterRules()">
                     <span id="rules-count" class="text-secondary" style="font-size:12px;"></span>
-                    <button class="btn btn-sm" id="recategorize-btn" onclick="recategorizeAll()" title="Re-run all rules against existing transactions">Re-categorize All</button>
+                    <button class="btn btn-sm" id="recategorize-btn" onclick="recategorizeAll()" title="Re-run all rules against existing transactions">Re-run All Rules</button>
                     <button class="btn btn-sm" onclick="openCreateRuleModal()">+ Add Rule</button>
                 </div>
                 <div id="rules-accordion" class="rules-accordion" style="max-height:600px;overflow-y:auto;"></div>
@@ -486,7 +443,10 @@
                             <input type="checkbox" id="acct-show-archived" onchange="renderAccountsTab()"> Show archived
                         </label>
                     </div>
-                    <button class="btn btn-sm btn-primary" onclick="toggleAcctForm()">+ Add Account</button>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <button class="btn btn-sm" onclick="openFigureModal()">Enter a figure</button>
+                        <button class="btn btn-sm btn-primary" onclick="toggleAcctForm()">+ Add Account</button>
+                    </div>
                 </div>
 
                 <!-- Add Account Form (hidden) -->
@@ -501,12 +461,12 @@
                             <input type="text" id="acct-short" placeholder="e.g. DBS-Altitude-1229" style="width:100%;">
                         </div>
                         <div>
-                            <label>Type</label>
-                            <select id="acct-type" style="width:100%;">
-                                <option value="credit_card">Credit Card</option>
-                                <option value="debit">Debit Card</option>
-                                <option value="bank">Bank Account</option>
-                            </select>
+                            <label>Kind</label>
+                            <select id="acct-type" style="width:100%;"></select>
+                        </div>
+                        <div>
+                            <label>Owner</label>
+                            <select id="acct-owner" style="width:100%;"></select>
                         </div>
                         <div>
                             <label>Last Four</label>
@@ -527,12 +487,14 @@
                 <table class="data-table" id="acct-table">
                     <thead>
                         <tr>
-                            <th style="width:30%;">Name</th>
-                            <th style="width:20%;">Short Name</th>
-                            <th style="width:14%;">Type</th>
-                            <th style="width:8%;">Last 4</th>
-                            <th style="width:8%;">Currency</th>
-                            <th style="width:20%;text-align:right;">Actions</th>
+                            <th style="width:22%;">Name</th>
+                            <th style="width:14%;">Short Name</th>
+                            <th style="width:9%;">Kind</th>
+                            <th style="width:9%;">Owner</th>
+                            <th style="width:6%;">Last 4</th>
+                            <th style="width:6%;">Currency</th>
+                            <th style="width:18%;">Rests on</th>
+                            <th style="width:16%;text-align:right;">Actions</th>
                         </tr>
                     </thead>
                     <tbody id="acct-body"></tbody>
@@ -540,7 +502,76 @@
                 <div id="acct-empty" class="empty-state hidden">
                     <div class="empty-state-icon">-</div>
                     <div class="empty-state-text">No accounts</div>
-                    <div class="empty-state-hint">Add your cards and bank accounts</div>
+                    <div class="empty-state-hint">Add your cards, bank accounts, loans and holdings</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         BALANCE SHEET TAB (what the household owns and owes at a month's end)
+         ============================================================ -->
+    <div id="tab-balance" class="tab-content">
+        <div class="container">
+            <div class="balance-head">
+                <div class="section-label" style="margin-bottom:0;">/ Balance sheet</div>
+                <label class="balance-as-at">As at:
+                    <select id="balance-month" onchange="onBalanceMonth()"></select>
+                </label>
+            </div>
+
+            <div class="card">
+                <div id="balance-net-worth" class="balance-net-worth"></div>
+                <div id="balance-note" class="balance-note hidden"></div>
+                <table class="data-table hidden" id="balance-table">
+                    <thead>
+                        <tr>
+                            <th style="width:26%;">Account</th>
+                            <th style="width:18%;text-align:right;">Balance</th>
+                            <th style="width:24%;">Rests on</th>
+                            <th style="width:20%;">Check</th>
+                            <th style="width:12%;">Since</th>
+                        </tr>
+                    </thead>
+                    <tbody id="balance-body"></tbody>
+                </table>
+                <div id="balance-currency-change"></div>
+                <div id="balance-month-check"></div>
+                <div id="balance-error" class="empty-state hidden">
+                    <div class="empty-state-text" id="balance-error-text"></div>
+                </div>
+                <div class="balance-actions">
+                    <button class="btn btn-sm" onclick="openFigureModal()">Enter a figure</button>
+                    <a href="#review" id="balance-review-link" onclick="switchTab('review'); return false;">Review list (0)</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         REVIEW LIST TAB (transfers waiting for a label)
+         ============================================================ -->
+    <div id="tab-review" class="tab-content">
+        <div class="container">
+            <div class="section-label" id="review-heading">/ Review list</div>
+
+            <div class="card">
+                <table class="data-table" id="review-table">
+                    <thead>
+                        <tr>
+                            <th style="width:9%;">Date</th>
+                            <th style="width:13%;">Account</th>
+                            <th style="width:28%;">Description</th>
+                            <th style="width:10%;text-align:right;">Amount</th>
+                            <th style="width:40%;">This was...</th>
+                        </tr>
+                    </thead>
+                    <tbody id="review-body"></tbody>
+                </table>
+                <div id="review-empty" class="empty-state hidden">
+                    <div class="empty-state-icon">-</div>
+                    <div class="empty-state-text">Nothing is waiting</div>
+                    <div class="empty-state-hint">A bank transfer no merchant rule knows lands here until you say what it was</div>
                 </div>
             </div>
         </div>
@@ -566,7 +597,49 @@
         </div>
     </div>
 
-    <!-- Resolve Transaction Modal (unified: service + rule + category) -->
+    <!-- Enter a figure Modal (a supplied anchor for a loan, a holding, a company, a person, or a bank account with no statement) -->
+    <div class="modal-overlay" id="figure-modal" style="display:none;">
+        <div class="modal" style="width:460px;">
+            <div class="modal-header">
+                <span class="section-label" style="margin-bottom:0;">/ Enter a figure</span>
+                <button class="modal-close" onclick="closeFigureModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-field">
+                    <label>For</label>
+                    <select id="figure-account" style="width:100%;" onchange="updateFigureHint(); loadFigureHeld();"></select>
+                    <div class="figure-hint">loans, holdings, a company's opening amount, a bank account with no statement</div>
+                </div>
+                <div class="modal-field" id="figure-held-field" style="display:none;">
+                    <label>Figures you entered for it</label>
+                    <div id="figure-held"></div>
+                </div>
+                <div class="modal-field-row">
+                    <div class="modal-field">
+                        <label>Amount</label>
+                        <input type="text" id="figure-amount" inputmode="decimal" style="width:100%;" placeholder="902,500.00">
+                        <div class="figure-hint" id="figure-amount-hint">what is owed, or what it is worth</div>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 160px;">
+                        <label>As of</label>
+                        <input type="date" id="figure-date" style="width:100%;">
+                    </div>
+                </div>
+                <div class="modal-field">
+                    <label>Note</label>
+                    <input type="text" id="figure-note" style="width:100%;" placeholder="from the paper statement">
+                </div>
+                <div class="figure-result" id="figure-result" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <div style="flex:1;"></div>
+                <button class="btn" id="figure-cancel" onclick="closeFigureModal()">Cancel</button>
+                <button class="btn btn-primary" id="figure-save" onclick="saveFigure()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Resolve Transaction Modal (unified: service + rule + book and type) -->
     <div class="modal-overlay" id="resolve-modal" style="display:none;">
         <div class="modal modal-resolve" style="width:520px;">
             <div class="modal-header">
@@ -586,28 +659,15 @@
                     </div>
                 </div>
                 <div class="modal-field-row">
+                    <div class="modal-field" style="flex:0 0 160px;">
+                        <label>Book</label>
+                        <select id="resolve-modal-book" style="width:100%;" onchange="updateResolveCascade()"></select>
+                    </div>
                     <div class="modal-field">
-                        <label>Category</label>
-                        <select id="resolve-modal-category" style="width:100%;" onchange="onResolveCategoryChange()"></select>
-                        <small id="resolve-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
-                    </div>
-                </div>
-                <!-- New category inline (shown when "-- New category --" selected) -->
-                <div class="modal-field-row hidden" id="resolve-new-cat-row">
-                    <div class="modal-field" style="flex:2;">
-                        <label>New Category Name</label>
-                        <input type="text" id="resolve-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
-                    </div>
-                    <div class="modal-field" style="flex:1;">
-                        <label>Parent (optional)</label>
-                        <select id="resolve-new-cat-parent" style="width:100%;"></select>
-                    </div>
-                    <div class="modal-field" style="flex:0 0 120px;">
                         <label>Type</label>
-                        <select id="resolve-new-cat-type" style="width:100%;">
-                            <option value="1">Personal</option>
-                            <option value="0">Business</option>
-                        </select>
+                        <select id="resolve-modal-type" style="width:100%;" onchange="onResolveTypeChange()"></select>
+                        <small id="resolve-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
+                        <small id="resolve-suggestion" style="color:var(--text-muted);display:none;"></small>
                     </div>
                 </div>
                 <div class="resolve-cascade" id="resolve-cascade">
@@ -678,9 +738,13 @@
                         <small id="edit-rule-cat-display" style="color:var(--text-muted);font-size:11px;"></small>
                     </div>
                     <div class="modal-field">
-                        <label>Category Override</label>
-                        <select id="edit-rule-category-override" style="width:100%;"></select>
+                        <label>Type Override</label>
+                        <select id="edit-rule-type-override" style="width:100%;"></select>
                         <small style="color:var(--text-muted);font-size:11px;">Leave blank to inherit the service default.</small>
+                    </div>
+                    <div class="modal-field" style="flex:0 0 150px;">
+                        <label>Book Override</label>
+                        <select id="edit-rule-book-override" style="width:100%;"></select>
                     </div>
                 </div>
                 <div class="modal-field-row modal-field-row-compact">
@@ -714,7 +778,7 @@
             </div>
             <div class="modal-body sub-modal-grid">
                 <div class="sub-modal-row">
-                    <div class="modal-field sub-col-service">
+                    <div class="modal-field sub-col-service" style="grid-column: span 2;">
                         <label>Service</label>
                         <div class="svc-picker" id="add-sub-svc-picker">
                             <input type="text" class="svc-picker-input" placeholder="Search or create new service..." autocomplete="off">
@@ -723,27 +787,13 @@
                         </div>
                     </div>
                     <div class="modal-field sub-col-category">
-                        <label>Category</label>
-                        <select id="sub-category" onchange="onSubCategoryChange('add')"></select>
+                        <label>Type <span class="field-hint">(the service's)</span></label>
+                        <select id="sub-type" onchange="proposeBookInto('sub-book', this.value)"></select>
                         <small id="sub-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
                     </div>
-                </div>
-                <!-- New category inline (shown when "+ New category..." selected) -->
-                <div class="sub-modal-row hidden" id="add-sub-new-cat-row">
-                    <div class="modal-field" style="flex:2;">
-                        <label>New Category Name</label>
-                        <input type="text" id="add-sub-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
-                    </div>
-                    <div class="modal-field" style="flex:1;">
-                        <label>Parent</label>
-                        <select id="add-sub-new-cat-parent" style="width:100%;"></select>
-                    </div>
-                    <div class="modal-field" style="flex:0 0 100px;">
-                        <label>Type</label>
-                        <select id="add-sub-new-cat-type" style="width:100%;">
-                            <option value="1">Personal</option>
-                            <option value="0">Business</option>
-                        </select>
+                    <div class="modal-field sub-col-category">
+                        <label>Book</label>
+                        <select id="sub-book"></select>
                     </div>
                 </div>
                 <div class="sub-modal-row">
@@ -829,7 +879,7 @@
             <div class="modal-body sub-modal-grid">
                 <input type="hidden" id="edit-sub-id">
                 <div class="sub-modal-row">
-                    <div class="modal-field sub-col-service">
+                    <div class="modal-field sub-col-service" style="grid-column: span 2;">
                         <label>Service</label>
                         <div class="svc-picker" id="edit-sub-svc-picker">
                             <input type="text" class="svc-picker-input" placeholder="Search or create new service..." autocomplete="off">
@@ -838,27 +888,13 @@
                         </div>
                     </div>
                     <div class="modal-field sub-col-category">
-                        <label>Category</label>
-                        <select id="edit-sub-category" onchange="onSubCategoryChange('edit')"></select>
+                        <label>Type <span class="field-hint">(the service's)</span></label>
+                        <select id="edit-sub-type" onchange="proposeBookInto('edit-sub-book', this.value)"></select>
                         <small id="edit-sub-cat-hint" style="color:var(--text-muted);display:none;">Auto-filled from service</small>
                     </div>
-                </div>
-                <!-- New category inline -->
-                <div class="sub-modal-row hidden" id="edit-sub-new-cat-row">
-                    <div class="modal-field" style="flex:2;">
-                        <label>New Category Name</label>
-                        <input type="text" id="edit-sub-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
-                    </div>
-                    <div class="modal-field" style="flex:1;">
-                        <label>Parent</label>
-                        <select id="edit-sub-new-cat-parent" style="width:100%;"></select>
-                    </div>
-                    <div class="modal-field" style="flex:0 0 100px;">
-                        <label>Type</label>
-                        <select id="edit-sub-new-cat-type" style="width:100%;">
-                            <option value="1">Personal</option>
-                            <option value="0">Business</option>
-                        </select>
+                    <div class="modal-field sub-col-category">
+                        <label>Book</label>
+                        <select id="edit-sub-book"></select>
                     </div>
                 </div>
                 <div class="sub-modal-row">
@@ -947,26 +983,19 @@
                     <label>Name</label>
                     <input type="text" id="add-svc-name" placeholder="e.g. Netflix" style="width:100%;">
                 </div>
-                <div class="modal-field">
-                    <label>Category</label>
-                    <select id="add-svc-category" style="width:100%;" onchange="toggleNewCategoryRow('add-svc-category', 'add-svc-new-cat-row', 'add-svc-new-cat-name')"></select>
-                </div>
-                <div class="modal-field-row hidden" id="add-svc-new-cat-row">
-                    <div class="modal-field" style="flex:2;">
-                        <label>New Category Name</label>
-                        <input type="text" id="add-svc-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
-                    </div>
-                    <div class="modal-field" style="flex:1;">
-                        <label>Parent</label>
-                        <select id="add-svc-new-cat-parent" style="width:100%;"></select>
-                    </div>
-                    <div class="modal-field" style="flex:0 0 100px;">
+                <div class="modal-field-row">
+                    <div class="modal-field">
                         <label>Type</label>
-                        <select id="add-svc-new-cat-type" style="width:100%;">
-                            <option value="1">Personal</option>
-                            <option value="0">Business</option>
-                        </select>
+                        <select id="add-svc-type" style="width:100%;" onchange="proposeBookInto('add-svc-book', this.value)"></select>
                     </div>
+                    <div class="modal-field" style="flex:0 0 140px;">
+                        <label>Book</label>
+                        <select id="add-svc-book" style="width:100%;"></select>
+                    </div>
+                </div>
+                <div class="modal-field" style="display:flex;align-items:center;gap:var(--space-2);">
+                    <input type="checkbox" id="add-svc-review">
+                    <label for="add-svc-review" style="margin:0;font-size:12px;color:var(--text-secondary);">Mixed merchant: review the type of its rows each time</label>
                 </div>
                 <div class="modal-field">
                     <label>Notes</label>
@@ -993,26 +1022,19 @@
                     <label>Name</label>
                     <input type="text" id="edit-svc-name" style="width:100%;">
                 </div>
-                <div class="modal-field">
-                    <label>Category</label>
-                    <select id="edit-svc-category" style="width:100%;" onchange="toggleNewCategoryRow('edit-svc-category', 'edit-svc-new-cat-row', 'edit-svc-new-cat-name')"></select>
-                </div>
-                <div class="modal-field-row hidden" id="edit-svc-new-cat-row">
-                    <div class="modal-field" style="flex:2;">
-                        <label>New Category Name</label>
-                        <input type="text" id="edit-svc-new-cat-name" placeholder="e.g. Coffee" style="width:100%;">
-                    </div>
-                    <div class="modal-field" style="flex:1;">
-                        <label>Parent</label>
-                        <select id="edit-svc-new-cat-parent" style="width:100%;"></select>
-                    </div>
-                    <div class="modal-field" style="flex:0 0 100px;">
+                <div class="modal-field-row">
+                    <div class="modal-field">
                         <label>Type</label>
-                        <select id="edit-svc-new-cat-type" style="width:100%;">
-                            <option value="1">Personal</option>
-                            <option value="0">Business</option>
-                        </select>
+                        <select id="edit-svc-type" style="width:100%;" onchange="proposeBookInto('edit-svc-book', this.value)"></select>
                     </div>
+                    <div class="modal-field" style="flex:0 0 140px;">
+                        <label>Book</label>
+                        <select id="edit-svc-book" style="width:100%;"></select>
+                    </div>
+                </div>
+                <div class="modal-field" style="display:flex;align-items:center;gap:var(--space-2);">
+                    <input type="checkbox" id="edit-svc-review">
+                    <label for="edit-svc-review" style="margin:0;font-size:12px;color:var(--text-secondary);">Mixed merchant: review the type of its rows each time</label>
                 </div>
                 <div class="modal-field">
                     <label>Notes</label>

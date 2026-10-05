@@ -10,6 +10,7 @@ import pytest
 
 import parse_citi_pdf
 import parsers
+import tie
 from ingest import ensure_account
 from parse_citi_pdf import (
     _chk_date,
@@ -97,6 +98,14 @@ SGD 000001 20,000.00 Jun 01 2026 Jul 01 2026 1.00000 16.44"""
 CHK_PAGES = [CHK_PAGE1, CHK_PAGE2]
 
 
+def _read_and_checked(parse, pages):
+    """Parse, then check the rows against the statement's balances as the
+    import path does. The parser hands the balances over; tie.py refuses."""
+    stmt = parse(pages)
+    tie.check(stmt)
+    return stmt
+
+
 # ---------------------------------------------------------------------------
 # Detection
 # ---------------------------------------------------------------------------
@@ -144,20 +153,21 @@ def test_card_statement_header_fields():
 
 def test_card_rows_signs_and_dates():
     stmt = parse_citi_card_pages(CARD_PAGES)
-    rows = [(t.date, t.description, t.amount_sgd) for t in stmt.transactions]
+    # Amounts are whole cents, as the statement states them.
+    rows = [(t.date, t.description, t.amount_minor) for t in stmt.transactions]
     assert rows == [
-        ("2026-05-12", "PAYMENT-ATM/INTERNET", -500.00),
-        ("2026-05-20", "FAKE COFFEE ROASTERS SINGAPORE SG", 600.00),
-        ("2026-05-28", "TEST HOTEL JAKARTA ID", 100.00),
-        ("2026-06-01", "DEMO BOOKSHOP NEW YORK US", 300.00),
-        ("2026-06-02", "ANNUAL FEE", 20.00),
+        ("2026-05-12", "PAYMENT-ATM/INTERNET", -50000),
+        ("2026-05-20", "FAKE COFFEE ROASTERS SINGAPORE SG", 60000),
+        ("2026-05-28", "TEST HOTEL JAKARTA ID", 10000),
+        ("2026-06-01", "DEMO BOOKSHOP NEW YORK US", 30000),
+        ("2026-06-02", "ANNUAL FEE", 2000),
     ]
 
 
 def test_card_payment_row_is_emitted_and_flagged():
     stmt = parse_citi_card_pages(CARD_PAGES)
     payments = [t for t in stmt.transactions if t.is_payment]
-    assert len(payments) == 1 and payments[0].amount_sgd < 0
+    assert len(payments) == 1 and payments[0].amount_minor < 0
 
 
 def test_card_foreign_amount_attached_to_preceding_row():
@@ -215,7 +225,43 @@ def test_card_that_does_not_reconcile_raises():
     # Dropping a billed row must fail loudly, never import a short statement.
     broken = [CARD_PAGE1, CARD_PAGE2.replace("28 MAY TEST HOTEL JAKARTA ID 100.00\n", ""), CARD_PAGE3]
     with pytest.raises(ValueError, match="reconcile"):
-        parse_citi_card_pages(broken)
+        _read_and_checked(parse_citi_card_pages, broken)
+
+
+def test_card_one_cent_off_its_current_balance_raises():
+    # Previous balance and the rows add up to 1,020.00; the bill says one cent off.
+    summary = "500.00 500.00 1,000.00 0.00 20.00 1,020.00"
+    assert summary in CARD_PAGE2
+    for off_by_a_cent in ("1,020.01", "1,019.99"):
+        broken = [CARD_PAGE1, CARD_PAGE2.replace(summary, summary[:-8] + off_by_a_cent), CARD_PAGE3]
+        with pytest.raises(ValueError, match="reconcile"):
+            _read_and_checked(parse_citi_card_pages, broken)
+
+
+def test_card_rows_add_up_to_the_balance_in_whole_cents():
+    stmt = parse_citi_card_pages(CARD_PAGES)
+    # Previous balance 500.00, current balance 1,020.00.
+    assert 50000 + sum(t.amount_minor for t in stmt.transactions) == 102000
+    assert all(type(t.amount_minor) is int for t in stmt.transactions)
+
+
+def test_card_hands_over_its_balances_owed_as_negative_and_ties():
+    stmt = _read_and_checked(parse_citi_card_pages, CARD_PAGES)
+    # Previous balance 500.00 and current balance 1,020.00, both owed.
+    assert (stmt.opening_minor, stmt.closing_minor) == (-50000, -102000)
+    assert (stmt.opening_date, stmt.closing_date) == (None, "2026-06-05")
+    assert tie.check(stmt)["difference_minor"] == 0
+
+
+def test_card_off_its_current_balance_reports_the_difference():
+    broken = [CARD_PAGE1, CARD_PAGE2.replace("28 MAY TEST HOTEL JAKARTA ID 100.00\n", ""), CARD_PAGE3]
+    with pytest.raises(tie.DoesNotTie) as excinfo:
+        tie.check(parse_citi_card_pages(broken))
+    # The 100.00 row that was not read is still owed on the bill.
+    assert excinfo.value.figures == {
+        "opening_minor": -50000, "rows_minor": -42000, "closing_minor": -102000,
+        "difference_minor": 10000, "rows": 4,
+    }
 
 
 def test_card_account_resolves_to_existing_account(conn):
@@ -245,13 +291,13 @@ def test_checking_header_fields():
 
 def test_checking_rows_signed_by_balance_movement():
     stmt = parse_citi_checking_pages(CHK_PAGES)
-    rows = [(t.date, t.amount_sgd) for t in stmt.transactions]
-    # Credits (balance up) negative, debits (balance down) positive.
+    rows = [(t.date, t.amount_minor) for t in stmt.transactions]
+    # Credits (balance up) negative, debits (balance down) positive; whole cents.
     assert rows == [
-        ("2026-06-03", -2000.00),
-        ("2026-06-10", 1500.00),
-        ("2026-06-30", -12.34),
-        ("2026-06-30", 5.00),
+        ("2026-06-03", -200000),
+        ("2026-06-10", 150000),
+        ("2026-06-30", -1234),
+        ("2026-06-30", 500),
     ]
 
 
@@ -276,12 +322,37 @@ def test_checking_continuation_line_appended_but_page_furniture_is_not():
 def test_checking_that_does_not_reconcile_raises():
     broken = [CHK_PAGE1, CHK_PAGE2.replace("TOTAL 1,505.00 2,012.34", "TOTAL 1,505.00 2,999.99")]
     with pytest.raises(ValueError, match="reconcile"):
-        parse_citi_checking_pages(broken)
+        _read_and_checked(parse_citi_checking_pages, broken)
+
+
+@pytest.mark.parametrize("stated, one_cent_off", [
+    ("TOTAL 1,505.00 2,012.34", "TOTAL 1,505.01 2,012.34"),
+    ("TOTAL 1,505.00 2,012.34", "TOTAL 1,505.00 2,012.33"),
+    ("CLOSING BALANCE 10,507.34", "CLOSING BALANCE 10,507.35"),
+])
+def test_checking_one_cent_off_its_totals_or_closing_balance_raises(stated, one_cent_off):
+    assert stated in CHK_PAGE2
+    broken = [CHK_PAGE1, CHK_PAGE2.replace(stated, one_cent_off)]
+    with pytest.raises(ValueError, match="reconcile"):
+        _read_and_checked(parse_citi_checking_pages, broken)
+
+
+def test_checking_rows_carry_the_opening_balance_to_the_closing_balance_in_whole_cents():
+    stmt = parse_citi_checking_pages(CHK_PAGES)
+    # Opening 10,000.00 less the rows (money out positive) is closing 10,507.34.
+    assert 1000000 - sum(t.amount_minor for t in stmt.transactions) == 1050734
+    assert all(type(t.amount_minor) is int for t in stmt.transactions)
+
+
+def test_checking_hands_over_its_opening_and_closing_balance_with_their_dates():
+    stmt = _read_and_checked(parse_citi_checking_pages, CHK_PAGES)
+    assert (stmt.opening_minor, stmt.closing_minor) == (1000000, 1050734)
+    assert (stmt.opening_date, stmt.closing_date) == ("2026-06-01", "2026-06-30")
 
 
 def test_checking_bill_payment_to_card_is_emitted():
     stmt = parse_citi_checking_pages(CHK_PAGES)
-    assert any(t.is_payment and t.amount_sgd > 0 for t in stmt.transactions)
+    assert any(t.is_payment and t.amount_minor > 0 for t in stmt.transactions)
 
 
 def test_checking_known_month_abbreviation_maps():

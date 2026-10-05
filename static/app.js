@@ -1,44 +1,58 @@
 /* fin — app.js
-   Frontend logic for Dashboard, Import, Subscriptions, Services, and Masters tabs */
+   Frontend logic for Dashboard, Import, Subscriptions, Services, and Masters tabs.
+   A row is labelled by book (whose spending: Household, Moom, Kalesh) and type
+   (what kind); both lists come from the server (/api/books, /api/types). */
 
 // ============================================================
 // STATE
 // ============================================================
 
-let categories = [];          // [{id, name, parent_id, parent_name, display_name, is_personal, scope}, ...]
+let types = [];               // The type list: [{id, name, parent_id, parent_name, display_name, default_one_off, covers, not_for, proposed_book}, ...]
+let books = [];               // [{name, description}, ...] — Household, Moom, Kalesh
 let accounts = [];            // [{id, name, ...}, ...]
+let accountKinds = { kinds: [], owners: [] };  // the declared account kinds and owners, each with a description
+let reviewChoices = [];       // what a waiting transfer can be labelled: [{name, label, flow, asks, kinds, description}, ...]
+let incomeKinds = [];         // the income kinds: [{id, name, ...}, ...]
+let reviewRows = [];          // the transfers waiting for a label, largest first
 let currentImportId = null;   // Active import preview
 let currentImportData = null; // Preview data from upload
-let importServices = [];      // [{id, name, category_id}, ...] from upload response
+let importServices = [];      // [{id, name, book, type_id, type_name}, ...] from upload response
 let monthlyChart = null;      // Chart.js instance
-let categoryChart = null;     // Chart.js instance
+let typeChart = null;     // Chart.js instance
 let txCurrentPage = 1;
-let spendFilter = 'personal';  // 'all', 'personal', 'moom' — default to personal
+let spendFilter = 'Household'; // 'all' or a book — default to Household
 let selectedFiles = [];
 let txSortCol = 'date';       // Current sort column
 let txSortDir = 'desc';       // Current sort direction
-let showSubcategories = false; // Charts: roll up to parent by default
+let showSubtypes = false;      // Charts: roll sub-types up to their parent by default
 let chartMode = 'bar';         // 'bar' or 'trend' for monthly chart
 let lastMonthlyData = null;    // Cache for chart mode toggle
 let lastGranularity = null;    // Cache for chart mode toggle
 let subsFilter = 'active';     // 'active', 'all', 'deactivated'
-let subsSpend = 'personal';    // 'personal', 'all', 'moom'
+let subsSpend = 'Household';   // 'all' or a book
 let allSubs = [];              // Cached subscription data
 const subsSortState = { col: 'service', asc: true };
 // sortSubs toggler created after renderSubscriptions is defined (line ~3400)
 let subsFxRate = 1.35;         // USD→SGD rate from subscriptions API
 let noteModalTxId = null;      // Transaction ID being edited in note modal
 let noteModalIconEl = null;    // Icon element to update after save
-// Chart-table linking state — selections[] model (any combo of category + period)
-// Each entry: { category: string, period: string|null }
+// Chart-table linking state — selections[] model (any combo of type + period)
+// Each entry: { type: string, period: string|null }
 // period=null means "all periods" (from donut click)
 let chartFilter = { selections: [] };
 let monthlyPeriods = [];       // Raw period strings for chart click lookup
-let catFilterSelections = [];  // Multi-select category filter selections
+let typeFilterSelections = []; // Multi-select type filter selections
 let allServicesList = [];      // Cached services list (shared by resolve modal, services master, subs)
-let categoryColorMap = {};     // category name → hex color (shared between bar + donut)
+let typeColorMap = {};     // type name → hex color (shared between bar + donut)
 
-// Category color palette (Dark Neutral chart tokens)
+// The book a row with none is read as, and what the charts and the type
+// filter call spending rows with no type. Both mirror the server.
+const DEFAULT_BOOK = 'Household';
+const NO_TYPE_LABEL = 'No type';
+const UNTYPED_FILTER = '__untyped__';
+let suggestionsEnabled = false; // Type suggestion is on only when the server has its key
+
+// Type color palette (Dark Neutral chart tokens)
 const CAT_COLORS = [
     '#e8e0d8', '#ff6b6b', '#a09890', '#4aba6a', '#d4a85c',
     '#7090c0', '#c090b0', '#80b8a8', '#e8e0d8', '#ff6b6b',
@@ -54,44 +68,61 @@ const MONTH_NAMES = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
 // SHARED HELPERS
 // ============================================================
 
-// Build hierarchical category <option> HTML from the global categories array.
-// Options: placeholder (default "—"), includeNew (appends "+ New category..."), selectedId
-function buildCategoryDropdownHtml({placeholder = '—', includeNew = false, selectedId = null} = {}) {
+// Build hierarchical type <option> HTML from the global types array.
+// Options: placeholder (default "—"), selectedId. The type list is fixed, so
+// there is no "new type" entry.
+function buildTypeDropdownHtml({placeholder = '—', selectedId = null} = {}) {
     let html = `<option value="">${placeholder}</option>`;
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
+    const parents = types.filter(t => !t.parent_id).sort((a, b) => a.name.localeCompare(b.name));
     parents.forEach(p => {
         html += `<option value="${p.id}"${p.id == selectedId ? ' selected' : ''}>${escapeHtml(p.name)}</option>`;
-        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
+        const children = types.filter(t => t.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
         children.forEach(c => {
             html += `<option value="${c.id}"${c.id == selectedId ? ' selected' : ''}>&nbsp;&nbsp;${escapeHtml(p.name)} > ${escapeHtml(c.name)}</option>`;
         });
     });
-    if (includeNew) html += '<option value="__new__">+ New category...</option>';
     return html;
 }
 
-// Populate a <select> element with hierarchical category options.
-// parentSelectId: optional ID of a parent-only dropdown to populate alongside (for "new category" flows)
-function populateCategorySelect(selectId, {placeholder, includeNew, selectedId, parentSelectId} = {}) {
-    const sel = document.getElementById(selectId);
-    sel.innerHTML = buildCategoryDropdownHtml({placeholder, includeNew, selectedId});
-    if (parentSelectId) {
-        const parentSel = document.getElementById(parentSelectId);
-        if (parentSel) {
-            parentSel.innerHTML = '<option value="">-- Top-level --</option>';
-            categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name))
-                .forEach(p => { parentSel.innerHTML += `<option value="${p.id}">${p.name}</option>`; });
-        }
-    }
+// Populate a <select> element with hierarchical type options.
+function populateTypeSelect(selectId, {placeholder, selectedId} = {}) {
+    document.getElementById(selectId).innerHTML = buildTypeDropdownHtml({placeholder, selectedId});
 }
 
-function categoryDisplayName(categoryId) {
-    if (!categoryId) return '';
-    const cat = categories.find(c => c.id === categoryId);
-    if (!cat) return '';
-    if (!cat.parent_id) return cat.name;
-    const parent = categories.find(c => c.id === cat.parent_id);
-    return parent ? `${parent.name} > ${cat.name}` : cat.name;
+// Build book <option> HTML from the global books array.
+function buildBookDropdownHtml({placeholder = '—', selectedBook = null} = {}) {
+    let html = `<option value="">${placeholder}</option>`;
+    books.forEach(b => {
+        html += `<option value="${escapeHtml(b.name)}"${b.name === selectedBook ? ' selected' : ''} title="${escapeHtml(b.description)}">${escapeHtml(b.name)}</option>`;
+    });
+    return html;
+}
+
+function populateBookSelect(selectId, {placeholder, selectedBook} = {}) {
+    document.getElementById(selectId).innerHTML = buildBookDropdownHtml({placeholder, selectedBook});
+}
+
+function typeDisplayName(typeId) {
+    if (!typeId) return '';
+    const type = types.find(t => t.id === typeId);
+    return type ? type.display_name : '';
+}
+
+// The book a type proposes for a merchant no rule knows: Moom for the types
+// only a company buys, nothing for Software & AI tools (the operator says),
+// Household for the rest. Decided by the server and sent with the type list.
+function proposedBook(typeId) {
+    const type = types.find(t => t.id === parseInt(typeId));
+    return type ? type.proposed_book : null;
+}
+
+// When a type is picked and no book is chosen yet, fill in the proposed book.
+// A book the operator already chose is left alone.
+function proposeBookInto(bookSelectId, typeId) {
+    const bookSel = document.getElementById(bookSelectId);
+    if (!bookSel || bookSel.value) return;
+    const proposed = proposedBook(typeId);
+    if (proposed) bookSel.value = proposed;
 }
 
 // Factory: create a sort toggler for a table section.
@@ -116,34 +147,6 @@ function updateSortIndicators(tableSelector, sortState) {
             th.classList.add(sortState.asc ? 'sort-asc' : 'sort-desc');
         }
     });
-}
-
-// Resolve a category select that may have "__new__" selected.
-// Returns { id: number|null, abort: boolean }. abort=true means validation failed (caller should return).
-async function resolveCategory(selectId, prefix) {
-    const catVal = document.getElementById(selectId).value;
-    if (catVal === '__new__') {
-        const newCatName = document.getElementById(`${prefix}-new-cat-name`).value.trim();
-        if (!newCatName) { alert('Please enter a category name.'); return { id: null, abort: true }; }
-        const parentId = document.getElementById(`${prefix}-new-cat-parent`).value || null;
-        const isPersonal = parseInt(document.getElementById(`${prefix}-new-cat-type`).value);
-        const catData = await apiFetch('/api/categories', {
-            method: 'POST', body: { name: newCatName, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }
-        });
-        if (!catData) return { id: null, abort: true };
-        await loadReferenceData();
-        showToast(`Created category "${newCatName}"`, 'info');
-        return { id: catData.id, abort: false };
-    }
-    return { id: catVal ? parseInt(catVal) : null, abort: false };
-}
-
-// Toggle new-category-row visibility when category select changes to/from "__new__".
-function toggleNewCategoryRow(selectId, newCatRowId, focusFieldId) {
-    const val = document.getElementById(selectId).value;
-    const row = document.getElementById(newCatRowId);
-    if (val === '__new__') { row.classList.remove('hidden'); document.getElementById(focusFieldId).focus(); }
-    else { row.classList.add('hidden'); }
 }
 
 // Open a modal: display flex, optional backdrop close and Escape key handler.
@@ -173,7 +176,16 @@ function setupFxHint(modalId, currencySelectId) {
     const currSel = document.getElementById(currencySelectId);
     const update = () => {
         document.querySelectorAll(`#${modalId} .fx-rate-hint`).forEach(el => {
-            el.textContent = currSel.value === 'USD' && subsFxRate ? `(1 USD = ${subsFxRate.toFixed(2)} SGD)` : '';
+            el.textContent = currSel.value === 'USD' && subsFxRate ? `(1 USD = ${subsFxRate.toFixed(2)} SGD, click to fetch)` : '';
+            // The rate is fetched only on this click, never by a page load.
+            el.onclick = currSel.value === 'USD' ? async (ev) => {
+                ev.preventDefault();
+                const resp = await fetch('/api/fx-rate', { method: 'POST' });
+                if (resp.ok) {
+                    subsFxRate = (await resp.json()).usd_sgd;
+                    update();
+                }
+            } : null;
         });
     };
     currSel.onchange = update;
@@ -192,81 +204,75 @@ function calcRenewalDate(startVal, freq, periods) {
     return start.toISOString().split('T')[0];
 }
 
-// Update a service's category and show toast with recategorization count.
-// Returns the recategorized count (0 if failed/skipped).
-async function cascadeServiceCategory(serviceId, categoryId, serviceName, verb) {
-    if (!serviceId || !categoryId) return 0;
-    const svcData = await apiFetch(`/api/services/${serviceId}`, {
-        method: 'PUT', body: { category_id: categoryId }
-    });
+// Update a service's book and type and show toast with the relabel count.
+// Returns the relabelled count (0 if failed/skipped). A subscription has no
+// label of its own: this is how its screen changes the label it shows.
+async function cascadeServiceLabel(serviceId, book, typeId, serviceName, verb) {
+    if (!serviceId || !typeId) return 0;
+    const body = { type_id: typeId };
+    if (book) body.book = book;
+    const svcData = await apiFetch(`/api/services/${serviceId}`, { method: 'PUT', body });
     if (svcData && svcData.recategorized) {
-        showToast(`${verb} "${serviceName}" + re-categorized ${svcData.recategorized} transactions`, 'info');
+        showToast(`${verb} "${serviceName}" + relabelled ${svcData.recategorized} transactions`, 'info');
         return svcData.recategorized;
     }
     return 0;
 }
 
-function getScope(item) {
-    if (!item) return 'personal';
-    if (item.scope) return item.scope;
-    return item.is_personal === 0 ? 'moom' : 'personal';
+// The book an item is read as: its own, or the default when it has none.
+function bookOf(item) {
+    return (item && item.book) || DEFAULT_BOOK;
 }
 
-function scopeLabel(scope) {
-    if (scope === 'moom') return 'Moom';
-    if (scope === 'kalesh') return 'Kalesh';
-    return 'Personal';
+function matchesBook(filter, item) {
+    return filter === 'all' || bookOf(item) === filter;
 }
 
-function matchesScope(filter, item) {
-    return filter === 'all' || getScope(item) === filter;
+// A badge naming the book, shown only where it is not the household's.
+function bookBadgeHtml(book) {
+    if (!book || book === DEFAULT_BOOK) return '';
+    return ` <span class="badge badge-muted">${escapeHtml(book)}</span>`;
 }
 
-function scopeBadgeHtml(scope) {
-    if (!scope || scope === 'personal') return '';
-    return ` <span class="badge badge-muted">${escapeHtml(scopeLabel(scope))}</span>`;
-}
-
-// Build a visibility-change hint for toast when a transaction moves between spend filters.
-function spendFilterHint(categoryId) {
-    const cat = categories.find(c => c.id === categoryId);
-    if (!cat) return null;
-    const nextScope = getScope(cat);
-    if (spendFilter !== 'all' && nextScope !== spendFilter) {
-        return `Moved to ${scopeLabel(nextScope)} — switch to "All" to see it`;
+// Build a visibility-change hint for toast when a transaction moves between books.
+function spendFilterHint(book) {
+    const next = book || DEFAULT_BOOK;
+    if (spendFilter !== 'all' && next !== spendFilter) {
+        return `Moved to ${next} — switch to "All" to see it`;
     }
     return null;
 }
 
-// Resolve service+category from a picker: validate, create new service if needed.
-// Returns { serviceId, categoryId, serviceName } or null if aborted.
-async function resolveSubService(pickerFn, catSelectId, catPrefix) {
+// Resolve service + its book and type from a picker: validate, create new service if needed.
+// Returns { serviceId, book, typeId, serviceName } or null if aborted.
+async function resolveSubService(pickerFn, bookSelectId, typeSelectId) {
     const picker = pickerFn();
     let { id: serviceId, name: serviceName } = picker.getValue();
     if (!serviceName) { alert('Please select or create a service'); return null; }
 
-    const { id: categoryId, abort } = await resolveCategory(catSelectId, catPrefix);
-    if (abort) return null;
+    const typeVal = document.getElementById(typeSelectId).value;
+    const typeId = typeVal ? parseInt(typeVal) : null;
+    const book = document.getElementById(bookSelectId).value || null;
 
     if (!serviceId && serviceName) {
-        if (!categoryId) { alert('Please select a category for the new service.'); return null; }
-        const svcData = await apiFetch('/api/services', {
-            method: 'POST', body: { name: serviceName, category_id: categoryId }
-        });
+        if (!typeId) { alert('Please select a type for the new service.'); return null; }
+        const body = { name: serviceName, type_id: typeId };
+        if (book) body.book = book;
+        const svcData = await apiFetch('/api/services', { method: 'POST', body });
         if (!svcData) return null;
         serviceId = svcData.id;
         allServicesList = null;
         showToast(`Created service "${serviceName}"`, 'info');
     }
-    return { serviceId, categoryId, serviceName };
+    return { serviceId, book, typeId, serviceName };
 }
 
 // Read subscription form fields. prefix: 'sub' for add, 'edit-sub' for edit.
-function readSubFormBody(prefix, serviceId, categoryId, serviceName) {
+// A subscription carries no book or type: they are its service's.
+function readSubFormBody(prefix, serviceId, serviceName) {
     const el = (id) => document.getElementById(`${prefix}-${id}`);
     return {
         service_id: serviceId,
-        category_id: categoryId,
         amount: parseFloat(el('amount').value) || 0,
         currency: el('currency').value || 'SGD',
         frequency: el(prefix === 'sub' ? 'frequency' : 'freq').value,
@@ -319,16 +325,30 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function loadReferenceData() {
-    const [catRes, acctRes] = await Promise.all([
-        fetch('/api/categories').then(r => r.json()),
+    const [typeRes, bookRes, acctRes, kindRes] = await Promise.all([
+        fetch('/api/types').then(r => r.json()),
+        fetch('/api/books').then(r => r.json()),
         fetch('/api/accounts').then(r => r.json()),
+        fetch('/api/account-kinds').then(r => r.json()),
     ]);
-    categories = catRes;
+    types = typeRes;
+    books = bookRes;
     accounts = acctRes;
+    accountKinds = kindRes;
 
-    populateCatMultiSelect();
+    populateTypeMultiSelect();
     populateAccountFilter();
     await populateYearDropdown();
+
+    // Type suggestion: off unless the server says its key is present.
+    try {
+        const status = await fetch('/api/suggestions/status').then(r => r.json());
+        suggestionsEnabled = !!status.enabled;
+    } catch (_) {
+        suggestionsEnabled = false;
+    }
+    updateSuggestButton();
+    refreshReviewCount();
 }
 
 function populateAccountFilter() {
@@ -337,14 +357,14 @@ function populateAccountFilter() {
     if (dashSel) {
         const current = dashSel.value;
         dashSel.innerHTML = '<option value="">All Accounts</option>';
-        accounts.forEach(a => {
+        accounts.filter(hasStatements).forEach(a => {
             dashSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         });
         if (current) dashSel.value = current;
     }
 
     // Subscription card dropdowns (add form + edit modal)
-    const activeAccounts = accounts.filter(a => a.status !== 'archived');
+    const activeAccounts = accounts.filter(a => a.status !== 'archived' && hasStatements(a));
     ['sub-card', 'edit-sub-card'].forEach(id => {
         const sel = document.getElementById(id);
         if (!sel) return;
@@ -456,8 +476,11 @@ function switchTab(tabName, {pushHistory = true} = {}) {
     if (tabName === 'subs') loadSubscriptions();
     if (tabName === 'accounts') renderAccountsTab();
     if (tabName === 'rules') loadRules();
-    if (tabName === 'categories') renderCategoriesMaster();
+    if (tabName === 'types') renderTypesMaster();
     if (tabName === 'services-master') renderServicesMaster();
+    if (tabName === 'balance') loadBalanceSheet();
+    if (tabName === 'review') loadReviewList();
+    else refreshReviewCount();
 }
 
 // Handle browser back/forward
@@ -480,9 +503,9 @@ async function loadDashboard(preserveChartFilter) {
     const params = buildFilterParams();           // full filter (includes month narrowing)
     const chartFilterParams = buildChartParams();  // year-level only (no month narrowing)
     const granularity = 'monthly';
-    const groupParent = showSubcategories ? 'false' : 'true';
+    const groupParent = showSubtypes ? 'false' : 'true';
     const chartParams = chartFilterParams + (chartFilterParams ? '&' : '') + 'granularity=' + granularity + '&group_parent=' + groupParent;
-    const catChartParams = params + (params ? '&' : '') + 'group_parent=' + groupParent;
+    const typeChartParams = params + (params ? '&' : '') + 'group_parent=' + groupParent;
 
     // Stat cards: pass ref_month if a specific month is selected
     const year = document.getElementById('filter-year').value;
@@ -491,22 +514,22 @@ async function loadDashboard(preserveChartFilter) {
     if (year && month) {
         statParams = `ref_month=${year}-${month}`;
     }
-    if (spendFilter !== 'all') statParams += (statParams ? '&' : '') + 'scope=' + spendFilter;
+    if (spendFilter !== 'all') statParams += (statParams ? '&' : '') + 'book=' + spendFilter;
     if (document.getElementById('filter-one-off').checked) statParams += (statParams ? '&' : '') + 'exclude_one_off=true';
     const accountId = document.getElementById('filter-account')?.value;
     if (accountId) statParams += (statParams ? '&' : '') + 'account_id=' + accountId;
 
-    const [statCards, monthly, catData] = await Promise.all([
+    const [statCards, monthly, typeData] = await Promise.all([
         fetch('/api/dashboard/stat-cards?' + statParams).then(r => r.json()),
         fetch('/api/dashboard/monthly?' + chartParams).then(r => r.json()),
-        fetch('/api/dashboard/categories?' + catChartParams).then(r => r.json()),
+        fetch('/api/dashboard/types?' + typeChartParams).then(r => r.json()),
     ]);
 
     renderStatCards(statCards);
     renderMonthlyChart(monthly, granularity);
-    renderCategoryChart(catData);
+    renderTypeChart(typeData);
 
-    // Load transaction area via txPage (includes search, chart filter, category filter)
+    // Load transaction area via txPage (includes search, chart filter, type filter)
     txCurrentPage = 1;
     txPage(0);
 }
@@ -533,7 +556,7 @@ function buildFilterParams() {
     const accountId = document.getElementById('filter-account')?.value;
     if (accountId) p.set('account_id', accountId);
 
-    if (spendFilter !== 'all') p.set('scope', spendFilter);
+    if (spendFilter !== 'all') p.set('book', spendFilter);
     if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
     return p.toString();
 }
@@ -549,17 +572,17 @@ function buildChartParams() {
     }
     const accountId = document.getElementById('filter-account')?.value;
     if (accountId) p.set('account_id', accountId);
-    if (spendFilter !== 'all') p.set('scope', spendFilter);
+    if (spendFilter !== 'all') p.set('book', spendFilter);
     if (document.getElementById('filter-one-off').checked) p.set('exclude_one_off', 'true');
     return p.toString();
 }
 
 function applyDashboardFilters() { loadDashboard(); }
 
-function toggleSubcategories() {
-    showSubcategories = !showSubcategories;
+function toggleSubtypes() {
+    showSubtypes = !showSubtypes;
     const btn = document.getElementById('subcategory-toggle');
-    if (btn) btn.classList.toggle('active', showSubcategories);
+    if (btn) btn.classList.toggle('active', showSubtypes);
     loadDashboard();
 }
 
@@ -568,16 +591,6 @@ function setSpendFilter(filter) {
     document.querySelectorAll('[data-filter]').forEach(b => {
         b.classList.toggle('active', b.dataset.filter === filter);
     });
-    // Auto-toggle subcategories: on for business scopes, off for Personal/All
-    if ((filter === 'moom' || filter === 'kalesh') && !showSubcategories) {
-        showSubcategories = true;
-        const btn = document.getElementById('subcategory-toggle');
-        if (btn) btn.classList.add('active');
-    } else if (filter !== 'moom' && filter !== 'kalesh' && showSubcategories) {
-        showSubcategories = false;
-        const btn = document.getElementById('subcategory-toggle');
-        if (btn) btn.classList.remove('active');
-    }
     loadDashboard();
 }
 
@@ -595,31 +608,49 @@ function renderStatCards(d) {
         return `<div class="stat-sub">3mo avg: S$${formatAmount(avg)}</div>`;
     }
 
+    const transfers = (n) => `${n} ${n === 1 ? 'transfer' : 'transfers'}`;
+    const rows = (n) => `${n} ${n === 1 ? 'row' : 'rows'}`;
+    // What the headline is held short of: this month's transfers nobody has
+    // labelled, money out and money in apart.
+    const loanCard = `
+        <div class="stat-card">
+            <div class="stat-label">Loan principal</div>
+            <div class="stat-value">S$${formatAmount(d.loan_principal)}</div>
+            <div class="stat-sub">not spending; cash out S$${formatAmount(d.cash_out)}</div>
+            ${d.loan_interest ? `<div class="stat-sub">interest S$${formatAmount(d.loan_interest)} is inside spending</div>` : ''}
+        </div>`;
+    const heldOut = d.held_out_count
+        ? `<div class="stat-sub text-warning">excludes unreviewed ${d.held_out_count === 1 ? 'transfer' : 'transfers'}: ${waitingOutAndIn(d, 'held_out')}</div>`
+        : '';
+
+    // The headline is household spending only. A company's costs sit beside
+    // it and are never added into it.
     document.getElementById('stats-row').innerHTML = `
         <div class="stat-card">
-            <div class="stat-label">${d.ref_label} Spend</div>
-            <div class="stat-value">S$${formatAmount(d.spend)} ${delta(d.spend, d.avg_spend)}</div>
-            <div class="stat-sub">${d.tx_count} transactions</div>
-            ${avgLine(d.avg_spend)}
+            <div class="stat-label">${d.ref_label} Household spending</div>
+            <div class="stat-value accent">S$${formatAmount(d.household)} ${delta(d.household, d.avg_household)}</div>
+            <div class="stat-sub">${rows(d.household_rows)}</div>
+            ${avgLine(d.avg_household)}
+            ${heldOut}
         </div>
+        ${loanCard}
         <div class="stat-card">
-            <div class="stat-label">Personal</div>
-            <div class="stat-value accent">S$${formatAmount(d.personal)} ${delta(d.personal, d.avg_personal)}</div>
-            ${avgLine(d.avg_personal)}
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Moom</div>
+            <div class="stat-label">Moom (its costs)</div>
             <div class="stat-value moom">S$${formatAmount(d.moom)} ${delta(d.moom, d.avg_moom)}</div>
+            <div class="stat-sub">paid from our accounts</div>
             ${avgLine(d.avg_moom)}
         </div>
         <div class="stat-card">
-            <div class="stat-label">Kalesh</div>
+            <div class="stat-label">Kalesh (its costs)</div>
             <div class="stat-value" style="color:var(--accent-pop);">S$${formatAmount(d.kalesh)} ${delta(d.kalesh, d.avg_kalesh)}</div>
+            <div class="stat-sub">paid from our accounts</div>
             ${avgLine(d.avg_kalesh)}
         </div>
-        <div class="stat-card">
-            <div class="stat-label">Uncategorized</div>
-            <div class="stat-value ${d.uncategorized > 0 ? 'text-warning' : ''}">${d.uncategorized}</div>
+        <div class="stat-card" style="cursor:pointer;" title="Open the review list" onclick="switchTab('review')">
+            <div class="stat-label">To review</div>
+            <div class="stat-value ${d.waiting > 0 ? 'text-warning' : ''}" style="font-size:22px;">${transfers(d.waiting)}</div>
+            ${d.waiting > 0 ? `<div class="stat-sub text-warning">${waitingOutAndIn(d, 'waiting')}</div>` : ''}
+            <div class="stat-sub">${rows(d.untyped)} with no type in ${d.ref_label}</div>
         </div>
     `;
 }
@@ -642,23 +673,23 @@ function renderMonthlyChart(data, granularity) {
 
     // Update chart title based on granularity + mode
     const titleEl = document.getElementById('chart-trend-title');
-    const prefix = chartMode === 'trend' ? 'Category Trends' : (
+    const prefix = chartMode === 'trend' ? 'Type Trends' : (
         granularity === 'weekly' ? 'Weekly Spending' :
         granularity === 'quarterly' ? 'Quarterly Spending' : 'Monthly Spending'
     );
     titleEl.textContent = prefix;
 
-    // Collect all categories across periods
+    // Collect all types across periods
     const allCats = new Set();
     periods.forEach(p => Object.keys(data[p]).forEach(c => allCats.add(c)));
 
-    // Backend already filters by personal_only / moom_only — just sort
+    // Backend already filters by book — just sort
     let catList = [...allCats].sort();
 
     // Build shared color map so donut uses same colors as bar chart
-    categoryColorMap = {};
+    typeColorMap = {};
     catList.forEach((cat, i) => {
-        categoryColorMap[cat] = CAT_COLORS[i % CAT_COLORS.length];
+        typeColorMap[cat] = CAT_COLORS[i % CAT_COLORS.length];
     });
 
     // Format labels: "2025-09" → "Sep-25"
@@ -764,7 +795,7 @@ function renderBarChart(catList, periods, labels, data) {
 }
 
 function renderTrendChart(catList, periods, labels, data) {
-    // Rank categories by total spend, take top 8, aggregate rest as "Other"
+    // Rank types by total spend, take top 8, aggregate the rest
     const catTotals = catList.map(cat => ({
         cat,
         total: periods.reduce((s, p) => s + (data[p][cat] || 0), 0),
@@ -786,7 +817,7 @@ function renderTrendChart(catList, periods, labels, data) {
         pointBackgroundColor: CAT_COLORS[i % CAT_COLORS.length],
     }));
 
-    // Aggregate remaining categories (use "Rest" to avoid collision with "Other" category)
+    // Aggregate remaining types (use "Rest" to avoid collision with the type "Other")
     if (restCats.length) {
         datasets.push({
             label: 'Rest',
@@ -872,13 +903,10 @@ function renderTrendChart(catList, periods, labels, data) {
     });
 }
 
-function renderCategoryChart(data) {
-    let filtered = data;
-    if (spendFilter !== 'all') filtered = data.filter(d => matchesScope(spendFilter, d));
-
-    // Top 10 + "Other"
-    const top = filtered.slice(0, 10);
-    const rest = filtered.slice(10);
+function renderTypeChart(data) {
+    // Backend already filters by book. Top 10 + "Others"
+    const top = data.slice(0, 10).map(d => ({ category: d.type, total: d.total, count: d.count }));
+    const rest = data.slice(10);
     if (rest.length) {
         top.push({
             category: 'Others',
@@ -888,15 +916,15 @@ function renderCategoryChart(data) {
     }
 
     const ctx = document.getElementById('chart-categories');
-    if (categoryChart) categoryChart.destroy();
+    if (typeChart) typeChart.destroy();
 
-    categoryChart = new Chart(ctx, {
+    typeChart = new Chart(ctx, {
         type: 'doughnut',
         data: {
             labels: top.map(d => d.category),
             datasets: [{
                 data: top.map(d => d.total),
-                backgroundColor: top.map(d => categoryColorMap[d.category] || CAT_COLORS[0]),
+                backgroundColor: top.map(d => typeColorMap[d.category] || CAT_COLORS[0]),
                 borderWidth: 0,
                 offset: 0,
             }],
@@ -908,7 +936,7 @@ function renderCategoryChart(data) {
             onClick: (event, elements) => {
                 if (!elements.length) return;
                 const el = elements[0];
-                const category = categoryChart.data.labels[el.index];
+                const category = typeChart.data.labels[el.index];
                 toggleChartFilter(category, null, 'doughnut');
             },
             onHover: (event, elements) => {
@@ -938,20 +966,24 @@ function renderCategoryChart(data) {
 // TRANSACTIONS TABLE
 // ============================================================
 
-function renderCategoryBadges(tx) {
-    const catName = tx.parent_category || tx.category;
+function renderTypeBadges(tx) {
+    const typeName = tx.parent_type || tx.type;
     const badges = (() => {
-        if (!tx.category) return '<span class="badge badge-warning">Uncategorized</span>';
-        if (tx.parent_category) {
-            return `<span class="badge badge-parent">${escapeHtml(tx.parent_category)}</span><span class="badge badge-sub">${escapeHtml(tx.category)}</span>`;
+        if (!tx.type) return '<span class="badge badge-warning">No type</span>';
+        if (tx.parent_type) {
+            return `<span class="badge badge-parent">${escapeHtml(tx.parent_type)}</span><span class="badge badge-sub">${escapeHtml(tx.type)}</span>`;
         }
-        return `<span class="badge badge-success">${escapeHtml(tx.category)}</span>`;
+        return `<span class="badge badge-success">${escapeHtml(tx.type)}</span>`;
     })();
-    // Category text navigates to By Category view; uncategorized opens Resolve Modal directly
-    if (!catName) {
-        return `<span class="tx-cat-editable" onclick="showCategoryPicker(${tx.id}, this)" title="Click to categorize">${badges}</span>`;
+    // The book is named where it is not the household's; a mixed merchant's
+    // row is flagged so its type gets a look each time.
+    const extras = bookBadgeHtml(tx.book)
+        + (tx.review_each_time ? ' <span class="badge badge-warning" title="Mixed merchant: check this row\'s type">check type</span>' : '');
+    // Type text navigates to By Type view; a row with no type opens Resolve Modal directly
+    if (!typeName) {
+        return `<span class="tx-cat-editable" onclick="showTypePicker(${tx.id}, this)" title="Click to give it a type">${badges}</span>${extras}`;
     }
-    return `<a href="#" class="tx-cat-link" onclick="navigateToCategory('${escapeHtml(catName)}');return false;" title="View in By Category">${badges}</a>`;
+    return `<a href="#" class="tx-cat-link" onclick="navigateToType('${escapeHtml(typeName)}');return false;" title="View in By Type">${badges}</a>${extras}`;
 }
 
 function renderTransactions(data) {
@@ -971,12 +1003,12 @@ function renderTransactions(data) {
         tr.innerHTML = `
             <td class="col-date">${formatDate(tx.date)}</td>
             <td>${tx.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${tx.service_id});return false;">${escapeHtml(tx.service_name)}</a>` : `<span class="text-tertiary" style="font-size:12px;">${escapeHtml(tx.description).substring(0, 30)}</span>`}</td>
-            <td>${renderCategoryBadges(tx)}</td>
+            <td>${renderTypeBadges(tx)}</td>
             <td class="text-secondary" style="font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}${noteIcon}</td>
             <td class="text-secondary" style="font-size:12px;">${tx.account_name || ''}</td>
-            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
             <td style="text-align:center;"><span class="${oneOffClass}" title="${oneOffTitle}" onclick="toggleTxOneOff(${tx.id}, this)">1x</span></td>
-            <td style="text-align:center;"><span class="tx-edit-icon" title="Resolve / edit transaction" onclick="showCategoryPicker(${tx.id}, this)">&#9998;</span></td>
+            <td style="text-align:center;"><span class="tx-edit-icon" title="Resolve / edit transaction" onclick="showTypePicker(${tx.id}, this)">&#9998;</span></td>
         `;
         tbody.appendChild(tr);
     });
@@ -1015,7 +1047,7 @@ function toggleSort(col) {
 function txPage(delta) {
     // If not in flat view, delegate to accordion loaders
     if (txViewMode === 'service') { loadServiceAccordion(); return; }
-    if (txViewMode === 'category') { loadCategoryAccordion(); return; }
+    if (txViewMode === 'type') { loadTypeAccordion(); return; }
 
     txCurrentPage += delta;
     if (txCurrentPage < 1) txCurrentPage = 1;
@@ -1025,12 +1057,9 @@ function txPage(delta) {
     let url = `/api/transactions?${params}&expense_only=true&per_page=50&page=${txCurrentPage}&sort=${txSortCol}&sort_dir=${txSortDir}`;
     if (search) url += '&search=' + encodeURIComponent(search);
 
-    // Category filter: chart selections take precedence over multi-select dropdown
-    const chartCats = getChartFilterCategories();
-    const activeCats = chartCats.length > 0 ? chartCats : catFilterSelections;
-    if (activeCats.length) {
-        url += '&categories=' + encodeURIComponent(activeCats.join(','));
-    }
+    // Type filter: chart selections take precedence over multi-select dropdown
+    const typesParam = activeTypesParam();
+    if (typesParam) url += '&types=' + encodeURIComponent(typesParam);
 
     // Chart-driven date narrowing from selections with specific periods
     const chartDateRange = getChartFilterDateRange();
@@ -1126,8 +1155,8 @@ async function toggleTxOneOff(txId, el) {
     }
 }
 
-function showCategoryPicker(txId, containerEl) {
-    // Open the unified resolve modal instead of inline category picker
+function showTypePicker(txId, containerEl) {
+    // Open the unified resolve modal
     const row = containerEl.closest('tr');
     const desc = row?.dataset.description || '';
     openResolveModal(txId, desc);
@@ -1160,6 +1189,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'note-modal': closeNoteModal,
         'resolve-modal': closeResolveModal,
         'edit-rule-modal': closeEditRuleModal,
+        'figure-modal': closeFigureModal,
     };
     document.addEventListener('keydown', e => {
         if (e.key !== 'Escape') return;
@@ -1175,7 +1205,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ============================================================
-// RULE CREATION MODAL (from category picker)
+// RULE CREATION MODAL (from the type picker)
 // ============================================================
 
 function isTransferLikeDescription(description) {
@@ -1211,7 +1241,7 @@ function suggestPattern(description) {
 }
 
 // ---- Resolve Transaction Modal ----
-// Unified flow: pick/create service → category auto-fills → rule pattern → one save
+// Unified flow: pick/create service → book and type auto-fill → rule pattern → one save
 
 let resolveModalTxId = null;
 let resolveCascadeCountToken = 0;
@@ -1233,13 +1263,13 @@ async function openResolveModal(txId, description) {
     const defaultScope = document.querySelector('input[name="resolve-scope"][value="transaction"]');
     if (defaultScope) defaultScope.checked = true;
 
-    // Populate category dropdown (for new services or manual override)
-    populateCategorySelect('resolve-modal-category', {
-        placeholder: '-- Select category --', includeNew: true, parentSelectId: 'resolve-new-cat-parent'
-    });
+    // Populate book and type dropdowns (for new services or manual override)
+    populateTypeSelect('resolve-modal-type', { placeholder: '-- Select type --' });
+    populateBookSelect('resolve-modal-book', { placeholder: '-- Book --' });
 
     // Try to auto-match service from description
     await autoMatchService(description);
+    await showResolveSuggestion(txId);
     updateResolveCascade();
 
     // Show modal and focus service input
@@ -1247,8 +1277,10 @@ async function openResolveModal(txId, description) {
     picker.input.focus();
 }
 
-function onResolveCategoryChange() {
-    toggleNewCategoryRow('resolve-modal-category', 'resolve-new-cat-row', 'resolve-new-cat-name');
+function onResolveTypeChange() {
+    // A type proposes the book when none is chosen; Software & AI tools
+    // proposes none, and the save is refused until the operator says.
+    proposeBookInto('resolve-modal-book', document.getElementById('resolve-modal-type').value);
     updateResolveCascade();
 }
 
@@ -1258,8 +1290,9 @@ function updateResolveCascade() {
     const countEl = document.getElementById('resolve-cascade-count');
     const picker = getResolveServicePicker();
     const { id: serviceId, name: serviceName } = picker.getValue();
-    const categoryRaw = document.getElementById('resolve-modal-category').value;
-    const categoryId = categoryRaw && categoryRaw !== '__new__' ? parseInt(categoryRaw) : null;
+    const typeRaw = document.getElementById('resolve-modal-type').value;
+    const typeId = typeRaw ? parseInt(typeRaw) : null;
+    const book = document.getElementById('resolve-modal-book').value || null;
     const pattern = document.getElementById('resolve-modal-pattern').value.trim();
     const ruleRadio = document.querySelector('input[name="resolve-scope"][value="rule"]');
     const txRadio = document.querySelector('input[name="resolve-scope"][value="transaction"]');
@@ -1268,29 +1301,35 @@ function updateResolveCascade() {
     const existingService = serviceId
         ? allServicesList.find(s => s.id === serviceId)
         : allServicesList.find(s => s.name.toLowerCase() === serviceName.toLowerCase());
-    const defaultCategory = existingService?.display_category || categoryDisplayName(existingService?.category_id);
-    const selectedCategory = categoryDisplayName(categoryId);
+    const labelText = (bookName, typeName) => [bookName, typeName].filter(Boolean).join(' · ');
+    const defaultLabel = existingService
+        ? labelText(existingService.book, existingService.display_type || typeDisplayName(existingService.type_id))
+        : '';
+    const selectedLabel = labelText(book, typeDisplayName(typeId));
+    const differs = existingService && typeId && (
+        existingService.type_id !== typeId || (book && existingService.book !== book)
+    );
 
     if (ruleRadio) {
         ruleRadio.disabled = !pattern;
         if (!pattern && ruleRadio.checked && txRadio) txRadio.checked = true;
     }
 
-    if (existingService && categoryId && existingService.category_id !== categoryId) {
+    if (differs) {
         warningEl.textContent =
-            `Service "${existingService.name}" defaults to "${defaultCategory || 'Uncategorized'}". ` +
-            `You selected "${selectedCategory}".`;
+            `Service "${existingService.name}" defaults to "${defaultLabel || 'no type'}". ` +
+            `You selected "${selectedLabel}".`;
     } else if (existingService) {
-        warningEl.textContent = defaultCategory
-            ? `Service "${existingService.name}" defaults to "${defaultCategory}".`
-            : `Service "${existingService.name}" does not have a default category yet.`;
-    } else if (serviceName && selectedCategory) {
+        warningEl.textContent = defaultLabel
+            ? `Service "${existingService.name}" defaults to "${defaultLabel}".`
+            : `Service "${existingService.name}" does not have a default type yet.`;
+    } else if (serviceName && typeId) {
         warningEl.textContent = pattern
-            ? `Create "${serviceName}" and choose whether "${selectedCategory}" applies only here, to this pattern, or as the service default.`
+            ? `Create "${serviceName}" and choose whether "${selectedLabel}" applies only here, to this pattern, or as the service default.`
             : `Create "${serviceName}" and keep it transaction-only for now, unless you want a reusable rule later.`;
     } else {
         warningEl.textContent = pattern
-            ? 'Choose whether this category is transaction-only, a reusable rule override, or the new service default.'
+            ? 'Choose whether this book and type are transaction-only, a reusable rule override, or the new service default.'
             : 'Transaction-only is safest when you are not creating a reusable rule.';
     }
 
@@ -1331,25 +1370,117 @@ function onResolveServiceChange(value) {
     const match = allServicesList.find(
         s => s.name.toLowerCase() === trimmed.toLowerCase()
     );
-    const catSelect = document.getElementById('resolve-modal-category');
+    const typeSelect = document.getElementById('resolve-modal-type');
+    const bookSelect = document.getElementById('resolve-modal-book');
     const catHint = document.getElementById('resolve-cat-hint');
 
-    if (match && match.category_id) {
-        catSelect.value = String(match.category_id);
+    // A known service brings its default book and type.
+    if (match && match.type_id) {
+        typeSelect.value = String(match.type_id);
+        bookSelect.value = match.book || '';
         catHint.style.display = 'block';
     } else {
         catHint.style.display = 'none';
     }
-    // Hide new-cat row when service changes (might not need new cat anymore)
-    document.getElementById('resolve-new-cat-row').classList.add('hidden');
     updateResolveCascade();
+}
+
+// ---- Type suggestion (suggest-only: the operator confirms or corrects) ----
+
+let resolveSuggestionVisible = false;
+
+function updateSuggestButton() {
+    const btn = document.getElementById('suggest-types-btn');
+    if (!btn) return;
+    const onNoTypeList = typeFilterSelections.includes(UNTYPED_FILTER);
+    btn.style.display = suggestionsEnabled && onNoTypeList ? '' : 'none';
+}
+
+// What the stored answer gives the dialog: a pre-filled type, three to pick
+// from, or nothing. It fills the type field only; service, pattern, scope and
+// book stay the operator's.
+async function showResolveSuggestion(txId) {
+    resolveSuggestionVisible = false;
+    const el = document.getElementById('resolve-suggestion');
+    el.style.display = 'none';
+    el.textContent = '';
+    if (!suggestionsEnabled) return;
+
+    const typeSelect = document.getElementById('resolve-modal-type');
+    if (typeSelect.value) return; // a known service already filled it
+
+    let suggestion;
+    try {
+        suggestion = await fetch(`/api/transactions/${txId}/suggestion`).then(r => r.json());
+    } catch (_) {
+        return;
+    }
+    if (resolveModalTxId !== txId || !suggestion || !suggestion.types || !suggestion.types.length) return;
+
+    const pct = p => `${Math.round(p * 100)}%`;
+    if (suggestion.route === 'prefill') {
+        const top = suggestion.types[0];
+        typeSelect.value = String(top.type_id);
+        onResolveTypeChange();
+        el.textContent = `Suggested: ${top.name} (${pct(top.probability)}). Confirm or change it.`;
+    } else if (suggestion.route === 'top3') {
+        el.textContent = 'Suggested: ';
+        suggestion.types.forEach(t => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm';
+            btn.style.marginRight = '4px';
+            btn.textContent = `${t.name} (${pct(t.probability)})`;
+            btn.onclick = () => {
+                typeSelect.value = String(t.type_id);
+                onResolveTypeChange();
+            };
+            el.appendChild(btn);
+        });
+    } else {
+        return;
+    }
+    el.style.display = 'block';
+    resolveSuggestionVisible = true;
+}
+
+// Two steps. The first click writes the merchant names to a local file and
+// sends nothing; only the operator's second, separate confirmation sends.
+async function startTypeSuggestions() {
+    const btn = document.getElementById('suggest-types-btn');
+    btn.disabled = true;
+    try {
+        const prepared = await apiFetch('/api/suggestions/prepare', { method: 'POST' });
+        if (!prepared) return;
+        if (!prepared.count) {
+            showToast('No new merchant names to ask about.', 'info');
+            return;
+        }
+        const send = await showConfirmDialog(
+            'Read the list before anything is sent',
+            `<strong>${prepared.count}</strong> merchant names were written to<br>` +
+            `<code>${escapeHtml(prepared.file)}</code><br><br>` +
+            `Nothing has been sent. Open the file, delete any line that is a person's name ` +
+            `or that you do not want sent, and save it. Each remaining line is then sent on ` +
+            `its own, with the type list and nothing else.`,
+            { okLabel: 'I have read it: send', cancelLabel: 'Not now' }
+        );
+        if (!send) return;
+
+        const result = await apiFetch('/api/suggestions/send', { method: 'POST' });
+        if (!result) return;
+        const parts = [`${result.sent} merchant names answered`];
+        if (result.stopped) parts.push(`Stopped: ${result.stopped}. ${result.remaining} not sent`);
+        showToast(parts.join('. '), result.stopped ? 'warn' : 'info', 6000);
+    } finally {
+        btn.disabled = false;
+    }
 }
 
 function closeResolveModal() {
     document.getElementById('resolve-modal').style.display = 'none';
     resolveModalTxId = null;
-    document.getElementById('resolve-new-cat-row').classList.add('hidden');
-    document.getElementById('resolve-new-cat-name').value = '';
+    resolveSuggestionVisible = false;
     document.getElementById('resolve-cascade-warning').textContent = '';
     document.getElementById('resolve-cascade-count').textContent = '';
 }
@@ -1391,7 +1522,8 @@ function showToast(message, type = 'info', duration = 4000) {
 async function saveResolveModal() {
     const picker = getResolveServicePicker();
     const { id: pickedServiceId, name: serviceName } = picker.getValue();
-    let categoryId = parseInt(document.getElementById('resolve-modal-category').value);
+    const typeId = parseInt(document.getElementById('resolve-modal-type').value);
+    const book = document.getElementById('resolve-modal-book').value || null;
     const pattern = document.getElementById('resolve-modal-pattern').value.trim();
     const matchType = document.getElementById('resolve-modal-match').value;
 
@@ -1402,10 +1534,7 @@ async function saveResolveModal() {
     btn.textContent = 'Resolving...';
 
     try {
-        const { id: newCatId, abort } = await resolveCategory('resolve-modal-category', 'resolve');
-        if (abort) return;
-        if (newCatId) categoryId = newCatId;
-        if (!categoryId) { alert('Please select a category.'); return; }
+        if (!typeId) { alert('Please select a type.'); return; }
 
         const existingService = pickedServiceId
             ? allServicesList.find(s => s.id === pickedServiceId)
@@ -1422,10 +1551,15 @@ async function saveResolveModal() {
             service_name: serviceName,
             pattern,
             match_type: matchType,
-            category_id: categoryId,
+            type_id: typeId,
             apply_scope: applyScope,
         };
+        // With no book chosen the server takes the service's, or the one the
+        // type proposes, and refuses a type that proposes none.
+        if (book) payload.book = book;
         if (existingService) payload.service_id = existingService.id;
+        // Kept with the stored answer: was a suggestion on screen for this choice?
+        payload.suggestion_visible = resolveSuggestionVisible;
 
         const data = await apiFetch('/api/transactions/resolve', { method: 'POST', body: payload });
         if (!data) return;
@@ -1440,7 +1574,7 @@ async function saveResolveModal() {
         if (scopeMessage) parts.push(scopeMessage);
         if (!existingService) parts.push(`Created service "${serviceName}"`);
         if (data.backfilled > 0) parts.push(`${data.backfilled} matching transactions updated`);
-        const hint = spendFilterHint(categoryId);
+        const hint = spendFilterHint(data.book);
         if (hint) parts.push(hint);
         if (parts.length) showToast(parts.join('. '), 'info', 5000);
 
@@ -1522,9 +1656,10 @@ function renderImportPreview(data) {
     // Stats
     document.getElementById('preview-stats').innerHTML = `
         <div class="preview-stat"><strong>${data.stats.total}</strong> Total</div>
-        <div class="preview-stat"><strong class="text-success">${data.stats.categorized}</strong> Categorized</div>
-        <div class="preview-stat"><strong class="text-warning">${data.stats.uncategorized}</strong> Uncategorized</div>
+        <div class="preview-stat"><strong class="text-success">${data.stats.typed}</strong> Typed</div>
+        <div class="preview-stat"><strong class="text-warning">${data.stats.untyped}</strong> No type</div>
         <div class="preview-stat"><strong class="text-muted">${data.stats.skipped}</strong> Skipped</div>
+        ${data.stats.review_each_time ? `<div class="preview-stat"><strong class="text-warning">${data.stats.review_each_time}</strong> Check type (mixed merchant)</div>` : ''}
         ${data.errors.length ? `<div class="preview-stat text-error">${data.errors.length} errors</div>` : ''}
     `;
 
@@ -1532,7 +1667,33 @@ function renderImportPreview(data) {
     const groupsEl = document.getElementById('preview-groups');
     groupsEl.innerHTML = '';
 
+    // Files that could not be imported. A statement whose rows do not add up
+    // to its own closing balance is shown with its tie line.
+    data.errors.forEach(err => {
+        const div = document.createElement('div');
+        div.className = 'account-group';
+        div.innerHTML = err.tie ? `
+            <div class="account-group-header">
+                <span class="account-group-name">${escapeHtml(err.tie.account)} · ${escapeHtml(err.tie.closing_date || '')} · ${err.tie.rows} rows</span>
+            </div>
+            ${tieLineHtml(err.tie)}
+            <div class="text-error" style="padding:4px 16px 12px;font-size:13px;">
+                This statement cannot be imported: its rows do not add up to its own closing balance.
+                A row was probably missed when the file was read. <span class="text-muted">(${escapeHtml(err.file)})</span>
+            </div>
+        ` : `
+            <div class="account-group-header">
+                <span class="account-group-name">${escapeHtml(err.file)}</span>
+            </div>
+            <div class="text-error" style="padding:4px 16px 12px;font-size:13px;">${escapeHtml(err.error)}</div>
+        `;
+        groupsEl.appendChild(div);
+    });
+
     data.groups.forEach((group, gi) => {
+        const statements = group.statements || [];
+        // A group whose rows were all checked against a statement has no skip control.
+        const allChecked = statements.length > 0 && group.transactions.every(tx => tx.statement != null);
         const div = document.createElement('div');
         div.className = 'account-group';
         div.innerHTML = `
@@ -1540,20 +1701,24 @@ function renderImportPreview(data) {
                 <span class="account-group-name">${escapeHtml(group.account)}</span>
                 <div class="account-group-stats">
                     <span>${group.total} transactions</span>
-                    <span class="text-success">${group.categorized} categorized</span>
-                    <span class="text-warning">${group.uncategorized} uncategorized</span>
+                    <span class="text-success">${group.typed} typed</span>
+                    <span class="text-warning">${group.untyped} no type</span>
+                    ${group.tie === 'ties' ? '' : '<span class="text-muted">not checked</span>'}
                 </div>
             </div>
+            ${statements.map(tieLineHtml).join('')}
+            ${statements.length ? '<div class="text-muted" style="padding:0 16px 8px;font-size:12px;">every row is imported; none is skipped</div>' : ''}
             <div class="preview-table-wrap">
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th style="width:40px;"><input type="checkbox" checked onchange="toggleGroupSkip(${gi}, this.checked)"></th>
+                            <th style="width:40px;">${allChecked ? '' : `<input type="checkbox" checked onchange="toggleGroupSkip(${gi}, this.checked)">`}</th>
                             <th>Date</th>
                             <th>Description</th>
                             <th style="text-align:right">Amount</th>
                             <th>Service</th>
-                            <th>Category</th>
+                            <th>Book</th>
+                            <th>Type</th>
                             <th>Status</th>
                         </tr>
                     </thead>
@@ -1568,10 +1733,10 @@ function renderImportPreview(data) {
             const tr = document.createElement('tr');
             if (tx._skip) tr.style.opacity = '0.4';
             tr.innerHTML = `
-                <td><input type="checkbox" ${tx._skip ? '' : 'checked'} data-gi="${gi}" data-ti="${ti}" onchange="toggleTxSkip(${gi}, ${ti}, this.checked)"></td>
+                <td>${tx.statement != null ? '' : `<input type="checkbox" ${tx._skip ? '' : 'checked'} data-gi="${gi}" data-ti="${ti}" onchange="toggleTxSkip(${gi}, ${ti}, this.checked)">`}</td>
                 <td class="col-date">${tx.date}</td>
                 <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
-                <td class="col-amount">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+                <td class="col-amount">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(group.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
                 <td class="col-service">
                     <input type="text" class="svc-input" list="svc-datalist"
                         value="${escapeHtml(tx.service_name || '')}"
@@ -1581,11 +1746,16 @@ function renderImportPreview(data) {
                         oninput="setServiceOverride(${gi}, ${ti}, this.value)">
                 </td>
                 <td>
-                    <select class="cat-select ${tx.status === 'uncategorized' ? 'unresolved' : ''}" data-gi="${gi}" data-ti="${ti}" onchange="onImportCategoryChange(${gi}, ${ti}, this)">
-                        ${buildCategoryDropdownHtml({placeholder: '-- Select --', includeNew: true, selectedId: tx.category_id})}
+                    <select class="cat-select book-select" data-gi="${gi}" data-ti="${ti}" onchange="setBookOverride(${gi}, ${ti}, this.value)">
+                        ${buildBookDropdownHtml({placeholder: '--', selectedBook: tx.book})}
                     </select>
                 </td>
-                <td><span class="badge badge-${tx.status === 'categorized' ? 'success' : tx.status === 'transfer' ? 'muted' : 'warning'}">${tx.status}</span></td>
+                <td>
+                    <select class="cat-select type-select ${tx.status === 'untyped' ? 'unresolved' : ''}" data-gi="${gi}" data-ti="${ti}" onchange="setTypeOverride(${gi}, ${ti}, this.value)">
+                        ${buildTypeDropdownHtml({placeholder: '-- Select --', selectedId: tx.type_id})}
+                    </select>
+                </td>
+                <td><span class="badge badge-${statusBadgeClass(tx.status)} status-badge">${importStatusLabel(tx.status)}</span>${tx.review_each_time ? ' <span class="badge badge-warning" title="Mixed merchant: check this row\'s type">check type</span>' : ''}</td>
             `;
             tbody.appendChild(tr);
         });
@@ -1599,7 +1769,7 @@ function renderImportPreview(data) {
     importServices.forEach(s => {
         const opt = document.createElement('option');
         opt.value = s.name;
-        opt.label = s.category_name || '';
+        opt.label = s.type_name || '';
         datalist.appendChild(opt);
     });
     document.body.appendChild(datalist);
@@ -1607,7 +1777,45 @@ function renderImportPreview(data) {
     updateConfirmBar();
 }
 
-// Service picker: when user types/selects a service, auto-fill category
+// The tie line of a statement in the import preview: opening, what the rows
+// add up to, closing, and whether they tie.
+function tieLineHtml(line) {
+    const verdict = line.status === 'ties'
+        ? '<strong class="text-success">TIES</strong>'
+        : `<strong class="text-error">OFF BY ${escapeHtml(line.difference)}</strong>`;
+    return `
+        <div style="padding:4px 16px 8px;font-size:13px;color:var(--text-secondary);">
+            Opening <strong>${escapeHtml(line.opening)}</strong>
+            &nbsp; rows add up to <strong>${escapeHtml(line.rows_sum)}</strong>
+            &nbsp; closing <strong>${escapeHtml(line.closing)}</strong>
+            &nbsp; ${verdict}
+            <span class="text-muted">&nbsp; ${line.rows} rows${line.closing_date ? ' · to ' + escapeHtml(line.closing_date) : ''}</span>
+        </div>
+    `;
+}
+
+// Status badge colour and wording for an import preview row.
+function statusBadgeClass(status) {
+    return status === 'typed' ? 'success'
+        : (status === 'transfer' || status === 'movement') ? 'muted' : 'warning';
+}
+
+function importStatusLabel(status) {
+    return status === 'untyped' ? 'no type' : status === 'review' ? 'to review' : status;
+}
+
+// What a preview row with no type is shown as: the flow that holds it out of
+// spending, or 'untyped'.
+function untypedImportStatus(tx) {
+    return ['transfer', 'payment', 'movement', 'review'].includes(tx.flow_type) ? tx.flow_type : 'untyped';
+}
+
+// The <select> of one kind ('book-select' or 'type-select') on a preview row.
+function importRowSelect(gi, ti, kind) {
+    return document.querySelector(`select.${kind}[data-gi="${gi}"][data-ti="${ti}"]`);
+}
+
+// Service picker: when user types/selects a service, auto-fill its book and type
 function setServiceOverride(gi, ti, value) {
     const tx = currentImportData.groups[gi].transactions[ti];
     const trimmed = value.trim();
@@ -1618,13 +1826,17 @@ function setServiceOverride(gi, ti, value) {
         tx.service_id = match.id;
         tx.service_name = match.name;
         tx._new_service = null;
-        // Auto-fill category from service
-        if (match.category_id) {
-            tx.category_id = match.category_id;
-            const catSelect = document.querySelector(`select.cat-select[data-gi="${gi}"][data-ti="${ti}"]`);
-            if (catSelect) catSelect.value = match.category_id;
-            tx.status = 'categorized';
-            updateStatusBadge(gi, ti, 'categorized');
+        // Auto-fill book and type from the service's defaults
+        if (match.type_id) {
+            tx.type_id = match.type_id;
+            tx.type_name = match.type_name;
+            tx.book = match.book || null;
+            const typeSelect = importRowSelect(gi, ti, 'type-select');
+            if (typeSelect) { typeSelect.value = match.type_id; typeSelect.classList.remove('unresolved'); }
+            const bookSelect = importRowSelect(gi, ti, 'book-select');
+            if (bookSelect) bookSelect.value = match.book || '';
+            tx.status = 'typed';
+            updateStatusBadge(gi, ti, 'typed');
         }
     } else if (trimmed) {
         // New service — will be created on commit
@@ -1641,15 +1853,16 @@ function setServiceOverride(gi, ti, value) {
 function updateStatusBadge(gi, ti, status) {
     const row = document.querySelectorAll(`#preview-group-${gi} tr`)[ti];
     if (!row) return;
-    const badge = row.querySelector('.badge');
+    const badge = row.querySelector('.status-badge');
     if (badge) {
-        badge.className = `badge badge-${status === 'categorized' ? 'success' : status === 'transfer' ? 'muted' : 'warning'}`;
-        badge.textContent = status;
+        badge.className = `badge badge-${statusBadgeClass(status)} status-badge`;
+        badge.textContent = importStatusLabel(status);
     }
 }
 
 function toggleGroupSkip(gi, checked) {
     currentImportData.groups[gi].transactions.forEach((tx, ti) => {
+        if (tx.statement != null) return;  // a row checked against its statement is always imported
         tx._skip = !checked;
         const cb = document.querySelector(`[data-gi="${gi}"][data-ti="${ti}"]`);
         if (cb && cb.type === 'checkbox') cb.checked = checked;
@@ -1664,79 +1877,31 @@ function toggleTxSkip(gi, ti, checked) {
     updateConfirmBar();
 }
 
-function setCategoryOverride(gi, ti, catId) {
+function setTypeOverride(gi, ti, typeId) {
     const tx = currentImportData.groups[gi].transactions[ti];
-    tx.category_id = catId ? parseInt(catId) : null;
-    tx.category_name = catId ? categories.find(c => c.id === parseInt(catId))?.name : null;
-    tx.status = catId ? 'categorized' : 'uncategorized';
+    tx.type_id = typeId ? parseInt(typeId) : null;
+    tx.type_name = typeId ? typeDisplayName(parseInt(typeId)) : null;
+    tx.status = typeId ? 'typed' : untypedImportStatus(tx);
 
-    // Update badge
-    const row = document.querySelector(`[data-gi="${gi}"][data-ti="${ti}"]`).closest('tr');
-    const badge = row.querySelector('.badge');
-    if (badge) {
-        badge.className = `badge badge-${catId ? 'success' : 'warning'}`;
-        badge.textContent = catId ? 'categorized' : 'uncategorized';
+    // With no book on the row yet, take the one the type proposes.
+    if (typeId && !tx.book) {
+        const proposed = proposedBook(typeId);
+        if (proposed) {
+            tx.book = proposed;
+            const bookSelect = importRowSelect(gi, ti, 'book-select');
+            if (bookSelect) bookSelect.value = proposed;
+        }
     }
-    const select = row.querySelector('.cat-select');
-    if (select) select.classList.toggle('unresolved', !catId);
+
+    updateStatusBadge(gi, ti, tx.status);
+    const select = importRowSelect(gi, ti, 'type-select');
+    if (select) select.classList.toggle('unresolved', tx.status === 'untyped');
 
     updateConfirmBar();
 }
 
-// Import preview: handle category dropdown change, intercept __new__
-let _importNewCatTrigger = null; // {gi, ti, selectEl} — which row triggered the modal
-function onImportCategoryChange(gi, ti, selectEl) {
-    if (selectEl.value === '__new__') {
-        _importNewCatTrigger = {gi, ti, selectEl};
-        openImportNewCatModal();
-        // Reset dropdown to blank while modal is open
-        selectEl.value = '';
-    } else {
-        setCategoryOverride(gi, ti, selectEl.value);
-    }
-}
-
-function openImportNewCatModal() {
-    document.getElementById('import-new-cat-name').value = '';
-    // Populate parent dropdown with top-level categories
-    const parentSel = document.getElementById('import-new-cat-parent');
-    parentSel.innerHTML = '<option value="">-- Top-level --</option>';
-    categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name)).forEach(c => {
-        parentSel.innerHTML += `<option value="${c.id}">${escapeHtml(c.name)}</option>`;
-    });
-    document.getElementById('import-new-cat-type').value = '1';
-    openModalEl('import-new-cat-modal', closeImportNewCatModal);
-    document.getElementById('import-new-cat-name').focus();
-}
-
-function closeImportNewCatModal() {
-    closeModalEl('import-new-cat-modal');
-    _importNewCatTrigger = null;
-}
-
-async function saveImportNewCategory() {
-    const name = document.getElementById('import-new-cat-name').value.trim();
-    if (!name) { alert('Please enter a category name.'); return; }
-    const parentId = document.getElementById('import-new-cat-parent').value || null;
-    const isPersonal = parseInt(document.getElementById('import-new-cat-type').value);
-
-    const catData = await apiFetch('/api/categories', {
-        method: 'POST', body: { name, parent_id: parentId ? parseInt(parentId) : null, is_personal: isPersonal }
-    });
-    if (!catData) return;
-
-    await loadReferenceData();
-    showToast(`Created category "${name}"`, 'info');
-
-    // Auto-select the new category in the triggering row
-    if (_importNewCatTrigger) {
-        const {gi, ti, selectEl} = _importNewCatTrigger;
-        // Rebuild dropdown options with the new category
-        selectEl.innerHTML = buildCategoryDropdownHtml({placeholder: '-- Select --', includeNew: true, selectedId: catData.id});
-        setCategoryOverride(gi, ti, catData.id.toString());
-    }
-
-    closeImportNewCatModal();
+function setBookOverride(gi, ti, book) {
+    currentImportData.groups[gi].transactions[ti].book = book || null;
 }
 
 function updateConfirmBar() {
@@ -1750,6 +1915,9 @@ function updateConfirmBar() {
     });
     document.getElementById('confirm-info').innerHTML =
         `<strong>${active}</strong> of ${total} transactions will be committed`;
+    // Nothing to import (every statement was refused): Confirm is off.
+    const confirmBtn = document.querySelector('.confirm-bar .btn-primary');
+    if (confirmBtn) confirmBtn.disabled = currentImportData.groups.length === 0;
 }
 
 function discardImport() {
@@ -1766,19 +1934,19 @@ function discardImport() {
 async function confirmImport() {
     if (!currentImportData) return;
 
-    // Warn about uncategorized transactions
-    let uncatCount = 0, activeCount = 0;
+    // Warn about transactions with no type
+    let untypedCount = 0, activeCount = 0;
     for (const g of currentImportData.groups) {
         for (const tx of g.transactions) {
             if (tx._skip) continue;
             activeCount++;
-            if (!tx.category_id) uncatCount++;
+            if (!tx.type_id) untypedCount++;
         }
     }
-    if (uncatCount > 0) {
+    if (untypedCount > 0) {
         const proceed = await showConfirmDialog(
-            'Uncategorized Transactions',
-            `<strong>${uncatCount}</strong> of ${activeCount} transactions have no category assigned.<br><br>They'll be imported as uncategorized — you can resolve them later from the Dashboard.`,
+            'Transactions With No Type',
+            `<strong>${untypedCount}</strong> of ${activeCount} transactions have no type.<br><br>They'll be imported without one — you can resolve them later from the Dashboard.`,
             {okLabel: 'Import Anyway', cancelLabel: 'Go Back'}
         );
         if (!proceed) return;
@@ -1789,12 +1957,14 @@ async function confirmImport() {
     for (const g of currentImportData.groups) {
         for (const tx of g.transactions) {
             if (tx._skip) continue;
-            if (tx._new_service && tx.category_id) {
+            if (tx._new_service && tx.type_id) {
                 const key = tx._new_service.toLowerCase();
                 if (!newServicesMap[key]) {
+                    // The new service's defaults are this row's book and type.
                     newServicesMap[key] = {
                         name: tx._new_service,
-                        category_id: tx.category_id,
+                        book: tx.book || null,
+                        type_id: tx.type_id,
                         description: tx.description,
                     };
                 }
@@ -1806,7 +1976,10 @@ async function confirmImport() {
         import_id: currentImportId,
         groups: currentImportData.groups.map(g => ({
             account: g.account,
+            // The currency the upload stated: a new account is created in it.
+            currency: g.currency,
             transactions: g.transactions,
+            statements: g.statements || [],
         })),
         new_rules: [],
         new_services: Object.values(newServicesMap),
@@ -1821,11 +1994,14 @@ async function confirmImport() {
         if (!result) return;
 
         const dupMsg = result.duplicates_skipped ? ` (${result.duplicates_skipped} duplicates skipped)` : '';
+        const anchorMsg = result.anchors_written
+            ? ` ${result.anchors_written} closing balance${result.anchors_written === 1 ? '' : 's'} anchored.`
+            : '';
         const svcMsg = result.services_created ? ` ${result.services_created} new services created.` : '';
         const guardrailMsg = result.rules_skipped_generic
             ? ` ${result.rules_skipped_generic} generic transfer rule${result.rules_skipped_generic === 1 ? '' : 's'} skipped.`
             : '';
-        showToast(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${svcMsg}${guardrailMsg}`, 'success', 6000);
+        showToast(`Committed ${result.transactions_saved} transactions to ${result.accounts.length} accounts.${dupMsg}${anchorMsg}${svcMsg}${guardrailMsg}`, 'success', 6000);
         discardImport();
         await loadReferenceData();
     } catch (err) {
@@ -1833,6 +2009,7 @@ async function confirmImport() {
     } finally {
         confirmBtn.textContent = 'Confirm & Commit';
         confirmBtn.disabled = false;
+        updateConfirmBar();
     }
 }
 
@@ -1966,7 +2143,8 @@ function filterRules() {
     const filtered = allRules.filter(r =>
         r.pattern.toLowerCase().includes(q) ||
         (r.service_name || '').toLowerCase().includes(q) ||
-        (r.category_name || '').toLowerCase().includes(q)
+        (r.display_type || '').toLowerCase().includes(q) ||
+        (r.book || '').toLowerCase().includes(q)
     );
     renderRules(filtered);
 }
@@ -1974,11 +2152,11 @@ function filterRules() {
 function renderRules(rules) {
     document.getElementById('rules-count').textContent = `${rules.length} rules`;
 
-    // Group by display_category (Parent > Sub or just Parent)
+    // Group by display_type (Parent > Sub or just Parent)
     const groups = {};
     rules.forEach(r => {
-        const key = r.display_category || r.category_name;
-        if (!groups[key]) groups[key] = { parentName: r.parent_name, categoryName: r.category_name, rules: [] };
+        const key = r.display_type || NO_TYPE_LABEL;
+        if (!groups[key]) groups[key] = { parentName: r.parent_type, typeName: r.type_name || NO_TYPE_LABEL, rules: [] };
         groups[key].rules.push(r);
     });
 
@@ -1993,9 +2171,9 @@ function renderRules(rules) {
         // Title: show "Parent > Sub" with styling
         let titleHtml;
         if (g.parentName) {
-            titleHtml = `${escapeHtml(g.parentName)}<span class="acc-sub"> > ${escapeHtml(g.categoryName)}</span>`;
+            titleHtml = `${escapeHtml(g.parentName)}<span class="acc-sub"> > ${escapeHtml(g.typeName)}</span>`;
         } else {
-            titleHtml = escapeHtml(g.categoryName);
+            titleHtml = escapeHtml(g.typeName);
         }
 
         groupEl.innerHTML = `
@@ -2029,8 +2207,8 @@ function renderRules(rules) {
                             } else if (r.max_amount != null) {
                                 amtStr = '\u2264 $' + r.max_amount.toLocaleString();
                             }
-                            const serviceHtml = `${escapeHtml(r.service_name || '')}${
-                                r.category_override_id
+                            const serviceHtml = `${escapeHtml(r.service_name || '')}${bookBadgeHtml(r.book)}${
+                                (r.type_override_id || r.book_override)
                                     ? ' <span class="badge badge-muted" style="font-size:10px;margin-left:6px;">override</span>'
                                     : ''
                             }`;
@@ -2089,8 +2267,11 @@ async function openRuleModal(rule = null) {
         max: rule?.max_amount || '',
     };
     for (const [k, v] of Object.entries(ruleFields)) document.getElementById(`edit-rule-${k}`).value = v;
-    populateCategorySelect('edit-rule-category-override', {
-        placeholder: 'Use service default', selectedId: rule?.category_override_id || ''
+    populateTypeSelect('edit-rule-type-override', {
+        placeholder: 'Use service default', selectedId: rule?.type_override_id || ''
+    });
+    populateBookSelect('edit-rule-book-override', {
+        placeholder: 'Use service default', selectedBook: rule?.book_override || null
     });
 
     const picker = getEditRuleServicePicker();
@@ -2110,9 +2291,10 @@ async function openRuleModal(rule = null) {
 
 function updateEditRuleServiceMeta(serviceId) {
     const svc = (allServicesList || []).find(s => s.id === serviceId);
+    const defaultLabel = svc ? [svc.book, svc.display_type].filter(Boolean).join(' · ') : '';
     document.getElementById('edit-rule-cat-display').textContent =
-        svc?.display_category
-            ? `Service default: ${svc.display_category}. Leave override blank to inherit it.`
+        defaultLabel
+            ? `Service default: ${defaultLabel}. Leave override blank to inherit it.`
             : 'Leave override blank to use the service default.';
 }
 
@@ -2141,7 +2323,8 @@ async function saveRuleModal() {
         priority: parseInt(document.getElementById('edit-rule-priority').value) || 0,
         min_amount: parseFloat(document.getElementById('edit-rule-min').value) || null,
         max_amount: parseFloat(document.getElementById('edit-rule-max').value) || null,
-        category_override_id: parseInt(document.getElementById('edit-rule-category-override').value) || null,
+        type_override_id: parseInt(document.getElementById('edit-rule-type-override').value) || null,
+        book_override: document.getElementById('edit-rule-book-override').value || null,
     };
     if (serviceId) payload.service_id = serviceId;
 
@@ -2161,7 +2344,7 @@ async function deleteRule(ruleId) {
 }
 
 async function recategorizeAll() {
-    if (!confirm('Re-run all merchant rules against existing transactions? This will update categories based on current rules.')) return;
+    if (!confirm('Re-run all merchant rules against existing transactions? This will update book and type based on current rules. Rows you labelled by hand are left alone.')) return;
     const btn = document.getElementById('recategorize-btn');
     btn.disabled = true;
     btn.textContent = 'Running...';
@@ -2172,138 +2355,49 @@ async function recategorizeAll() {
         loadDashboard();
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Re-categorize All';
+        btn.textContent = 'Re-run All Rules';
     }
-}
-
-// ============================================================
-// CATEGORY MASTER
-// ============================================================
-
-function toggleCatForm() {
-    const form = document.getElementById('cat-form');
-    form.classList.toggle('hidden');
-    if (!form.classList.contains('hidden')) {
-        populateCatParentDropdown();
-    }
-}
-
-function populateCatParentDropdown() {
-    // Uses the parent-select-only path of populateCategorySelect
-    // by populating a dummy and leveraging parentSelectId — but this is simpler inline:
-    const sel = document.getElementById('cat-new-parent');
-    sel.innerHTML = '<option value="">-- Top-level --</option>';
-    categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name)).forEach(c => {
-        sel.innerHTML += `<option value="${c.id}">${c.name}</option>`;
-    });
-}
-
-function renderCategoryTree() {
-    const tree = document.getElementById('cat-tree');
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
-
-    document.getElementById('cat-count').textContent = `${categories.length} categories (${parents.length} top-level)`;
-
-    // Separate parents with/without subcategories for cleaner layout
-    const withChildren = parents.filter(p => categories.some(c => c.parent_id === p.id));
-    const withoutChildren = parents.filter(p => !categories.some(c => c.parent_id === p.id));
-
-    let html = '';
-
-    // Categories with subcategories
-    if (withChildren.length) {
-        html += '<div class="cat-tree-grid">';
-        withChildren.forEach(p => {
-            const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
-            const typeLabel = scopeBadgeHtml(getScope(p));
-            const collapsed = children.length > 5;
-            html += `<div class="cat-group${collapsed ? ' collapsed' : ''}">
-                <div class="cat-group-name" onclick="this.parentElement.classList.toggle('collapsed')">
-                    <span class="cat-expand-arrow">${collapsed ? '&#9654;' : '&#9660;'}</span>
-                    ${escapeHtml(p.name)}${typeLabel}
-                    <span class="cat-sub-count">(${children.length})</span>
-                </div>
-                <div class="cat-sub-list">
-                    ${children.map(c => `<div class="cat-sub-item">${escapeHtml(c.name)}</div>`).join('')}
-                </div>
-            </div>`;
-        });
-        html += '</div>';
-    }
-
-    // Simple categories (no subcategories) — compact inline chips
-    if (withoutChildren.length) {
-        html += '<div class="cat-simple-row">';
-        withoutChildren.forEach(p => {
-            const typeLabel = scopeBadgeHtml(getScope(p));
-            html += `<span class="cat-chip">${escapeHtml(p.name)}${typeLabel}</span>`;
-        });
-        html += '</div>';
-    }
-
-    tree.innerHTML = html;
-}
-
-async function addCategory() {
-    const name = document.getElementById('cat-new-name').value.trim();
-    const parentId = document.getElementById('cat-new-parent').value;
-    const isPersonal = document.getElementById('cat-new-personal').value;
-
-    if (!name) {
-        alert('Category name is required');
-        return;
-    }
-
-    const body = { name, is_personal: parseInt(isPersonal) };
-    if (parentId) body.parent_id = parseInt(parentId);
-
-    const data = await apiFetch('/api/categories', { method: 'POST', body });
-    if (!data) return;
-
-    document.getElementById('cat-new-name').value = '';
-    await loadReferenceData();
-    renderCategoryTree();
 }
 
 // ============================================================
 // CHART-TABLE LINKING
 // ============================================================
 
-function toggleChartFilter(category, period, source) {
-    // Donut click: period=null (all periods for this category)
+function toggleChartFilter(type, period, source) {
+    // Donut click: period=null (all periods for this type)
     // Bar click: period=specific month
 
-    // If donut click for a category that already has a period-null entry, remove it (toggle off)
-    // If bar click for same category that has period-null, narrow to this specific period
+    // If donut click for a type that already has a period-null entry, remove it (toggle off)
+    // If bar click for same type that has period-null, narrow to this specific period
     const sel = chartFilter.selections;
 
     if (source === 'doughnut') {
-        // Check if this category already has an all-periods entry
-        const allIdx = sel.findIndex(s => s.category === category && s.period === null);
+        // Check if this type already has an all-periods entry
+        const allIdx = sel.findIndex(s => s.type === type && s.period === null);
         if (allIdx >= 0) {
             // Toggle off
             sel.splice(allIdx, 1);
         } else {
-            // Remove any period-specific entries for this category (donut replaces them)
+            // Remove any period-specific entries for this type (donut replaces them)
             for (let i = sel.length - 1; i >= 0; i--) {
-                if (sel[i].category === category) sel.splice(i, 1);
+                if (sel[i].type === type) sel.splice(i, 1);
             }
-            sel.push({ category, period: null });
+            sel.push({ type, period: null });
         }
     } else {
         // Bar click — specific period
-        // If category has an all-periods entry, narrow to this specific period
-        const allIdx = sel.findIndex(s => s.category === category && s.period === null);
+        // If type has an all-periods entry, narrow to this specific period
+        const allIdx = sel.findIndex(s => s.type === type && s.period === null);
         if (allIdx >= 0) {
             sel.splice(allIdx, 1);
-            sel.push({ category, period });
+            sel.push({ type, period });
         } else {
-            // Toggle this specific (category, period) pair
-            const exactIdx = sel.findIndex(s => s.category === category && s.period === period);
+            // Toggle this specific (type, period) pair
+            const exactIdx = sel.findIndex(s => s.type === type && s.period === period);
             if (exactIdx >= 0) {
                 sel.splice(exactIdx, 1);
             } else {
-                sel.push({ category, period });
+                sel.push({ type, period });
             }
         }
     }
@@ -2330,9 +2424,18 @@ function clearChartFilter() {
     txPage(0);
 }
 
-// Helper: extract unique categories from selections
-function getChartFilterCategories() {
-    return [...new Set(chartFilter.selections.map(s => s.category))];
+// Helper: extract unique types from selections
+function getChartFilterTypes() {
+    return [...new Set(chartFilter.selections.map(s => s.type))];
+}
+
+// The `types` query value for the transaction list: chart selections take
+// precedence over the multi-select dropdown. The charts' "No type" slice is
+// the list of rows with no type.
+function activeTypesParam() {
+    const chartTypes = getChartFilterTypes();
+    const active = chartTypes.length > 0 ? chartTypes : typeFilterSelections;
+    return active.map(t => (t === NO_TYPE_LABEL ? UNTYPED_FILTER : t)).join(',');
 }
 
 // Helper: compute date range from period-specific selections
@@ -2354,7 +2457,7 @@ function getChartFilterDateRange() {
 
 function updateChartHighlights() {
     const hasFilter = chartFilter.selections.length > 0;
-    const selectedCats = getChartFilterCategories();
+    const selectedCats = getChartFilterTypes();
     const selectedPeriods = chartFilter.selections
         .filter(s => s.period !== null)
         .map(s => s.period);
@@ -2363,19 +2466,19 @@ function updateChartHighlights() {
     // Bar chart highlights
     if (monthlyChart) {
         monthlyChart.data.datasets.forEach((ds, i) => {
-            const baseColor = categoryColorMap[ds.label] || CAT_COLORS[i % CAT_COLORS.length];
+            const baseColor = typeColorMap[ds.label] || CAT_COLORS[i % CAT_COLORS.length];
             if (!hasFilter) {
                 ds.backgroundColor = baseColor;
                 ds.borderColor = 'transparent';
                 ds.borderWidth = 0;
             } else if (selectedCats.includes(ds.label)) {
-                // This category is selected — highlight its bars
+                // This type is selected — highlight its bars
                 // If all-periods or no period filter, highlight all bars
                 // If period-specific, only highlight matching period bars
-                const catSelections = chartFilter.selections.filter(s => s.category === ds.label);
+                const catSelections = chartFilter.selections.filter(s => s.type === ds.label);
                 const catAllPeriods = catSelections.some(s => s.period === null);
                 if (catAllPeriods) {
-                    // All bars for this category highlighted
+                    // All bars for this type highlighted
                     ds.backgroundColor = baseColor;
                     ds.borderColor = '#ededed';
                     ds.borderWidth = 1.5;
@@ -2402,22 +2505,22 @@ function updateChartHighlights() {
     }
 
     // Doughnut highlights
-    if (categoryChart) {
-        const ds = categoryChart.data.datasets[0];
-        const labels = categoryChart.data.labels;
+    if (typeChart) {
+        const ds = typeChart.data.datasets[0];
+        const labels = typeChart.data.labels;
         if (!hasFilter) {
-            ds.backgroundColor = labels.map(label => categoryColorMap[label] || CAT_COLORS[0]);
+            ds.backgroundColor = labels.map(label => typeColorMap[label] || CAT_COLORS[0]);
             ds.offset = 0;
         } else {
             ds.backgroundColor = labels.map(label => {
-                const base = categoryColorMap[label] || CAT_COLORS[0];
+                const base = typeColorMap[label] || CAT_COLORS[0];
                 return selectedCats.includes(label) ? base : hexToRgba(base, 0.15);
             });
             ds.offset = labels.map(label =>
                 selectedCats.includes(label) ? 8 : 0
             );
         }
-        categoryChart.update();
+        typeChart.update();
     }
 }
 
@@ -2430,11 +2533,10 @@ function renderFilterChip() {
         return;
     }
 
-    // Build chips: group by category, show period if specific
+    // Build chips: one per selected type, show period if specific
     const chips = chartFilter.selections.map(s => {
-        const label = s.period ? `${escapeHtml(s.category)} · ${escapeHtml(formatPeriodLabel(s.period))}` : escapeHtml(s.category);
-        const key = s.period ? `${s.category}|${s.period}` : s.category;
-        return `<span class="chip-cat" onclick="removeChartSelection('${escapeHtml(s.category)}', ${s.period ? "'" + escapeHtml(s.period) + "'" : 'null'})">${label}<span class="chip-x">&times;</span></span>`;
+        const label = s.period ? `${escapeHtml(s.type)} · ${escapeHtml(formatPeriodLabel(s.period))}` : escapeHtml(s.type);
+        return `<span class="chip-cat" onclick="removeChartSelection('${escapeHtml(s.type)}', ${s.period ? "'" + escapeHtml(s.period) + "'" : 'null'})">${label}<span class="chip-x">&times;</span></span>`;
     }).join('');
 
     el.innerHTML = `
@@ -2445,9 +2547,9 @@ function renderFilterChip() {
     el.classList.remove('hidden');
 }
 
-function removeChartSelection(category, period) {
+function removeChartSelection(type, period) {
     const idx = chartFilter.selections.findIndex(s =>
-        s.category === category && s.period === period
+        s.type === type && s.period === period
     );
     if (idx >= 0) chartFilter.selections.splice(idx, 1);
 
@@ -2528,10 +2630,12 @@ function formatPeriodLabel(period) {
 }
 
 // ============================================================
-// DASHBOARD 3-VIEW TOGGLE (Flat / By Service / By Category)
+// DASHBOARD 3-VIEW TOGGLE (Flat / By Service / By Type)
 // ============================================================
 
 let txViewMode = localStorage.getItem('fin-tx-view') || 'flat';
+// The By Type view was saved as 'category' before types replaced categories.
+if (txViewMode === 'category') txViewMode = 'type';
 
 function setTxView(mode) {
     txViewMode = mode;
@@ -2543,26 +2647,25 @@ function setTxView(mode) {
     // Show/hide containers
     document.getElementById('tx-view-flat').style.display = mode === 'flat' ? '' : 'none';
     document.getElementById('tx-view-service').style.display = mode === 'service' ? '' : 'none';
-    document.getElementById('tx-view-category').style.display = mode === 'category' ? '' : 'none';
+    document.getElementById('tx-view-category').style.display = mode === 'type' ? '' : 'none';
     // Load data for accordion views
     if (mode === 'flat') {
         txPage(0);
     } else if (mode === 'service') {
         loadServiceAccordion();
-    } else if (mode === 'category') {
-        loadCategoryAccordion();
+    } else if (mode === 'type') {
+        loadTypeAccordion();
     }
 }
 
-// Build the full transaction URL for accordion views (shared by service + category accordions).
+// Build the full transaction URL for accordion views (shared by service + type accordions).
 function buildAccordionUrl() {
     const params = buildFilterParams();
     const search = document.getElementById('tx-search').value;
     let url = `/api/transactions?${params}&expense_only=true&per_page=5000&sort=date&sort_dir=desc`;
     if (search) url += '&search=' + encodeURIComponent(search);
-    const chartCats = getChartFilterCategories();
-    const activeCats = chartCats.length > 0 ? chartCats : catFilterSelections;
-    if (activeCats.length) url += '&categories=' + encodeURIComponent(activeCats.join(','));
+    const typesParam = activeTypesParam();
+    if (typesParam) url += '&types=' + encodeURIComponent(typesParam);
     const chartDateRange = getChartFilterDateRange();
     if (chartDateRange.start) url += '&chart_start=' + chartDateRange.start;
     if (chartDateRange.end) url += '&chart_end=' + chartDateRange.end;
@@ -2599,7 +2702,7 @@ async function loadServiceAccordion() {
     txns.forEach(tx => {
         if (tx.service_id) {
             const key = tx.service_id;
-            if (!groups[key]) groups[key] = { name: tx.service_name, category: tx.display_category || tx.category, txns: [], total: 0 };
+            if (!groups[key]) groups[key] = { name: tx.service_name, category: tx.display_type || NO_TYPE_LABEL, txns: [], total: 0 };
             groups[key].txns.push(tx);
             groups[key].total += tx.amount_sgd > 0 ? tx.amount_sgd : 0;
         } else {
@@ -2624,15 +2727,15 @@ async function loadServiceAccordion() {
     container.innerHTML = html || '<div class="empty-state"><div class="empty-state-text">No transactions</div></div>';
 }
 
-async function loadCategoryAccordion() {
+async function loadTypeAccordion() {
     const data = await fetch(buildAccordionUrl()).then(r => r.json());
     const txns = data.transactions.filter(tx => tx.flow_type === 'expense' || tx.flow_type === 'refund');
 
-    // Build 3-level: parent category → subcategory → service → transactions
+    // Build 3-level: parent type → sub-type → service → transactions
     const tree = {};
     txns.forEach(tx => {
-        const parentCat = tx.parent_category || tx.category || 'Other';
-        const subCat = tx.parent_category ? tx.category : null;
+        const parentCat = tx.parent_type || tx.type || NO_TYPE_LABEL;
+        const subCat = tx.parent_type ? tx.type : null;
         const svcName = tx.service_name || 'Unlinked';
         const svcId = tx.service_id || 0;
 
@@ -2687,11 +2790,11 @@ function renderAccordionTxRow(tx) {
     return `<tr>
         <td style="width:90px;">${formatDate(tx.date)}</td>
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
-        <td>${renderCategoryBadges(tx)}</td>
+        <td>${renderTypeBadges(tx)}</td>
         <td class="text-secondary">${tx.account_name || ''}</td>
-        <td style="text-align:right;" class="${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}S$${formatAmount(Math.abs(tx.amount_sgd))}</td>
+        <td style="text-align:right;" class="${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
         <td style="width:28px;text-align:center;"><span class="${oneOffClass}" title="${oneOffTitle}" onclick="toggleTxOneOff(${tx.id}, this)">1x</span></td>
-        <td style="width:28px;text-align:center;"><span class="tx-edit-icon" title="Resolve / edit" onclick="showCategoryPicker(${tx.id}, this)">&#9998;</span></td>
+        <td style="width:28px;text-align:center;"><span class="tx-edit-icon" title="Resolve / edit" onclick="showTypePicker(${tx.id}, this)">&#9998;</span></td>
     </tr>`;
 }
 
@@ -2746,30 +2849,30 @@ async function navigateToService(serviceId) {
     }
 }
 
-async function navigateToCategory(categoryName) {
+async function navigateToType(typeName) {
     switchTab('dashboard', { pushHistory: false });
 
-    // Set search to category name — API searches c.name and p.name
-    document.getElementById('tx-search').value = categoryName;
+    // Set search to type name — API searches the type's and its parent's name
+    document.getElementById('tx-search').value = typeName;
 
-    // Switch to By Category view
-    txViewMode = 'category';
-    localStorage.setItem('fin-tx-view', 'category');
+    // Switch to By Type view
+    txViewMode = 'type';
+    localStorage.setItem('fin-tx-view', 'type');
     document.querySelectorAll('.tx-view-toggle .btn-toggle').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.txview === 'category');
+        btn.classList.toggle('active', btn.dataset.txview === 'type');
     });
     document.getElementById('tx-view-flat').style.display = 'none';
     document.getElementById('tx-view-service').style.display = 'none';
     document.getElementById('tx-view-category').style.display = '';
 
-    await loadCategoryAccordion();
+    await loadTypeAccordion();
 
-    // Auto-expand the matching category
+    // Auto-expand the matching type
     const container = document.getElementById('tx-view-category');
     const items = container.querySelectorAll('.cat-l1-group');
     for (const item of items) {
         const header = item.querySelector('.cat-l1-header');
-        if (header && header.textContent.includes(categoryName)) {
+        if (header && header.textContent.includes(typeName)) {
             item.classList.add('open');
             item.scrollIntoView({ behavior: 'smooth', block: 'start' });
             break;
@@ -2778,31 +2881,31 @@ async function navigateToCategory(categoryName) {
 }
 
 // ============================================================
-// SEARCHABLE MULTI-SELECT (Category Filter)
+// SEARCHABLE MULTI-SELECT (Type Filter)
 // ============================================================
 
-function populateCatMultiSelect() {
+function populateTypeMultiSelect() {
     const container = document.getElementById('cat-filter-options');
     if (!container) return;
 
     let html = '';
-    // Uncategorized option
-    const uncatChecked = catFilterSelections.includes('__uncategorized__');
-    html += `<label class="ms-option ms-separator" data-name="uncategorized">
-        <input type="checkbox" value="__uncategorized__" ${uncatChecked ? 'checked' : ''}> Uncategorized
+    // Rows with no type (spending and refunds only)
+    const untypedChecked = typeFilterSelections.includes(UNTYPED_FILTER);
+    html += `<label class="ms-option ms-separator" data-name="no type">
+        <input type="checkbox" value="${UNTYPED_FILTER}" ${untypedChecked ? 'checked' : ''}> ${NO_TYPE_LABEL}
     </label>`;
 
-    // Categories grouped by parent
-    const parents = categories.filter(c => !c.parent_id).sort((a, b) => a.name.localeCompare(b.name));
+    // Types grouped by parent
+    const parents = types.filter(t => !t.parent_id).sort((a, b) => a.name.localeCompare(b.name));
     parents.forEach(p => {
-        const checked = catFilterSelections.includes(p.name);
+        const checked = typeFilterSelections.includes(p.name);
         html += `<label class="ms-option ${checked ? 'ms-checked' : ''}" data-name="${escapeHtml(p.name.toLowerCase())}">
             <input type="checkbox" value="${escapeHtml(p.name)}" ${checked ? 'checked' : ''}> ${escapeHtml(p.name)}
         </label>`;
-        // Subcategories indented
-        const children = categories.filter(c => c.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
+        // Sub-types indented
+        const children = types.filter(t => t.parent_id === p.id).sort((a, b) => a.name.localeCompare(b.name));
         children.forEach(c => {
-            const cChecked = catFilterSelections.includes(c.name);
+            const cChecked = typeFilterSelections.includes(c.name);
             html += `<label class="ms-option ms-indent ${cChecked ? 'ms-checked' : ''}" data-name="${escapeHtml(c.name.toLowerCase())}">
                 <input type="checkbox" value="${escapeHtml(c.name)}" ${cChecked ? 'checked' : ''}> ${escapeHtml(c.name)}
             </label>`;
@@ -2843,9 +2946,9 @@ function filterCatOptions() {
 
 function applyCatFilter() {
     // Read checked values
-    catFilterSelections = [];
+    typeFilterSelections = [];
     document.querySelectorAll('#cat-filter-options input[type="checkbox"]:checked').forEach(cb => {
-        catFilterSelections.push(cb.value);
+        typeFilterSelections.push(cb.value);
     });
 
     // Close panel
@@ -2858,7 +2961,7 @@ function applyCatFilter() {
 }
 
 function clearCatFilter() {
-    catFilterSelections = [];
+    typeFilterSelections = [];
     document.querySelectorAll('#cat-filter-options input[type="checkbox"]').forEach(cb => {
         cb.checked = false;
     });
@@ -2872,25 +2975,26 @@ function clearCatFilter() {
 }
 
 function updateCatFilterDisplay() {
+    updateSuggestButton();
     const display = document.getElementById('cat-filter-display');
     const trigger = document.getElementById('cat-filter-trigger');
     if (!display || !trigger) return;
 
-    const chartCats = getChartFilterCategories();
+    const chartCats = getChartFilterTypes();
     if (chartCats.length > 0) {
         display.textContent = `Chart: ${chartCats.join(', ')}`;
         trigger.classList.add('ms-has-selection');
         trigger.classList.add('ms-disabled');
-    } else if (catFilterSelections.length === 0) {
-        display.textContent = 'All Categories';
+    } else if (typeFilterSelections.length === 0) {
+        display.textContent = 'All Types';
         trigger.classList.remove('ms-has-selection');
         trigger.classList.remove('ms-disabled');
-    } else if (catFilterSelections.length === 1) {
-        display.textContent = catFilterSelections[0] === '__uncategorized__' ? 'Uncategorized' : catFilterSelections[0];
+    } else if (typeFilterSelections.length === 1) {
+        display.textContent = typeFilterSelections[0] === UNTYPED_FILTER ? NO_TYPE_LABEL : typeFilterSelections[0];
         trigger.classList.add('ms-has-selection');
         trigger.classList.remove('ms-disabled');
     } else {
-        display.textContent = `${catFilterSelections.length} categories`;
+        display.textContent = `${typeFilterSelections.length} types`;
         trigger.classList.add('ms-has-selection');
         trigger.classList.remove('ms-disabled');
     }
@@ -2907,11 +3011,31 @@ document.addEventListener('click', e => {
 });
 
 // ============================================================
-// CATEGORIES MASTER TAB
+// TYPES MASTER TAB
 // ============================================================
 
-function renderCategoriesMaster() {
-    renderCategoryTree();
+// The type list, read-only: it is one fixed list for every book, declared on
+// the server. Each type says what it covers and what it is not for.
+function renderTypesMaster() {
+    const parents = types.filter(t => !t.parent_id);
+    document.getElementById('type-count').textContent =
+        `${types.length} types (${parents.length} top-level)`;
+
+    const row = (t, indent) => `
+        <tr>
+            <td style="${indent ? 'padding-left:28px;' : 'font-weight:500;'}">${escapeHtml(t.name)}</td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${t.default_one_off ? 'one-off' : 'running'}</td>
+            <td style="font-size:12px;color:var(--text-secondary);">${escapeHtml(t.covers || '')}</td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(t.not_for || '')}</td>
+        </tr>`;
+
+    // Declared order, each parent followed by its sub-types
+    let html = '';
+    parents.forEach(p => {
+        html += row(p, false);
+        types.filter(t => t.parent_id === p.id).forEach(c => { html += row(c, true); });
+    });
+    document.getElementById('types-body').innerHTML = html;
 }
 
 // ============================================================
@@ -2936,7 +3060,8 @@ async function renderServicesMaster(skipFetch) {
     filtered = [...filtered].sort((a, b) => {
         let va, vb;
         switch (svcSortState.col) {
-            case 'category': va = (a.display_category || '').toLowerCase(); vb = (b.display_category || '').toLowerCase(); break;
+            case 'type':     va = (a.display_type || '').toLowerCase(); vb = (b.display_type || '').toLowerCase(); break;
+            case 'book':     va = (a.book || '').toLowerCase(); vb = (b.book || '').toLowerCase(); break;
             case 'notes':    va = (a.notes || '').toLowerCase(); vb = (b.notes || '').toLowerCase(); break;
             default:         va = a.name.toLowerCase(); vb = b.name.toLowerCase();
         }
@@ -2949,14 +3074,15 @@ async function renderServicesMaster(skipFetch) {
 
     const body = document.getElementById('services-master-body');
     if (!filtered.length) {
-        body.innerHTML = '<tr><td colspan="4" style="color:var(--text-tertiary);text-align:center;padding:var(--space-6);">No services</td></tr>';
+        body.innerHTML = '<tr><td colspan="5" style="color:var(--text-tertiary);text-align:center;padding:var(--space-6);">No services</td></tr>';
         return;
     }
 
     body.innerHTML = filtered.map(s => `
         <tr>
-            <td style="font-weight:500;">${escapeHtml(s.name)}</td>
-            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(s.display_category || '')}</td>
+            <td style="font-weight:500;">${escapeHtml(s.name)}${s.review_each_time ? ' <span class="badge badge-warning" style="font-size:10px;margin-left:6px;" title="Mixed merchant: the type of its rows is reviewed each time">mixed</span>' : ''}</td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(s.book || '')}</td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(s.display_type || '')}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(s.notes || '')}</td>
             <td style="text-align:right;white-space:nowrap;">
                 <button class="btn btn-sm" onclick="openEditServiceModal(${s.id})">Edit</button>
@@ -3054,7 +3180,7 @@ function renderCleanupView() {
                 <div class="cleanup-meta">
                     <span>${s.txn_count || 0} txns</span>
                     <span>${s.rule_count || 0} rules</span>
-                    <span>${escapeHtml(s.display_category || '—')}</span>
+                    <span>${escapeHtml([s.book, s.display_type].filter(Boolean).join(' · ') || '—')}</span>
                 </div>
             </div>
             <div class="cleanup-actions">
@@ -3125,10 +3251,11 @@ async function saveCleanupRenames() {
 function openAddServiceModal() {
     document.getElementById('add-svc-name').value = '';
     document.getElementById('add-svc-notes').value = '';
-    document.getElementById('add-svc-new-cat-row').classList.add('hidden');
+    document.getElementById('add-svc-review').checked = false;
 
-    // Populate category dropdown with "+ New category..." option
-    populateCategorySelect('add-svc-category', {includeNew: true, parentSelectId: 'add-svc-new-cat-parent'});
+    // Populate the default book and type dropdowns
+    populateTypeSelect('add-svc-type');
+    populateBookSelect('add-svc-book');
 
     openModalEl('add-service-modal', closeAddServiceModal);
     document.getElementById('add-svc-name').focus();
@@ -3142,13 +3269,12 @@ async function saveNewService() {
     const name = document.getElementById('add-svc-name').value.trim();
     if (!name) { alert('Service name is required'); return; }
 
-    const { id: categoryId, abort } = await resolveCategory('add-svc-category', 'add-svc');
-    if (abort) return;
-
     const body = {
         name,
-        category_id: categoryId,
+        book: document.getElementById('add-svc-book').value || null,
+        type_id: parseInt(document.getElementById('add-svc-type').value) || null,
         notes: document.getElementById('add-svc-notes').value.trim() || null,
+        review_each_time: document.getElementById('add-svc-review').checked ? 1 : 0,
     };
 
     const data = await apiFetch('/api/services', { method: 'POST', body });
@@ -3167,9 +3293,11 @@ function openEditServiceModal(svcId) {
     document.getElementById('edit-svc-notes').value = svc.notes || '';
     document.getElementById('edit-svc-one-off').checked = !!svc.is_one_off;
 
-    // Populate category dropdown with "+ New category..." option
-    populateCategorySelect('edit-svc-category', {selectedId: svc.category_id, includeNew: true, parentSelectId: 'edit-svc-new-cat-parent'});
-    document.getElementById('edit-svc-new-cat-row').classList.add('hidden');
+    document.getElementById('edit-svc-review').checked = !!svc.review_each_time;
+
+    // Populate the default book and type dropdowns
+    populateTypeSelect('edit-svc-type', {selectedId: svc.type_id});
+    populateBookSelect('edit-svc-book', {selectedBook: svc.book});
 
     // Populate merge target dropdown (all services except this one, sorted by name)
     const mergeSel = document.getElementById('edit-svc-merge-target');
@@ -3211,14 +3339,13 @@ async function saveEditService() {
     const name = document.getElementById('edit-svc-name').value.trim();
     if (!name) { alert('Service name is required'); return; }
 
-    const { id: categoryId, abort } = await resolveCategory('edit-svc-category', 'edit-svc');
-    if (abort) return;
-
     const body = {
         name,
-        category_id: categoryId,
+        book: document.getElementById('edit-svc-book').value || null,
+        type_id: parseInt(document.getElementById('edit-svc-type').value) || null,
         notes: document.getElementById('edit-svc-notes').value.trim() || null,
         is_one_off: document.getElementById('edit-svc-one-off').checked ? 1 : 0,
+        review_each_time: document.getElementById('edit-svc-review').checked ? 1 : 0,
     };
 
     const res = await fetch(`/api/services/${svcId}`, {
@@ -3233,7 +3360,7 @@ async function saveEditService() {
     }
 
     closeEditServiceModal();
-    // Refresh both services caches since name/category may have changed
+    // Refresh both services caches since name, book or type may have changed
     allServicesList = null;
     await renderServicesMaster();
 }
@@ -3322,7 +3449,7 @@ class ServicePicker {
             .map(s => ({
                 id: s.id,
                 name: s.name,
-                category: s.display_category || s.category_name || '',
+                category: [s.book, s.display_type].filter(Boolean).join(' · '),
             }))
             .filter(s => !query || s.name.toLowerCase().includes(query) || s.category.toLowerCase().includes(query))
             .sort((a, b) => {
@@ -3558,12 +3685,13 @@ function setSubsSpend(spend) {
 function renderSubsStats(subs) {
     // Apply spend filter to stats
     let active = subs.filter(s => s.status === 'active');
-    if (subsSpend !== 'all') active = active.filter(s => matchesScope(subsSpend, s));
+    if (subsSpend !== 'all') active = active.filter(s => matchesBook(subsSpend, s));
 
+    const monthlyOf = (book) => active.filter(s => bookOf(s) === book).reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
     const totalMonthly = active.reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
-    const personalMonthly = active.filter(s => getScope(s) === 'personal').reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
-    const moomMonthly = active.filter(s => getScope(s) === 'moom').reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
-    const kaleshMonthly = active.filter(s => getScope(s) === 'kalesh').reduce((sum, s) => sum + (s.monthly_sgd || 0), 0);
+    const householdMonthly = monthlyOf('Household');
+    const moomMonthly = monthlyOf('Moom');
+    const kaleshMonthly = monthlyOf('Kalesh');
     const fxRate = subs.length ? subs[0].fx_rate : 1.35;
 
     document.getElementById('subs-stats-row').innerHTML = `
@@ -3573,9 +3701,9 @@ function renderSubsStats(subs) {
             <div class="stat-sub">${active.length} active subscriptions</div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">Personal</div>
-            <div class="stat-value accent">S$${formatAmount(personalMonthly)}</div>
-            <div class="stat-sub">S$${formatAmount(personalMonthly * 12)}/year</div>
+            <div class="stat-label">Household</div>
+            <div class="stat-value accent">S$${formatAmount(householdMonthly)}</div>
+            <div class="stat-sub">S$${formatAmount(householdMonthly * 12)}/year</div>
         </div>
         <div class="stat-card">
             <div class="stat-label">Moom</div>
@@ -3611,14 +3739,14 @@ function renderSubscriptions(subs) {
     else if (subsFilter === 'deactivated') filtered = subs.filter(s => s.status !== 'active');
 
     // Spend filter
-    if (subsSpend !== 'all') filtered = filtered.filter(s => matchesScope(subsSpend, s));
+    if (subsSpend !== 'all') filtered = filtered.filter(s => matchesBook(subsSpend, s));
 
     // Sort
     filtered = [...filtered].sort((a, b) => {
         let va, vb;
         switch (subsSortState.col) {
             case 'service':   va = (a.service_name || '').toLowerCase(); vb = (b.service_name || '').toLowerCase(); break;
-            case 'category':  va = (a.display_category || '').toLowerCase(); vb = (b.display_category || '').toLowerCase(); break;
+            case 'type':      va = (a.display_type || '').toLowerCase(); vb = (b.display_type || '').toLowerCase(); break;
             case 'billed':    va = a.amount || 0; vb = b.amount || 0; break;
             case 'monthly':   va = a.monthly_sgd || 0; vb = b.monthly_sgd || 0; break;
             case 'frequency': va = a.frequency; vb = b.frequency; break;
@@ -3694,7 +3822,7 @@ function renderSubscriptions(subs) {
             <td>
                 <div style="font-weight:600;font-size:13px;">${s.service_id ? `<a href="#" class="svc-link" onclick="navigateToService(${s.service_id});return false;">${escapeHtml(s.service_name || '')}</a>` : escapeHtml(s.service_name || '')}</div>
             </td>
-            <td class="subs-col-hide-sm"><a href="#" class="cat-link" onclick="navigateToCategory('${escapeHtml(s.parent_name || s.category_name || '')}');return false;">${escapeHtml(s.display_category)}</a></td>
+            <td class="subs-col-hide-sm"><a href="#" class="cat-link" onclick="navigateToType('${escapeHtml(s.parent_type || s.type_name || '')}');return false;">${escapeHtml(s.display_type)}</a>${bookBadgeHtml(s.book)}</td>
             <td style="text-align:right;font-size:13px;">${billedHtml}</td>
             <td style="text-align:right;font-size:13px;font-weight:600;color:var(--accent-camel);" title="${escapeHtml(monthlyTitle)}">
                 ${monthlyLabel}
@@ -3726,69 +3854,57 @@ function getServiceRulePattern(serviceId) {
     return null;
 }
 
-// Shared: populate a category dropdown with hierarchy + "+ New category..."
-function populateSubCategoryDropdown(selectId, selectedId) {
-    const prefix = selectId === 'sub-category' ? 'add-sub' : 'edit-sub';
-    populateCategorySelect(selectId, {
-        includeNew: true, selectedId, parentSelectId: `${prefix}-new-cat-parent`
-    });
-}
-
-function onSubCategoryChange(mode) {
-    const prefix = mode === 'add' ? 'add-sub' : 'edit-sub';
-    const selId = mode === 'add' ? 'sub-category' : 'edit-sub-category';
-    toggleNewCategoryRow(selId, `${prefix}-new-cat-row`, `${prefix}-new-cat-name`);
-}
-
-// Subscription ServicePicker — auto-fill category on selection
-function _subPickerOnSelect(catSelectId, catHintId) {
+// Subscription ServicePicker — a subscription takes its book and type from
+// its service: show them on selection
+function _subPickerOnSelect(bookSelectId, typeSelectId, hintId) {
     return (item) => {
         if (!item.isNew && allServicesList) {
             const svc = allServicesList.find(s => s.id === item.id);
-            if (svc && svc.category_id) {
-                document.getElementById(catSelectId).value = String(svc.category_id);
-                document.getElementById(catHintId).style.display = 'block';
+            if (svc && svc.type_id) {
+                document.getElementById(typeSelectId).value = String(svc.type_id);
+                document.getElementById(bookSelectId).value = svc.book || '';
+                document.getElementById(hintId).style.display = 'block';
                 return;
             }
         }
-        document.getElementById(catHintId).style.display = 'none';
+        document.getElementById(hintId).style.display = 'none';
     };
 }
 
 function getAddSubServicePicker() {
     return getServicePicker('add-sub-svc-picker', {
         allowCreate: true,
-        onSelect: _subPickerOnSelect('sub-category', 'sub-cat-hint'),
+        onSelect: _subPickerOnSelect('sub-book', 'sub-type', 'sub-cat-hint'),
     });
 }
 
 function getEditSubServicePicker() {
     return getServicePicker('edit-sub-svc-picker', {
         allowCreate: true,
-        onSelect: _subPickerOnSelect('edit-sub-category', 'edit-sub-cat-hint'),
+        onSelect: _subPickerOnSelect('edit-sub-book', 'edit-sub-type', 'edit-sub-cat-hint'),
     });
 }
 
 async function openAddSubModal() {
     // Reset all fields
-    const defaults = { 'sub-category': '', 'sub-amount': '', 'sub-currency': 'SGD', 'sub-frequency': 'monthly',
+    const defaults = { 'sub-amount': '', 'sub-currency': 'SGD', 'sub-frequency': 'monthly',
         'sub-periods': '1', 'sub-card': '', 'sub-renewal': '', 'sub-status': 'active',
         'sub-link': '', 'sub-notes': '', 'sub-start-date': '' };
     for (const [id, val] of Object.entries(defaults)) document.getElementById(id).value = val;
-    document.getElementById('add-sub-new-cat-row').classList.add('hidden');
     document.getElementById('sub-cat-hint').style.display = 'none';
 
     // Initialize ServicePicker
     const picker = getAddSubServicePicker();
     picker.clear();
 
-    // Populate category dropdown
-    populateSubCategoryDropdown('sub-category', null);
+    // Populate book and type dropdowns (the service's, shown here)
+    populateTypeSelect('sub-type');
+    populateBookSelect('sub-book');
 
     // Populate card dropdown from active accounts only
     const cardSel = document.getElementById('sub-card');
     cardSel.innerHTML = '<option value="">—</option>';
-    accounts.filter(a => a.status !== 'archived').forEach(a => {
+    accounts.filter(a => a.status !== 'archived' && hasStatements(a)).forEach(a => {
         cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
     });
 
@@ -3815,15 +3931,15 @@ function closeAddSubModal() {
 }
 
 async function addSubscription() {
-    const resolved = await resolveSubService(getAddSubServicePicker, 'sub-category', 'add-sub');
+    const resolved = await resolveSubService(getAddSubServicePicker, 'sub-book', 'sub-type');
     if (!resolved) return;
-    const { serviceId, categoryId, serviceName } = resolved;
+    const { serviceId, book, typeId, serviceName } = resolved;
 
-    const body = readSubFormBody('sub', serviceId, categoryId, serviceName);
+    const body = readSubFormBody('sub', serviceId, serviceName);
     const data = await apiFetch('/api/subscriptions', { method: 'POST', body });
     if (!data) return;
 
-    const recat = await cascadeServiceCategory(serviceId, categoryId, serviceName, 'Added subscription');
+    const recat = await cascadeServiceLabel(serviceId, book, typeId, serviceName, 'Added subscription');
     if (!recat) showToast(`Added subscription "${serviceName}"`, 'info');
 
     closeAddSubModal();
@@ -3902,7 +4018,6 @@ async function openEditSubModal(subId) {
     if (!sub) return;
 
     document.getElementById('edit-sub-id').value = sub.id;
-    document.getElementById('edit-sub-new-cat-row').classList.add('hidden');
     document.getElementById('edit-sub-cat-hint').style.display = 'none';
 
     // Initialize ServicePicker with current service
@@ -3914,14 +4029,15 @@ async function openEditSubModal(subId) {
         status: sub.status || 'active', link: sub.link || '', notes: sub.notes || '' };
     for (const [k, v] of Object.entries(fieldMap)) document.getElementById(`edit-sub-${k}`).value = v;
 
-    // Populate category dropdown with current selection
-    populateSubCategoryDropdown('edit-sub-category', sub.category_id);
+    // Populate book and type dropdowns with the service's current label
+    populateTypeSelect('edit-sub-type', {selectedId: sub.type_id});
+    populateBookSelect('edit-sub-book', {selectedBook: sub.type_id ? sub.book : null});
 
     // Populate card dropdown from accounts (include archived if sub uses one)
     const cardSel = document.getElementById('edit-sub-card');
     cardSel.innerHTML = '<option value="">—</option>';
     accounts.forEach(a => {
-        if (a.status !== 'archived' || a.id === sub.account_id) {
+        if ((a.status !== 'archived' && hasStatements(a)) || a.id === sub.account_id) {
             cardSel.innerHTML += `<option value="${a.id}">${a.short_name}</option>`;
         }
     });
@@ -3948,17 +4064,17 @@ function closeEditSubModal() {
 
 async function saveEditSub() {
     const subId = parseInt(document.getElementById('edit-sub-id').value);
-    const resolved = await resolveSubService(getEditSubServicePicker, 'edit-sub-category', 'edit-sub');
+    const resolved = await resolveSubService(getEditSubServicePicker, 'edit-sub-book', 'edit-sub-type');
     if (!resolved) return;
-    const { serviceId, categoryId, serviceName } = resolved;
+    const { serviceId, book, typeId, serviceName } = resolved;
 
     if (!serviceId) { alert('Please select a service'); return; }
 
-    const body = readSubFormBody('edit-sub', serviceId, categoryId, serviceName);
+    const body = readSubFormBody('edit-sub', serviceId, serviceName);
     const data = await apiFetch(`/api/subscriptions/${subId}`, { method: 'PUT', body });
     if (!data) return;
 
-    const recat = await cascadeServiceCategory(serviceId, categoryId, serviceName, 'Updated subscription');
+    const recat = await cascadeServiceLabel(serviceId, book, typeId, serviceName, 'Updated subscription');
     if (!recat) showToast(`Updated subscription "${serviceName}"`, 'info');
 
     closeEditSubModal();
@@ -3983,11 +4099,56 @@ async function deleteSubFromModal() {
 // ACCOUNTS TAB
 // ============================================================
 
-const ACCT_TYPE_LABELS = {
-    credit_card: 'Credit Card',
-    debit: 'Debit Card',
-    bank: 'Bank Account',
-};
+// An account's kind and owner come from one declaration, served by
+// /api/account-kinds and held in accountKinds.
+function kindInfo(kind) {
+    return accountKinds.kinds.find(k => k.name === kind) || {};
+}
+
+// Whether an account's rows come from imported statements (a bank account or a card).
+function hasStatements(a) {
+    return !!kindInfo(a.type).has_statements;
+}
+
+function acctKindOptions(selected) {
+    return accountKinds.kinds.map(k =>
+        `<option value="${k.name}" title="${escapeHtml(k.description)}" ${k.name === selected ? 'selected' : ''}>${k.name}</option>`
+    ).join('');
+}
+
+function acctOwnerOptions(selected) {
+    return accountKinds.owners.map(o =>
+        `<option value="${escapeHtml(o.name)}" title="${escapeHtml(o.description)}" ${o.name === selected ? 'selected' : ''}>${escapeHtml(o.name)}</option>`
+    ).join('');
+}
+
+const CURRENCY_SIGNS = { SGD: 'S$', INR: 'Rs' };
+
+// The sign a row's amount is shown with: its account's currency. A row's
+// amount_sgd key is the old name; for a rupee account it holds rupees.
+function amountSign(currency) {
+    if (!currency || currency === 'SGD') return 'S$';
+    return `${CURRENCY_SIGNS[currency] || currency} `;
+}
+
+// A stored amount (whole minor units) as text: "S$ -902,500.00". Integer
+// arithmetic only.
+function formatMinorUnits(minor, currency) {
+    const abs = Math.abs(minor);
+    const units = Math.floor(abs / 100).toLocaleString('en-US');
+    const cents = String(abs % 100).padStart(2, '0');
+    const code = currency || 'SGD';
+    return `${CURRENCY_SIGNS[code] || code} ${minor < 0 ? '-' : ''}${units}.${cents}`;
+}
+
+// What an account's balance rests on: its latest anchor, or that it has none.
+function acctRestsOn(a) {
+    if (!a.anchor) {
+        return a.takes_a_figure ? '<span style="color:var(--text-muted);">no figure</span>' : '—';
+    }
+    const source = a.anchor.source === 'supplied' ? 'your figure' : 'statement';
+    return `${formatMinorUnits(a.anchor.amount_minor, a.currency)}<br><span style="color:var(--text-muted);">${source} ${formatDate(a.anchor.date)}</span>`;
+}
 
 let editingAcctId = null;  // Track which account row is being edited
 
@@ -4021,9 +4182,11 @@ function renderAccountsTab() {
         return `<tr${isArchived ? ' style="opacity:0.5;"' : ''}>
             <td style="font-size:13px;">${escapeHtml(a.name)}${isArchived ? ' <span class="badge badge-muted" style="font-size:10px;margin-left:6px;">archived</span>' : ''}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.short_name)}</td>
-            <td><span class="acct-type-badge acct-type-${a.type}">${ACCT_TYPE_LABELS[a.type] || a.type}</span></td>
+            <td><span class="acct-type-badge acct-type-${a.type}" title="${escapeHtml(kindInfo(a.type).description || '')}">${escapeHtml(a.type)}</span></td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${escapeHtml(a.owner || '')}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${a.last_four || '—'}</td>
             <td style="font-size:12px;color:var(--text-tertiary);">${a.currency || 'SGD'}</td>
+            <td style="font-size:12px;color:var(--text-tertiary);">${acctRestsOn(a)}</td>
             <td style="text-align:right;white-space:nowrap;">
                 <button class="btn btn-sm" onclick="startEditAcct(${a.id})">Edit</button>
                 ${archiveBtn}
@@ -4038,14 +4201,14 @@ function renderAcctEditRow(a) {
         <td><input type="text" id="edit-acct-name" value="${escapeHtml(a.name)}" style="width:100%;font-size:13px;"></td>
         <td><input type="text" id="edit-acct-short" value="${escapeHtml(a.short_name)}" style="width:100%;font-size:12px;"></td>
         <td>
-            <select id="edit-acct-type" style="width:100%;font-size:12px;">
-                <option value="credit_card" ${a.type === 'credit_card' ? 'selected' : ''}>Credit Card</option>
-                <option value="debit" ${a.type === 'debit' ? 'selected' : ''}>Debit Card</option>
-                <option value="bank" ${a.type === 'bank' ? 'selected' : ''}>Bank Account</option>
-            </select>
+            <select id="edit-acct-type" style="width:100%;font-size:12px;">${acctKindOptions(a.type)}</select>
+        </td>
+        <td>
+            <select id="edit-acct-owner" style="width:100%;font-size:12px;">${acctOwnerOptions(a.owner)}</select>
         </td>
         <td><input type="text" id="edit-acct-last4" value="${a.last_four || ''}" maxlength="4" style="width:100%;font-size:12px;"></td>
         <td><input type="text" id="edit-acct-currency" value="${a.currency || 'SGD'}" style="width:60px;font-size:12px;"></td>
+        <td style="font-size:12px;color:var(--text-tertiary);">${acctRestsOn(a)}</td>
         <td style="text-align:right;white-space:nowrap;">
             <button class="btn btn-sm btn-primary" onclick="saveEditAcct(${a.id})">Save</button>
             <button class="btn btn-sm" onclick="cancelEditAcct()">Cancel</button>
@@ -4054,6 +4217,11 @@ function renderAcctEditRow(a) {
 }
 
 function toggleAcctForm() {
+    const kindSel = document.getElementById('acct-type');
+    if (!kindSel.options.length) {
+        kindSel.innerHTML = acctKindOptions('card');
+        document.getElementById('acct-owner').innerHTML = acctOwnerOptions('Household');
+    }
     document.getElementById('acct-form').classList.toggle('hidden');
 }
 
@@ -4065,6 +4233,7 @@ async function addAccount() {
         name,
         short_name: document.getElementById('acct-short').value.trim() || name,
         type: document.getElementById('acct-type').value,
+        owner: document.getElementById('acct-owner').value,
         last_four: document.getElementById('acct-last4').value.trim() || null,
         currency: document.getElementById('acct-currency').value.trim() || 'SGD',
     };
@@ -4098,6 +4267,7 @@ async function saveEditAcct(id) {
         name: document.getElementById('edit-acct-name').value.trim(),
         short_name: document.getElementById('edit-acct-short').value.trim(),
         type: document.getElementById('edit-acct-type').value,
+        owner: document.getElementById('edit-acct-owner').value,
         last_four: document.getElementById('edit-acct-last4').value.trim() || null,
         currency: document.getElementById('edit-acct-currency').value.trim() || 'SGD',
     };
@@ -4138,4 +4308,589 @@ async function reloadAccounts() {
     accounts = acctRes;
     populateAccountFilter();
     renderAccountsTab();
+    // A figure entered from the balance sheet shows on it at once.
+    if (document.getElementById('tab-balance')?.classList.contains('active')) await loadBalanceSheet();
 }
+
+
+// ============================================================
+// REVIEW LIST (transfers waiting for a label)
+// ============================================================
+
+// What is waiting, money out and money in apart: "8 out · S$ 96,000.00 ·
+// 2 in · S$ 250,000.00". A side with nothing in it is not named. `prefix`
+// picks the figures: 'waiting' (the whole list) or 'held_out' (one month's).
+function waitingOutAndIn(d, prefix) {
+    const side = (name) => d[`${prefix}_${name}_count`]
+        ? [`${d[`${prefix}_${name}_count`]} ${name} · S$ ${formatAmount(d[`${prefix}_${name}_total`])}`]
+        : [];
+    return [...side('out'), ...side('in')].join(' · ');
+}
+
+// The tab button says how many transfers are waiting.
+function showReviewCount(waiting) {
+    const btn = document.getElementById('review-tab-btn');
+    if (btn) btn.textContent = waiting ? `Review list (${waiting})` : 'Review list';
+}
+
+async function refreshReviewCount() {
+    try {
+        const info = await fetch('/api/review').then(r => r.json());
+        reviewChoices = info.choices;
+        showReviewCount(info.waiting);
+    } catch (err) {
+        // The count is a convenience; the list itself reports a failure.
+    }
+}
+
+async function loadReviewList() {
+    const [info, list, kinds] = await Promise.all([
+        fetch('/api/review').then(r => r.json()),
+        // The transaction list's own amount sort: largest first.
+        fetch('/api/transactions?flow=review&sort=amount&sort_dir=desc&per_page=500').then(r => r.json()),
+        incomeKinds.length ? incomeKinds : fetch('/api/types?kind=income').then(r => r.json()),
+    ]);
+    reviewChoices = info.choices;
+    incomeKinds = kinds;
+    reviewRows = list.transactions;
+    showReviewCount(info.waiting);
+
+    const noun = info.waiting === 1 ? 'transfer' : 'transfers';
+    const shown = reviewRows.length < info.waiting ? ` · showing the largest ${reviewRows.length}` : '';
+    document.getElementById('review-heading').textContent =
+        `/ Review list · ${info.waiting} ${noun} waiting${info.waiting ? ` · ${waitingOutAndIn(info, 'waiting')}` : ''} · held out of spending · largest first${shown}`;
+
+    document.getElementById('review-empty').classList.toggle('hidden', reviewRows.length > 0);
+    document.getElementById('review-table').classList.toggle('hidden', reviewRows.length === 0);
+    document.getElementById('review-body').innerHTML = reviewRows.map(tx => `<tr>
+            <td class="col-date">${formatDate(tx.date)}</td>
+            <td class="text-secondary" style="font-size:12px;">${escapeHtml(tx.account_name || '')}</td>
+            <td class="text-secondary" style="font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description)}">${escapeHtml(tx.description)}</td>
+            <td class="col-amount ${tx.amount_sgd < 0 ? 'text-success' : ''}">${tx.amount_sgd < 0 ? '-' : ''}${amountSign(tx.currency)}${formatAmount(Math.abs(tx.amount_sgd))}</td>
+            <td style="white-space:nowrap;">
+                <select id="review-choice-${tx.id}" style="font-size:12px;" onchange="onReviewChoice(${tx.id})">
+                    <option value="">choose</option>
+                    ${reviewChoices.map(c => `<option value="${c.name}" title="${escapeHtml(c.description)}">${escapeHtml(c.label)}</option>`).join('')}
+                </select>
+                <span id="review-detail-${tx.id}"></span>
+                <button class="btn btn-sm btn-primary hidden" id="review-save-${tx.id}" onclick="saveReviewLabel(${tx.id})">Save</button>
+            </td>
+        </tr>`).join('');
+}
+
+// The accounts a choice may name as the other side: the household's, of the
+// kinds the choice allows, and never the account the row is on.
+function reviewAccountsFor(choice, tx) {
+    return accounts.filter(a =>
+        a.status !== 'archived' && a.owner === DEFAULT_BOOK
+        && choice.kinds.includes(a.type) && a.name !== tx.account_name);
+}
+
+// Show what the chosen label asks for: a type, an account, a person, an income kind.
+function onReviewChoice(txId) {
+    const tx = reviewRows.find(r => r.id === txId);
+    const choice = reviewChoices.find(c => c.name === document.getElementById(`review-choice-${txId}`).value);
+    const detail = document.getElementById(`review-detail-${txId}`);
+    document.getElementById(`review-save-${txId}`).classList.toggle('hidden', !choice);
+    if (!choice || !tx) { detail.innerHTML = ''; return; }
+
+    if (choice.asks === 'type') {
+        detail.innerHTML = `
+            <select id="review-type-${txId}" style="font-size:12px;max-width:170px;" onchange="onReviewType(${txId})">
+                <option value="">type</option>
+                ${types.map(t => `<option value="${t.id}" title="${escapeHtml(t.covers || '')}">${escapeHtml(t.display_name)}</option>`).join('')}
+            </select>
+            <select id="review-book-${txId}" style="font-size:12px;">
+                <option value="">whose</option>
+                ${books.map(b => `<option value="${escapeHtml(b.name)}" title="${escapeHtml(b.description)}">${escapeHtml(b.name)}</option>`).join('')}
+            </select>`;
+    } else if (choice.asks === 'account') {
+        detail.innerHTML = `
+            <select id="review-account-${txId}" style="font-size:12px;max-width:220px;">
+                <option value="">which</option>
+                ${reviewAccountsFor(choice, tx).map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('')}
+            </select>`;
+    } else if (choice.asks === 'person') {
+        detail.innerHTML = `
+            <input type="text" id="review-person-${txId}" list="review-people-${txId}" placeholder="who" style="font-size:12px;width:170px;">
+            <datalist id="review-people-${txId}">
+                ${reviewAccountsFor(choice, tx).map(a => `<option value="${escapeHtml(a.name)}"></option>`).join('')}
+            </datalist>`;
+    } else if (choice.asks === 'income_kind') {
+        detail.innerHTML = `
+            <select id="review-kind-${txId}" style="font-size:12px;">
+                <option value="">what kind</option>
+                ${incomeKinds.map(k => `<option value="${k.id}" title="${escapeHtml(k.covers || '')}">${escapeHtml(k.name)}</option>`).join('')}
+            </select>`;
+    } else {
+        detail.innerHTML = '';
+    }
+}
+
+// A type proposes whose spending it is; a book already chosen is left alone.
+function onReviewType(txId) {
+    const bookSel = document.getElementById(`review-book-${txId}`);
+    const proposed = proposedBook(document.getElementById(`review-type-${txId}`).value);
+    if (bookSel && !bookSel.value && proposed) bookSel.value = proposed;
+}
+
+async function saveReviewLabel(txId) {
+    const choice = reviewChoices.find(c => c.name === document.getElementById(`review-choice-${txId}`).value);
+    if (!choice) return;
+    const body = { choice: choice.name };
+    const value = id => (document.getElementById(`${id}-${txId}`) || {}).value || '';
+
+    if (choice.asks === 'type') {
+        if (!value('review-type')) { alert('Choose a type'); return; }
+        body.type_id = parseInt(value('review-type'));
+        if (value('review-book')) body.book = value('review-book');
+    } else if (choice.asks === 'account') {
+        if (!value('review-account')) { alert('Choose which account'); return; }
+        body.account_id = parseInt(value('review-account'));
+    } else if (choice.asks === 'person') {
+        if (!value('review-person').trim()) { alert('Say who'); return; }
+        body.person = value('review-person').trim();
+    } else if (choice.asks === 'income_kind') {
+        if (!value('review-kind')) { alert('Choose what kind of income'); return; }
+        body.income_kind_id = parseInt(value('review-kind'));
+    }
+
+    const btn = document.getElementById(`review-save-${txId}`);
+    btn.disabled = true;
+    const data = await apiFetch(`/api/review/${txId}/label`, { method: 'POST', body });
+    btn.disabled = false;
+    if (!data) return;
+
+    const named = data.other_side_name ? `, naming ${data.other_side_name}` : '';
+    const created = data.created_account ? ' (a new account for them)' : '';
+    showToast(`Labelled: ${choice.label}${named}${created}`, 'success', 5000);
+    if (data.created_account) {
+        accounts = await fetch('/api/accounts').then(r => r.json());
+    }
+    await loadReviewList();
+}
+
+
+// ============================================================
+// BALANCE SHEET (what the household owns and owes at a month's end)
+// ============================================================
+
+const BALANCE_SHEET_START = '2026-01';   // nothing is shown for an earlier month
+let balanceMonth = null;                 // the month shown, YYYY-MM; null = this month
+
+function thisMonth() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// The last day of a month written YYYY-MM, as YYYY-MM-DD.
+function monthEnd(month) {
+    const [y, m] = month.split('-').map(Number);
+    return `${month}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+}
+
+// The months the sheet can show, newest first: this month back to the start.
+function balanceMonths() {
+    const months = [];
+    let [y, m] = thisMonth().split('-').map(Number);
+    for (;;) {
+        const month = `${y}-${String(m).padStart(2, '0')}`;
+        if (month < BALANCE_SHEET_START) break;
+        months.push(month);
+        m -= 1;
+        if (m === 0) { m = 12; y -= 1; }
+    }
+    return months;
+}
+
+function onBalanceMonth() {
+    balanceMonth = document.getElementById('balance-month').value;
+    loadBalanceSheet();
+}
+
+// What a line rests on: "statement 31 Jul 2026", with its age when the
+// anchor is not from the month shown.
+function balanceRestsOn(line) {
+    // A company or a person with no opening figure is counted from the day
+    // the sheet starts, and says so.
+    if (!line.rests_on && line.since_label) return escapeHtml(line.since_label);
+    if (!line.rests_on) return '<span class="text-muted">no figure</span>';
+    const r = line.rests_on;
+    const age = r.in_month ? '' : ` <span class="text-warning">[${r.age_days} ${r.age_days === 1 ? 'day' : 'days'} old]</span>`;
+    return `${escapeHtml(r.label)} ${formatDate(r.date)}${age}`;
+}
+
+// A company's or a person's line says what its balance is made of in place
+// of a check: opening figure, paid for it, capital, paid back.
+function balanceCheck(line) {
+    if (line.made_of) {
+        const note = line.note ? ` <span class="text-warning">${escapeHtml(line.note)}</span>` : '';
+        return `<span class="text-secondary">${escapeHtml(line.made_of.text)}</span>${note}`;
+    }
+    if (!line.check) return '';
+    const cls = { ties: 'text-success', off: 'text-warning', not_checked: 'text-muted' }[line.check.status] || '';
+    return `<span class="${cls}">${escapeHtml(line.check.text)}</span>`;
+}
+
+// A balance in another currency shows its SGD value and the rate that gives
+// it; one left out of the total is marked, and says why.
+function balanceFigure(line) {
+    if (line.balance_minor === null) return escapeHtml(line.balance);
+    if (line.rate) {
+        return `${escapeHtml(line.balance)}
+            <div class="text-secondary" style="font-size:12px;" title="${escapeHtml(line.rate.source)}">${escapeHtml(line.value)}</div>
+            <div class="text-muted" style="font-size:11px;">${escapeHtml(line.rate.text)}</div>`;
+    }
+    if (line.in_total) return escapeHtml(line.balance);
+    return `${escapeHtml(line.balance)} <span class="text-muted" title="${escapeHtml(line.left_out || '')}">*</span>`;
+}
+
+// The month's currency change, and the rate controls for the currencies the
+// sheet holds besides SGD.
+function balanceCurrencyChange(sheet) {
+    const change = sheet.currency_change;
+    if (!change || !change.lines.length) return '';
+    const currencies = [...new Set(change.lines.map(l => l.currency))];
+    const figure = change.minor === null
+        ? `<span class="text-warning">${escapeHtml(change.note)}</span>`
+        : `<span style="font-family:var(--font-mono);">${escapeHtml(change.text)}</span>
+           <span class="text-muted">${change.lines.map(l =>
+               `${escapeHtml(l.name)}: ${escapeHtml(l.opening)} at ${escapeHtml(l.end.rate)} less at ${escapeHtml(l.start.rate)}`
+           ).join('; ')}</span>`;
+    const controls = currencies.map(c => `
+        <button class="btn btn-sm" onclick="fetchRate('${escapeHtml(c)}', '${escapeHtml(sheet.as_at)}')">Fetch ${escapeHtml(c)} rate for ${formatDate(sheet.as_at)}</button>
+        <button class="btn btn-sm" onclick="enterRate('${escapeHtml(c)}', '${escapeHtml(sheet.as_at)}')">Enter it</button>`).join('');
+    return `<div style="font-size:12px;margin-top:var(--space-3);">
+            <span class="balance-net-label">Currency change</span> ${figure}
+        </div>
+        <div style="display:flex;gap:var(--space-3);margin-top:var(--space-3);">${controls}</div>`;
+}
+
+// The month check: net worth at the previous month-end, plus income, less
+// spending, plus currency change, against net worth at the month-end. The
+// difference is unexplained, shown beside the month's transfers waiting for
+// review and the lines whose check is not "ties".
+function balanceMonthCheck(sheet) {
+    const c = sheet.month_check;
+    if (!c) return '';
+    const [y, m] = c.month.split('-').map(Number);
+    const monthName = new Date(y, m - 1, 1).toLocaleString('en-GB', { month: 'long', year: 'numeric' });
+    const row = (label, figure, aside = '', cls = '') => `<tr class="${cls}">
+            <td>${label}</td>
+            <td class="col-amount">${figure === null ? '<span class="text-muted">-</span>' : escapeHtml(figure)}</td>
+            <td class="text-secondary">${aside}</td>
+        </tr>`;
+    const interest = c.interest_minor ? `(interest ${escapeHtml(c.interest)} inside)` : '';
+    const review = c.review.count
+        ? `${c.review.count} ${c.review.count === 1 ? 'transfer' : 'transfers'} dated in ${escapeHtml(monthName)} waiting in the review list
+           (out ${escapeHtml(c.review.out)}${c.review.in_count ? ` · in ${escapeHtml(c.review.in)}` : ''})`
+        : `no transfer dated in ${escapeHtml(monthName)} is waiting for review`;
+    const notTying = c.not_tying.map(l =>
+        `<div>${escapeHtml(l.name)}: ${escapeHtml(l.text)}${l.date ? ` (${formatDate(l.date)})` : ''}</div>`
+    ).join('');
+    const unexplained = c.available
+        ? row('<strong>Unexplained</strong>', c.unexplained, `<div>${review}</div>${notTying}`, 'balance-total')
+        : row('Unexplained', null, `<span class="text-warning">${escapeHtml(c.why)}</span><div>${review}</div>${notTying}`);
+    const note = c.note ? `<div class="balance-note">${escapeHtml(c.note)}</div>` : '';
+    return `<div style="margin-top:var(--space-5);">
+            <div class="balance-net-label">Month check · ${escapeHtml(monthName)}</div>
+            ${note}
+            <table class="data-table" style="font-size:12px;">
+                <tbody>
+                    ${row(`Net worth, ${formatDate(c.from)}`, c.opening)}
+                    ${row('+ income', c.income)}
+                    ${row('- spending', c.spending, interest)}
+                    ${row('+ currency change', c.currency_change, (c.currency_change_lines || []).filter(l => l.spread_minor).map(l => `${escapeHtml(l.name)}: conversion spread ${escapeHtml(l.spread)} inside`).join('; '))}
+                    ${c.outside_minor ? row('+ moved from accounts left out', c.outside, 'to or from an account with no balance at one end of the month') : ''}
+                    ${row(`= expected, ${formatDate(c.to)}`, c.expected)}
+                    ${row(`actual, ${formatDate(c.to)}`, c.actual)}
+                    ${unexplained}
+                </tbody>
+            </table>
+        </div>`;
+}
+
+// Fetch the reference rate for a day and save it; a rate already saved is kept.
+async function fetchRate(currency, day) {
+    const resp = await fetch('/api/rates/fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currency, date: day }),
+    });
+    const result = await resp.json();
+    if (!resp.ok) { alert(result.error || 'The rate could not be fetched'); return; }
+    loadBalanceSheet();
+}
+
+// Enter a rate for a day by hand, in place of any saved for it.
+async function enterRate(currency, day) {
+    const rate = prompt(`SGD for 1 ${currency} on ${day} (for example 0.0153):`);
+    if (rate === null || !rate.trim()) return;
+    const resp = await fetch('/api/rates', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currency, date: day, rate: rate.trim() }),
+    });
+    const result = await resp.json();
+    if (!resp.ok) { alert(result.error || 'The rate could not be saved'); return; }
+    loadBalanceSheet();
+}
+
+async function loadBalanceSheet() {
+    const month = balanceMonth || thisMonth();
+    const sel = document.getElementById('balance-month');
+    sel.innerHTML = balanceMonths().map(m =>
+        `<option value="${m}"${m === month ? ' selected' : ''}>${formatDate(monthEnd(m))}</option>`
+    ).join('');
+
+    const table = document.getElementById('balance-table');
+    const errorEl = document.getElementById('balance-error');
+    const noteEl = document.getElementById('balance-note');
+    const netEl = document.getElementById('balance-net-worth');
+    let sheet;
+    try {
+        sheet = await fetch(`/api/balance-sheet?month=${encodeURIComponent(month)}`).then(r => r.json());
+    } catch (err) {
+        sheet = { error: 'The balance sheet could not be loaded' };
+    }
+    if (sheet.error) {
+        table.classList.add('hidden');
+        noteEl.classList.add('hidden');
+        netEl.textContent = '';
+        document.getElementById('balance-currency-change').innerHTML = '';
+        document.getElementById('balance-month-check').innerHTML = '';
+        document.getElementById('balance-error-text').textContent = sheet.error;
+        errorEl.classList.remove('hidden');
+        return;
+    }
+    errorEl.classList.add('hidden');
+    table.classList.remove('hidden');
+
+    netEl.innerHTML = `<span class="balance-net-label">Net worth</span>
+        <span class="balance-net-figure">${escapeHtml(sheet.net_worth)}</span>
+        <span class="text-muted">as at ${formatDate(sheet.as_at)}</span>`;
+    noteEl.textContent = sheet.note || '';
+    noteEl.classList.toggle('hidden', !sheet.note);
+
+    document.getElementById('balance-body').innerHTML = sheet.sections.map(section => {
+        const lines = section.lines.map(line => `<tr>
+                <td>${escapeHtml(line.name)}${line.archived ? ' <span class="text-muted" style="font-size:11px;">archived</span>' : ''}</td>
+                <td class="col-amount${line.balance_minor === null ? ' text-muted' : ''}">${balanceFigure(line)}</td>
+                <td class="text-secondary" style="font-size:12px;">${balanceRestsOn(line)}</td>
+                <td style="font-size:12px;">${balanceCheck(line)}</td>
+                <td class="text-secondary" style="font-size:12px;">${escapeHtml(line.since || '')}</td>
+            </tr>`).join('');
+        const leftOut = section.left_out.length
+            ? `leaves out ${section.left_out.map(l => `${escapeHtml(l.name)} (${escapeHtml(l.why)})`).join('; ')}`
+            : '';
+        const empty = section.lines.length ? '' : '<tr><td colspan="5" class="text-muted" style="font-size:12px;">no accounts</td></tr>';
+        return `<tr class="balance-section"><td colspan="5">${escapeHtml(section.heading)}</td></tr>
+            ${lines}${empty}
+            <tr class="balance-total">
+                <td class="text-muted" style="font-size:12px;">total</td>
+                <td class="col-amount">${escapeHtml(section.total)}</td>
+                <td colspan="3" class="text-muted" style="font-size:12px;">${leftOut}</td>
+            </tr>`;
+    }).join('');
+
+    document.getElementById('balance-currency-change').innerHTML = balanceCurrencyChange(sheet);
+    document.getElementById('balance-month-check').innerHTML = balanceMonthCheck(sheet);
+    document.getElementById('balance-review-link').textContent = `Review list (${sheet.review_waiting})`;
+}
+
+
+// ============================================================
+// ENTER A FIGURE (a supplied anchor: an account's balance on a date)
+// ============================================================
+
+function figureAccounts() {
+    // Each account says whether it takes a figure: a bank account does only
+    // while it has no statement. One with figures already typed is offered
+    // too, so that they can be corrected or deleted.
+    return accounts.filter(a => a.status !== 'archived' && (a.takes_a_figure || a.supplied_figures > 0));
+}
+
+// The figure being corrected, or null when the dialog enters a new one.
+let figureEditingId = null;
+
+// Whole minor units as the operator types a figure, two decimals: "902500.00".
+// A loan's figure is stored negative and typed as the positive amount owed.
+function typedFigure(minor, kind) {
+    const owed = kind === 'loan' ? -minor : minor;
+    const abs = Math.abs(owed);
+    return `${owed < 0 ? '-' : ''}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
+}
+
+function setFigureEditing(anchor) {
+    figureEditingId = anchor ? anchor.id : null;
+    document.getElementById('figure-account').disabled = !!anchor;
+    document.getElementById('figure-save').textContent = anchor ? 'Save correction' : 'Save';
+}
+
+// The figures typed for the chosen account, each with Correct and Delete. A
+// statement's balance is not listed: it is never changed by hand.
+async function loadFigureHeld() {
+    const field = document.getElementById('figure-held-field');
+    const box = document.getElementById('figure-held');
+    const acct = accounts.find(a => a.id === parseInt(document.getElementById('figure-account').value));
+    if (!acct || !acct.supplied_figures) { field.style.display = 'none'; box.innerHTML = ''; return; }
+    const held = (await fetch(`/api/anchors?account_id=${acct.id}`).then(r => r.json()))
+        .filter(f => f.source === 'supplied');
+    field.style.display = held.length ? '' : 'none';
+    box.innerHTML = held.map(f => `
+        <div class="figure-held-row${f.id === figureEditingId ? ' editing' : ''}">
+            <span>${formatDate(f.date)} · ${escapeHtml(formatMinorUnits(f.amount_minor, f.currency))}${f.note ? ` <span class="text-muted">${escapeHtml(f.note)}</span>` : ''}</span>
+            <span>
+                <button class="btn btn-sm" onclick="editFigure(${f.id})">Correct</button>
+                <button class="btn btn-sm" onclick="deleteFigure(${f.id})">Delete</button>
+            </span>
+        </div>`).join('');
+    box._held = held;
+}
+
+function editFigure(id) {
+    const f = (document.getElementById('figure-held')._held || []).find(x => x.id === id);
+    if (!f) return;
+    setFigureEditing(f);
+    document.getElementById('figure-amount').value = typedFigure(f.amount_minor, f.kind);
+    document.getElementById('figure-date').value = f.date;
+    document.getElementById('figure-note').value = f.note || '';
+    showFigureResult(null);
+    loadFigureHeld();
+    document.getElementById('figure-amount').focus();
+}
+
+async function deleteFigure(id) {
+    const f = (document.getElementById('figure-held')._held || []).find(x => x.id === id);
+    if (!f) return;
+    if (!confirm(`Delete your figure of ${formatMinorUnits(f.amount_minor, f.currency)} for ${formatDate(f.date)}? The balance will rest on the figures that remain.`)) return;
+    const data = await apiFetch(`/api/anchors/${id}`, { method: 'DELETE' });
+    if (!data) return;
+    if (figureEditingId === id) setFigureEditing(null);
+    showToast(`Deleted the figure for ${formatDate(f.date)}`, 'success', 4000);
+    await reloadAccounts();
+    await loadFigureHeld();
+}
+
+function openFigureModal() {
+    const offered = figureAccounts();
+    if (!offered.length) {
+        alert('No loan, holding, company or person account, and no bank account without a statement, yet. Add one first.');
+        return;
+    }
+    const sel = document.getElementById('figure-account');
+    sel.innerHTML = offered.map(a =>
+        `<option value="${a.id}">${escapeHtml(a.name)} (${escapeHtml(a.type)})</option>`
+    ).join('');
+    document.getElementById('figure-amount').value = '';
+    document.getElementById('figure-note').value = '';
+    setFigureEditing(null);
+    showFigureResult(null);
+    loadFigureHeld();
+    const now = new Date();
+    document.getElementById('figure-date').value =
+        `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    updateFigureHint();
+    document.getElementById('figure-modal').style.display = 'flex';
+    document.getElementById('figure-amount').focus();
+}
+
+function closeFigureModal() {
+    setFigureEditing(null);
+    document.getElementById('figure-modal').style.display = 'none';
+}
+
+// After a loan figure is saved the dialog stays open and states what was
+// worked out; with nothing to state it shows the form.
+function showFigureResult(message) {
+    const result = document.getElementById('figure-result');
+    result.textContent = message || '';
+    result.style.display = message ? 'block' : 'none';
+    document.getElementById('figure-save').style.display = message ? 'none' : '';
+    document.getElementById('figure-cancel').textContent = message ? 'Close' : 'Cancel';
+}
+
+function updateFigureHint() {
+    const acct = accounts.find(a => a.id === parseInt(document.getElementById('figure-account').value));
+    const hints = {
+        loan: 'what is owed',
+        holding: 'what it is worth',
+        company: 'our money in it on that date (its opening amount)',
+        person: 'what they owe us on that date',
+        bank: 'the balance on that date',
+    };
+    const sign = acct ? (CURRENCY_SIGNS[acct.currency || 'SGD'] || acct.currency) : '';
+    document.getElementById('figure-amount-hint').textContent =
+        `${(acct && hints[acct.type]) || 'what is owed, or what it is worth'}${sign ? ', in ' + sign : ''}`;
+}
+
+async function saveFigure() {
+    const accountId = parseInt(document.getElementById('figure-account').value);
+    const acct = accounts.find(a => a.id === accountId);
+    // The amount goes as the text typed, less any currency sign and spaces:
+    // the server reads it exactly and refuses what is not a plain figure.
+    const amount = document.getElementById('figure-amount').value.replace(/[^0-9.,-]/g, '');
+    const date = document.getElementById('figure-date').value;
+    if (!amount) { alert('Amount is required'); return; }
+    if (!date) { alert('The date the figure is as of is required'); return; }
+
+    const btn = document.getElementById('figure-save');
+    btn.disabled = true;
+    const note = document.getElementById('figure-note').value.trim() || null;
+    const correcting = figureEditingId;
+    const data = correcting
+        ? await apiFetch(`/api/anchors/${correcting}`, { method: 'PUT', body: { amount, date, note } })
+        : await apiFetch('/api/anchors', {
+            method: 'POST',
+            body: { account_id: accountId, amount, date, note },
+        });
+    btn.disabled = false;
+    if (!data) return;
+
+    if (correcting) {
+        setFigureEditing(null);
+        if (data.message) showFigureResult(data.message); else closeFigureModal();
+        showToast(
+            `Corrected: ${acct ? acct.name : data.anchor.account_name} ${formatMinorUnits(data.anchor.amount_minor, data.anchor.currency)} as of ${formatDate(data.anchor.date)}`,
+            'success', 6000
+        );
+        await reloadAccounts();
+        return;
+    }
+
+    if (data.message) {
+        showFigureResult(data.message);
+    } else {
+        closeFigureModal();
+    }
+    const shown = formatMinorUnits(data.anchor.amount_minor, data.anchor.currency);
+    const name = acct ? acct.name : data.anchor.account_name;
+    showToast(
+        data.created
+            ? `Saved: ${name} ${shown} as of ${formatDate(data.anchor.date)}`
+            : `${name} already had ${shown} for ${formatDate(data.anchor.date)}; nothing changed`,
+        data.created ? 'success' : 'info', 6000
+    );
+    await reloadAccounts();
+    await loadFigureHeld();
+}
+
+// ---------------------------------------------------------------------------
+// Backup warning (fin-online D3): shown when backups are not configured
+// (hosted only, never in local-dev) or none has succeeded in 36 hours. The
+// server decides; this only shows it.
+// ---------------------------------------------------------------------------
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        const res = await fetch('/api/backups/status');
+        if (!res.ok) return;
+        const status = await res.json();
+        if (!status.warning) return;
+        const banner = document.createElement('div');
+        banner.className = 'backup-warning';
+        banner.setAttribute('role', 'status');
+        banner.textContent = `Backups: ${status.warning}` +
+            (status.last_success_at ? ` (last success ${status.last_success_at})` : '');
+        document.querySelector('.app-header')?.after(banner);
+    } catch (_) { /* no banner if the status cannot be read */ }
+});

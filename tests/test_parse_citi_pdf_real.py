@@ -12,6 +12,7 @@ import pytest
 
 import parsers
 import parse_citi_pdf
+import tie
 
 ROOT = os.environ.get("FIN_STATEMENTS_DIR")
 pytestmark = pytest.mark.skipif(not ROOT, reason="FIN_STATEMENTS_DIR not set")
@@ -38,17 +39,18 @@ def test_real_citi_statements_parse_and_reconcile(prefix, kind):
     assert pdfs, f"no PDFs under {prefix}*"
     for pdf in pdfs:
         assert parse_citi_pdf.detect_citi_pdf(str(pdf)) == kind
-        # Dispatch through the registry, as the upload route does. The parser
-        # raises ValueError when rows don't reconcile to the statement totals.
+        # Dispatch through the registry, then the shared check, as the upload
+        # route does: ValueError when rows don't reconcile to the statement.
         [stmt] = parsers.auto_detect_and_parse(str(pdf))
+        assert tie.check(stmt)["difference_minor"] == 0
         assert stmt.statement_type == kind
         assert len(stmt.accounts) == 1
         assert all(t.card_info == stmt.accounts[0] for t in stmt.transactions)
         if kind == "credit_card":
             text = "\n".join(parse_citi_pdf._read_pages(str(pdf)))
             summary = parse_citi_pdf._card_summary(text)
-            total = summary["previous"] + sum(t.amount_sgd for t in stmt.transactions)
-            assert abs(total - summary["current"]) < 0.005
+            total = summary["previous"] + sum(t.amount_minor for t in stmt.transactions)
+            assert total == summary["current"]
 
 
 @pytest.mark.parametrize("prefix", ["UOB", "DBS"])

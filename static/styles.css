@@ -1846,9 +1846,41 @@ input[type="checkbox"]:focus-visible {
     background: var(--bg-elevated);
     color: var(--text-secondary);
 }
-.acct-type-credit_card { color: var(--accent-camel); }
-.acct-type-debit { color: var(--semantic-success); }
+.acct-type-card { color: var(--accent-camel); }
 .acct-type-bank { color: var(--chart-6); }
+.acct-type-loan { color: var(--accent-pop); }
+.acct-type-holding { color: var(--semantic-success); }
+.acct-type-company,
+.acct-type-person { color: var(--text-secondary); }
+
+/* Enter a figure dialog */
+.figure-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: var(--space-1);
+}
+
+/* The figures typed for the chosen account, each correctable */
+.figure-held-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 12px;
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.figure-held-row.editing { font-weight: 600; }
+
+/* What fin worked out after a loan figure is saved */
+.figure-result {
+    font-size: 13px;
+    color: var(--text-primary);
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--space-3);
+    margin-top: var(--space-3);
+    line-height: 1.5;
+}
 
 /* Field hints (? tooltip + FX rate) */
 .field-hint {
@@ -2367,4 +2399,37 @@ input[type="checkbox"]:focus-visible {
     margin-left: 6px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+}
+
+/* ================================================================
+   BALANCE SHEET
+   ================================================================ */
+.balance-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-4);
+}
+.balance-as-at { font-size: 12px; color: var(--text-secondary); }
+.balance-net-worth { display: flex; align-items: baseline; gap: var(--space-4); margin-bottom: var(--space-3); }
+.balance-net-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+.balance-net-figure { font-family: var(--font-mono); font-size: 24px; }
+.balance-note { font-size: 12px; color: var(--semantic-warning); margin-bottom: var(--space-3); }
+.balance-section td {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    padding-top: var(--space-5);
+}
+.balance-total td { border-top: 1px solid var(--border-subtle); font-weight: 600; }
+.balance-actions { display: flex; align-items: center; gap: var(--space-4); margin-top: var(--space-5); font-size: 13px; }
+
+/* Backup warning (fin-online D3) */
+.backup-warning {
+    padding: 6px 16px;
+    font-size: 13px;
+    color: var(--semantic-warning);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-default);
 }

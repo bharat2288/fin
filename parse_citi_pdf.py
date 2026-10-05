@@ -24,8 +24,12 @@ Text is extracted with x_tolerance=1.5: pdfplumber's default (3) glues Citi's
 tightly-kerned words together ("BALANCEPREVIOUSSTATEMENT"), which would make
 descriptions differ from the Citi CSV export and break merchant rules.
 
-Both parsers check the parsed rows against the statement's own totals and
-raise ValueError when they disagree — a short import is worse than none.
+Both parsers hand over the statement's opening and closing balance, signed as
+the household sees them (a card's balance owed is negative). Whether the rows
+carry the one to the other is checked by the import path (tie.py), which
+refuses a statement that does not reconcile — a short import is worse than
+none. The checking parser still raises ValueError itself when a row disagrees
+with its running balance or the rows disagree with the statement's TOTAL line.
 """
 
 import re
@@ -34,6 +38,7 @@ from pathlib import Path
 
 import pdfplumber
 
+import money
 from parse_dbs import ParsedTransaction, ParsedStatement, MONTH_MAP, _direction_from_balance
 
 TEXT_X_TOLERANCE = 1.5
@@ -56,11 +61,12 @@ FOREIGN_CURRENCY_NAMES = {
 AMOUNT = r"\(?-?[\d,]+\.\d{2}\)?"
 
 
-def _amount(text: str) -> float:
-    """Parse '1,234.56', '(500.00)' or '-12.50'. Parentheses mean credit."""
+def _amount(text: str) -> int:
+    """Parse '1,234.56', '(500.00)' or '-12.50' into whole minor units.
+    Parentheses mean credit."""
     text = text.strip()
     negative = text.startswith("(") or text.startswith("-")
-    value = float(text.strip("()-").replace(",", ""))
+    value = money.parse_minor(text.strip("()-"))
     return -value if negative else value
 
 
@@ -205,29 +211,27 @@ def parse_citi_card_pages(pages: list[str], filename: str = "") -> ParsedStateme
 
         # Citi prints charges positive and credits in parentheses, which is
         # already our convention: positive = expense, negative = credit.
-        amount_sgd = _amount(amount_str)
+        amount_minor = _amount(amount_str)
         transactions.append(ParsedTransaction(
             date=f"{year}-{mon}-{day.zfill(2)}",
             description=description.strip(),
-            amount_sgd=amount_sgd,
+            amount_minor=amount_minor,
             is_payment="PAYMENT" in description.upper(),
             card_info=account_name,
         ))
 
-    # Previous balance + every billed row must land on the current balance.
-    parsed_total = round(summary["previous"] + sum(t.amount_sgd for t in transactions), 2)
-    if abs(parsed_total - summary["current"]) > 0.005:
-        raise ValueError(
-            f"Citi card statement does not reconcile: {len(transactions)} parsed rows "
-            "do not add up to the statement's current balance"
-        )
-
+    # Previous balance + every billed row must land on the current balance,
+    # to the cent: the import path checks it (tie.py). Citi prints what is
+    # owed as a positive figure; a balance owed is stored negative.
     return ParsedStatement(
         statement_type="credit_card",
         statement_date=stmt_date,
         accounts=[account_name],
         filename=filename,
         transactions=transactions,
+        opening_minor=-summary["previous"],
+        closing_minor=-summary["current"],
+        closing_date=stmt_date,
     )
 
 
@@ -278,6 +282,7 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
 
     account_number = ""
     opening = closing = None
+    opening_date = closing_date = None
     totals = None
     balance = None
     transactions = []
@@ -292,10 +297,12 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
 
         if (m := CHK_OPENING_RE.match(line)):
             opening = balance = _amount(m.group(7))
+            opening_date = _chk_date(m.group(1), m.group(2), m.group(3))
             continuing = False
             continue
         if (m := CHK_CLOSING_RE.match(line)):
             closing = _amount(m.group(4))
+            closing_date = _chk_date(m.group(1), m.group(2), m.group(3))
             continuing = False
             continue
         if (m := CHK_TOTAL_RE.match(line)):
@@ -315,12 +322,12 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
                 )
             balance = new_balance
             # Debit (balance down) positive = expense; credit negative.
-            amount_sgd = withdrawal if withdrawal is not None else -deposit
+            amount_minor = withdrawal if withdrawal is not None else -deposit
             desc_upper = description.upper()
             transactions.append(ParsedTransaction(
                 date=_chk_date(row.group(1), row.group(2), row.group(3)),
                 description=description,
-                amount_sgd=amount_sgd,
+                amount_minor=amount_minor,
                 is_payment="BILL PAYMENT" in desc_upper,
                 card_info="",  # filled once the account number is known
             ))
@@ -338,10 +345,11 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
     if opening is None or closing is None or totals is None:
         raise ValueError("Citi Plus statement: opening/closing balance or totals not found")
 
-    debits = round(sum(t.amount_sgd for t in transactions if t.amount_sgd > 0), 2)
-    credits = round(-sum(t.amount_sgd for t in transactions if t.amount_sgd < 0), 2)
-    if (abs(debits - totals[0]) > 0.005 or abs(credits - totals[1]) > 0.005
-            or abs(round(opening - debits + credits, 2) - closing) > 0.005):
+    debits = sum(t.amount_minor for t in transactions if t.amount_minor > 0)
+    credits = -sum(t.amount_minor for t in transactions if t.amount_minor < 0)
+    # Opening less the rows against the closing balance is the import path's
+    # check (tie.py); the TOTAL line is this statement's own second witness.
+    if debits != totals[0] or credits != totals[1]:
         raise ValueError(
             f"Citi Plus statement does not reconcile: {len(transactions)} parsed rows "
             "do not match the statement's totals"
@@ -357,6 +365,10 @@ def parse_citi_checking_pages(pages: list[str], filename: str = "") -> ParsedSta
         accounts=[account_name],
         filename=filename,
         transactions=transactions,
+        opening_minor=opening,
+        closing_minor=closing,
+        opening_date=opening_date,
+        closing_date=closing_date,
     )
 
 

@@ -5,6 +5,9 @@ UOB Bank Statement format:
   - Account on page 2: "One Account 380-344-339-2"
   - Transactions: Date | Description | Withdrawals | Deposits | Balance
   - Multi-line descriptions (continuation lines have no date)
+  - The first "BALANCE B/F" is handed over as the opening balance and the
+    balance printed on the last row as the closing balance, dated by the
+    period's end; the import path checks the rows against them (tie.py)
 
 UOB Credit Card Statement format:
   - Statement Date on page 1: "Statement Date DD MMM YYYY"
@@ -20,6 +23,7 @@ from pathlib import Path
 
 import pdfplumber
 
+import money
 from parse_dbs import ParsedTransaction, ParsedStatement, MONTH_MAP
 
 
@@ -89,9 +93,9 @@ def _extract_cc_card_info(text: str) -> tuple[str, str]:
     return "UOB Card", ""
 
 
-def _parse_amount(amount_str: str) -> float:
-    """Parse amount string, handling commas."""
-    return float(amount_str.replace(",", ""))
+def _parse_amount(amount_str: str) -> int:
+    """Parse amount string, handling commas, into whole minor units."""
+    return money.parse_minor(amount_str)
 
 
 def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
@@ -105,6 +109,8 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
 
     account_number = ""
     transactions = []
+    opening = None        # the first balance brought forward
+    last_balance = None   # the balance printed on the last line read
 
     for page in pdf.pages:
         text = page.extract_text() or ""
@@ -145,7 +151,7 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                     transactions[-1] = ParsedTransaction(
                         date=last.date,
                         description=last.description + " " + line,
-                        amount_sgd=last.amount_sgd,
+                        amount_minor=last.amount_minor,
                         amount_foreign=last.amount_foreign,
                         currency_foreign=last.currency_foreign,
                         is_payment=last.is_payment,
@@ -182,6 +188,9 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                 # If BALANCE B/F, anchor the running balance and skip
                 if "BALANCE B/F" in rest:
                     prev_balance = _parse_amount(amounts[-1])
+                    last_balance = prev_balance
+                    if opening is None:
+                        opening = prev_balance
                     continue
 
                 # Extract description (everything before the first amount)
@@ -199,16 +208,17 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                     prev_balance, balance, candidates
                 )
                 if deposit is not None:
-                    amount_sgd = -deposit
+                    amount_minor = -deposit
                 elif withdrawal is not None:
-                    amount_sgd = withdrawal
+                    amount_minor = withdrawal
                 elif "Interest Credit" in description or "Inward Credit" in description:
                     # Fallback when no balance anchor: credits are negative
-                    amount_sgd = -_parse_amount(amounts[0])
+                    amount_minor = -_parse_amount(amounts[0])
                 else:
                     # Fallback default: positive = expense
-                    amount_sgd = _parse_amount(amounts[0])
+                    amount_minor = _parse_amount(amounts[0])
                 prev_balance = balance
+                last_balance = balance
 
                 desc_upper = description.upper()
                 is_payment = "BILL PAYMENT" in desc_upper
@@ -223,7 +233,7 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                 tx = ParsedTransaction(
                     date=tx_date,
                     description=description,
-                    amount_sgd=amount_sgd,
+                    amount_minor=amount_minor,
                     is_payment=is_payment,
                     is_transfer=is_transfer,
                     card_info=f"UOB One Account {account_number}",
@@ -231,6 +241,9 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                 transactions.append(tx)
             elif len(amounts) == 1 and "BALANCE B/F" in rest:
                 prev_balance = _parse_amount(amounts[0])
+                last_balance = prev_balance
+                if opening is None:
+                    opening = prev_balance
                 continue
 
     pdf.close()
@@ -246,12 +259,18 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
             mon = MONTH_MAP.get(m.group(2).upper()[:3], "01")
             stmt_date = f"{m.group(3)}-{mon}-{day}"
 
+    # Balances only with a brought-forward balance and a day to anchor on.
+    stated = opening is not None and bool(stmt_date)
+
     return ParsedStatement(
         statement_type="bank",
         statement_date=stmt_date,
         accounts=[account_name],
         filename=path.name,
         transactions=transactions,
+        opening_minor=opening if stated else None,
+        closing_minor=last_balance if stated else None,
+        closing_date=stmt_date if stated else None,
     )
 
 
@@ -268,6 +287,16 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
     account_name = f"UOB {card_name} {card_number}" if card_number else f"UOB {card_name}"
 
     transactions = []
+    # The card's previous balance and its sub-total (or, failing that, its
+    # total balance), as printed: whole cents, owed positive, CR negative.
+    printed = {"previous": None, "closing": None}
+
+    def balance_on(line: str) -> int | None:
+        m = re.search(r"([\d,]+\.\d{2})\s*(CR)?$", line)
+        if not m:
+            return None
+        amount = _parse_amount(m.group(1))
+        return -amount if m.group(2) else amount
 
     for page in pdf.pages:
         text = page.extract_text() or ""
@@ -286,7 +315,11 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
             if "Description of Transaction" in line:
                 in_transactions = True
                 continue
-            if "End of Transaction" in line or "SUB TOTAL" in line or "TOTAL BALANCE" in line:
+            if "SUB TOTAL" in line or "TOTAL BALANCE" in line:
+                if in_transactions and printed["closing"] is None:
+                    printed["closing"] = balance_on(line)
+                break
+            if "End of Transaction" in line:
                 break
             if not in_transactions:
                 continue
@@ -295,8 +328,12 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
             if line.startswith("Ref No."):
                 continue
             if "PREVIOUS BALANCE" in line:
+                if printed["previous"] is None:
+                    printed["previous"] = balance_on(line)
                 continue
-            if "ADD UNI$" in line or "MEMBERSHIP FEE" in line:
+            # Rewards lines carry no money. A membership fee, or its waiver,
+            # is a row like any other: the sub-total counts it.
+            if "ADD UNI$" in line:
                 continue
 
             # Transaction line: "DD MMM DD MMM Description Amount"
@@ -337,16 +374,16 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
 
             # Credits are negative (payments/refunds), debits are positive (expenses)
             if is_credit:
-                amount_sgd = -amount
+                amount_minor = -amount
             else:
-                amount_sgd = amount
+                amount_minor = amount
 
             is_payment = "PAYMT" in description.upper() or "PAYMENT" in description.upper()
 
             tx = ParsedTransaction(
                 date=tx_date,
                 description=description,
-                amount_sgd=amount_sgd,
+                amount_minor=amount_minor,
                 is_payment=is_payment,
                 card_info=account_name,
             )
@@ -363,12 +400,18 @@ def parse_uob_cc_pdf(filepath: str) -> ParsedStatement:
             mon = MONTH_MAP.get(m.group(2).upper()[:3], "01")
             stmt_date = f"{m.group(3)}-{mon}-{day}"
 
+    # The balances, signed as the household sees them (owed negative), only
+    # when both are printed and the statement date is a real day.
+    stated = printed["previous"] is not None and printed["closing"] is not None and bool(stmt_date)
     return ParsedStatement(
         statement_type="credit_card",
         statement_date=stmt_date,
         accounts=[account_name],
         filename=path.name,
         transactions=transactions,
+        opening_minor=-printed["previous"] if stated else None,
+        closing_minor=-printed["closing"] if stated else None,
+        closing_date=stmt_date if stated else None,
     )
 
 

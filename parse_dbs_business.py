@@ -3,6 +3,10 @@
 Format: "Details Of Your DBS Business/Corporate Multi-Currency Account"
 SGD-only account. Single account per statement. Withdrawal vs Deposit
 disambiguated via running balance delta (more robust than column positioning).
+
+The statement's first "Balance Brought Forward" and last "Balance Carried
+Forward" are handed over as its opening and closing balance, dated by its
+period; the import path checks the rows against them (tie.py).
 """
 
 import re
@@ -10,6 +14,7 @@ from pathlib import Path
 
 import pdfplumber
 
+import money
 from parse_dbs import MONTH_MAP, ParsedStatement, ParsedTransaction
 
 
@@ -34,17 +39,18 @@ def _parse_date(day: str, mon: str, yy: str) -> str:
     return f"20{yy}-{mm}-{day}"
 
 
-def _to_float(s: str) -> float:
-    return float(s.replace(",", ""))
+def _to_minor(s: str) -> int:
+    return money.parse_minor(s)
 
 
-def _split_amounts(tail: str) -> tuple[str, list[float]]:
-    """Strip trailing amount tokens from a line; return (description, amounts)."""
+def _split_amounts(tail: str) -> tuple[str, list[int]]:
+    """Strip trailing amount tokens from a line; return (description, amounts).
+    Amounts are in whole minor units."""
     tokens = tail.rsplit(None, 3)
-    amounts: list[float] = []
+    amounts: list[int] = []
     desc_parts: list[str] = list(tokens)
     while desc_parts and AMOUNT_RE.match(desc_parts[-1]):
-        amounts.insert(0, _to_float(desc_parts.pop()))
+        amounts.insert(0, _to_minor(desc_parts.pop()))
     return " ".join(desc_parts).strip(), amounts
 
 
@@ -82,8 +88,10 @@ def parse_dbs_business_pdf(filepath: str) -> ParsedStatement:
 
     lines = full_text.split("\n")
     txns: list[ParsedTransaction] = []
-    running_balance: float | None = None
+    running_balance: int | None = None
     current: dict | None = None
+    opening: int | None = None   # the first balance brought forward
+    closing: int | None = None   # the last balance carried forward
 
     def finalize(entry: dict) -> None:
         if running_balance is None or entry.get("new_balance") is None:
@@ -91,7 +99,7 @@ def parse_dbs_business_pdf(filepath: str) -> ParsedStatement:
         amount = entry["amount"]
         new_bal = entry["new_balance"]
         prev_bal = entry["prev_balance"]
-        delta = round(new_bal - prev_bal, 2)
+        delta = new_bal - prev_bal
         is_deposit = delta > 0 or (delta == 0 and entry.get("explicit_deposit"))
         description = " ".join(entry["desc_parts"]).strip()
         is_transfer, is_payment = _classify(description, is_deposit)
@@ -100,7 +108,7 @@ def parse_dbs_business_pdf(filepath: str) -> ParsedStatement:
             ParsedTransaction(
                 date=entry["date"],
                 description=description,
-                amount_sgd=signed,
+                amount_minor=signed,
                 is_payment=is_payment,
                 is_transfer=is_transfer,
                 card_info=account_name,
@@ -115,9 +123,17 @@ def parse_dbs_business_pdf(filepath: str) -> ParsedStatement:
         if line.startswith("Balance Brought Forward"):
             m = re.search(r"([\d,]+\.\d{2})", line)
             if m:
-                running_balance = _to_float(m.group(1))
+                running_balance = _to_minor(m.group(1))
+            stated = re.search(r"(-?[\d,]+\.\d{2})", line)
+            if stated and opening is None:
+                opening = _to_minor(stated.group(1))
             current = None
             continue
+
+        if line.startswith("Balance Carried Forward"):
+            stated = re.search(r"(-?[\d,]+\.\d{2})", line)
+            if stated:
+                closing = _to_minor(stated.group(1))
 
         if line.startswith(("Balance Carried Forward", "Total ", "Currency:")):
             if current:
@@ -137,8 +153,8 @@ def parse_dbs_business_pdf(filepath: str) -> ParsedStatement:
             elif len(amounts) == 1:
                 amount, new_balance = amounts[0], None
             else:
-                amount, new_balance = 0.0, None
-            prev_balance = running_balance if running_balance is not None else 0.0
+                amount, new_balance = 0, None
+            prev_balance = running_balance if running_balance is not None else 0
             current = {
                 "date": date,
                 "desc_parts": [desc] if desc else [],
@@ -156,10 +172,20 @@ def parse_dbs_business_pdf(filepath: str) -> ParsedStatement:
     if current:
         finalize(current)
 
+    # Both balances or neither: a statement is never checked on half the facts.
+    stated = opening is not None and closing is not None
+    months = (MONTH_MAP.get(period.group(2).upper()[:3]), MONTH_MAP.get(period.group(5).upper()[:3]))
+
     return ParsedStatement(
         statement_type="bank",
         statement_date=stmt_date,
         accounts=[account_name],
         filename=path.name,
         transactions=txns,
+        opening_minor=opening if stated else None,
+        closing_minor=closing if stated else None,
+        opening_date=(
+            f"{period.group(3)}-{months[0]}-{period.group(1)}" if stated and months[0] else None
+        ),
+        closing_date=f"{period.group(6)}-{months[1]}-{period.group(4)}" if stated else None,
     )

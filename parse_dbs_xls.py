@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
+import money
 from parse_dbs import ParsedTransaction, ParsedStatement, MONTH_MAP
 
 
@@ -106,9 +107,9 @@ def parse_dbs_xls(filepath: str) -> ParsedStatement:
         credit = row.iloc[5] if len(row) > 5 and pd.notna(row.iloc[5]) else None
 
         if debit is not None:
-            amount_sgd = float(debit)
+            amount_minor = money.exact_minor(float(debit))
         elif credit is not None:
-            amount_sgd = -float(credit)
+            amount_minor = -money.exact_minor(float(credit))
         else:
             continue
 
@@ -118,13 +119,13 @@ def parse_dbs_xls(filepath: str) -> ParsedStatement:
             "SALARY" in desc_upper
             or "FAST PAYMENT" in desc_upper
             or "FUNDS TRANSFER" in desc_upper
-            or amount_sgd < 0  # credits/deposits
+            or amount_minor < 0  # credits/deposits
         )
 
         tx = ParsedTransaction(
             date=tx_date,
             description=description,
-            amount_sgd=amount_sgd,
+            amount_minor=amount_minor,
             is_payment=is_payment,
             is_transfer=is_transfer,
             card_info=account_name,

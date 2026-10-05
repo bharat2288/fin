@@ -11,12 +11,22 @@ static/
     app.js          ← All frontend logic
     styles.css      ← All styles
 db.py               ← Database helpers, categorization engine
+suggest.py          ← Type suggestion for unknown merchants (off without OPENROUTER_API_KEY)
+history.py          ← Change history: every write recorded (schema.sql triggers), undoable
+mcp_tools.py        ← The chat tools over MCP; the tool list is the permission list
+fin_upload.py       ← Upload command: sends a folder of statements to fin's import
 schema.sql          ← SQLite schema (source of truth)
 parsers.py          ← Statement parser orchestrator
 parse_dbs.py        ← DBS PDF/CSV parser
+card_balance.py     ← A card split by cardholder held as one balance (the Vantage card)
 parse_citi_csv.py   ← Citi CSV parser
 parse_uob.py        ← UOB PDF parser
 seed_mock_data.py   ← Demo data generator (for GitHub)
+serve.py            ← Hosted entry point: access gate → /mcp or Flask (fin-online; not yet live)
+access_gate.py      ← Cloudflare Access JWT check on every request (copied from folio)
+backup.py           ← Nightly backup to the object store, the seed step (copied from folio)
+mcp_server.py       ← /mcp; registers mcp_tools.TOOLS and calls them as the chat-gate client
+railway.json        ← Railway start command (python serve.py); deploy is by hand only
 specs/              ← Project specs (design, status, pipeline, decisions)
 ```
 
@@ -25,6 +35,7 @@ specs/              ← Project specs (design, status, pipeline, decisions)
 ```bash
 python app.py                    # Start server (port 8450)
 python seed_mock_data.py         # Generate demo DB (refuses if fin.db exists)
+FIN_LOCAL_DEV=1 python serve.py  # The hosted process on loopback, gate off (port 8000)
 ```
 
 ## Specs

@@ -2,6 +2,7 @@
 *.db
 *.db-journal
 *.db-wal
+*.db-shm
 *_backup.db
 bulk_rules.sql
 
@@ -73,3 +74,12 @@ specs/
 
 # Financial records — invoices, contracts, receipts (bank details; never push)
 business/
+
+# Backups the conversion runner writes beside the database (financial data)
+*.bak
+
+# The nightly backup's status, written beside the book
+backup-status.json
+
+# Merchant names waiting for the operator to read before a type suggestion is sent
+suggestion-strings.txt

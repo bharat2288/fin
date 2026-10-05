@@ -1,17 +1,19 @@
 """Ingest helpers for the fin database.
 
-Provides account/statement creation and PayNow categorization,
+Provides account/statement creation and the PayNow type fallback,
 imported by app.py for the import-confirm workflow.
 """
 
 import re
 import sqlite3
 
+import account_kind
 
-# Bank statement PayNow payee → category mapping
+
+# Bank statement PayNow payee → type mapping
 # These are identified by the "To:" field in bank statement descriptions
 PAYNOW_RULES = [
-    # (pattern_in_description, category_name, notes)
+    # (pattern_in_description, type name, notes)
     ("CENTRAL PROVIDENT FUND BOARD", "Tax", "CPF payment"),
     ("CPF VOLUNTARY CONTRIBUTIONS", "Tax", "CPF voluntary contribution"),
     ("SINGAPORE LIFE", "Insurance", "Life insurance premium"),
@@ -33,27 +35,26 @@ PAYNOW_RULES = [
 ]
 
 
-def categorize_bank_paynow(description: str) -> tuple[int | None, str | None]:
-    """Match bank statement PayNow/transfer descriptions to categories.
+def paynow_type(description: str) -> str | None:
+    """Match a bank statement PayNow/transfer description to a type.
 
-    Returns (category_id, category_name) or (None, None) if no match.
-    Requires a DB lookup, so we return the category name for later resolution.
+    Returns the type's name, or None if no payee wording matches. The caller
+    resolves the name to its id.
     """
     desc_upper = description.upper()
-    for pattern, cat_name, _ in PAYNOW_RULES:
+    for pattern, type_name, _ in PAYNOW_RULES:
         if pattern.upper() in desc_upper:
-            return None, cat_name  # category_name, resolve to ID later
-    return None, None
+            return type_name
+    return None
 
 
-def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> int:
-    """Find or create an account from card info string.
+def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
+    """The account a card info string names, or None when there is none yet.
 
     Matching priority:
     1. Exact name match
     2. Last-four digit match (extracts trailing 4-digit group from card_info)
     3. Account number substring match (long digit sequences in card_info)
-    4. Create new account if no match found
     """
     if not card_info:
         card_info = "Unknown Account"
@@ -86,13 +87,62 @@ def ensure_account(conn: sqlite3.Connection, card_info: str, stmt_type: str) -> 
         if match:
             return match[0]
 
-    # 4. Create new account
+    return None
+
+
+def ensure_account(
+    conn: sqlite3.Connection, card_info: str, stmt_type: str, currency: str = "SGD",
+) -> int:
+    """Find or create an account from card info string: the account
+    `find_account` gives, or a new one of the kind given, kept in the
+    currency given. Does not commit: the caller owns the transaction."""
+    if not card_info:
+        card_info = "Unknown Account"
+
+    found = find_account(conn, card_info)
+    if found is not None:
+        return found
+
+    all_digits = re.sub(r"\D", "", card_info)
+    last_four = all_digits[-4:] if len(all_digits) >= 4 else None
+
+    account_kind.checked_kind(stmt_type)
     conn.execute(
-        "INSERT INTO accounts (name, short_name, type, last_four) VALUES (?, ?, ?, ?)",
-        (card_info, card_info, stmt_type, last_four),
+        "INSERT INTO accounts (name, short_name, type, last_four, currency) VALUES (?, ?, ?, ?, ?)",
+        (card_info, card_info, stmt_type, last_four, currency),
     )
-    conn.commit()
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def ensure_named_account(
+    conn: sqlite3.Connection, name: str, stmt_type: str, currency: str = "SGD",
+) -> int:
+    """The account of exactly this name, or a new one: for an account a rule
+    names (a cardholder's account on a card split by cardholder), which a
+    match by last four could take for another. Does not commit."""
+    existing = conn.execute("SELECT id FROM accounts WHERE name = ?", (name,)).fetchone()
+    if existing:
+        return existing[0]
+    account_kind.checked_kind(stmt_type)
+    all_digits = re.sub(r"\D", "", name)
+    conn.execute(
+        "INSERT INTO accounts (name, short_name, type, last_four, currency) VALUES (?, ?, ?, ?, ?)",
+        (name, name, stmt_type, all_digits[-4:] if len(all_digits) >= 4 else None, currency),
+    )
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _free_day_in_month(conn: sqlite3.Connection, account_id: int, month: str) -> str:
+    """The first day of a month (YYYY-MM) the account holds no record for."""
+    taken = {r[0] for r in conn.execute(
+        "SELECT statement_date FROM statements WHERE account_id = ? AND statement_date LIKE ?",
+        (account_id, f"{month}-%"),
+    )}
+    for day in range(1, 32):
+        candidate = f"{month}-{day:02d}"
+        if candidate not in taken:
+            return candidate
+    raise ValueError(f"no free day left in {month} for a statement record")
 
 
 def ensure_statement(
@@ -100,22 +150,54 @@ def ensure_statement(
     account_id: int,
     statement_date: str,
     filename: str,
+    printed: bool = False,
 ) -> tuple[int, bool]:
     """Get or create a statement record.
 
-    Returns (statement_id, is_new). If a record already exists for this
-    account + date, returns the existing ID with is_new=False.
+    Returns (statement_id, is_new). Does not commit: the caller owns the
+    transaction.
+
+    `printed` is a statement as printed: dated by its closing day, holding
+    the rows it printed; the record held for that day is returned. A month
+    record (printed False) is the account's record for the month of
+    `statement_date`, whatever day it is dated: normally the 1st, or the
+    first free day when a printed statement closed on the 1st. A month
+    record that sits on the day a printed statement needs is moved to a free
+    day of its month, keeping its rows, so the two never share a record.
     """
+    if not printed:
+        month = statement_date[:7]
+        existing = conn.execute(
+            "SELECT id FROM statements WHERE account_id = ? AND printed = 0 "
+            "AND statement_date LIKE ? ORDER BY statement_date LIMIT 1",
+            (account_id, f"{month}-%"),
+        ).fetchone()
+        if existing:
+            return (existing[0], False)
+        held = conn.execute(
+            "SELECT 1 FROM statements WHERE account_id = ? AND statement_date = ?",
+            (account_id, statement_date),
+        ).fetchone()
+        on = _free_day_in_month(conn, account_id, month) if held else statement_date
+        cur = conn.execute(
+            "INSERT INTO statements (account_id, statement_date, filename, printed) VALUES (?, ?, ?, 0)",
+            (account_id, on, filename),
+        )
+        return (cur.lastrowid, True)
+
     existing = conn.execute(
-        "SELECT id FROM statements WHERE account_id = ? AND statement_date = ?",
+        "SELECT id, printed FROM statements WHERE account_id = ? AND statement_date = ?",
         (account_id, statement_date),
     ).fetchone()
+    if existing and existing[1]:
+        return (existing[0], False)
     if existing:
-        return (existing["id"], False)
-
+        conn.execute(
+            "UPDATE statements SET statement_date = ? WHERE id = ?",
+            (_free_day_in_month(conn, account_id, statement_date[:7]), existing[0]),
+        )
     cur = conn.execute(
-        "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, ?)",
+        "INSERT INTO statements (account_id, statement_date, filename, printed) VALUES (?, ?, ?, 1)",
         (account_id, statement_date, filename),
     )
-    conn.commit()
     return (cur.lastrowid, True)

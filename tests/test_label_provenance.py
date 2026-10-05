@@ -1,8 +1,13 @@
+"""Where a row's book and type came from (cat_source), and which writers may
+overwrite which rows."""
+
 import db
 
 
-def _category_id(conn, name: str) -> int:
-    return conn.execute("SELECT id FROM categories WHERE name = ?", (name,)).fetchone()[0]
+def _type_id(conn, name: str) -> int:
+    return conn.execute(
+        "SELECT id FROM types WHERE kind = 'spending' AND name = ?", (name,)
+    ).fetchone()[0]
 
 
 def _statement_id(conn) -> int:
@@ -17,10 +22,10 @@ def _statement_id(conn) -> int:
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
-def test_categorize_transaction_uses_service_default_provenance(conn):
-    dining_id = _category_id(conn, "Dining")
+def test_match_merchant_uses_service_default_provenance(conn):
+    dining_id = _type_id(conn, "Dining")
     conn.execute(
-        "INSERT INTO services (name, category_id) VALUES (?, ?)",
+        "INSERT INTO services (name, book, type_id) VALUES (?, 'Household', ?)",
         ("Mixed Merchant", dining_id),
     )
     service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -31,29 +36,25 @@ def test_categorize_transaction_uses_service_default_provenance(conn):
     conn.commit()
     db.invalidate_rules_cache()
 
-    category_id, matched_service_id, cat_source = db.categorize_transaction(
-        "Mixed Merchant Orchard",
-        conn,
-        amount=12.0,
-    )
+    found = db.match_merchant("Mixed Merchant Orchard", conn, amount_minor=1200)
 
-    assert category_id == dining_id
-    assert matched_service_id == service_id
-    assert cat_source == "service_default"
+    assert (found["book"], found["type_id"]) == ("Household", dining_id)
+    assert found["service_id"] == service_id
+    assert found["cat_source"] == "service_default"
 
 
-def test_categorize_transaction_uses_rule_override_provenance(conn):
-    dining_id = _category_id(conn, "Dining")
-    shopping_id = _category_id(conn, "Shopping")
+def test_match_merchant_uses_rule_override_provenance(conn):
+    dining_id = _type_id(conn, "Dining")
+    shopping_id = _type_id(conn, "Shopping")
     conn.execute(
-        "INSERT INTO services (name, category_id) VALUES (?, ?)",
+        "INSERT INTO services (name, book, type_id) VALUES (?, 'Household', ?)",
         ("Mixed Override Merchant", dining_id),
     )
     service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
         """
         INSERT INTO merchant_rules
-            (pattern, service_id, category_override_id, match_type, confidence)
+            (pattern, service_id, type_override_id, match_type, confidence)
         VALUES (?, ?, ?, 'contains', 'confirmed')
         """,
         ("MIXED OVERRIDE", service_id, shopping_id),
@@ -61,27 +62,33 @@ def test_categorize_transaction_uses_rule_override_provenance(conn):
     conn.commit()
     db.invalidate_rules_cache()
 
-    category_id, matched_service_id, cat_source = db.categorize_transaction(
-        "Mixed Override Apparel",
-        conn,
-        amount=80.0,
-    )
+    found = db.match_merchant("Mixed Override Apparel", conn, amount_minor=8000)
 
-    assert category_id == shopping_id
-    assert matched_service_id == service_id
-    assert cat_source == "rule_override"
+    # The rule overrides the type; the book is still the merchant's.
+    assert (found["book"], found["type_id"]) == ("Household", shopping_id)
+    assert found["service_id"] == service_id
+    assert found["cat_source"] == "rule_override"
 
 
-def test_service_category_update_only_recategorizes_service_default_rows(client):
+def test_match_merchant_with_no_rule_gives_nothing(conn):
+    found = db.match_merchant("NO SUCH SAMPLE MERCHANT", conn, amount_minor=500)
+
+    assert found == {
+        "book": None, "type_id": None, "service_id": None,
+        "cat_source": None, "review_each_time": False,
+    }
+
+
+def test_service_type_update_only_relabels_service_default_rows(client):
     conn = db.get_connection()
     try:
-        dining_id = _category_id(conn, "Dining")
-        shopping_id = _category_id(conn, "Shopping")
-        groceries_id = _category_id(conn, "Groceries")
+        dining_id = _type_id(conn, "Dining")
+        shopping_id = _type_id(conn, "Shopping")
+        groceries_id = _type_id(conn, "Groceries")
         statement_id = _statement_id(conn)
 
         conn.execute(
-            "INSERT INTO services (name, category_id) VALUES (?, ?)",
+            "INSERT INTO services (name, book, type_id) VALUES (?, 'Household', ?)",
             ("Scoped Merchant", dining_id),
         )
         service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -91,20 +98,20 @@ def test_service_category_update_only_recategorizes_service_default_rows(client)
             ("2026-04-02", "Scoped Merchant Shirt", shopping_id, "rule_override"),
             ("2026-04-03", "Scoped Merchant Gift", shopping_id, "manual"),
         ]
-        for tx_date, description, category_id, cat_source in rows:
+        for tx_date, description, type_id, cat_source in rows:
             conn.execute(
                 """
                 INSERT INTO transactions
-                    (statement_id, date, description, amount_sgd, category_id, service_id, cat_source)
-                VALUES (?, ?, ?, 25.0, ?, ?, ?)
+                    (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
+                VALUES (?, ?, ?, 2500, 'Household', ?, ?, ?)
                 """,
-                (statement_id, tx_date, description, category_id, service_id, cat_source),
+                (statement_id, tx_date, description, type_id, service_id, cat_source),
             )
         conn.commit()
     finally:
         conn.close()
 
-    resp = client.put(f"/api/services/{service_id}", json={"category_id": groceries_id})
+    resp = client.put(f"/api/services/{service_id}", json={"type_id": groceries_id})
     assert resp.status_code == 200
     assert resp.get_json()["recategorized"] == 1
 
@@ -112,7 +119,7 @@ def test_service_category_update_only_recategorizes_service_default_rows(client)
     try:
         rows = conn.execute(
             """
-            SELECT description, category_id, cat_source
+            SELECT description, type_id, cat_source
             FROM transactions
             WHERE service_id = ?
             ORDER BY date
@@ -122,7 +129,7 @@ def test_service_category_update_only_recategorizes_service_default_rows(client)
     finally:
         conn.close()
 
-    by_desc = {row["description"]: (row["category_id"], row["cat_source"]) for row in rows}
+    by_desc = {row["description"]: (row["type_id"], row["cat_source"]) for row in rows}
     assert by_desc["Scoped Merchant Lunch"] == (groceries_id, "service_default")
     assert by_desc["Scoped Merchant Shirt"] == (shopping_id, "rule_override")
     assert by_desc["Scoped Merchant Gift"] == (shopping_id, "manual")
@@ -131,20 +138,20 @@ def test_service_category_update_only_recategorizes_service_default_rows(client)
 def test_resolve_transaction_scope_does_not_mutate_service_default(client):
     conn = db.get_connection()
     try:
-        dining_id = _category_id(conn, "Dining")
-        shopping_id = _category_id(conn, "Shopping")
+        dining_id = _type_id(conn, "Dining")
+        shopping_id = _type_id(conn, "Shopping")
         statement_id = _statement_id(conn)
 
         conn.execute(
-            "INSERT INTO services (name, category_id) VALUES (?, ?)",
+            "INSERT INTO services (name, book, type_id) VALUES (?, 'Household', ?)",
             ("Scoped Resolve Merchant", dining_id),
         )
         service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
             """
             INSERT INTO transactions
-                (statement_id, date, description, amount_sgd, category_id, service_id, cat_source)
-            VALUES (?, '2026-04-04', 'Scoped Resolve Merchant Apparel', 88.0, NULL, NULL, 'auto')
+                (statement_id, date, description, amount_minor, type_id, service_id, cat_source)
+            VALUES (?, '2026-04-04', 'Scoped Resolve Merchant Apparel', 8800, NULL, NULL, 'auto')
             """,
             (statement_id,),
         )
@@ -158,7 +165,7 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
         json={
             "tx_id": tx_id,
             "service_id": service_id,
-            "category_id": shopping_id,
+            "type_id": shopping_id,
             "pattern": "SCOPED RESOLVE MERCHANT",
             "match_type": "contains",
             "apply_scope": "transaction",
@@ -171,7 +178,7 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
     conn = db.get_connection()
     try:
         service = conn.execute(
-            "SELECT category_id FROM services WHERE id = ?",
+            "SELECT book, type_id FROM services WHERE id = ?",
             (service_id,),
         ).fetchone()
         rule_count = conn.execute(
@@ -179,15 +186,16 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
             (service_id,),
         ).fetchone()[0]
         tx = conn.execute(
-            "SELECT category_id, service_id, cat_source FROM transactions WHERE id = ?",
+            "SELECT book, type_id, service_id, cat_source FROM transactions WHERE id = ?",
             (tx_id,),
         ).fetchone()
     finally:
         conn.close()
 
-    assert service["category_id"] == dining_id
+    assert (service["book"], service["type_id"]) == ("Household", dining_id)
     assert rule_count == 0
-    assert (tx["category_id"], tx["service_id"], tx["cat_source"]) == (
+    assert (tx["book"], tx["type_id"], tx["service_id"], tx["cat_source"]) == (
+        "Household",
         shopping_id,
         service_id,
         "manual",
@@ -197,13 +205,13 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
 def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
     conn = db.get_connection()
     try:
-        dining_id = _category_id(conn, "Dining")
-        shopping_id = _category_id(conn, "Shopping")
-        groceries_id = _category_id(conn, "Groceries")
+        dining_id = _type_id(conn, "Dining")
+        shopping_id = _type_id(conn, "Shopping")
+        groceries_id = _type_id(conn, "Groceries")
         statement_id = _statement_id(conn)
 
         conn.execute(
-            "INSERT INTO services (name, category_id) VALUES (?, ?)",
+            "INSERT INTO services (name, book, type_id) VALUES (?, 'Household', ?)",
             ("Recategorize Merchant", dining_id),
         )
         service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -221,17 +229,17 @@ def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
             ("2026-04-05", "Recat Merchant Order", dining_id, service_id, "service_default"),
             ("2026-04-06", "Recat Merchant Manual", groceries_id, service_id, "manual"),
         ]
-        for tx_date, description, category_id, tx_service_id, cat_source in rows:
+        for tx_date, description, type_id, tx_service_id, cat_source in rows:
             conn.execute(
                 """
                 INSERT INTO transactions
-                    (statement_id, date, description, amount_sgd, category_id, service_id, cat_source)
-                VALUES (?, ?, ?, 42.0, ?, ?, ?)
+                    (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
+                VALUES (?, ?, ?, 4200, 'Household', ?, ?, ?)
                 """,
-                (statement_id, tx_date, description, category_id, tx_service_id, cat_source),
+                (statement_id, tx_date, description, type_id, tx_service_id, cat_source),
             )
         conn.execute(
-            "UPDATE merchant_rules SET category_override_id = ? WHERE id = ?",
+            "UPDATE merchant_rules SET type_override_id = ? WHERE id = ?",
             (shopping_id, rule_id),
         )
         conn.commit()
@@ -250,7 +258,7 @@ def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
     try:
         rows = conn.execute(
             """
-            SELECT description, category_id, service_id, cat_source
+            SELECT description, type_id, service_id, cat_source
             FROM transactions
             WHERE service_id = ?
             ORDER BY date
@@ -261,22 +269,22 @@ def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
         conn.close()
 
     by_desc = {
-        row["description"]: (row["category_id"], row["service_id"], row["cat_source"])
+        row["description"]: (row["type_id"], row["service_id"], row["cat_source"])
         for row in rows
     }
     assert by_desc["Recat Merchant Order"] == (shopping_id, service_id, "rule_override")
     assert by_desc["Recat Merchant Manual"] == (groceries_id, service_id, "manual")
 
 
-def test_rule_update_can_apply_category_override_and_recategorize(client):
+def test_rule_update_can_apply_type_override_and_relabel(client):
     conn = db.get_connection()
     try:
-        dining_id = _category_id(conn, "Dining")
-        shopping_id = _category_id(conn, "Shopping")
+        dining_id = _type_id(conn, "Dining")
+        shopping_id = _type_id(conn, "Shopping")
         statement_id = _statement_id(conn)
 
         conn.execute(
-            "INSERT INTO services (name, category_id) VALUES (?, ?)",
+            "INSERT INTO services (name, book, type_id) VALUES (?, 'Household', ?)",
             ("Rule Update Merchant", dining_id),
         )
         service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -292,8 +300,8 @@ def test_rule_update_can_apply_category_override_and_recategorize(client):
         conn.execute(
             """
             INSERT INTO transactions
-                (statement_id, date, description, amount_sgd, category_id, service_id, cat_source)
-            VALUES (?, '2026-04-07', 'Rule Update Merchant Apparel', 51.0, ?, ?, 'service_default')
+                (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
+            VALUES (?, '2026-04-07', 'Rule Update Merchant Apparel', 5100, 'Household', ?, ?, 'service_default')
             """,
             (statement_id, dining_id, service_id),
         )
@@ -304,7 +312,7 @@ def test_rule_update_can_apply_category_override_and_recategorize(client):
 
     resp = client.put(
         f"/api/rules/{rule_id}",
-        json={"category_override_id": shopping_id},
+        json={"type_override_id": shopping_id},
     )
     assert resp.status_code == 200
     assert resp.get_json()["recategorized"] == 1
@@ -312,31 +320,32 @@ def test_rule_update_can_apply_category_override_and_recategorize(client):
     conn = db.get_connection()
     try:
         rule = conn.execute(
-            "SELECT category_override_id FROM merchant_rules WHERE id = ?",
+            "SELECT type_override_id FROM merchant_rules WHERE id = ?",
             (rule_id,),
         ).fetchone()
         tx = conn.execute(
-            "SELECT category_id, service_id, cat_source FROM transactions WHERE id = ?",
+            "SELECT book, type_id, service_id, cat_source FROM transactions WHERE id = ?",
             (tx_id,),
         ).fetchone()
     finally:
         conn.close()
 
-    assert rule["category_override_id"] == shopping_id
-    assert (tx["category_id"], tx["service_id"], tx["cat_source"]) == (
+    assert rule["type_override_id"] == shopping_id
+    assert (tx["book"], tx["type_id"], tx["service_id"], tx["cat_source"]) == (
+        "Household",
         shopping_id,
         service_id,
         "rule_override",
     )
 
 
-def test_rule_create_can_persist_category_override(client):
+def test_rule_create_can_persist_type_override(client):
     conn = db.get_connection()
     try:
-        dining_id = _category_id(conn, "Dining")
-        shopping_id = _category_id(conn, "Shopping")
+        dining_id = _type_id(conn, "Dining")
+        shopping_id = _type_id(conn, "Shopping")
         conn.execute(
-            "INSERT INTO services (name, category_id) VALUES (?, ?)",
+            "INSERT INTO services (name, book, type_id) VALUES (?, 'Household', ?)",
             ("Create Override Merchant", dining_id),
         )
         service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -349,7 +358,7 @@ def test_rule_create_can_persist_category_override(client):
         json={
             "pattern": "CREATE OVERRIDE",
             "service_id": service_id,
-            "category_override_id": shopping_id,
+            "type_override_id": shopping_id,
             "match_type": "contains",
         },
     )
@@ -359,5 +368,6 @@ def test_rule_create_can_persist_category_override(client):
     assert resp.status_code == 200
     created = next(r for r in resp.get_json() if r["pattern"] == "CREATE OVERRIDE")
     assert created["service_id"] == service_id
-    assert created["category_override_id"] == shopping_id
-    assert created["category_id"] == shopping_id
+    assert created["type_override_id"] == shopping_id
+    assert created["type_id"] == shopping_id
+    assert created["book"] == "Household"

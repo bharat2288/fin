@@ -1,0 +1,17 @@
+# The book, its backups and statements never ship to Railway: the volume holds
+# the book, seeded once from the bucket (fin-online D3).
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.bak
+backup-status.json
+suggestion-strings.txt
+business/
+*.pdf
+*.csv
+*.xls
+*.xlsx
+.env
+.env.*
+specs/
