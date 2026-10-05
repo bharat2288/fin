@@ -2085,10 +2085,12 @@ def _upload_name(sent: str, index: int, folder: str) -> str:
     a made-up one, keeping a safe extension, when nothing safe is left, and a
     numbered one when the batch already holds that name. The parser registry
     chooses by extension, so the extension is kept."""
-    name = secure_filename(sent or "")
-    if not name:
-        ext = secure_filename(os.path.splitext(sent or "")[1].lstrip(".") or "")
-        name = f"upload_{index}" + (f".{ext}" if ext else "")
+    # The stem and the extension are made safe apart: a stem with no ASCII
+    # letter in it ("выписка") must not take the extension with it.
+    sent_stem, sent_ext = os.path.splitext(os.path.basename((sent or "").replace("\\", "/")))
+    ext = secure_filename(sent_ext.lstrip("."))
+    stem = secure_filename(sent_stem) or f"upload_{index}"
+    name = stem + (f".{ext}" if ext else "")
     stem, ext = os.path.splitext(name)
     candidate, n = name, 1
     while os.path.exists(os.path.join(folder, candidate)):

@@ -68,3 +68,11 @@ def test_two_files_whose_safe_names_collide_are_both_kept(client, monkeypatch, t
     assert len(seen) == 3 and len(set(seen)) == 3
     assert all(temp_root in path.parents for path in seen)
     assert all(path.suffix == ".csv" for path in seen)
+
+
+def test_a_name_with_no_ascii_stem_keeps_its_extension(client, monkeypatch, tmp_path):
+    preview, seen, temp_root = _upload(client, monkeypatch, tmp_path, ["выписка.csv", "отчёт за август.csv"])
+
+    assert len(seen) == 2 and all(path.suffix == ".csv" for path in seen)
+    assert all(temp_root in path.parents for path in seen)
+    assert preview["filenames"] == ["выписка.csv", "отчёт за август.csv"]
