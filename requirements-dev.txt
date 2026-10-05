@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest==9.1.1
+# The ASGI test client for the composed app: the gate, backup and MCP tests
+# (tests/test_access_gate.py, test_backups.py, test_mcp_inventory.py) fail to collect without it.
+httpx==0.28.1
