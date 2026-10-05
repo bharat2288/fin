@@ -607,8 +607,12 @@
             <div class="modal-body">
                 <div class="modal-field">
                     <label>For</label>
-                    <select id="figure-account" style="width:100%;" onchange="updateFigureHint()"></select>
+                    <select id="figure-account" style="width:100%;" onchange="updateFigureHint(); loadFigureHeld();"></select>
                     <div class="figure-hint">loans, holdings, a company's opening amount, a bank account with no statement</div>
+                </div>
+                <div class="modal-field" id="figure-held-field" style="display:none;">
+                    <label>Figures you entered for it</label>
+                    <div id="figure-held"></div>
                 </div>
                 <div class="modal-field-row">
                     <div class="modal-field">

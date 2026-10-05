@@ -5,8 +5,11 @@ number of minor units (cents, paise) of the account's currency, signed as the
 household sees it: cash and things owned positive, anything owed negative.
 
 There is one anchor per account and date. The same amount again is accepted
-and changes nothing; a different amount is refused. Every writer of an anchor
-goes through `record`, which does not commit: the caller owns the transaction.
+and changes nothing; a different amount is refused. Every writer of a new
+anchor goes through `record`. A supplied anchor (one the operator typed) can
+be corrected through `replace` or removed through `remove`; a statement's
+anchor is the statement's fact and is never changed. None of them commits:
+the caller owns the transaction.
 """
 
 from __future__ import annotations
@@ -134,3 +137,64 @@ def record(
         (account_id, on, amount_minor, source, note),
     )
     return _held(conn, account_id, on), True
+
+
+class NotSupplied(ValueError):
+    """The anchor is a statement's closing balance, not a figure the operator
+    typed: it is never corrected or removed by hand."""
+
+
+def held_by_id(conn: sqlite3.Connection, anchor_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT id, account_id, date, amount, source, note FROM anchors WHERE id = ?",
+        (anchor_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(("id", "account_id", "date", "amount", "source", "note"), row))
+
+
+def _supplied(conn: sqlite3.Connection, anchor_id: int) -> dict | None:
+    held = held_by_id(conn, anchor_id)
+    if held is not None and held["source"] != SUPPLIED:
+        raise NotSupplied("a statement's balance is never changed by hand; only a figure you entered is")
+    return held
+
+
+def replace(
+    conn: sqlite3.Connection,
+    anchor_id: int,
+    on: str,
+    amount_minor: int,
+    note: str | None,
+) -> dict | None:
+    """Correct a supplied anchor: its date, amount and note. Returns the
+    anchor as now held, or None when there is no such anchor.
+
+    Raises NotSupplied for a statement's anchor, and AnchorConflict when the
+    account already has another anchor on the new date. Does not commit.
+    """
+    if isinstance(amount_minor, bool) or not isinstance(amount_minor, int):
+        raise InvalidAnchor("amount must be a whole number of minor units")
+    on = checked_date(on)
+    held = _supplied(conn, anchor_id)
+    if held is None:
+        return None
+    other = _held(conn, held["account_id"], on)
+    if other is not None and other["id"] != anchor_id:
+        raise AnchorConflict(other)
+    conn.execute(
+        "UPDATE anchors SET date = ?, amount = ?, note = ? WHERE id = ?",
+        (on, amount_minor, note, anchor_id),
+    )
+    return held_by_id(conn, anchor_id)
+
+
+def remove(conn: sqlite3.Connection, anchor_id: int) -> dict | None:
+    """Remove a supplied anchor. Returns the anchor as it was, or None when
+    there is no such anchor. Raises NotSupplied for a statement's anchor.
+    Does not commit."""
+    held = _supplied(conn, anchor_id)
+    if held is not None:
+        conn.execute("DELETE FROM anchors WHERE id = ?", (anchor_id,))
+    return held

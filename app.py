@@ -522,13 +522,19 @@ def api_account_kinds():
 def api_accounts():
     """List all accounts. `type` is the account's kind; `anchor` is the latest
     anchor the account rests on, or null when it has no figure;
-    `takes_a_figure` is whether the enter-a-figure dialog offers it."""
+    `takes_a_figure` is whether the enter-a-figure dialog offers it for a new
+    figure; `supplied_figures` is how many figures were typed for it, each of
+    which the dialog can correct or delete."""
     with get_db() as conn:
         rows = conn.execute(
             "SELECT id, name, short_name, type, last_four, currency, status, owner FROM accounts ORDER BY name"
         ).fetchall()
         statement_counts = dict(conn.execute(
             "SELECT account_id, COUNT(*) FROM statements GROUP BY account_id"
+        ).fetchall())
+        supplied_counts = dict(conn.execute(
+            "SELECT account_id, COUNT(*) FROM anchors WHERE source = ? GROUP BY account_id",
+            (anchors.SUPPLIED,),
         ).fetchall())
         latest = {
             r["account_id"]: {"date": r["date"], "amount_minor": r["amount"], "source": r["source"]}
@@ -546,6 +552,9 @@ def api_accounts():
         d["takes_a_figure"] = account_kind.takes_a_figure(
             d["type"], statement_counts.get(d["id"], 0)
         )
+        # Figures typed for it, which can be corrected or deleted even once
+        # the account no longer takes a new one.
+        d["supplied_figures"] = supplied_counts.get(d["id"], 0)
         result.append(d)
     return jsonify(result)
 
@@ -713,14 +722,8 @@ def api_anchors_create():
                          "that has no statement"
             }), 400
         try:
-            amount_minor = anchors.to_minor_units(data.get("amount"), account["currency"])
+            amount_minor = _typed_figure(account, data.get("amount"))
             on = anchors.checked_date(data.get("date"))
-            if kind in account_kind.OWED_KINDS:
-                if amount_minor < 0:
-                    raise anchors.InvalidAnchor(
-                        "amount for a loan is what is owed, entered as a positive figure"
-                    )
-                amount_minor = -amount_minor
             held, created = anchors.record(
                 conn, account_id, on, amount_minor, anchors.SUPPLIED, note
             )
@@ -750,6 +753,95 @@ def api_anchors_create():
         "worked_out": worked_out,
         "message": message,
     })
+
+
+def _typed_figure(account, amount) -> int:
+    """A typed figure as an anchor stores it: whole minor units of the
+    account's currency, and for a loan what is owed, typed positive and
+    stored negative."""
+    amount_minor = anchors.to_minor_units(amount, account["currency"])
+    if account["type"] in account_kind.OWED_KINDS:
+        if amount_minor < 0:
+            raise anchors.InvalidAnchor(
+                "amount for a loan is what is owed, entered as a positive figure"
+            )
+        amount_minor = -amount_minor
+    return amount_minor
+
+
+def _anchor_account(conn, anchor_id: int):
+    return conn.execute(
+        "SELECT a.id, a.name, a.type, a.currency FROM anchors n "
+        "JOIN accounts a ON a.id = n.account_id WHERE n.id = ?",
+        (anchor_id,),
+    ).fetchone()
+
+
+@app.route("/api/anchors/<int:anchor_id>", methods=["PUT"])
+def api_anchors_replace(anchor_id: int):
+    """Correct a figure you entered: its amount, date or note; what is not
+    sent stays as it is. The amount is typed as for a new figure (what is
+    owed, positive, for a loan). A statement's balance is refused: it is the
+    statement's fact. A date the account already has another figure or
+    statement balance for is refused (409). Balances and checks are worked
+    out on read, so they follow at once; for a loan the interest is worked
+    out again, and `message` says what that came to."""
+    data = request.get_json(silent=True) or {}
+    note_sent = "note" in data
+    note = data.get("note")
+    if note is not None and not isinstance(note, str):
+        return jsonify({"error": "note must be text"}), 400
+    with get_db() as conn:
+        account = _anchor_account(conn, anchor_id)
+        if account is None:
+            return jsonify({"error": "no such figure"}), 404
+        held = anchors.held_by_id(conn, anchor_id)
+        try:
+            amount_minor = (
+                _typed_figure(account, data["amount"]) if "amount" in data else held["amount"]
+            )
+            on = data["date"] if "date" in data else held["date"]
+            replaced = anchors.replace(
+                conn, anchor_id, on, amount_minor,
+                ((note or "").strip() or None) if note_sent else held["note"],
+            )
+        except anchors.NotSupplied as e:
+            return jsonify({"error": str(e)}), 400
+        except anchors.InvalidAnchor as e:
+            return jsonify({"error": str(e)}), 400
+        except anchors.AnchorConflict as e:
+            return jsonify({
+                "error": f"{mask_card_number(account['name'])} already has a figure for "
+                         f"{e.existing['date']}; correct or delete that one instead"
+            }), 409
+        message = None
+        if account["type"] == loan_interest.LOAN:
+            loan_interest.derive(conn, account["id"])
+            _, message = loan_interest.worked_out(
+                conn, account["id"], replaced["date"], account["currency"]
+            )
+        conn.commit()
+        row = conn.execute(_ANCHOR_SELECT + "WHERE n.id = ?", (anchor_id,)).fetchone()
+    return jsonify({"success": True, "anchor": _anchor_payload(row), "message": message})
+
+
+@app.route("/api/anchors/<int:anchor_id>", methods=["DELETE"])
+def api_anchors_delete(anchor_id: int):
+    """Delete a figure you entered. A statement's balance is refused. The
+    balances rest on the figures that remain; for a loan the interest is
+    worked out again from them."""
+    with get_db() as conn:
+        account = _anchor_account(conn, anchor_id)
+        if account is None:
+            return jsonify({"error": "no such figure"}), 404
+        try:
+            anchors.remove(conn, anchor_id)
+        except anchors.NotSupplied as e:
+            return jsonify({"error": str(e)}), 400
+        if account["type"] == loan_interest.LOAN:
+            loan_interest.derive(conn, account["id"])
+        conn.commit()
+    return jsonify({"success": True, "id": anchor_id})
 
 
 @app.route("/api/loan-interest", methods=["POST"])

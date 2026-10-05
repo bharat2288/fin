@@ -4695,8 +4695,71 @@ async function loadBalanceSheet() {
 
 function figureAccounts() {
     // Each account says whether it takes a figure: a bank account does only
-    // while it has no statement.
-    return accounts.filter(a => a.status !== 'archived' && a.takes_a_figure);
+    // while it has no statement. One with figures already typed is offered
+    // too, so that they can be corrected or deleted.
+    return accounts.filter(a => a.status !== 'archived' && (a.takes_a_figure || a.supplied_figures > 0));
+}
+
+// The figure being corrected, or null when the dialog enters a new one.
+let figureEditingId = null;
+
+// Whole minor units as the operator types a figure, two decimals: "902500.00".
+// A loan's figure is stored negative and typed as the positive amount owed.
+function typedFigure(minor, kind) {
+    const owed = kind === 'loan' ? -minor : minor;
+    const abs = Math.abs(owed);
+    return `${owed < 0 ? '-' : ''}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
+}
+
+function setFigureEditing(anchor) {
+    figureEditingId = anchor ? anchor.id : null;
+    document.getElementById('figure-account').disabled = !!anchor;
+    document.getElementById('figure-save').textContent = anchor ? 'Save correction' : 'Save';
+}
+
+// The figures typed for the chosen account, each with Correct and Delete. A
+// statement's balance is not listed: it is never changed by hand.
+async function loadFigureHeld() {
+    const field = document.getElementById('figure-held-field');
+    const box = document.getElementById('figure-held');
+    const acct = accounts.find(a => a.id === parseInt(document.getElementById('figure-account').value));
+    if (!acct || !acct.supplied_figures) { field.style.display = 'none'; box.innerHTML = ''; return; }
+    const held = (await fetch(`/api/anchors?account_id=${acct.id}`).then(r => r.json()))
+        .filter(f => f.source === 'supplied');
+    field.style.display = held.length ? '' : 'none';
+    box.innerHTML = held.map(f => `
+        <div class="figure-held-row${f.id === figureEditingId ? ' editing' : ''}">
+            <span>${formatDate(f.date)} · ${escapeHtml(formatMinorUnits(f.amount_minor, f.currency))}${f.note ? ` <span class="text-muted">${escapeHtml(f.note)}</span>` : ''}</span>
+            <span>
+                <button class="btn btn-sm" onclick="editFigure(${f.id})">Correct</button>
+                <button class="btn btn-sm" onclick="deleteFigure(${f.id})">Delete</button>
+            </span>
+        </div>`).join('');
+    box._held = held;
+}
+
+function editFigure(id) {
+    const f = (document.getElementById('figure-held')._held || []).find(x => x.id === id);
+    if (!f) return;
+    setFigureEditing(f);
+    document.getElementById('figure-amount').value = typedFigure(f.amount_minor, f.kind);
+    document.getElementById('figure-date').value = f.date;
+    document.getElementById('figure-note').value = f.note || '';
+    showFigureResult(null);
+    loadFigureHeld();
+    document.getElementById('figure-amount').focus();
+}
+
+async function deleteFigure(id) {
+    const f = (document.getElementById('figure-held')._held || []).find(x => x.id === id);
+    if (!f) return;
+    if (!confirm(`Delete your figure of ${formatMinorUnits(f.amount_minor, f.currency)} for ${formatDate(f.date)}? The balance will rest on the figures that remain.`)) return;
+    const data = await apiFetch(`/api/anchors/${id}`, { method: 'DELETE' });
+    if (!data) return;
+    if (figureEditingId === id) setFigureEditing(null);
+    showToast(`Deleted the figure for ${formatDate(f.date)}`, 'success', 4000);
+    await reloadAccounts();
+    await loadFigureHeld();
 }
 
 function openFigureModal() {
@@ -4711,7 +4774,9 @@ function openFigureModal() {
     ).join('');
     document.getElementById('figure-amount').value = '';
     document.getElementById('figure-note').value = '';
+    setFigureEditing(null);
     showFigureResult(null);
+    loadFigureHeld();
     const now = new Date();
     document.getElementById('figure-date').value =
         `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -4721,6 +4786,7 @@ function openFigureModal() {
 }
 
 function closeFigureModal() {
+    setFigureEditing(null);
     document.getElementById('figure-modal').style.display = 'none';
 }
 
@@ -4760,17 +4826,27 @@ async function saveFigure() {
 
     const btn = document.getElementById('figure-save');
     btn.disabled = true;
-    const data = await apiFetch('/api/anchors', {
-        method: 'POST',
-        body: {
-            account_id: accountId,
-            amount,
-            date,
-            note: document.getElementById('figure-note').value.trim() || null,
-        },
-    });
+    const note = document.getElementById('figure-note').value.trim() || null;
+    const correcting = figureEditingId;
+    const data = correcting
+        ? await apiFetch(`/api/anchors/${correcting}`, { method: 'PUT', body: { amount, date, note } })
+        : await apiFetch('/api/anchors', {
+            method: 'POST',
+            body: { account_id: accountId, amount, date, note },
+        });
     btn.disabled = false;
     if (!data) return;
+
+    if (correcting) {
+        setFigureEditing(null);
+        if (data.message) showFigureResult(data.message); else closeFigureModal();
+        showToast(
+            `Corrected: ${acct ? acct.name : data.anchor.account_name} ${formatMinorUnits(data.anchor.amount_minor, data.anchor.currency)} as of ${formatDate(data.anchor.date)}`,
+            'success', 6000
+        );
+        await reloadAccounts();
+        return;
+    }
 
     if (data.message) {
         showFigureResult(data.message);
@@ -4786,4 +4862,5 @@ async function saveFigure() {
         data.created ? 'success' : 'info', 6000
     );
     await reloadAccounts();
+    await loadFigureHeld();
 }

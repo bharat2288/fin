@@ -1860,6 +1860,18 @@ input[type="checkbox"]:focus-visible {
     margin-top: var(--space-1);
 }
 
+/* The figures typed for the chosen account, each correctable */
+.figure-held-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 12px;
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.figure-held-row.editing { font-weight: 600; }
+
 /* What fin worked out after a loan figure is saved */
 .figure-result {
     font-size: 13px;
