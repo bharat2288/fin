@@ -22,13 +22,14 @@ nothing. Exit 0 when nothing was refused, 1 otherwise, 2 for a usage error.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import sys
 import uuid
 from pathlib import Path
 from typing import Callable
-from urllib import error, request
+from urllib import error, parse, request
 
 EXTENSIONS = (".pdf", ".csv", ".xls", ".xlsx")
 
@@ -52,10 +53,34 @@ def statement_files(targets: list[str]) -> list[Path]:
     return found
 
 
+class InsecureUrl(ValueError):
+    """The service token would go somewhere it could be read on the way."""
+
+
+def _is_loopback(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def http_sender(base_url: str, client_id: str | None, client_secret: str | None) -> Sender:
     """Send to fin over HTTPS (or HTTP on loopback) with the gate's service
-    token, when there is one."""
+    token, when there is one. With a token, any other address is refused
+    before anything is sent: the secret goes only over https, or to this
+    machine."""
     base = base_url.rstrip("/")
+    if client_id and client_secret:
+        url = parse.urlsplit(base)
+        if not (url.scheme == "https" or (url.scheme == "http" and _is_loopback(url.hostname))):
+            raise InsecureUrl(
+                "FIN_URL must be an https:// address (or http:// on this machine) "
+                "when the upload credential is set"
+            )
 
     def send(path: str, body: bytes, content_type: str) -> tuple[int, object]:
         req = request.Request(base + path, data=body, method="POST")
@@ -147,8 +172,12 @@ def main(argv: list[str], send: Sender | None = None) -> int:
         # Stripped as serve.py strips the gate's FIN_UPLOAD_CLIENT_ID, which
         # it compares with the common_name Access puts in the JWT: the
         # client id this sends.
-        send = http_sender(base, (os.environ.get("FIN_UPLOAD_CLIENT_ID") or "").strip(),
-                           (os.environ.get("FIN_UPLOAD_CLIENT_SECRET") or "").strip())
+        try:
+            send = http_sender(base, (os.environ.get("FIN_UPLOAD_CLIENT_ID") or "").strip(),
+                               (os.environ.get("FIN_UPLOAD_CLIENT_SECRET") or "").strip())
+        except InsecureUrl as e:
+            print(e)
+            return 2
     try:
         files = statement_files(targets)
     except FileNotFoundError as e:

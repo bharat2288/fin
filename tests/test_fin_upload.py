@@ -134,3 +134,38 @@ def test_the_service_token_goes_in_the_gate_headers(monkeypatch, tmp_path):
     send("/api/import/upload", b"x", "application/octet-stream")
     assert seen["url"] == "https://fin.example.invalid/api/import/upload"
     assert (seen["cf-access-client-id"], seen["cf-access-client-secret"]) == ("id-value", "secret-value")
+
+
+@pytest.mark.parametrize("url", [
+    "http://fin.example.invalid",
+    "http://10.0.0.5:8450",
+    "ftp://fin.example.invalid",
+    "fin.example.invalid",
+])
+def test_the_secret_is_never_sent_but_over_https_or_to_loopback(monkeypatch, url):
+    monkeypatch.setattr(fin_upload.request, "urlopen", lambda *a, **k: pytest.fail("something was sent"))
+
+    with pytest.raises(fin_upload.InsecureUrl):
+        fin_upload.http_sender(url, "id-value", "secret-value")
+
+
+@pytest.mark.parametrize("url", [
+    "https://fin.example.invalid", "http://127.0.0.1:8450", "http://localhost:8450", "http://[::1]:8450",
+])
+def test_https_and_loopback_take_the_secret(url):
+    fin_upload.http_sender(url, "id-value", "secret-value")
+
+
+def test_plain_http_without_a_secret_is_the_desk_app():
+    fin_upload.http_sender("http://desk.example.invalid:8450", None, None)
+
+
+def test_an_insecure_fin_url_is_a_usage_error_naming_the_variable(monkeypatch, folder, capsys):
+    monkeypatch.setenv("FIN_URL", "http://fin.example.invalid")
+    monkeypatch.setenv("FIN_UPLOAD_CLIENT_ID", "id-value")
+    monkeypatch.setenv("FIN_UPLOAD_CLIENT_SECRET", "secret-value")
+    monkeypatch.setattr(fin_upload.request, "urlopen", lambda *a, **k: pytest.fail("something was sent"))
+
+    assert fin_upload.main([str(folder)]) == 2
+    out = capsys.readouterr().out
+    assert "FIN_URL" in out and "https" in out and "secret-value" not in out
