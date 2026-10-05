@@ -147,3 +147,26 @@ def test_a_statement_closing_on_the_1st_never_shares_a_record_with_the_month_rec
     ]
     # 31 August: the 1 August balance less the month record's two rows.
     assert lines(sheet(client, "2026-08"))[CARD]["balance_minor"] == -53_000 - 900 - 300
+
+
+def test_the_first_statement_after_conversion_never_reaches_into_a_closed_period(client, conn):
+    # Converted history: the June rows sit on a month record, and the May and
+    # June statement balances are anchored, as convert_printed_statements
+    # leaves a database. No record is printed yet.
+    import_statement(client, [("2026-06-02", "SAMPLE JUNE SHOP", 1_000)], closing_date="2026-06-30")
+    card = conn.execute("SELECT id FROM accounts WHERE name = ?", (CARD,)).fetchone()[0]
+    conn.executemany(
+        "INSERT INTO anchors (account_id, date, amount, source) VALUES (?, ?, ?, 'statement')",
+        [(card, "2026-05-15", -10_000), (card, "2026-06-15", -11_000)],
+    )
+    conn.commit()
+    assert lines(sheet(client, "2026-06"))[CARD]["check"]["status"] == "ties"
+
+    # The first printed statement: a late row dated 10 June, before the June
+    # statement closed, and a row of 1 July.
+    import_statement(client, [("2026-06-10", LATE, 500), ("2026-07-01", "SAMPLE GROCER", 2_000)],
+                     closing_date="2026-07-15", opening=-11_000)
+
+    assert lines(sheet(client, "2026-06"))[CARD]["check"]["status"] == "ties"
+    assert lines(sheet(client, "2026-06"))[CARD]["balance_minor"] == -11_000 - 500
+    assert lines(sheet(client, "2026-07"))[CARD]["check"]["status"] == "ties"

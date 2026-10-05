@@ -91,11 +91,22 @@ PAID_FOR_FLOWS = ("expense", "refund")
 # balance) counts on its own date. Within its statement's period a row
 # counts on its own date, so a month-end between two statements is moved by
 # the rows dated up to it.
+#
+# The previous statement closed on the later of the account's previous printed
+# record and its previous statement balance (anchor). The anchor covers the
+# history from before rows were filed by statement: a converted database
+# holds only month records, but its statement balances are anchored, and the
+# first statement imported afterwards must not reach back into a period one
+# of them already closed.
 ROW_DAY = (
     "(CASE WHEN s.printed = 1 THEN MIN(s.statement_date, MAX(t.date, COALESCE(("
-    "SELECT date(MAX(p.statement_date), '+1 day') FROM statements p "
+    "SELECT date(MAX(closed), '+1 day') FROM ("
+    "SELECT p.statement_date AS closed FROM statements p "
     "WHERE p.account_id = s.account_id AND p.printed = 1 "
-    "AND p.statement_date < s.statement_date), t.date))) ELSE t.date END)"
+    "AND p.statement_date < s.statement_date "
+    "UNION ALL SELECT n.date FROM anchors n "
+    "WHERE n.account_id = s.account_id AND n.source = 'statement' "
+    "AND n.date < s.statement_date)), t.date))) ELSE t.date END)"
 )
 
 # Kinds whose balance moves by the account's own rows; the others move by the
