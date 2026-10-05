@@ -486,7 +486,7 @@ def test_the_client_id_the_upload_command_sends_is_the_common_name_the_gate_chec
         sent.append(dict((k.lower(), v) for k, v in req.header_items()))
         return Refused()
 
-    monkeypatch.setattr(fin_upload.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(fin_upload, "_open", fake_urlopen)
     (tmp_path / "statement.csv").write_bytes(b"stand-in")
     fin_upload.main([str(tmp_path)])
     [headers] = sent

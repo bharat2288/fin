@@ -129,7 +129,7 @@ def test_the_service_token_goes_in_the_gate_headers(monkeypatch, tmp_path):
         seen["url"] = req.full_url
         return Answer()
 
-    monkeypatch.setattr(fin_upload.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(fin_upload, "_open", fake_urlopen)
     send = fin_upload.http_sender("https://fin.example.invalid/", "id-value", "secret-value")
     send("/api/import/upload", b"x", "application/octet-stream")
     assert seen["url"] == "https://fin.example.invalid/api/import/upload"
@@ -143,7 +143,7 @@ def test_the_service_token_goes_in_the_gate_headers(monkeypatch, tmp_path):
     "fin.example.invalid",
 ])
 def test_the_secret_is_never_sent_but_over_https_or_to_loopback(monkeypatch, url):
-    monkeypatch.setattr(fin_upload.request, "urlopen", lambda *a, **k: pytest.fail("something was sent"))
+    monkeypatch.setattr(fin_upload, "_open", lambda *a, **k: pytest.fail("something was sent"))
 
     with pytest.raises(fin_upload.InsecureUrl):
         fin_upload.http_sender(url, "id-value", "secret-value")
@@ -164,8 +164,42 @@ def test_an_insecure_fin_url_is_a_usage_error_naming_the_variable(monkeypatch, f
     monkeypatch.setenv("FIN_URL", "http://fin.example.invalid")
     monkeypatch.setenv("FIN_UPLOAD_CLIENT_ID", "id-value")
     monkeypatch.setenv("FIN_UPLOAD_CLIENT_SECRET", "secret-value")
-    monkeypatch.setattr(fin_upload.request, "urlopen", lambda *a, **k: pytest.fail("something was sent"))
+    monkeypatch.setattr(fin_upload, "_open", lambda *a, **k: pytest.fail("something was sent"))
 
     assert fin_upload.main([str(folder)]) == 2
     out = capsys.readouterr().out
     assert "FIN_URL" in out and "https" in out and "secret-value" not in out
+
+
+def test_a_redirect_is_never_followed_so_the_token_goes_nowhere_else(monkeypatch):
+    # A real local server answering 302 to another address: the sender must
+    # stop there, and the address it names must never be asked.
+    import http.server
+    import threading
+
+    asked = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            asked.append((self.path, self.headers.get("CF-Access-Client-Secret")))
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/elsewhere")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            self.do_POST()
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        send = fin_upload.http_sender(f"http://127.0.0.1:{server.server_port}", "id-value", "secret-value")
+        status, _body = send("/api/import/upload", b"x", "application/octet-stream")
+    finally:
+        server.shutdown()
+
+    assert status == 302
+    assert asked == [("/api/import/upload", "secret-value")]

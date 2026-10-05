@@ -53,6 +53,18 @@ def statement_files(targets: list[str]) -> list[Path]:
     return found
 
 
+class _NoRedirects(request.HTTPRedirectHandler):
+    """Refuse every redirect: the CF-Access headers would be sent on to the
+    address it names. The 3xx answer comes back as the answer."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Every request goes through this opener, which follows no redirect.
+_open = request.build_opener(_NoRedirects).open
+
+
 class InsecureUrl(ValueError):
     """The service token would go somewhere it could be read on the way."""
 
@@ -89,7 +101,7 @@ def http_sender(base_url: str, client_id: str | None, client_secret: str | None)
             req.add_header("CF-Access-Client-Id", client_id)
             req.add_header("CF-Access-Client-Secret", client_secret)
         try:
-            with request.urlopen(req, timeout=120) as resp:
+            with _open(req, timeout=120) as resp:
                 status, raw = resp.status, resp.read()
         except error.HTTPError as e:
             status, raw = e.code, e.read()
@@ -115,6 +127,8 @@ def _multipart(path: Path) -> tuple[bytes, str]:
 def _error_of(status: int, body) -> str:
     if isinstance(body, dict) and isinstance(body.get("error"), str):
         return body["error"]
+    if 300 <= status < 400:
+        return f"fin answered {status}, a redirect, which is not followed: check FIN_URL"
     if status in (401, 403):
         return "fin refused the credentials (check FIN_UPLOAD_CLIENT_ID and FIN_UPLOAD_CLIENT_SECRET)"
     return f"fin answered {status}"
