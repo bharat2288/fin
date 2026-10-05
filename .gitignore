@@ -78,5 +78,8 @@ business/
 # Backups the conversion runner writes beside the database (financial data)
 *.bak
 
+# The nightly backup's status, written beside the book
+backup-status.json
+
 # Merchant names waiting for the operator to read before a type suggestion is sent
 suggestion-strings.txt

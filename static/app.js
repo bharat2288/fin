@@ -4874,3 +4874,22 @@ async function saveFigure() {
     await reloadAccounts();
     await loadFigureHeld();
 }
+
+// ---------------------------------------------------------------------------
+// Backup warning (fin-online D3): shown when backups are not configured or
+// none has succeeded in 36 hours. The server decides; this only shows it.
+// ---------------------------------------------------------------------------
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        const res = await fetch('/api/backups/status');
+        if (!res.ok) return;
+        const status = await res.json();
+        if (!status.warning) return;
+        const banner = document.createElement('div');
+        banner.className = 'backup-warning';
+        banner.setAttribute('role', 'status');
+        banner.textContent = `Backups: ${status.warning}` +
+            (status.last_success_at ? ` (last success ${status.last_success_at})` : '');
+        document.querySelector('.app-header')?.after(banner);
+    } catch (_) { /* no banner if the status cannot be read */ }
+});

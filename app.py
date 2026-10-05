@@ -21,6 +21,7 @@ from werkzeug.utils import secure_filename
 import access_gate
 import account_kind
 import anchors
+import backup
 import balance_sheet
 import book_type
 import db
@@ -48,8 +49,9 @@ def get_db():
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 # LOCAL_DEV: off unless a caller turns it on (python app.py, serve.py in
 # local-dev); without the access gate's identity every request is then refused
-# (fin-online D1, the second layer).
-app.config.update(LOCAL_DEV=False)
+# (fin-online D1, the second layer). BACKUP_STORE: the nightly backup's object
+# store, set by serve.py; None means backups are not configured.
+app.config.update(LOCAL_DEV=False, BACKUP_STORE=None)
 app.wsgi_app = access_gate.RequireGateIdentity(app.wsgi_app, app.config)
 
 
@@ -3735,6 +3737,29 @@ def api_fx_rate():
     if request.method == "POST":
         return jsonify({"usd_sgd": _fetch_usd_sgd_rate(), "fetched": _fx_cache["fetched_at"] is not None})
     return jsonify({"usd_sgd": _get_usd_sgd_rate(), "fetched": _fx_cache["fetched_at"] is not None})
+
+
+# ---------------------------------------------------------------------------
+# Backups (fin-online D3): the status and "back up now", app gate only
+# ---------------------------------------------------------------------------
+
+@app.route("/api/backups/status")
+def api_backups_status():
+    """Last attempt, last success, last error; the warning the app shell shows
+    when backups are not configured or none succeeded in 36 hours."""
+    return jsonify(backup.backup_status(db.DB_PATH, configured=app.config["BACKUP_STORE"] is not None))
+
+
+@app.route("/api/backups/run", methods=["POST"])
+def api_backups_run():
+    store = app.config["BACKUP_STORE"]
+    if store is None:
+        message, status = backup.BACKUP_ERRORS["not_configured"]
+        return jsonify({"error": message}), status
+    try:
+        return jsonify(backup.run_backup(db.DB_PATH, store))
+    except backup.BackupFailed as failed:
+        return jsonify({"error": failed.message, "code": failed.code}), failed.status
 
 
 # ---------------------------------------------------------------------------

@@ -2424,3 +2424,12 @@ input[type="checkbox"]:focus-visible {
 }
 .balance-total td { border-top: 1px solid var(--border-subtle); font-weight: 600; }
 .balance-actions { display: flex; align-items: center; gap: var(--space-4); margin-top: var(--space-5); font-size: 13px; }
+
+/* Backup warning (fin-online D3) */
+.backup-warning {
+    padding: 6px 16px;
+    font-size: 13px;
+    color: var(--semantic-warning);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-default);
+}
