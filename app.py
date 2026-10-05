@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
+from werkzeug.utils import secure_filename
 
 import account_kind
 import anchors
@@ -1936,6 +1937,24 @@ def api_transaction_suggestion(tx_id: int):
 # Import API
 # ---------------------------------------------------------------------------
 
+def _upload_name(sent: str, index: int, folder: str) -> str:
+    """A name to save an uploaded file under inside `folder`: the name the
+    browser sent made safe (no folder part, no "..", no absolute path), with
+    a made-up one, keeping a safe extension, when nothing safe is left, and a
+    numbered one when the batch already holds that name. The parser registry
+    chooses by extension, so the extension is kept."""
+    name = secure_filename(sent or "")
+    if not name:
+        ext = secure_filename(os.path.splitext(sent or "")[1].lstrip(".") or "")
+        name = f"upload_{index}" + (f".{ext}" if ext else "")
+    stem, ext = os.path.splitext(name)
+    candidate, n = name, 1
+    while os.path.exists(os.path.join(folder, candidate)):
+        candidate = f"{stem}_{n}{ext}"
+        n += 1
+    return candidate
+
+
 @app.route("/api/import/upload", methods=["POST"])
 def api_import_upload():
     """Accept statement files, parse, label with book and type, return preview.
@@ -1968,11 +1987,12 @@ def api_import_upload():
         for f in files:
             if not f.filename:
                 continue
-            safe_name = f.filename
-            save_path = os.path.join(tmpdir, safe_name)
+            # The name the browser sent is shown, never used as a path: the
+            # file is saved inside the temporary folder under a safe name.
+            save_path = os.path.join(tmpdir, _upload_name(f.filename, len(saved_paths), tmpdir))
             f.save(save_path)
-            saved_paths.append((save_path, safe_name))
-            filenames.append(safe_name)
+            saved_paths.append((save_path, f.filename))
+            filenames.append(f.filename)
 
         # Detect and parse each file via parser registry
         from parsers import auto_detect_and_parse, handle_vantage_split
