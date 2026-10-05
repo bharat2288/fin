@@ -4591,7 +4591,7 @@ function balanceMonthCheck(sheet) {
                     ${row(`Net worth, ${formatDate(c.from)}`, c.opening)}
                     ${row('+ income', c.income)}
                     ${row('- spending', c.spending, interest)}
-                    ${row('+ currency change', c.currency_change)}
+                    ${row('+ currency change', c.currency_change, (c.currency_change_lines || []).filter(l => l.spread_minor).map(l => `${escapeHtml(l.name)}: conversion spread ${escapeHtml(l.spread)} inside`).join('; '))}
                     ${c.outside_minor ? row('+ moved from accounts left out', c.outside, 'to or from an account with no balance at one end of the month') : ''}
                     ${row(`= expected, ${formatDate(c.to)}`, c.expected)}
                     ${row(`actual, ${formatDate(c.to)}`, c.actual)}

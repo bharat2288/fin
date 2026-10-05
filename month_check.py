@@ -37,6 +37,12 @@ and one left out (paying off such a card, a row on such a card in a company's
 book) changes the checked net worth and is neither income nor spending: it is
 stated as `outside`, money into the check positive.
 
+Currency change in the check is the sheet's (each such account's opening
+balance revalued) plus the spread on the month's conversions between it and
+the accounts kept in SGD (ruling 5): the rupees a conversion moved, valued at
+the month-end rate, less the SGD the other side moved at the bank's rate. A
+conversion is counted when its two legs name each other's account.
+
 An account kept in another currency (the rupee account) is in the check when
 its currency change can be worked out: it has a balance at the previous
 month-end and a saved rate for both ends, so it is in net worth at both. Its
@@ -191,6 +197,42 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
     return total, touched
 
 
+def _conversions(conn: sqlite3.Connection, acct: int, after: str, upto: str,
+                 in_check: set, currency_of: dict) -> tuple[int, int]:
+    """The month's conversions between an account kept in another currency
+    and the accounts in the check kept in the currency of the totals: what
+    they moved on this account, in its minor units (positive is money out of
+    it), and what they moved on the other side, in cents (positive is money
+    out of the other account, into this one).
+
+    A conversion is two rows that name each other's account as their other
+    side (each leg labelled, on the review list or at import). The legs with
+    one other account are taken together; where only one side names the
+    other, nothing is taken, and the conversion stays unexplained in full.
+    """
+    window = f"{balance_sheet.ROW_DAY} > ? AND {balance_sheet.ROW_DAY} <= ?"
+    moves = ", ".join("?" for _ in MOVE_FLOWS)
+    here = dict(conn.execute(
+        "SELECT t.other_side_id, SUM(t.amount_minor) FROM transactions t "
+        "JOIN statements s ON t.statement_id = s.id "
+        f"WHERE s.account_id = ? AND t.flow_type IN ({moves}) AND t.other_side_id IS NOT NULL "
+        f"AND {window} GROUP BY t.other_side_id",
+        (acct, *MOVE_FLOWS, after, upto),
+    ))
+    there = dict(conn.execute(
+        "SELECT s.account_id, SUM(t.amount_minor) FROM transactions t "
+        "JOIN statements s ON t.statement_id = s.id "
+        f"WHERE t.other_side_id = ? AND s.account_id != ? AND t.flow_type IN ({moves}) "
+        f"AND {window} GROUP BY s.account_id",
+        (acct, acct, *MOVE_FLOWS, after, upto),
+    ))
+    paired = [
+        other for other in here
+        if other in there and other in in_check and currency_of.get(other) == CURRENCY
+    ]
+    return sum(here[o] for o in paired), sum(there[o] for o in paired)
+
+
 def _line_values(shown: dict) -> dict:
     """Each line of a sheet by its account id."""
     return {line["account_id"]: line for section in shown["sections"] for line in section["lines"]}
@@ -255,6 +297,7 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
     # Accounts in another currency: in the check at the month-end rate, or
     # left out of both sides.
     currency_change = 0
+    spreads = []
     for line in end_sheet["currency_change"]["lines"]:
         acct = line["account_id"]
         if acct not in in_check:
@@ -271,6 +314,21 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
         after_spending = with_income - held_spending
         income += value(with_income) - value(opening)
         spending += value(with_income) - value(after_spending)
+
+        # Conversions to and from accounts in the currency of the totals
+        # (ruling 5): what the rupee side moved, valued at the month-end
+        # rate, less what the other side moved at the bank's rate, is the
+        # spread, and it is currency change.
+        moved, paid = _conversions(conn, acct, after, upto, in_check, currency_of)
+        spread = value(after_spending - moved) - value(after_spending) - paid
+        currency_change += spread
+        spreads.append({
+            "account_id": acct,
+            "name": line["name"],
+            "revaluation_minor": line["change_minor"],
+            "spread_minor": spread,
+            "spread": _shown(spread),
+        })
 
     # What is left out, and why: every account in another currency whose
     # change has no figure, every account in net worth at one end only, and
@@ -346,6 +404,10 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
         "interest": _shown(interest),
         "currency_change_minor": currency_change,
         "currency_change": _shown(currency_change),
+        # Each account in another currency's part of the currency change:
+        # the revaluation of its opening balance and the spread on its
+        # conversions in the month.
+        "currency_change_lines": spreads,
         "outside_minor": outside,
         "outside": _shown(outside),
         "expected_minor": expected,
