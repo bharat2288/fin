@@ -4592,6 +4592,7 @@ function balanceMonthCheck(sheet) {
                     ${row('+ income', c.income)}
                     ${row('- spending', c.spending, interest)}
                     ${row('+ currency change', c.currency_change)}
+                    ${c.outside_minor ? row('+ moved from accounts left out', c.outside, 'to or from an account with no balance at one end of the month') : ''}
                     ${row(`= expected, ${formatDate(c.to)}`, c.expected)}
                     ${row(`actual, ${formatDate(c.to)}`, c.actual)}
                     ${unexplained}
