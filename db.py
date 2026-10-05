@@ -218,8 +218,8 @@ SEED_LABELS = {
 
 
 class DatabaseNotConverted(Exception):
-    """The database is in a shape from before book and type replaced the
-    category tree. Nothing was changed."""
+    """The database has not been through every conversion step (conversion.CHAIN).
+    Nothing was changed."""
 
 
 def _needs_converting(conn: sqlite3.Connection) -> bool:
@@ -252,12 +252,13 @@ def refusal(conn: sqlite3.Connection, path) -> str:
     still to run, in order, and the one command that runs them."""
     import conversion
 
-    waiting = conversion.not_applied(conn)
+    # Every step, when none reads as waiting: convert_all skips those applied.
+    waiting = conversion.not_applied(conn) or [name for name, _ in conversion.CHAIN]
     modules = dict(conversion.CHAIN)
     steps = "\n".join(f"  {n}. {name} ({modules[name]}.py)" for n, name in enumerate(waiting, 1))
     return (
         "fin will not start: this database has not been through every conversion step, "
-        "and a start never changes rows. Nothing was changed.\n"
+        "and fin does not convert a database as it starts. Nothing was changed.\n"
         f"Steps still to run, in order:\n{steps}\n"
         "Run them all with this one command (each step backs the database up first):\n"
         f"  python convert_all.py {path}"

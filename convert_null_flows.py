@@ -6,9 +6,9 @@ the account it is on (S6). This step does that work instead, behind the
 runner's backup and in one transaction: each such row is classified by the
 same classifier the import uses (flow.classify_row), with its account's kind
 and owner and the merchant a rule gave it, and takes the flow and the other
-side that gives. A row's flow is not marked as set by hand. Nothing else about a row changes, and no row that has a
-flow is touched. It runs last in the chain (conversion.CHAIN), after the
-accounts have their kinds and owners.
+side that gives. The flow is not marked as set by hand. Nothing else about
+a row changes, and no row that has a flow is touched. It runs last in the
+chain (conversion.CHAIN), after the accounts have their kinds and owners.
 
     python convert_null_flows.py <path to database>
 """
