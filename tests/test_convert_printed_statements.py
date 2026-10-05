@@ -13,6 +13,7 @@ import conversion
 import convert_account_kinds
 import convert_printed_statements
 import db
+import history
 
 DAY = date(2026, 10, 5)
 
@@ -35,7 +36,7 @@ def dump(path: Path) -> str:
 
 def old_schema() -> str:
     """Today's schema without the column this step adds."""
-    lines = db.SCHEMA_PATH.read_text().splitlines()
+    lines = history.without_history(db.SCHEMA_PATH.read_text()).splitlines()
     kept = [line for line in lines if not line.strip().startswith("printed ")]
     assert len(kept) == len(lines) - 1
     return "\n".join(kept)
@@ -84,7 +85,7 @@ def test_every_existing_record_is_a_month_record_and_no_row_moves(old):
 def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
     new = tmp_path / "new.db"
     conn = sqlite3.connect(str(new))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.close()
 
     convert(old)

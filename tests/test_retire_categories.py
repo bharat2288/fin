@@ -13,11 +13,13 @@ import pytest
 
 import app as fin_app
 import conversion
+import convert_change_history
 import convert_account_kinds
 import convert_book_type
 import convert_minor_units
 import convert_printed_statements
 import db
+import history
 import retire_categories
 import retire_float_amounts
 
@@ -245,13 +247,13 @@ def test_a_database_through_every_step_has_the_shape_of_a_new_one(old, tmp_path)
     conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
     fresh = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(fresh))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.close()
     # What the next start does to a converted database: the schema script's
     # CREATE IF NOT EXISTS adds any table made since the conversions (the
     # suggestion answers) and leaves every table the steps shaped as it is.
     conn = sqlite3.connect(str(old))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.close()
 
     def shape(path: Path) -> dict:
@@ -431,6 +433,8 @@ def test_the_app_serves_a_converted_database_by_book_and_type(old, started_on, m
     conversion.run_step(old, convert_account_kinds.STEP, today=DAY)
     conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
 
+    # And the change history, the last step of the chain.
+    conversion.run_step(old, convert_change_history.STEP)
     client = started_on(old)
 
     rows = {t["id"]: t for t in client.get("/api/transactions?per_page=50").get_json()["transactions"]}

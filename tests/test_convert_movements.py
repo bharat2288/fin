@@ -15,9 +15,11 @@ import pytest
 import app as fin_app
 import book_type
 import conversion
+import convert_change_history
 import convert_account_kinds
 import convert_movements
 import db
+import history
 import money
 
 DAY = date(2026, 3, 14)
@@ -104,7 +106,7 @@ def dump(path: Path) -> str:
 
 def old_schema() -> str:
     """Today's schema without the column this step adds."""
-    lines = db.SCHEMA_PATH.read_text().splitlines()
+    lines = history.without_history(db.SCHEMA_PATH.read_text()).splitlines()
     kept = [line for line in lines if not line.strip().startswith("other_side_id ")]
     assert len(kept) == len(lines) - 1
     return "\n".join(kept)
@@ -211,7 +213,7 @@ def test_no_row_is_lost_and_every_account_total_is_the_same_to_the_cent(old):
 def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
     new = tmp_path / "new.db"
     conn = sqlite3.connect(str(new))
-    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.close()
 
     convert(old)
@@ -326,6 +328,8 @@ def test_the_app_will_not_start_on_a_database_from_before_the_step(old, started_
 def test_the_app_shows_the_converted_rows_and_their_other_sides(old, started_on):
     convert(old)
 
+    # And the change history, the last step of the chain.
+    conversion.run_step(old, convert_change_history.STEP)
     client = started_on(old)
 
     waiting = client.get("/api/transactions?flow=review&sort=amount&sort_dir=desc").get_json()["transactions"]
