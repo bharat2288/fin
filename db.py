@@ -316,6 +316,10 @@ def init_db() -> None:
     schema_sql = SCHEMA_PATH.read_text()
     conn.executescript(schema_sql)
 
+    # An entry a crash left open would record the seeding below as its own.
+    history.close_left_open(conn)
+    conn.commit()
+
     # The type list, from its one declaration.
     book_type.seed_types(conn)
     conn.commit()

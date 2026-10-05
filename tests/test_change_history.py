@@ -383,3 +383,27 @@ def test_undoing_a_merchant_rule_leaves_no_stale_rule_in_the_cache(imported):
         assert not any(r["pattern"] == "SAMPLE RULE PATTERN" for r in db._get_rules(conn))
     finally:
         conn.close()
+
+
+def test_a_start_after_a_crash_closes_the_entry_left_open_before_reseeding(temp_db):
+    conn = db.get_connection()
+    try:
+        # A crash mid-write: an entry still open, and a default rule gone.
+        left_open = history.open_entry(conn, history.VIA_APP, history.APP_ACTOR)
+        conn.execute("UPDATE change_entries SET open = 1 WHERE id = ?", (left_open,))
+        pattern = db.DEFAULT_MERCHANT_RULES[0][0]
+        conn.execute("DELETE FROM merchant_rules WHERE pattern = ?", (pattern,))
+        conn.execute("DELETE FROM change_rows WHERE entry_id = ?", (left_open,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    db.init_db()  # re-seeds the rule
+
+    conn = db.get_connection()
+    try:
+        assert conn.execute("SELECT open FROM change_entries WHERE id = ?", (left_open,)).fetchone()[0] == 0
+        assert history.row_count(conn, left_open) == 0
+        assert conn.execute("SELECT COUNT(*) FROM merchant_rules WHERE pattern = ?", (pattern,)).fetchone()[0] == 1
+    finally:
+        conn.close()

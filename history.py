@@ -81,13 +81,18 @@ def has_shape(conn: sqlite3.Connection) -> bool:
     return wanted <= names
 
 
+def close_left_open(conn: sqlite3.Connection) -> None:
+    """Close any entry a crash left open: while open it would take rows that
+    are not its own. Not committed here."""
+    conn.execute("UPDATE change_entries SET open = 0 WHERE open = 1")
+
+
 def open_entry(conn: sqlite3.Connection, via: str, actor: str, summary: str = "") -> int:
     """Open an entry and commit it, so the triggers record into it whichever
     connection makes the change. The caller holds WRITE_LOCK."""
     if via not in VIAS:
         raise ValueError(f"unknown via: {via!r}")
-    # An entry left open by a crash would take rows that are not its own.
-    conn.execute("UPDATE change_entries SET open = 0 WHERE open = 1")
+    close_left_open(conn)
     cur = conn.execute(
         "INSERT INTO change_entries (via, actor, summary) VALUES (?, ?, ?)",
         (via, actor or APP_ACTOR, summary),
