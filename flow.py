@@ -105,7 +105,10 @@ PAYING_BACK_RAIL = "PAYNOW"
 LOAN_MERCHANTS = (("UOB Home Loan", "UOB home loan"), ("Car Loan", "DBS auto loan"))
 # Receipts on a household rupee account (HDFC) that are not income. Each is
 # a default; the operator can overturn any row. Matched against the
-# uppercased description, on money received on a household bank account.
+# description uppercased with every space taken out (_compact), on money
+# received on a household bank account: pdfplumber reads HDFC's narrations
+# with no spaces ("NEFTCR-...", "IBFDPREMATPRINCIPAL-..."), so the spaced
+# and the unspaced forms both match.
 #   - An own SGD->INR remittance: "NEFT CR-<IFSC>-<NAME>-<NAME>-<REF>(<REF>)
 #     FAMILY EXPENSE/SAVINGS", sent through DBS, so the IFSC is a DBS Bank
 #     India branch's (DBSS0 and six more). The routing code alone is enough;
@@ -116,16 +119,16 @@ LOAN_MERCHANTS = (("UOB Home Loan", "UOB home loan"), ("Car Loan", "DBS auto loa
 #     wording, so neither leg can be labelled automatically: the rupee leg
 #     waits on the review list, where the operator labels it (and the SGD
 #     leg) with the other side, never income.
-OWN_REMITTANCE_RE = re.compile(r"^NEFT CR-DBSS0[A-Z0-9]{6}\b")
+OWN_REMITTANCE_RE = re.compile(r"^NEFTCR-DBSS0[A-Z0-9]{6}(?![A-Z0-9])")
 OWN_REMITTANCE_FLOW = REVIEW
 #   - A fixed deposit closed early pays its principal back: money coming back
 #     from something the household owns, a movement. Its interest ("IB FD
 #     PREMAT INT PAID", "INTEREST PAID TILL") stays income.
-FD_PRINCIPAL_MARKERS = ("FD PREMAT PRINCIPAL",)
+FD_PRINCIPAL_MARKERS = ("FDPREMATPRINCIPAL",)
 #   - A mutual-fund redemption ("RTGS CR-... REDEMPTION A/C-...") is a
 #     holding sold, but investment holdings are not in the ledger yet (ledger
 #     ticket 02): it waits on the review list.
-REDEMPTION_PREFIX, REDEMPTION_MARKER = "RTGS CR", "REDEMPTION"
+REDEMPTION_PREFIX, REDEMPTION_MARKER = "RTGSCR", "REDEMPTION"
 # Funds transfers and NEFT receipts from family members ("IB FUNDS TRANSFER
 # CR", "NEFT CR" from another bank) are income or gifts (ruling 01): no rule
 # here.
@@ -329,12 +332,17 @@ def _ledger_rule(facts: dict, ctx: ClassifierContext, received: bool) -> str | N
     return None
 
 
+def _compact(text: str) -> str:
+    """Uppercased with every space taken out (as parse_hdfc._compact)."""
+    return "".join(text.split()).upper()
+
+
 def _rupee_receipt_rule(facts: dict, received: bool) -> str | None:
     """The flow a receipt on a household bank account gets from the rupee
     rules above, or None when none knows it."""
     if not (received and _on_household_bank(facts)):
         return None
-    up = " ".join((facts.get("description", "") or "").upper().split())
+    up = _compact(facts.get("description", "") or "")
     if OWN_REMITTANCE_RE.match(up):
         return OWN_REMITTANCE_FLOW
     if any(marker in up for marker in FD_PRINCIPAL_MARKERS):

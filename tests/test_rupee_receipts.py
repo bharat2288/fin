@@ -24,10 +24,17 @@ def on_rupee_account(description, amount=-1_000_000, owner=account_kind.HOUSEHOL
 REMITTANCE = "NEFT CR-DBSS0IN0001-SAMPLE HOLDER-SAMPLE HOLDER-0000OP0000000000(P0000)FAMILY EXPENSE/SAVINGS"
 
 
+def unspaced(description: str) -> str:
+    """The narration as pdfplumber reads it off a real statement: no spaces."""
+    return "".join(description.split())
+
+
 @pytest.mark.parametrize("description", [
     REMITTANCE,
+    unspaced(REMITTANCE),
     # the routing code alone
     "NEFT CR-DBSS0IN0001-SAMPLE HOLDER-SAMPLE HOLDER-0000OP0000000000",
+    "NEFTCR-DBSS0IN0001-SAMPLEHOLDER-SAMPLEHOLDER-0000OP0000000000",
 ])
 def test_an_own_remittance_from_sgd_waits_for_review_never_income(description):
     # Its SGD leg cannot be labelled automatically, so both legs are the
@@ -35,20 +42,27 @@ def test_an_own_remittance_from_sgd_waits_for_review_never_income(description):
     assert on_rupee_account(description) == (flow.REVIEW, None)
 
 
-def test_a_fixed_deposits_principal_coming_back_is_a_movement():
-    assert on_rupee_account("IB FD PREMAT PRINCIPAL-0001") == (flow.MOVEMENT, None)
+@pytest.mark.parametrize("description", ["IB FD PREMAT PRINCIPAL-0001", "IBFDPREMATPRINCIPAL-0001"])
+def test_a_fixed_deposits_principal_coming_back_is_a_movement(description):
+    assert on_rupee_account(description) == (flow.MOVEMENT, None)
 
 
 @pytest.mark.parametrize("description", [
     "IB FD PREMAT INT PAID-0001",
+    "IBFDPREMATINTPAID-0001",
     "INTEREST PAID TILL 31-MAY-2026",
+    "INTERESTPAIDTILL31-MAY-2026",
 ])
 def test_a_fixed_deposits_interest_stays_income(description):
     assert on_rupee_account(description) == ("income", None)
 
 
-def test_a_fund_redemption_waits_for_review():
-    assert on_rupee_account("RTGS CR-SAMP0000001-SAMPLE MUTUAL FUND-REDEMPTION A/C-0000000001") == (flow.REVIEW, None)
+@pytest.mark.parametrize("description", [
+    "RTGS CR-SAMP0000001-SAMPLE MUTUAL FUND-REDEMPTION A/C-0000000001",
+    "RTGSCR-SAMP0000001-SAMPLEMUTUALFUND-REDEMPTIONA/C-0000000001",
+])
+def test_a_fund_redemption_waits_for_review(description):
+    assert on_rupee_account(description) == (flow.REVIEW, None)
 
 
 @pytest.mark.parametrize("description", [
@@ -58,6 +72,10 @@ def test_a_fund_redemption_waits_for_review():
     "RTGS CR-SAMP0000001-SAMPLE RELATIVE-SAMPLE HOLDER",
     # another bank's routing code that only starts like DBS's
     "NEFT CR-DBSX0IN0001-SAMPLE RELATIVE-SAMPLE HOLDER",
+    # and the same, unspaced
+    "IBFUNDSTRANSFERCR-00000000001234-SAMPLERELATIVE",
+    "NEFTCR-SAMP0000001-SAMPLERELATIVE-SAMPLEHOLDER-SAMPN00000000000",
+    "RTGSCR-SAMP0000001-SAMPLERELATIVE-SAMPLEHOLDER",
 ])
 def test_family_receipts_and_other_wording_stay_income(description):
     assert on_rupee_account(description) == ("income", None)
@@ -86,8 +104,21 @@ STATEMENT = ["\n".join([
 ])]
 
 
-def test_an_imported_rupee_statement_lands_each_receipt_in_its_flow(client, monkeypatch):
-    preview = upload(client, monkeypatch, pages=STATEMENT)
+def _unspaced_narrations(page: str) -> str:
+    # Each row's narration with its spaces gone, as pdfplumber reads a real
+    # statement; the reference, dates and figures stay apart.
+    out = []
+    for line in page.splitlines():
+        words = line.split()
+        if len(words) > 5 and words[0].count("/") == 2:
+            line = " ".join([words[0], "".join(words[1:-4]), *words[-4:]])
+        out.append(line)
+    return "\n".join(out)
+
+
+@pytest.mark.parametrize("pages", [STATEMENT, [_unspaced_narrations(STATEMENT[0])]], ids=["spaced", "unspaced"])
+def test_an_imported_rupee_statement_lands_each_receipt_in_its_flow(client, monkeypatch, pages):
+    preview = upload(client, monkeypatch, pages=pages)
     assert preview["errors"] == [], preview["errors"]
     resp = client.post("/api/import/confirm", json={"import_id": preview["import_id"], "groups": preview["groups"]})
     assert resp.status_code == 200, resp.get_json()
