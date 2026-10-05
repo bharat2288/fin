@@ -114,10 +114,15 @@ def test_a_chat_write_is_stamped_with_its_client(imported):
     tx = a_row(imported)
     imported.put(
         f"/api/transactions/{tx['id']}", json={"book": "Kalesh"},
-        environ_base={access_gate.CHAT_CALL_ENVIRON_KEY: access_gate.chat_call_identity("Claude")},
+        environ_base={access_gate.CHAT_CALL_ENVIRON_KEY: access_gate.chat_call_identity("chat:sample-subject")},
     )
     latest = entries(imported)[0]
-    assert (latest["via"], latest["actor"]) == ("chat", "Claude")
+    assert (latest["via"], latest["actor"]) == ("chat", "chat:sample-subject")
+
+
+def test_a_chat_call_with_no_subject_is_labelled_chat_as_the_gate_labels_it():
+    assert access_gate.chat_call_identity("").actor == "chat"
+    assert access_gate.chat_call_identity("chat:sample-subject").via == "chat"
 
 
 def test_only_the_gate_or_a_chat_call_says_who_asked(imported):

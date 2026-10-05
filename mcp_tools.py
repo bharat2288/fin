@@ -20,7 +20,9 @@ Rulings this module carries:
   Statements reach the hosted fin through the upload command (fin_upload.py).
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
-the client's name from the chat gate's token.
+the client the chat gate verified, labelled as folio labels it: `chat:<sub>`,
+the token's subject (access_gate.AccessVerifier), or `chat` without one. There
+is no default actor: every call names who asks.
 """
 
 from __future__ import annotations
@@ -422,7 +424,7 @@ def _answer(resp) -> dict:
     return {"ok": True, "result": _hidden_out(body)}
 
 
-def call(name: str, args: dict | None = None, actor: str = "Claude") -> dict:
+def call(name: str, args: dict | None, actor: str) -> dict:
     """Run one tool for a chat client. Returns {"ok": True, "result": ...}
     (and "change": the history entry and its row count, for a write that
     changed something), {"ok": False, "error": ...}, or, for a write over
@@ -445,7 +447,7 @@ def call(name: str, args: dict | None = None, actor: str = "Claude") -> dict:
     # The chat identity, where the Flask app's second layer (access_gate.
     # RequireGateIdentity) takes it: an environ key no HTTP request can set.
     # It stamps the write via='chat', actor=the client the chat gate verified.
-    environ = {access_gate.CHAT_CALL_ENVIRON_KEY: access_gate.chat_call_identity(actor or "chat client")}
+    environ = {access_gate.CHAT_CALL_ENVIRON_KEY: access_gate.chat_call_identity(actor)}
     client = fin_app.app.test_client()
     if not tool.write:
         try:

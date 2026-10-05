@@ -14,6 +14,8 @@ import mcp_tools
 from test_balance_sheet import bring_in, make_account
 
 BANK = "Sample Bank 0002"
+# The chat gate's label for the client: folio's chat:<sub>.
+ACTOR = "chat:sample-subject"
 
 # The whole surface. A tool added or removed is a change to what a chat client
 # may do, so it changes this list in the same commit (ruling Q3: the tool list
@@ -31,7 +33,7 @@ WRITES = [
 
 
 def call(tool_name, **args):
-    return mcp_tools.call(tool_name, args, actor="Claude")
+    return mcp_tools.call(tool_name, args, actor=ACTOR)
 
 
 def keys_anywhere(value) -> set:
@@ -133,7 +135,7 @@ def test_a_write_lands_at_once_stamped_as_the_client_and_undoes(book):
     assert done["ok"], done
     assert done["change"]["rows"] == 1
     latest = call("history")["result"]["entries"][0]
-    assert (latest["id"], latest["via"], latest["actor"]) == (done["change"]["entry_id"], "chat", "Claude")
+    assert (latest["id"], latest["via"], latest["actor"]) == (done["change"]["entry_id"], "chat", ACTOR)
     assert first_row()["book"] == "Moom"
 
     assert call("undo", entry_id=done["change"]["entry_id"])["ok"]
