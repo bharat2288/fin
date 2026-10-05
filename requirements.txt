@@ -1,3 +1,16 @@
 flask>=3.0
 pdfplumber>=0.10
 openpyxl>=3.1
+# The DBS .xls parser and its tests.
+pandas>=2.0
+xlrd>=2.0
+requests>=2.31
+# Hosting (fin-online D2), pinned at folio's versions: the composed process,
+# the access gate, the MCP server at /mcp, the nightly backup and the seed.
+PyJWT[crypto]==2.15.1
+uvicorn==0.54.0
+a2wsgi==1.10.10
+# 2.x's server API differs from 1.x.
+mcp==2.2.0
+boto3==1.43.106
+APScheduler>=3.10,<4
