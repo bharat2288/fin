@@ -7,6 +7,10 @@ signed as the household sees them: cash and things owned positive, anything
 owed negative. A row's amount is positive for money out.
 
     bank, card   the anchor less the account's own rows since
+    bank with    (Home Reno, a fixed deposit: no statement fin imports) the
+    no statement supplied figure plus the transfer and movement rows naming
+                 it since, on the household's accounts in its currency: money
+                 out of the other account is money into this one (ruling 4)
     loan         the supplied figure plus the movement rows naming the loan
                  since (an instalment is money out, and brings what is owed
                  toward zero), less the interest worked out for those days
@@ -142,6 +146,36 @@ def _naming_rows(conn: sqlite3.Connection, account_id: int, after: str, upto: st
     return row[0], row[1], row[2]
 
 
+# The flows of a row on another account that move a bank account holding no
+# statement: money moved into it or out of it (ruling 4).
+INTO_UNSTATED_FLOWS = ("transfer", flow.MOVEMENT)
+
+
+def _holds_statements(conn: sqlite3.Connection, account_id: int) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM statements WHERE account_id = ? LIMIT 1", (account_id,)
+    ).fetchone() is not None
+
+
+def _moves_into(conn: sqlite3.Connection, account_id: int, currency: str | None,
+                after: str, upto: str) -> tuple[int, int]:
+    """The transfer and movement rows on the household's other accounts, in
+    this account's currency, that name it as their other side, dated after
+    one day up to another: how many, and what they add up to (positive is
+    money out of the other account, so into this one)."""
+    flows = ", ".join("?" for _ in INTO_UNSTATED_FLOWS)
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(t.amount_minor), 0) FROM transactions t "
+        "JOIN statements s ON t.statement_id = s.id "
+        "JOIN accounts a ON a.id = s.account_id "
+        f"WHERE t.other_side_id = ? AND t.flow_type IN ({flows}) AND a.owner = ? "
+        "AND COALESCE(a.currency, ?) = ? AND s.account_id != ? AND t.date > ? AND t.date <= ?",
+        (account_id, *INTO_UNSTATED_FLOWS, account_kind.HOUSEHOLD,
+         TOTAL_CURRENCY, currency or TOTAL_CURRENCY, account_id, after, upto),
+    ).fetchone()
+    return row[0], row[1]
+
+
 def _counted(count: int, one: str, many: str) -> str:
     return f"{count} {one if count == 1 else many} since"
 
@@ -182,6 +216,9 @@ def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: s
            currency: str | None = None):
     """An anchor carried to a day by the rows since: (the balance, how many
     rows, how they are worded)."""
+    if kind == "bank" and not _holds_statements(conn, account_id):
+        count, total = _moves_into(conn, account_id, currency, anchor["date"], upto)
+        return anchor["amount"] + total, count, f"+ {_counted(count, 'transfer', 'transfers')}"
     if kind in OWN_ROW_KINDS:
         count, total = _own_rows(conn, account_id, anchor["date"], upto)
         return anchor["amount"] - total, count, f"+ {_counted(count, 'row', 'rows')}"
