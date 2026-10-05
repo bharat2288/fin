@@ -289,13 +289,24 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
 def discard(conn: sqlite3.Connection, entry_id: int) -> None:
     """Write an entry's rows back and remove it, leaving no trace: for a chat
     write that stopped to ask the operator about its row count. The caller
-    holds WRITE_LOCK and nothing has been written since."""
-    conn.execute("UPDATE change_entries SET open = 0 WHERE id = ?", (entry_id,))
-    conn.commit()
-    _write_back(conn, entry_id)
-    conn.execute("DELETE FROM change_rows WHERE entry_id = ?", (entry_id,))
-    conn.execute("DELETE FROM change_entries WHERE id = ?", (entry_id,))
-    conn.commit()
+    holds WRITE_LOCK and nothing has been written since.
+
+    One transaction: the entry is closed (so the triggers do not record the
+    write-back into it), an undo it made is taken back (the entry it undid
+    is in force again, so no undone_by points at the entry being removed),
+    its rows are written back and it is deleted. Anything failing rolls all
+    of it back and raises: the entry then stands as it was."""
+    try:
+        conn.execute("UPDATE change_entries SET open = 0 WHERE id = ?", (entry_id,))
+        conn.execute("UPDATE change_entries SET undone_by = NULL WHERE undone_by = ?", (entry_id,))
+        conn.execute("UPDATE change_entries SET undoes = NULL WHERE undoes = ?", (entry_id,))
+        _write_back(conn, entry_id)
+        conn.execute("DELETE FROM change_rows WHERE entry_id = ?", (entry_id,))
+        conn.execute("DELETE FROM change_entries WHERE id = ?", (entry_id,))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def without_history(schema: str) -> str:

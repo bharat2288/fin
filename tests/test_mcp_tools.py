@@ -7,6 +7,7 @@ invented.
 """
 
 import json
+import sqlite3
 
 import pytest
 
@@ -214,3 +215,35 @@ def test_a_change_over_twenty_rows_stops_and_gives_the_count(many):
     done = call("rerun_rules", expected_count=count)
     assert done["ok"] and done["change"]["rows"] == count
     assert labels(many) != before
+
+
+def test_undoing_a_change_over_twenty_rows_stops_before_writing_and_gives_the_count(many):
+    done = call("rerun_rules", expected_count=call("rerun_rules")["would_change_rows"])
+    entry, count = done["change"]["entry_id"], done["change"]["rows"]
+    after, history_after = labels(many), call("history")["result"]["entries"]
+
+    answer = call("undo", entry_id=entry)
+
+    assert (answer["ok"], answer.get("stopped"), answer.get("would_change_rows")) == (False, True, count)
+    assert labels(many) == after
+    assert call("history")["result"]["entries"] == history_after
+    assert call("undo", entry_id=entry, expected_count=count + 1)["stopped"] is True
+
+    undone = call("undo", entry_id=entry, expected_count=count)
+    assert undone["ok"], undone
+    assert undone["change"]["rows"] == count
+    assert call("change", entry_id=entry)["result"]["undone_by"] == undone["change"]["entry_id"]
+
+
+def test_a_change_that_could_not_be_put_back_is_reported_as_standing(many, monkeypatch):
+    def broken(conn, entry_id):
+        raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+    monkeypatch.setattr(mcp_tools.history, "discard", broken)
+    answer = call("rerun_rules")
+
+    assert answer["ok"] is False and answer.get("stopped") is not True
+    assert answer["change"]["rows"] > mcp_tools.MANY_ROWS
+    assert "could not be put back" in answer["error"]
+    assert str(answer["change"]["entry_id"]) in answer["error"]
+    assert "FOREIGN KEY" not in answer["error"]

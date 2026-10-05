@@ -346,3 +346,25 @@ def test_an_import_preview_alone_records_nothing(client, stand_in):
     stand_in(ROWS, 100000, 100000 - 14000 - 15950, account=BANK)
     upload(client)
     assert entries(client) == []
+
+
+def test_discarding_an_undo_puts_the_change_back_in_force_in_one_transaction(imported):
+    tx = a_row(imported)
+    first = label(imported, tx["id"], book="Moom")
+    entry = int(first.headers["X-Fin-Change"])
+    undone = imported.post(f"/api/history/{entry}/undo")
+    undo_entry = int(undone.headers["X-Fin-Change"])
+
+    conn = db.get_connection()
+    try:
+        with history.WRITE_LOCK:
+            history.discard(conn, undo_entry)
+        ids = {r[0] for r in conn.execute("SELECT id FROM change_entries")}
+        undone_by = conn.execute("SELECT undone_by FROM change_entries WHERE id = ?", (entry,)).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert undo_entry not in ids and entry in ids
+    assert undone_by is None
+    assert {t["id"]: t["book"] for t in imported.get("/api/transactions?per_page=50").get_json()["transactions"]}[
+        tx["id"]] == "Moom"

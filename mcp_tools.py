@@ -456,6 +456,16 @@ def call(name: str, args: dict | None, actor: str) -> dict:
             return {"ok": False, "error": FIXED_ERROR}
 
     with history.WRITE_LOCK:
+        if name == "undo":
+            # An undo writes back exactly the rows its entry changed, so its
+            # count is known before anything is written: ask first.
+            conn = db.get_connection()
+            try:
+                rows = history.row_count(conn, int(args["entry_id"]))
+            finally:
+                conn.close()
+            if rows > MANY_ROWS and expected != rows:
+                return _stopped(name, rows)
         try:
             resp = _send(client, method, path, payload, environ)
         except Exception:
@@ -470,17 +480,33 @@ def call(name: str, args: dict | None, actor: str) -> dict:
             conn = db.get_connection()
             try:
                 history.discard(conn, int(entry_id))
+            except Exception:
+                # The change stands: say so, and where it is. The type and
+                # text stay here: they can carry row contents.
+                return {
+                    "ok": False,
+                    "change": {"entry_id": int(entry_id), "rows": rows},
+                    "error": (
+                        f"this changed {rows} rows, over the {MANY_ROWS} that need the operator's "
+                        f"count, and the change could not be put back: it stands as change "
+                        f"{entry_id}. Tell the operator; they can undo it from fin's history."
+                    ),
+                }
             finally:
                 conn.close()
-            db.invalidate_rules_cache()
-            return {
-                "ok": False,
-                "stopped": True,
-                "would_change_rows": rows,
-                "error": (
-                    f"this would change {rows} rows, so nothing was changed. Tell the operator "
-                    f"the count, and if they agree call {name} again with expected_count={rows}."
-                ),
-            }
+                db.invalidate_rules_cache()
+            return _stopped(name, rows)
         answer["change"] = {"entry_id": int(entry_id), "rows": rows}
         return answer
+
+
+def _stopped(name: str, rows: int) -> dict:
+    return {
+        "ok": False,
+        "stopped": True,
+        "would_change_rows": rows,
+        "error": (
+            f"this would change {rows} rows, so nothing was changed. Tell the operator "
+            f"the count, and if they agree call {name} again with expected_count={rows}."
+        ),
+    }
