@@ -437,3 +437,15 @@ BEGIN
         json_object('id', OLD.id, 'service_id', OLD.service_id, 'amount', OLD.amount, 'currency', OLD.currency, 'frequency', OLD.frequency, 'periods', OLD.periods, 'account_id', OLD.account_id, 'last_paid', OLD.last_paid, 'renewal_date', OLD.renewal_date, 'status', OLD.status, 'link', OLD.link, 'notes', OLD.notes, 'match_pattern', OLD.match_pattern, 'created_at', OLD.created_at, 'book', OLD.book, 'type_id', OLD.type_id), NULL);
 END;
 -- history:end
+
+-- "Asked first, yes in chat" (fin-surfaces 01 Q3, 02 Changes): a chat change
+-- over mcp_tools.MANY_ROWS rows stands only when the call carried the count
+-- the operator agreed to in chat; this records that count against its entry.
+-- Written by mcp_tools.call, read by the history routes. Not a tracked table.
+-- A new table, made empty by CREATE IF NOT EXISTS on start; no existing row
+-- is converted or rewritten.
+CREATE TABLE IF NOT EXISTS change_asked (
+    entry_id INTEGER PRIMARY KEY REFERENCES change_entries(id),
+    expected_count INTEGER NOT NULL,
+    at TEXT NOT NULL DEFAULT (datetime('now'))
+);

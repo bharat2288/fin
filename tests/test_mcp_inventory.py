@@ -34,7 +34,7 @@ GOLDEN: list[str] = [
     # writes
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "rerun_rules", "change_merchant", "merge_merchants",
-    "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate", "undo",
+    "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate", "stop_claude_writing", "undo",
 ]
 
 CHAT = header(mint(aud=CHAT_AUD))

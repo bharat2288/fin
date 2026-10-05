@@ -566,8 +566,10 @@ def api_history():
         return jsonify({"error": "limit and before must be whole numbers"}), 400
     with get_db() as conn:
         shown = history.entries(conn, limit, before)
+        asked = history.asked_counts(conn, [e["id"] for e in shown])
         for e in shown:
-            e["asked_first"] = _asked_first(e)
+            e["asked_first"] = e["id"] in asked
+            e["asked_count"] = asked.get(e["id"])
         if request.args.get("blockers") == "1":
             # What would refuse each entry's undo, named, so the list can say
             # so before the operator taps it.
@@ -581,10 +583,35 @@ def api_history():
                         **screens.since_looked(conn)})
 
 
-def _asked_first(entry: dict) -> bool:
-    """A chat change over MANY_ROWS rows stands only when the operator said
-    yes to its count in chat first (mcp_tools.call puts any other back)."""
-    return entry["via"] == history.VIA_CHAT and entry["rows"] > mcp_tools.MANY_ROWS
+def _change_currencies(conn, changes: list[dict]) -> None:
+    """Give each changed row the currency its amounts are in: a row's and a
+    figure's are their account's, an account's its own, a bill's its own.
+    A statement removed by the same entry still names its account there."""
+    def account_currency(account_id):
+        if account_id is None:
+            return None
+        found = conn.execute("SELECT currency FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        return (found[0] or "SGD") if found else None
+
+    statement_account = {
+        c["row_id"]: (c["after"] or c["before"] or {}).get("account_id")
+        for c in changes if c["table"] == "statements"
+    }
+    for c in changes:
+        row = c["after"] or c["before"] or {}
+        currency = None
+        if c["table"] == "transactions":
+            sid = row.get("statement_id")
+            account_id = statement_account.get(sid)
+            if account_id is None and sid is not None:
+                found = conn.execute("SELECT account_id FROM statements WHERE id = ?", (sid,)).fetchone()
+                account_id = found[0] if found else None
+            currency = account_currency(account_id)
+        elif c["table"] in ("anchors", "statements"):
+            currency = account_currency(row.get("account_id"))
+        elif c["table"] in ("accounts", "subscriptions"):
+            currency = row.get("currency")
+        c["currency"] = currency or "SGD"
 
 
 @app.route("/api/history/<int:entry_id>")
@@ -596,7 +623,10 @@ def api_history_entry(entry_id: int):
         if shown is None:
             return jsonify({"error": "no such change"}), 404
         shown["blocked_by"] = history.blocker(conn, entry_id) if shown["undone_by"] is None else None
-        shown["asked_first"] = _asked_first(shown)
+        asked = history.asked_counts(conn, [entry_id])
+        shown["asked_first"] = entry_id in asked
+        shown["asked_count"] = asked.get(entry_id)
+        _change_currencies(conn, shown["changes"])
     return jsonify(shown)
 
 
@@ -644,6 +674,18 @@ def _from_chat() -> bool:
 _SCREENS_ONLY = "only fin's own screens can do that; nothing was changed"
 
 
+def _chat_import_refused():
+    """An import from the chat's side (the upload command, stamped via chat)
+    while the operator has switched Claude's writes off: the refusal to
+    return. None when the import may go ahead."""
+    if not _from_chat():
+        return None
+    with get_db() as conn:
+        if screens.claude_may_write(conn):
+            return None
+    return jsonify({"error": screens.IMPORTS_OFF}), 403
+
+
 @app.route("/api/settings")
 def api_settings():
     """The "Claude may write" switch and the history mark Home counts from."""
@@ -663,6 +705,26 @@ def api_settings_claude_write():
     with get_db() as conn:
         screens.set_claude_may_write(conn, data["on"])
         return jsonify({"claude_may_write": screens.claude_may_write(conn)})
+
+
+@app.route("/api/settings/claude-write/off", methods=["POST"])
+def api_settings_claude_write_off():
+    """Switch Claude's writes off: from fin's screens or from the chat (01:
+    the switch "can only be turned off from chat's side", for a lost phone or
+    odd behaviour). It only ever turns writes off; turning them back on is
+    the PUT above, from fin's own screens only. Not a change to the book."""
+    with get_db() as conn:
+        screens.set_claude_may_write(conn, False)
+        return jsonify({"claude_may_write": screens.claude_may_write(conn)})
+
+
+@app.route("/api/changes/marks")
+def api_changes_marks():
+    """The quiet mark (01, "For 02" item 4): the rows the chat changed since
+    the operator last looked, and the accounts whose balance-sheet line it
+    touched, each with the newest such change (its id in the history)."""
+    with get_db() as conn:
+        return jsonify(screens.claude_marks(conn))
 
 
 @app.route("/api/changes/looked", methods=["POST"])
@@ -1813,9 +1875,15 @@ def api_transactions():
         params.append(tx_id)
 
     # look=mixed: rows of a mixed merchant (looked at each time) that nobody
-    # has set by hand yet: the queue's "is this type right?" items.
+    # has set by hand yet: the queue's "is this type right?" items. Only a
+    # typed spending or refund row: an untyped one is already the queue's
+    # "no type" item and a transfer waiting for review its "This was…" item,
+    # so the same row is never listed twice.
     if request.args.get("look") == "mixed":
-        filters += " AND COALESCE(svc.review_each_time, 0) = 1 AND COALESCE(t.cat_source, 'auto') != 'manual'"
+        filters += (
+            " AND COALESCE(svc.review_each_time, 0) = 1 AND COALESCE(t.cat_source, 'auto') != 'manual'"
+            " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL"
+        )
 
     # Type filter (from chart selection or multi-select dropdown): type names,
     # a parent taking its sub-types with it. __untyped__ is the list of rows
@@ -2419,7 +2487,12 @@ def api_import_upload():
     One that does not is refused: none of its rows is in the preview, and its
     entry in `errors` carries the same line under `tie`, with the difference.
     A source with no balance is not checked. No row is skipped by default.
+    Refused (403) from the chat's side (the upload command) while the
+    "Claude may write" switch is off; the operator's own import still works.
     """
+    refused = _chat_import_refused()
+    if refused is not None:
+        return refused
     if "files" not in request.files:
         return jsonify({"error": "No files uploaded"}), 400
 
@@ -2722,6 +2795,9 @@ def api_import_confirm():
     All or nothing: every write of one confirm is one transaction, and any
     failure rolls all of it back.
     """
+    refused = _chat_import_refused()
+    if refused is not None:
+        return refused
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400

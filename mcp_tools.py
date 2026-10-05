@@ -15,7 +15,11 @@ Rulings this module carries:
   without that, or with a different count, it is put back and the count is
   returned, for Claude to tell the operator and ask.
 - With the "Claude may write" switch off in fin (screens.py), every write
-  tool is refused and changes nothing; reads still work. No tool sets it.
+  tool is refused and changes nothing; reads still work. The chat can turn
+  the switch off (stop_claude_writing, allowed while writes are off) and
+  never on: turning it back on is the operator's, in fin.
+- A change over MANY_ROWS that stands on the operator's agreed count is
+  recorded as asked first (history.record_asked), so Changes can say so.
 - No tool imports a statement, changes or deletes an imported row, edits an
   account other than adding a company or a person, sends merchants to the
   type-suggestion service, runs a conversion or touches subscriptions.
@@ -38,6 +42,9 @@ import history
 import screens
 
 MANY_ROWS = 20
+
+# The chat's side of the off switch: the one write allowed while writes are off.
+STOP_WRITING = "stop_claude_writing"
 
 # Keys taken out of every answer, at any depth.
 HIDDEN_KEYS = frozenset({"file", "filename", "filenames", "path", "file_path"})
@@ -362,6 +369,15 @@ _WRITES = [
         lambda a: ("PUT", "/api/rates", _pick(a, "currency", "date", "rate")),
     ),
     _w(
+        "stop_claude_writing",
+        "Switch Claude's writes to fin off, at once: every write tool is then refused and reads "
+        "still work. For a lost phone or odd behaviour. It works while writes are already off. "
+        "Only the operator can switch writes back on, in fin.",
+        {},
+        (),
+        lambda a: ("POST", "/api/settings/claude-write/off", {}),
+    ),
+    _w(
         "undo",
         "Undo one change made from the chat. Refused, naming it, when a later change touched "
         "the same rows: undo that one first. A change made in fin itself is the operator's to undo.",
@@ -470,7 +486,9 @@ def call(name: str, args: dict | None, actor: str) -> dict:
             writes_on = screens.claude_may_write(conn)
         finally:
             conn.close()
-        if not writes_on:
+        # Turning writes off is always allowed: it is the chat's side of the
+        # off switch, and it never writes to the book.
+        if not writes_on and name != STOP_WRITING:
             return {"ok": False, "error": screens.WRITES_OFF}
         if name == "undo":
             conn = db.get_connection()
@@ -520,6 +538,14 @@ def call(name: str, args: dict | None, actor: str) -> dict:
                 conn.close()
                 db.invalidate_rules_cache()
             return _stopped(name, rows)
+        if rows > MANY_ROWS:
+            # It stands on the count the operator agreed to in chat: say so
+            # in the history ("asked first, yes in chat").
+            conn = db.get_connection()
+            try:
+                history.record_asked(conn, int(entry_id), rows)
+            finally:
+                conn.close()
         answer["change"] = {"entry_id": int(entry_id), "rows": rows}
         return answer
 

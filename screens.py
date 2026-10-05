@@ -1,8 +1,9 @@
 """What fin's screens keep that is not part of the book (fin-surfaces 02).
 
 - The "Claude may write" switch (01, off switches): with it off, every chat
-  write tool is refused and reads still work. Only fin's own screens set it;
-  no chat tool can (mcp_tools has none, and the route refuses a chat caller).
+  write tool and every chat-side import (the upload command) is refused, and
+  reads still work. Only fin's own screens turn it on; the chat can only turn
+  it off (mcp_tools.stop_claude_writing), never on.
 - Where the operator last looked in the change history: Home's quiet line
   counts the chat's changes after it. It moves when Recent changes is opened
   or "Looks right" is tapped on Home (02, ruling 7).
@@ -18,6 +19,7 @@ a refusal aside is not a change to the book and is not in the history.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 CLAUDE_MAY_WRITE = "claude_may_write"
@@ -28,6 +30,10 @@ KEYS = (CLAUDE_MAY_WRITE, LAST_LOOKED)
 WRITES_OFF = (
     "the operator has switched off Claude's writes in fin; nothing was changed. "
     "Reads still work. Only the operator can switch writes back on, in fin."
+)
+IMPORTS_OFF = (
+    "Claude's writes are switched off in fin, so an import from Claude's side is "
+    "refused; nothing was imported. The operator can import in fin, or switch writes back on there."
 )
 
 
@@ -83,6 +89,49 @@ def since_looked(conn: sqlite3.Connection) -> dict:
     ).fetchone()
     newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_entries WHERE open = 0").fetchone()[0]
     return {"last_looked": mark, "claude_count": row[0], "latest_claude_at": row[1], "newest": newest}
+
+
+def claude_marks(conn: sqlite3.Connection) -> dict:
+    """What the chat changed after the mark, for the quiet mark on rows and
+    balances (01, "For 02" item 4): each row the chat changed, and each
+    account whose balance-sheet line it touched (a figure, the account
+    itself, or a row naming it as the other side, or a row added to or
+    taken from it), mapped to the newest such change still in force. With
+    no mark yet, every chat change counts."""
+    mark = last_looked(conn) or 0
+    rows: dict[int, int] = {}
+    accounts: dict[int, int] = {}
+
+    def touch(target: dict, key, entry_id: int) -> None:
+        if key is None:
+            return
+        key = int(key)
+        if entry_id > target.get(key, 0):
+            target[key] = entry_id
+
+    changed = conn.execute(
+        "SELECT c.entry_id, c.tbl, c.row_id, c.op, c.before, c.after FROM change_rows c "
+        "JOIN change_entries e ON e.id = c.entry_id "
+        "WHERE e.open = 0 AND e.via = 'chat' AND e.id > ? AND e.undone_by IS NULL",
+        (mark,),
+    ).fetchall()
+    for entry_id, tbl, row_id, op, before, after in changed:
+        old = json.loads(before) if before else {}
+        new = json.loads(after) if after else {}
+        if tbl == "transactions":
+            touch(rows, row_id, entry_id)
+            if old.get("other_side_id") != new.get("other_side_id"):
+                touch(accounts, old.get("other_side_id"), entry_id)
+                touch(accounts, new.get("other_side_id"), entry_id)
+            if op != "update" or old.get("amount_minor") != new.get("amount_minor"):
+                sid = new.get("statement_id") or old.get("statement_id")
+                found = conn.execute("SELECT account_id FROM statements WHERE id = ?", (sid,)).fetchone()
+                touch(accounts, found[0] if found else None, entry_id)
+        elif tbl == "anchors":
+            touch(accounts, new.get("account_id") or old.get("account_id"), entry_id)
+        elif tbl == "accounts":
+            touch(accounts, row_id, entry_id)
+    return {"last_looked": mark or None, "rows": rows, "accounts": accounts}
 
 
 # ---------------------------------------------------------------------------

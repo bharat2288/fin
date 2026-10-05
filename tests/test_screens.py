@@ -15,7 +15,8 @@ import access_gate
 import mcp_tools
 import parsers
 from parse_dbs import ParsedStatement, ParsedTransaction
-from test_balance_sheet import bring_in
+from test_balance_sheet import bring_in, make_account
+from test_mcp_tools import many  # noqa: F401 (a fixture)
 
 BANK = "Sample Bank 0002"
 ACTOR = "chat:sample-subject"
@@ -86,13 +87,62 @@ def test_with_the_switch_off_chat_writes_are_refused_and_reads_work(book):
     assert first_row(book)["notes"] is None
 
     book.put("/api/settings/claude-write", json={"on": True})
-    assert chat("set_note", tx_id=tx["id"], notes="sample note")["ok"] is True
+    done = chat("set_note", tx_id=tx["id"], notes="sample note")
+    assert done["ok"] is True
+
+    # Undo is a write too: refused while the switch is off.
+    book.put("/api/settings/claude-write", json={"on": False})
+    before = book.get("/api/history").get_json()["entries"]
+    refused = chat("undo", entry_id=done["change"]["entry_id"])
+    assert refused["ok"] is False and "switched off" in refused["error"]
+    assert first_row(book)["notes"] == "sample note"
+    assert book.get("/api/history").get_json()["entries"] == before
+    book.put("/api/settings/claude-write", json={"on": True})
+    assert chat("undo", entry_id=done["change"]["entry_id"])["ok"] is True
+    assert first_row(book)["notes"] is None
 
 
-def test_the_switch_is_never_set_from_the_chat(book):
+def test_the_switch_is_never_turned_on_from_the_chat(book):
     resp = book.put("/api/settings/claude-write", json={"on": True}, environ_base=chat_environ())
     assert resp.status_code == 403
-    assert not any("setting" in t.name or "switch" in t.name for t in mcp_tools.TOOLS)
+    book.put("/api/settings/claude-write", json={"on": False})
+    for tool in mcp_tools.TOOLS:
+        args = {k: 1 if v.get("type") == "integer" else "x"
+                for k, v in tool.input_schema["properties"].items() if v.get("type") in ("integer", "string")}
+        method, path, body = tool.request(args)
+        assert path != "/api/settings/claude-write", tool.name
+    assert book.get("/api/settings").get_json()["claude_may_write"] is False
+
+
+def test_the_chat_can_turn_writes_off_even_while_they_are_off(book):
+    before = book.get("/api/history").get_json()["entries"]
+    answer = chat("stop_claude_writing")
+    assert answer["ok"] is True and answer["result"]["claude_may_write"] is False
+    assert book.get("/api/settings").get_json()["claude_may_write"] is False
+    # Again, with writes already off: still allowed, still off.
+    again = chat("stop_claude_writing")
+    assert again["ok"] is True and again["result"]["claude_may_write"] is False
+    assert "change" not in again
+    assert book.get("/api/history").get_json()["entries"] == before
+    tx = first_row(book)
+    assert chat("set_note", tx_id=tx["id"], notes="x")["ok"] is False
+
+
+def test_with_the_switch_off_an_import_from_the_chats_side_is_refused(client):
+    """The upload command arrives stamped as the chat (Claude Code
+    (upload)); with writes off it is refused, and the operator's own import
+    still works."""
+    upload = access_gate.AccessIdentity(email="", gate=access_gate.APP_GATE, client=access_gate.UPLOAD_ACTOR)
+    environ = {"asgi.scope": {access_gate.ACCESS_IDENTITY_SCOPE_KEY: upload}}
+    client.put("/api/settings/claude-write", json={"on": False})
+    up = client.post("/api/import/upload", data={"files": (io.BytesIO(b"x"), "sample.csv")},
+                     content_type="multipart/form-data", environ_base=environ)
+    assert up.status_code == 403 and "switched off" in up.get_json()["error"]
+    confirm = client.post("/api/import/confirm", json={"import_id": 1, "groups": []}, environ_base=environ)
+    assert confirm.status_code == 403
+    # The operator's import is not the chat's: it goes through.
+    bring_in(client, BANK, [("2026-08-03", "SAMPLE GROCER", 14000)], opening=100000, closing=86000)
+    assert client.get("/api/transactions").get_json()["total"] == 1
 
 
 def test_the_switch_takes_only_true_or_false(book):
@@ -165,18 +215,82 @@ def test_an_undo_can_itself_be_undone(book):
     assert first_row(book)["notes"] == "first"
 
 
-def test_a_chat_change_over_the_count_is_marked_asked_first(book, conn):
-    conn.execute("INSERT INTO change_entries (via, actor, summary, open) VALUES ('chat', ?, 'many', 0)",
-                 (ACTOR,))
+def test_asked_first_is_recorded_when_the_chat_carries_the_agreed_count(many):
+    stopped = chat("rerun_rules")
+    assert stopped["stopped"] is True
+    # Stopped: nothing stands, nothing is recorded as asked.
+    assert not any(e["asked_first"] for e in many.get("/api/history").get_json()["entries"])
+
+    count = stopped["would_change_rows"]
+    done = chat("rerun_rules", expected_count=count)
+    entry = done["change"]["entry_id"]
+    shown = many.get("/api/history").get_json()
+    assert shown["many_rows"] == mcp_tools.MANY_ROWS
+    top = shown["entries"][0]
+    assert (top["id"], top["asked_first"], top["asked_count"]) == (entry, True, count)
+    one = many.get(f"/api/history/{entry}").get_json()
+    assert one["asked_first"] is True and one["asked_count"] == count
+
+
+def test_a_large_change_not_asked_in_chat_is_not_marked(many, conn):
+    # The operator's own change over the count, and a chat change under it.
+    many.post("/api/rules/recategorize", json={})
+    tx = first_row(many)
+    chat("set_note", tx_id=tx["id"], notes="small")
+    entries = many.get("/api/history").get_json()["entries"]
+    assert entries[1]["rows"] > mcp_tools.MANY_ROWS and entries[1]["via"] == "app"
+    assert not any(e["asked_first"] for e in entries)
+    # A chat entry over the count with no recorded yes is not marked either.
+    conn.execute("INSERT INTO change_entries (via, actor, summary, open) VALUES ('chat', ?, 'many', 0)", (ACTOR,))
     entry = conn.execute("SELECT MAX(id) FROM change_entries").fetchone()[0]
     for n in range(mcp_tools.MANY_ROWS + 1):
         conn.execute("INSERT INTO change_rows (entry_id, tbl, row_id, op) VALUES (?, 'transactions', ?, 'update')",
                      (entry, 1000 + n))
     conn.commit()
-    shown = book.get("/api/history").get_json()
-    assert shown["entries"][0]["asked_first"] is True
-    assert shown["many_rows"] == mcp_tools.MANY_ROWS
-    assert book.get(f"/api/history/{entry}").get_json()["asked_first"] is True
+    assert many.get(f"/api/history/{entry}").get_json()["asked_first"] is False
+
+
+# --- each changed row's currency --------------------------------------------------
+
+
+def test_a_change_names_each_rows_currency(client, conn):
+    bring_in(client, BANK, [("2026-08-03", "SAMPLE GROCER", 14000)], opening=100000, closing=86000)
+    conn.execute("UPDATE accounts SET currency = 'INR' WHERE name = ?", (BANK,))
+    conn.commit()
+    tx = first_row(client)
+    client.put(f"/api/transactions/{tx['id']}", json={"notes": "rupees"})
+    entry = client.get("/api/history").get_json()["entries"][0]["id"]
+    changes = client.get(f"/api/history/{entry}").get_json()["changes"]
+    assert [c["currency"] for c in changes] == ["INR"]
+    # The import's own entry: its rows, statement and figure, all the account's.
+    imported = client.get("/api/history").get_json()["entries"][-1]["id"]
+    held = client.get(f"/api/history/{imported}").get_json()["changes"]
+    assert {c["currency"] for c in held if c["table"] in ("transactions", "statements", "anchors")} == {"INR"}
+
+
+# --- the quiet mark: what Claude changed since you last looked ---------------------
+
+
+def test_marks_list_the_rows_and_balances_claude_changed_since_you_looked(book, conn):
+    tx = first_row(book)
+    other = book.get("/api/transactions?per_page=50").get_json()["transactions"][1]
+    assert book.get("/api/changes/marks").get_json() == {"last_looked": None, "rows": {}, "accounts": {}}
+
+    note = chat("set_note", tx_id=tx["id"], notes="from chat")["change"]["entry_id"]
+    book.put(f"/api/transactions/{other['id']}", json={"notes": "mine"})  # the operator's own: no mark
+    loan = make_account(book, "Sample Loan", "loan")
+    figure = chat("enter_figure", account_id=loan, amount="1000.00", date="2026-08-31")["change"]["entry_id"]
+
+    marks = book.get("/api/changes/marks").get_json()
+    assert marks["rows"] == {str(tx["id"]): note}
+    assert marks["accounts"] == {str(loan): figure}
+
+    # An undone change leaves no mark; looking clears them all.
+    book.post(f"/api/history/{figure}/undo")
+    assert book.get("/api/changes/marks").get_json()["accounts"] == {}
+    book.post("/api/changes/looked", json={})
+    looked = book.get("/api/changes/marks").get_json()
+    assert looked["rows"] == {} and looked["accounts"] == {}
 
 
 # --- refused statements --------------------------------------------------------
@@ -242,7 +356,9 @@ def test_look_mixed_lists_rows_of_a_mixed_merchant_not_yet_set_by_hand(book, con
     tx = first_row(book)
     conn.execute("INSERT INTO services (name, review_each_time) VALUES ('Sample Market', 1)")
     svc = conn.execute("SELECT id FROM services WHERE name = 'Sample Market'").fetchone()[0]
-    conn.execute("UPDATE transactions SET service_id = ? WHERE id = ?", (svc, tx["id"]))
+    type_id = conn.execute("SELECT id FROM types WHERE kind = 'spending' ORDER BY id LIMIT 1").fetchone()[0]
+    conn.execute("UPDATE transactions SET service_id = ?, type_id = ?, flow_type = 'expense' WHERE id = ?",
+                 (svc, type_id, tx["id"]))
     conn.commit()
     listed = book.get("/api/transactions?look=mixed").get_json()["transactions"]
     assert [r["id"] for r in listed] == [tx["id"]]
@@ -261,3 +377,20 @@ def test_tx_id_reads_one_row_hidden_merchant_or_not(book, conn):
     conn.execute("UPDATE transactions SET service_id = ? WHERE id = ?", (svc, tx["id"]))
     conn.commit()
     assert [r["id"] for r in book.get(f"/api/transactions?tx_id={tx['id']}").get_json()["transactions"]] == [tx["id"]]
+
+
+def test_look_mixed_never_lists_a_row_the_queue_lists_elsewhere(book, conn):
+    """An untyped row is the queue's "no type" item and a transfer waiting
+    for review its "This was…" item: neither is also a mixed-merchant item."""
+    rows = book.get("/api/transactions?per_page=50").get_json()["transactions"]
+    conn.execute("INSERT INTO services (name, review_each_time) VALUES ('Sample Market', 1)")
+    svc = conn.execute("SELECT id FROM services WHERE name = 'Sample Market'").fetchone()[0]
+    conn.execute("UPDATE transactions SET service_id = ?, type_id = NULL, flow_type = 'expense' WHERE id = ?",
+                 (svc, rows[0]["id"]))
+    conn.execute("UPDATE transactions SET service_id = ?, type_id = NULL, flow_type = 'review' WHERE id = ?",
+                 (svc, rows[1]["id"]))
+    conn.commit()
+    assert book.get("/api/transactions?look=mixed").get_json()["transactions"] == []
+    untyped = {r["id"] for r in book.get("/api/transactions?types=__untyped__").get_json()["transactions"]}
+    review = {r["id"] for r in book.get("/api/transactions?flow=review").get_json()["transactions"]}
+    assert rows[0]["id"] in untyped and rows[1]["id"] in review

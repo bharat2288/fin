@@ -153,6 +153,28 @@ def _entry(conn: sqlite3.Connection, r) -> dict:
     }
 
 
+def record_asked(conn: sqlite3.Connection, entry_id: int, expected_count: int) -> None:
+    """Record that a chat change stands on the count the operator agreed to
+    in chat ("asked first, yes in chat"), in change_asked, and commit."""
+    conn.execute(
+        "INSERT OR REPLACE INTO change_asked (entry_id, expected_count) VALUES (?, ?)",
+        (entry_id, expected_count),
+    )
+    conn.commit()
+
+
+def asked_counts(conn: sqlite3.Connection, entry_ids) -> dict[int, int]:
+    """For each of these entries that was asked first in chat, the count the
+    operator agreed to."""
+    ids = [int(i) for i in entry_ids]
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    return dict(conn.execute(
+        f"SELECT entry_id, expected_count FROM change_asked WHERE entry_id IN ({marks})", ids,
+    ).fetchall())
+
+
 def entries(conn: sqlite3.Connection, limit: int = 50, before: int | None = None) -> list[dict]:
     """Closed entries, newest first."""
     sql = "SELECT * FROM change_entries WHERE open = 0"
@@ -307,6 +329,7 @@ def discard(conn: sqlite3.Connection, entry_id: int) -> None:
         conn.execute("UPDATE change_entries SET undoes = NULL WHERE undoes = ?", (entry_id,))
         _write_back(conn, entry_id)
         conn.execute("DELETE FROM change_rows WHERE entry_id = ?", (entry_id,))
+        conn.execute("DELETE FROM change_asked WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM change_entries WHERE id = ?", (entry_id,))
         conn.commit()
     except BaseException:
