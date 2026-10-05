@@ -1,6 +1,6 @@
 """DBS and UOB card statements hand over each card's previous balance and its
-sub-total (M1), so the card ties and anchors like any statement with
-balances. A DBS card whose section is split by cardholder (the Vantage card;
+closing balance (M1: a DBS card's TOTAL, a UOB card's sub-total), so the card
+ties and anchors like any statement with balances. A DBS card whose section is split by cardholder (the Vantage card;
 ruling 3 pending) hands over none and is filed exactly as before.
 
 Synthetic text shaped like pdfplumber's output: invented card numbers,
@@ -30,11 +30,13 @@ DBS_CARDS = "\n".join([
     "USD 9.10",
     "05 AUG SAMPLE MERCHANT TWO 4.50",
     "SUB-TOTAL: 16.80",
+    "TOTAL: 16.80",
     "DBS OTHER MASTERCARD CARD NO.: 0000 0000 0000 2222",
     "PREVIOUS BALANCE 50.00 CR",
     "30 JUL SAMPLE MERCHANT THREE 70.00",
     "SUB-TOTAL: 20.00",
-    "TOTAL: 36.80",
+    "TOTAL: 20.00",
+    "GRAND TOTAL FOR ALL CARD ACCOUNTS: 36.80",
 ])
 
 VISA = "DBS SAMPLE VISA 1111"
@@ -66,8 +68,10 @@ def test_a_dbs_card_with_a_row_not_read_does_not_tie(monkeypatch):
     assert excinfo.value.figures["difference_minor"] == 450
 
 
-def test_a_dbs_card_with_no_sub_total_is_left_with_no_balance(monkeypatch):
-    visa, rest = dbs(monkeypatch, DBS_CARDS.replace("SUB-TOTAL: 20.00\n", ""))
+def test_a_dbs_card_with_no_total_is_left_with_no_balance(monkeypatch):
+    # Its SUB-TOTAL is not its closing balance, and the GRAND TOTAL after it
+    # is not either.
+    visa, rest = dbs(monkeypatch, DBS_CARDS.replace("\nTOTAL: 20.00\n", "\n"))
 
     assert visa.accounts == [VISA] and visa.closing_minor == -1_680
     assert rest.accounts == [OTHER]
@@ -87,6 +91,50 @@ def test_the_dbs_parser_registry_entry_returns_one_statement_per_card(monkeypatc
     assert [s.accounts for s in parsed] == [[VISA], [OTHER]]
 
 
+# --- a card's TOTAL, not its SUB-TOTAL, is its closing balance -------------------
+
+# Rows print between a cardholder block's SUB-TOTAL and the card's TOTAL: an
+# admin fee and its GST, a bill payment that takes the card into credit, a
+# payment reversal. The TOTAL is in credit (CR).
+AFTER_SUB_TOTAL = "\n".join([
+    "DBS Credit Cards",
+    "STATEMENT DATE",
+    "15 Aug 2026",
+    "DBS SAMPLE VISA CARD NO.: 0000 0000 0000 1111",
+    "PREVIOUS BALANCE 200.00",
+    "NEW TRANSACTIONS SAMPLE HOLDER",
+    "20 JUL PAYMENT - DBS INTERNET/WIRELESS 200.00 CR",
+    "25 JUL SAMPLE MERCHANT ONE 50.00",
+    "SUB-TOTAL: 50.00",
+    "01 AUG SAMPLE ADMIN FEE 100.00",
+    "01 AUG GST 9.00",
+    "05 AUG PAYMENT - DBS INTERNET/WIRELESS 300.00 CR",
+    "07 AUG PAYMENT REVERSAL 20.00",
+    "TOTAL: 121.00 CR",
+    "GRAND TOTAL FOR ALL CARD ACCOUNTS: 121.00 CR",
+])
+
+
+def test_the_rows_after_a_sub_total_are_the_cards_and_it_closes_on_its_total(monkeypatch):
+    (visa,) = dbs(monkeypatch, AFTER_SUB_TOTAL)
+
+    assert [(t.description, t.amount_minor, t.card_info) for t in visa.transactions][2:] == [
+        ("SAMPLE ADMIN FEE", 10_000, VISA), ("GST", 900, VISA),
+        ("PAYMENT - DBS INTERNET/WIRELESS", -30_000, VISA), ("PAYMENT REVERSAL", 2_000, VISA),
+    ]
+    # Owed negative; the TOTAL in CR is a credit the bank holds for us.
+    assert (visa.opening_minor, visa.closing_minor) == (-20_000, 12_100)
+    assert tie.check(visa)["difference_minor"] == 0
+
+
+def test_the_grand_total_for_all_cards_is_not_a_cards_total(monkeypatch):
+    text = AFTER_SUB_TOTAL.replace("TOTAL: 121.00 CR\nGRAND", "GRAND")
+    whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement, [text])
+
+    assert [s["total"] for s in whole.card_sections] == [None]
+    assert parse_dbs.by_card(whole) == [whole]
+
+
 # --- a card split by cardholder: ruling 3 pending -------------------------------
 
 SPLIT = "\n".join([
@@ -100,11 +148,15 @@ SPLIT = "\n".join([
     "28 JUL SAMPLE MERCHANT ONE 40.00",
     "NEW TRANSACTIONS OTHER HOLDER",
     "02 AUG SAMPLE MERCHANT TWO 60.00",
-    "SUB-TOTAL: 100.00",
+    "SUB-TOTAL: 60.00",
+    "05 AUG SAMPLE ADMIN FEE 10.00",
+    "TOTAL: 110.00",
     "DBS SAMPLE VISA CARD NO.: 0000 0000 0000 1111",
     "PREVIOUS BALANCE 0.00",
     "25 JUL SAMPLE MERCHANT THREE 12.30",
     "SUB-TOTAL: 12.30",
+    "TOTAL: 12.30",
+    "GRAND TOTAL FOR ALL CARD ACCOUNTS: 122.30",
 ])
 MAIN, SUPPLEMENTARY = "Sample Infinite Card 9999", "Sample Infinite Card 9999 (OH)"
 
@@ -130,6 +182,22 @@ def test_a_card_split_by_cardholder_hands_over_no_balance_and_is_filed_as_before
     assert [(t.date, t.description, t.amount_minor, t.card_info) for t in rest.transactions] == before
     assert {t.card_info for t in rest.transactions} == {MAIN, SUPPLEMENTARY}
     assert VISA not in rest.accounts and {MAIN, SUPPLEMENTARY} <= set(rest.accounts)
+
+
+def test_switched_to_one_bill_the_split_card_ties_on_its_previous_balance_and_total(monkeypatch, holders):
+    # Ruling 3 pending: the switch is off. Switched on, every cardholder's
+    # rows, and the fee after the last SUB-TOTAL, are the card's own, and the
+    # card hands over one balance.
+    monkeypatch.setattr(parse_dbs, "SPLIT_CARD_ONE_BALANCE", True)
+    whole = _read(monkeypatch, parse_dbs, parse_dbs.parse_cc_statement, [SPLIT])
+
+    card, visa = parse_dbs.by_card(whole)
+
+    assert card.accounts == ["DBS SAMPLE INFINITE 9999"]
+    assert [t.amount_minor for t in card.transactions] == [-30_000, 4_000, 6_000, 1_000]
+    assert (card.opening_minor, card.closing_minor) == (-30_000, -11_000)
+    assert tie.check(card)["difference_minor"] == 0
+    assert visa.accounts == [VISA] and tie.check(visa)["difference_minor"] == 0
 
 
 def test_a_statement_holding_only_the_split_card_is_returned_unchanged(monkeypatch, holders):
@@ -223,10 +291,10 @@ def test_a_dbs_card_statement_imports_and_anchors_each_card(client, monkeypatch)
 
 @pytest.mark.parametrize("section", [
     # a month in which the split card printed no row
-    ["PREVIOUS BALANCE 500.00", "SUB-TOTAL: 500.00"],
+    ["PREVIOUS BALANCE 500.00", "TOTAL: 500.00"],
     # a holder the map does not name: the rows fall to the card itself
     ["PREVIOUS BALANCE 500.00", "NEW TRANSACTIONS UNNAMED HOLDER",
-     "02 AUG SAMPLE MERCHANT TWO 60.00", "SUB-TOTAL: 560.00"],
+     "02 AUG SAMPLE MERCHANT TWO 60.00", "SUB-TOTAL: 60.00", "TOTAL: 560.00"],
 ])
 def test_the_split_card_hands_over_no_balance_whatever_its_rows(monkeypatch, holders, section):
     text = "\n".join(["DBS Credit Cards", "STATEMENT DATE", "15 Aug 2026",
