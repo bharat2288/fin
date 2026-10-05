@@ -45,6 +45,8 @@ const S = {
     spending: store.get('spending', { book: 'all', view: 'type', span: 'month', search: '', type: '', oneOffs: true, account: '' }),
     changes: { who: 'all', state: 'any', newOnly: false, asked: false, open: new Set() },
     lastSeenMark: null,        // the mark as it was when Changes was opened: the divider sits there
+    marks: { rows: {}, accounts: {} },  // what Claude changed since you last looked (the quiet mark)
+    manyRows: null,            // the server's count over which a chat change asks first (mcp_tools.MANY_ROWS)
 };
 
 function todayIso() {
@@ -194,6 +196,32 @@ async function act(method, url, body, done) {
 
 function sheetFor(month) { return get(`/api/balance-sheet?month=${month}`); }
 
+// A row list read whole, every page of it, so no total is cut short. Past
+// MAX_ROW_PAGES pages it stops, and `total` beside `transactions.length`
+// lets the page say "showing N of M".
+const ROWS_PER_PAGE = 2000;
+const MAX_ROW_PAGES = 25;
+async function getAllRows(query) {
+    const url = page => `/api/transactions?${query}${query ? '&' : ''}per_page=${ROWS_PER_PAGE}&page=${page}`;
+    const first = await get(url(1));
+    const pages = Math.min(first.pages || 1, MAX_ROW_PAGES);
+    const rest = await Promise.all(Array.from({ length: Math.max(0, pages - 1) }, (_, i) => get(url(i + 2))));
+    const transactions = first.transactions.concat(...rest.map(r => r.transactions));
+    return { transactions, total: first.total ?? transactions.length };
+}
+function shownOf(list) {
+    return list.total > list.transactions.length ? `showing ${list.transactions.length} of ${list.total}` : '';
+}
+
+/** The quiet mark: a small dot on a row or balance Claude changed since you
+ *  last looked, linking to that change in Changes. */
+function claudeMark(entryId) {
+    if (!entryId) return '';
+    return `<button type="button" class="cmark" data-act="goto-change" data-entry="${esc(entryId)}" title="Changed by Claude since you last looked" aria-label="Changed by Claude since you last looked: see change ${esc(entryId)}"><span aria-hidden="true"></span></button>`;
+}
+function rowMark(rowId) { return claudeMark(S.marks.rows[rowId]); }
+function accountMark(accountId) { return claudeMark(S.marks.accounts[accountId]); }
+
 async function refs() {
     const [types, books, accounts, review, kinds] = await Promise.all([
         get('/api/types'), get('/api/books'), get('/api/accounts'), get('/api/review'), get('/api/account-kinds'),
@@ -277,7 +305,19 @@ function restsOn(line, { short = false } = {}) {
     }
     return `statement ${esc(date)}`;
 }
-function fixFor(line) {
+/** A balance in another currency with no saved rate for its day: left out of
+ *  the S$ totals until a rate is fetched or entered. */
+function lacksRate(line) {
+    return !!line.currency && line.currency !== 'SGD' && !line.rate && !line.counted_in
+        && line.balance_minor !== null && line.balance_minor !== undefined;
+}
+/** The day a sheet's rates are for: its as-at day, never after today. */
+function rateDay(asAt) {
+    const d = asAt || monthEnd(S.month);
+    return d > todayIso() ? todayIso() : d;
+}
+function fixFor(line, asAt) {
+    if (lacksRate(line)) return { act: 'rate', data: { currency: line.currency, date: rateDay(asAt) }, title: `Fetch or enter the ${line.currency} rate` };
     const acct = window.__accountById?.get(line.account_id);
     if (acct && acct.takes_a_figure) return { act: 'figure', data: { account: line.account_id }, title: 'Enter a figure' };
     return { href: `#/books/account/${line.account_id}`, title: 'See why' };
@@ -342,7 +382,9 @@ async function render() {
     const token = ++renderToken;
     const view = $('#view');
     try {
-        window.__accountById = (await refs()).accountById;
+        const [rr, marks] = await Promise.all([refs(), get('/api/changes/marks', { fresh: true }).catch(() => null)]);
+        window.__accountById = rr.accountById;
+        S.marks = marks || { rows: {}, accounts: {} };
         const html = await route[2](match);
         if (token !== renderToken) return;
         if (typeof html === 'string') view.innerHTML = html;
@@ -442,18 +484,26 @@ async function loadQueue() {
     const p = (async () => {
         const month = currentMonth();
         const [review, untyped, mixed, sheet, refused, subs, r] = await Promise.all([
-            get('/api/transactions?flow=review&per_page=500&sort=amount&sort_dir=desc'),
-            get('/api/transactions?types=__untyped__&per_page=500&sort=amount&sort_dir=desc'),
-            get('/api/transactions?look=mixed&per_page=200&sort=amount&sort_dir=desc'),
+            getAllRows('flow=review&sort=amount&sort_dir=desc'),
+            getAllRows('types=__untyped__&sort=amount&sort_dir=desc'),
+            getAllRows('look=mixed&sort=amount&sort_dir=desc'),
             sheetFor(month),
             get('/api/statements/refused'),
             get('/api/subscriptions'),
             refs(),
         ]);
         const items = [];
-        review.transactions.forEach(row => items.push(rowItem(row, 'transfer')));
-        untyped.transactions.forEach(row => items.push(rowItem(row, 'untyped')));
-        mixed.transactions.forEach(row => items.push(rowItem(row, 'mixed')));
+        // One item per row: a row the server lists twice is shown once, as
+        // the first of these it is (waiting for review, no type, mixed).
+        const seen = new Set();
+        [[review, 'transfer'], [untyped, 'untyped'], [mixed, 'mixed']].forEach(([list, kind]) => list.transactions.forEach(row => {
+            if (seen.has(row.id)) return;
+            seen.add(row.id);
+            items.push(rowItem(row, kind));
+        }));
+        const capped = [[review, 'transfers waiting'], [untyped, 'rows with no type'], [mixed, 'mixed-merchant rows']]
+            .filter(([list]) => list.total > list.transactions.length)
+            .map(([list, what]) => `${what}: ${shownOf(list)}`);
         subs.forEach(sub => {
             const missed = billMissed(sub);
             if (!missed) return;
@@ -523,7 +573,7 @@ async function loadQueue() {
             list.forEach(i => { if (i.kind === 'bill') return; by[i.currency] = (by[i.currency] || 0) + i.amount; });
             return Object.entries(by).map(([c, m]) => money(m, c)).join(' · ') || '';
         };
-        return { lanes, refusedBy, count: lanes.out.length + lanes.in.length + lanes.books.length,
+        return { lanes, refusedBy, capped, count: lanes.out.length + lanes.in.length + lanes.books.length,
             sums: { out: sum(lanes.out.filter(i => i.kind === 'transfer')), in: sum(lanes.in.filter(i => i.kind === 'transfer')) } };
     })();
     cache.set('queue', p);
@@ -544,7 +594,7 @@ function itemHTML(item) {
         ? `<a class="btn sm${a.primary ? ' primary' : ''}" href="${a.href}">${esc(a.label)}</a>`
         : `<button type="button" class="btn sm${a.primary ? ' primary' : ''}" data-act="${a.act}"${Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(a.label)}</button>`).join('');
     return `<article class="item ${item.kind}">
-        <div><div class="what">${esc(item.title)} ${marker}</div><div class="meta">${esc(item.meta || '')}</div>${item.holds ? `<div class="holds">${esc(item.holds)}</div>` : ''}</div>
+        <div><div class="what">${esc(item.title)} ${marker}${item.row ? rowMark(item.row.id) : item.line ? accountMark(item.line.account_id) : ''}</div><div class="meta">${esc(item.meta || '')}</div>${item.holds ? `<div class="holds">${esc(item.holds)}</div>` : ''}</div>
         <div class="amt">${amount}</div>
         <div class="act">${actions}</div></article>`;
 }
@@ -626,7 +676,7 @@ async function viewHome() {
     }
     now.left_out.forEach(l => {
         const line = now.sections.flatMap(s => s.lines).find(x => x.name === l.name);
-        chips.push(tag('nofig', `${l.name}: ${l.why}, left out`, line ? fixFor(line) : {}));
+        chips.push(tag('nofig', `${l.name}: ${l.why}, left out`, line ? fixFor(line, now.as_at) : {}));
     });
 
     const hero = `<section class="card home-hero">
@@ -642,6 +692,7 @@ async function viewHome() {
         ${list.length > 3 ? `<a class="link small" href="#/queue">${list.length - 3} more in the queue</a>` : ''}</div>`;
     const waits = `<section class="card home-waits">
         <div class="card-head"><h2>Waiting for you</h2><a class="btn sm" href="#/queue">Open the queue · ${q.count}</a></div>
+        ${q.capped.length ? `<p class="small notice">Too many to read at once, so these counts and sums are short: ${esc(q.capped.join('; '))}.</p>` : ''}
         ${q.count ? `<div class="waits-cols">${lane('out', 'Money out', q.lanes.out, q.sums.out)}${lane('in', 'Money in', q.lanes.in, q.sums.in)}</div>
         ${q.lanes.books.length ? `<div style="margin-top:16px">${lane('books', 'Figures and statements', q.lanes.books)}</div>` : ''}`
         : '<p class="empty">Nothing waits for you.</p>'}</section>`;
@@ -722,7 +773,8 @@ async function viewQueue() {
         </section>`;
     const jump = [['out', 'Out', q.lanes.out.length], ['in', 'In', q.lanes.in.length], ['books', 'Figures and statements', q.lanes.books.length]]
         .map(([k, l, n]) => `<a class="chip" href="#/queue" data-act="jump" data-to="lane-${k}">${l} <span class="n">${n}</span></a>`).join('');
-    return `<div class="page-head"><div><h1>Queue</h1><p>${q.count ? `${plural(q.count, 'thing waits', 'things wait')} for you. Money out and money in are kept apart.` : 'Nothing waits for you.'}</p></div>
+    return `<div class="page-head"><div><h1>Queue</h1><p>${q.count ? `${plural(q.count, 'thing waits', 'things wait')} for you. Money out and money in are kept apart.` : 'Nothing waits for you.'}</p>
+            ${q.capped.length ? `<p class="small notice">Too many to read at once, so the counts and sums here are short: ${esc(q.capped.join('; '))}.</p>` : ''}</div>
             <div class="chips phone-only">${jump}</div></div>
         <div class="waits">
             <div class="waits-cols">${lane('out', 'Money out', q.lanes.out, q.sums.out ? `transfers ${q.sums.out}` : '')}${lane('in', 'Money in', q.lanes.in, q.sums.in ? `transfers ${q.sums.in}` : '')}</div>
@@ -995,8 +1047,9 @@ function sortKey(line, key) {
     return 0;
 }
 
-function marginNote(line, refused) {
+function marginNote(line, refused, asAt) {
     const notes = [];
+    if (lacksRate(line)) notes.push(tag('nofig', `no ${line.currency} rate`, fixFor(line, asAt)));
     if (line.since) notes.push(`rolled forward: ${esc(line.since)}`);
     if (line.since_label && line.rows_since) notes.push(`${plural(line.rows_since, 'row')} ${esc(line.since_label)}`);
     if (line.made_of) notes.push(esc(line.made_of.text));
@@ -1025,13 +1078,13 @@ async function viewSheet() {
         const lines = sorted(section.lines.filter(shown));
         if (!lines.length && S.needsLook) return '';
         const rows = lines.map(line => `<tr>
-            <td><a href="#/books/account/${line.account_id}">${esc(line.name)}</a></td>
+            <td><a href="#/books/account/${line.account_id}">${esc(line.name)}</a>${accountMark(line.account_id)}</td>
             <td class="r num">${line.currency !== 'SGD' && line.balance_minor !== null ? esc(money(line.balance_minor, line.currency)) : ''}</td>
-            <td class="r num">${line.in_total ? esc(money(line.value_minor, 'SGD')) : line.counted_in ? '<span class="muted">counted above</span>' : tag('nofig', line.balance === 'no figure' ? 'no figure' : 'left out', fixFor(line))}</td>
+            <td class="r num">${line.in_total ? esc(money(line.value_minor, 'SGD')) : line.counted_in ? '<span class="muted">counted above</span>' : tag('nofig', line.balance === 'no figure' ? 'no figure' : lacksRate(line) ? 'no rate' : 'left out', fixFor(line, sheet.as_at))}</td>
             <td class="tick">${tickOf(line)}</td>
             <td>${restsOn(line)}</td>
             <td>${checkMarker(line)}</td>
-            <td class="margin-note">${marginNote(line, refusedBy.get(line.account_id))}</td></tr>`).join('');
+            <td class="margin-note">${marginNote(line, refusedBy.get(line.account_id), sheet.as_at)}</td></tr>`).join('');
         return `<tr class="section"><td colspan="7">${esc(section.heading)}${section.owed ? ' <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:500">negative: what we owe</span>' : ''}</td></tr>${rows}
             ${S.needsLook ? '' : `<tr class="total"><td>${section.owed ? 'Total owed' : 'Total'}</td><td></td><td class="r num">${esc(money(section.total_minor, 'SGD'))}</td><td colspan="4" class="small muted">${section.left_out.length ? `left out: ${section.left_out.map(l => esc(l.name)).join(', ')}` : ''}</td></tr>`}`;
     }).join('');
@@ -1040,12 +1093,12 @@ async function viewSheet() {
         const lines = sorted(section.lines.filter(shown));
         if (!lines.length && S.needsLook) return '';
         return `<h3 class="eyebrow" style="margin-top:16px">${esc(section.heading)}</h3>${lines.map(line => `<div class="line-card">
-            <div class="spread"><a href="#/books/account/${line.account_id}"><b>${esc(line.name)}</b></a>
-            <span class="num"><b>${line.in_total ? esc(money(line.value_minor, 'SGD')) : line.counted_in ? '' : tag('nofig', line.balance === 'no figure' ? 'no figure' : 'left out', fixFor(line))}</b></span></div>
+            <div class="spread"><span><a href="#/books/account/${line.account_id}"><b>${esc(line.name)}</b></a>${accountMark(line.account_id)}</span>
+            <span class="num"><b>${line.in_total ? esc(money(line.value_minor, 'SGD')) : line.counted_in ? '' : tag('nofig', line.balance === 'no figure' ? 'no figure' : lacksRate(line) ? 'no rate' : 'left out', fixFor(line, sheet.as_at))}</b></span></div>
             ${line.currency !== 'SGD' && line.balance_minor !== null ? `<div class="small num">${esc(money(line.balance_minor, line.currency))}</div>` : ''}
             <div class="small">${restsOn(line, { short: true })}</div>
             <div class="row small" style="margin-top:4px">${checkMarker(line)}</div>
-            <div class="margin-note">${marginNote(line, refusedBy.get(line.account_id))}</div></div>`).join('')}
+            <div class="margin-note">${marginNote(line, refusedBy.get(line.account_id), sheet.as_at)}</div></div>`).join('')}
             ${S.needsLook ? '' : `<div class="spread small" style="padding:8px 0"><b>${section.owed ? 'Total owed' : 'Total'}</b><b class="num">${esc(money(section.total_minor, 'SGD'))}</b></div>`}`;
     }).join('');
 
@@ -1074,6 +1127,8 @@ async function viewSheet() {
             ${S.needsLook ? '' : `<tfoot><tr class="total"><td>Net worth</td><td></td><td class="r num">${esc(money(sheet.net_worth_minor, 'SGD'))}</td><td colspan="4"></td></tr></tfoot>`}</table></div>
         <div class="sheet-lines">${cards || '<p class="empty">Nothing needs a look.</p>'}</div>
         ${sheet.currency_change && sheet.currency_change.minor ? `<p class="small" style="margin-top:12px">Currency change since ${esc(day(sheet.currency_change.from))}: <b class="num">${esc(money(sheet.currency_change.minor, 'SGD', { signed: true }))}</b></p>` : ''}
+        ${sheet.currency_change && sheet.currency_change.minor === null && sheet.currency_change.note ? `<p class="small" style="margin-top:12px">${tag('nofig', 'currency change not worked out')} ${esc(sheet.currency_change.note)}
+            ${[...new Set((sheet.currency_change.lines || []).map(l => l.currency).filter(Boolean))].map(c => `<button class="btn sm" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay(sheet.as_at))}">${esc(c)} rate</button>`).join(' ')}</p>` : ''}
     </section>
     ${monthCheckHTML(sheet)}`;
 }
@@ -1222,7 +1277,7 @@ async function viewAccount(id) {
     const rowList = rows.transactions.map(row => rowTr(row, { account: false })).join('');
     ACT.__rows = new Map(rows.transactions.map(x => [x.id, x]));
     return `${booksNav('sheet')}
-    <div class="page-head"><div><a class="link small" href="#/books">← Balance sheet</a><h1>${esc(acct.name)}</h1>
+    <div class="page-head"><div><a class="link small" href="#/books">← Balance sheet</a><h1>${esc(acct.name)}${accountMark(id)}</h1>
         <p>${esc(acct.type)} · ${esc(acct.owner)} · kept in ${esc(cur)}${acct.status === 'archived' ? ' · archived' : ''}</p></div>
         <div class="row">${acct.takes_a_figure ? `<button class="btn primary" data-act="figure" data-account="${id}">Enter a figure</button>` : ''}${monthPicker()}</div></div>
     <div class="grid-2">
@@ -1251,7 +1306,7 @@ function rowTr(row, { account = true, book = false } = {}) {
     const label = flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
-        <td>${esc(row.description)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
+        <td>${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
         <td>${label}${book || (row.book && row.book !== 'Household') ? ` <span class="small muted">· ${esc(row.book || '')}</span>` : ''}</td>
         <td class="r">${rowAmount(minor, row.currency)}</td></tr>`;
 }
@@ -1300,24 +1355,27 @@ async function viewSpending() {
     const span = sp.span === 'year' ? months : [S.month];
     const books = sp.book === 'all' ? r.books.map(b => b.name) : [sp.book];
     const qs = book => {
-        const p = new URLSearchParams({ book, start: months[0] + '-01', end: monthEnd(S.month), expense_only: 'true', per_page: '5000', sort: 'date', sort_dir: 'desc' });
+        const p = new URLSearchParams({ book, start: months[0] + '-01', end: monthEnd(S.month), expense_only: 'true', sort: 'date', sort_dir: 'desc' });
         if (sp.search) p.set('search', sp.search);
         if (sp.type) p.set('types', sp.type);
         if (sp.account) p.set('account_id', sp.account);
         if (!sp.oneOffs) p.set('exclude_one_off', 'true');
         return p.toString();
     };
-    const lists = await Promise.all(books.map(b => get(`/api/transactions?${qs(b)}`)));
+    // Every page is read: a total is never one page's sum.
+    const lists = await Promise.all(books.map(b => getAllRows(qs(b))));
     const perBook = books.map((book, i) => {
         const year = lists[i].transactions;
         const rows = year.filter(row => span.includes(row.date.slice(0, 7)));
-        return { book, year, rows, by: totalsByCurrency(rows) };
+        const others = [...new Set(year.map(row => row.currency || 'SGD').filter(c => c !== 'SGD'))];
+        return { book, year, rows, by: totalsByCurrency(rows), short: shownOf(lists[i]), others };
     });
     ACT.__rows = new Map(perBook.flatMap(b => b.rows).map(x => [x.id, x]));
 
     const totals = `<div class="tiles">${perBook.map((b, i) => `<div class="tile ${i === 0 && b.book === r.books[0].name ? '' : 'company'}">
         <div class="eyebrow">${esc(b.book)}${i === 0 && b.book === r.books[0].name ? ' · household spending' : ' · its costs'}</div>
-        <div class="fig num">${esc(totalsText(b.by))}</div><p>${plural(b.rows.length, 'row')} · ${span.length === 1 ? esc(monthName(S.month)) : `12 months to ${esc(monthName(S.month, { short: true }))}`}</p></div>`).join('')}</div>
+        <div class="fig num">${esc(totalsText(b.by))}</div><p>${plural(b.rows.length, 'row')} · ${span.length === 1 ? esc(monthName(S.month)) : `12 months to ${esc(monthName(S.month, { short: true }))}`}</p>
+        ${b.short ? `<p class="small" style="color:var(--warn)">Short: too many rows to read at once (${esc(b.short)} over 12 months). Narrow the filters.</p>` : ''}</div>`).join('')}</div>
         ${perBook.length > 1 ? '<p class="never">Each book has its own total. They are never added together.</p>' : ''}`;
 
     const body = perBook.map(b => {
@@ -1334,7 +1392,8 @@ async function viewSpending() {
         }
         return `<section class="card"><div class="card-head"><h2>${esc(b.book)}</h2><p>total <b class="num">${esc(totalsText(b.by))}</b> · ${plural(b.rows.length, 'row')}</p></div>
             <div class="chart-box small"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)} by month"></canvas></div>
-            <p class="small muted" style="margin:6px 0 10px">By month, 12 months to ${esc(monthName(S.month, { short: true }))}, in S$, on its own scale. Tap a month to look at it.</p>
+            <p class="small muted" style="margin:6px 0 10px">By month, 12 months to ${esc(monthName(S.month, { short: true }))}, on its own scale. Tap a month to look at it.
+                ${b.others.length ? `<b>S$ rows only</b>; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows are shown in the table and its total, not in the chart.` : 'In S$.'}</p>
             ${content}</section>`;
     }).join('');
 
@@ -1386,7 +1445,7 @@ function drawSpendingCharts(perBook, months) {
         const fill = i === 0 ? '#8a7a62' : '#c9a774';
         charts.push(new Chart(canvas, {
             type: 'bar',
-            data: { labels: months.map(m => MONTHS[Number(m.slice(5)) - 1]), datasets: [{ label: `${b.book}, S$`, data: sums,
+            data: { labels: months.map(m => MONTHS[Number(m.slice(5)) - 1]), datasets: [{ label: `${b.book}, S$ rows only`, data: sums,
                 backgroundColor: months.map(m => m === S.month ? '#2c2418' : fill), borderRadius: 3 }] },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false,
@@ -1423,7 +1482,7 @@ async function viewBills() {
     }).join('');
     return `${booksNav('bills')}
     <div class="page-head"><div><h1>Bills</h1><p>What renews and when, from the rows that pay it. A renewal with no payment seen goes to the queue.</p></div>
-        <button class="btn primary" data-act="bill" data-id="">Add a bill</button></div>
+        <div class="row"><button class="btn" data-act="bills-refresh">Refresh from rows</button><button class="btn primary" data-act="bill" data-id="">Add a bill</button></div></div>
     <section class="card"><div class="tiles">${Object.entries(perBook).map(([b, m]) => `<div class="tile"><div class="eyebrow">${esc(b)}</div><div class="fig num">${esc(money(m, 'SGD'))}</div><p>a month, active bills</p></div>`).join('')}</div>
         <p class="never">Monthly figures in S$ at the bill's own rate; each book's bills are their own total.</p></section>
     <section class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Bill</th><th class="r">Amount</th><th>How often</th><th class="r desk-only">A month</th><th class="desk-only">Paid from</th><th>Last paid</th><th>Next</th><th>State</th></tr></thead>
@@ -1447,6 +1506,14 @@ ACT.bill = async el => {
         <label class="field"><span>Note</span><input type="text" id="bl-notes" value="${esc(s?.notes || '')}"></label></div>
         <div class="row"><button class="btn primary" data-act="bill-save" data-id="${s ? s.id : ''}">Save</button>${s ? `<button class="btn danger" data-act="bill-delete" data-id="${s.id}">Delete</button>` : ''}</div>`);
 };
+// Each bill's last payment from the rows that match it, and its renewal moved
+// on past a payment seen.
+ACT['bills-refresh'] = async el => {
+    el.disabled = true;
+    const r = await act('POST', '/api/subscriptions/enrich', {}, 'Bills refreshed from rows');
+    el.disabled = false;
+    if (r) { toast(`${plural(r.data.updated || 0, 'bill')} refreshed${r.data.renewals_advanced ? `, ${r.data.renewals_advanced} renewal${r.data.renewals_advanced === 1 ? '' : 's'} moved on` : ''}`); rerender(); }
+};
 ACT['bill-save'] = async el => {
     const v = id => $('#' + id).value.trim();
     if (!v('bl-svc')) { toast('Choose the merchant', { bad: true }); return; }
@@ -1468,7 +1535,7 @@ ACT['bill-delete'] = async el => {
 
 const listState = { search: '', filter: 'all' };
 async function viewLists(tab) {
-    const tabs = [['merchants', 'Merchants'], ['rules', 'Rules'], ['accounts', 'Accounts'], ['types', 'Types']];
+    const tabs = [['merchants', 'Merchants'], ['rules', 'Rules'], ['accounts', 'Accounts'], ['rates', 'Rates'], ['types', 'Types']];
     const head = `${booksNav('lists')}<div class="page-head"><div><h1>Lists</h1><p>What the rules and labels are made of. Every change here lands in Changes, with Undo.</p></div></div>
         <div class="chips" style="margin-bottom:16px">${tabs.map(([k, l]) => `<a class="chip" href="#/books/lists/${k}" aria-pressed="${k === tab}">${l}</a>`).join('')}</div>`;
     const search = placeholder => `<label class="field" style="max-width:360px"><span class="sr-only">Search</span><input type="search" id="ls-search" value="${esc(listState.search)}" placeholder="${placeholder}"></label>`;
@@ -1481,6 +1548,16 @@ async function viewLists(tab) {
         return `${head}<section class="card"><div class="card-head"><h2>Types</h2><p>One list serves every book. The list is declared in fin’s code.</p></div>
             <div class="table-wrap"><table class="t"><thead><tr><th>Type</th><th>Covers</th><th>Not for</th><th>Book</th></tr></thead><tbody>${block('spending')}</tbody></table></div></section>
             <section class="card"><div class="card-head"><h2>Income kinds</h2></div><div class="table-wrap"><table class="t"><tbody>${block('income')}</tbody></table></div></section>`;
+    }
+    if (tab === 'rates') {
+        const saved = await get('/api/rates');
+        const foreign = [...new Set(r.accounts.filter(a => a.currency && a.currency !== 'SGD').map(a => a.currency))];
+        const rows = saved.slice(0, 200).map(x => `<tr><td class="num">${esc(day(x.date))}</td><td>${esc(x.pair)}</td><td class="r num">${esc(x.rate)}</td><td class="small muted">${esc(x.source || '')}</td>
+            <td class="r"><button class="btn sm" data-act="rate" data-currency="${esc(String(x.pair).split('/')[0])}" data-date="${esc(x.date)}">Change</button></td></tr>`).join('');
+        return `${head}<section class="card"><div class="card-head"><div><h2>Rates</h2><p>S$ for one unit, by day. A balance in another currency joins the S$ totals at the rate for its day, or the latest saved before it.</p></div>
+            <div class="row">${(foreign.length ? foreign : ['INR']).map(c => `<button class="btn primary" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay())}">Fetch or enter a ${esc(c)} rate</button>`).join('')}</div></div>
+            <div class="table-wrap"><table class="t"><thead><tr><th>Day</th><th>Pair</th><th class="r">Rate</th><th>Where from</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No rate saved yet.</td></tr>'}</tbody></table></div>
+            ${saved.length > 200 ? `<p class="small muted">The newest 200 of ${saved.length}.</p>` : ''}</section>`;
     }
     if (tab === 'accounts') {
         const rows = r.accounts.map(a => `<tr><td><a href="#/books/account/${a.id}"><b>${esc(a.name)}</b></a></td><td>${esc(a.type)}</td><td>${esc(a.owner)}</td><td>${esc(a.currency)}</td>
@@ -1506,16 +1583,45 @@ async function viewLists(tab) {
     const filters = { all: () => true, untyped: s => !s.type_id, mixed: s => s.review_each_time, hidden: s => s.exclude_from_expense_views, unused: s => !s.txn_count };
     const shown = services.filter(filters[listState.filter] || filters.all).filter(s => !needle || s.name.toLowerCase().includes(needle));
     ACT.__services = new Map(services.map(s => [s.id, s]));
-    const rows = shown.slice(0, 200).map(s => `<tr class="clickable" data-act="merchant" data-id="${s.id}"><td><b>${esc(s.name)}</b></td><td>${esc(s.book || '')}</td>
+    const renaming = listState.renaming;
+    const nameCell = s => renaming
+        ? `<td><input type="text" class="rename-input" data-rename="${s.id}" data-orig="${esc(s.name)}" value="${esc(listState.renames[s.id] ?? s.name)}" aria-label="New name for ${esc(s.name)}"></td>`
+        : `<td><b>${esc(s.name)}</b></td>`;
+    const rows = shown.slice(0, 200).map(s => `<tr${renaming ? '' : ` class="clickable" data-act="merchant" data-id="${s.id}"`}>${nameCell(s)}<td>${esc(s.book || '')}</td>
         <td>${s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type')}</td><td class="r num">${s.txn_count}</td><td class="r num">${s.rule_count}</td>
         <td>${s.review_each_time ? tag('notchecked', 'mixed') : ''} ${s.exclude_from_expense_views ? tag('yours', 'hidden') : ''} ${s.is_one_off ? tag('yours', 'one-off') : ''}</td></tr>`).join('');
     const chip = (k, l, n) => `<button class="chip" data-act="list-filter" data-f="${k}" aria-pressed="${listState.filter === k}">${l} <span class="n">${n}</span></button>`;
-    return `${head}<section class="card"><div class="card-head">${search('Search merchants')}</div>
+    const pending = Object.keys(listState.renames).length;
+    return `${head}<section class="card"><div class="card-head">${search('Search merchants')}
+            <div class="row">${renaming
+                ? `<button class="btn" data-act="rename-mode" data-on="0">Stop renaming</button><button class="btn primary" data-act="rename-save" id="rename-save"${pending ? '' : ' disabled'}>${pending ? `Save ${plural(pending, 'rename')}` : 'Save renames'}</button>`
+                : '<button class="btn" data-act="rename-mode" data-on="1">Rename several</button>'}</div></div>
+        ${renaming ? '<p class="small muted">Type the new names, then save them together: one change in Changes, with Undo. Rules and rows keep pointing at the same merchant.</p>' : ''}
         <div class="chips" style="margin-bottom:12px">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('mixed', 'Mixed', services.filter(filters.mixed).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
         <div class="table-wrap"><table class="t"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty">None.</td></tr>'}</tbody></table></div>
         ${shown.length > 200 ? `<p class="small muted">The first 200 of ${shown.length}; search to narrow.</p>` : ''}</section>`;
 }
 ACT['list-filter'] = el => { listState.filter = el.dataset.f; rerender(); };
+listState.renaming = false;
+listState.renames = {};
+ACT['rename-mode'] = el => { listState.renaming = el.dataset.on === '1'; listState.renames = {}; rerender(); };
+document.addEventListener('input', e => {
+    const el = e.target.closest('[data-rename]');
+    if (!el) return;
+    const name = el.value.trim();
+    if (name && name !== el.dataset.orig) listState.renames[el.dataset.rename] = name; else delete listState.renames[el.dataset.rename];
+    const n = Object.keys(listState.renames).length;
+    const btn = $('#rename-save');
+    if (btn) { btn.disabled = !n; btn.textContent = n ? `Save ${plural(n, 'rename')}` : 'Save renames'; }
+});
+ACT['rename-save'] = async () => {
+    const renames = Object.entries(listState.renames).map(([id, name]) => ({ id: Number(id), name }));
+    if (!renames.length) return;
+    const r = await act('POST', '/api/services/bulk-rename', { renames }, `Renamed ${plural(renames.length, 'merchant')}`);
+    if (!r) return;
+    if (r.data.errors && r.data.errors.length) toast(`${r.data.updated} renamed; ${r.data.errors.length} could not be: a merchant of that name may exist already`, { bad: true, ms: 9000 });
+    listState.renames = {}; listState.renaming = false; rerender();
+};
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'ls-search') { listState.search = e.target.value.trim(); rerender(); } });
 document.addEventListener('search', e => { if (e.target.id === 'ls-search') { listState.search = e.target.value.trim(); rerender(); } }, true);
 
@@ -1620,7 +1726,7 @@ ACT['account-save'] = async el => {
 
 const importState = { preview: null, done: null, busy: false };
 async function viewImport() {
-    const past = await get('/api/import/history').catch(() => []);
+    const [past, coverage] = await Promise.all([get('/api/import/history').catch(() => []), get('/api/statements/coverage?months=6').catch(() => null)]);
     const p = importState.preview;
     afterRender(wireDrop);
     return `${booksNav('import')}
@@ -1633,10 +1739,29 @@ async function viewImport() {
     </section>
     ${p ? importPreviewHTML(p) : ''}
     ${importState.done ? `<section class="card"><p class="notice">${esc(importState.done)}</p></section>` : ''}
+    ${coverage ? coverageHTML(coverage) : ''}
     <section class="card"><div class="card-head"><h2>Past imports</h2></div>
         <div class="table-wrap"><table class="t"><thead><tr><th>When</th><th>Accounts</th><th class="r">Rows</th><th>State</th></tr></thead><tbody>
         ${past.map(b => `<tr><td>${esc(when(b.created_at))}</td><td class="small">${b.accounts.map(esc).join(', ')}</td><td class="r num">${b.total_lines}</td><td>${esc(b.status)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">None yet.</td></tr>'}
         </tbody></table></div></section>`;
+}
+/** Which statements are held: each bank and card account against the last six
+ *  months, the last closed month marked as the one to have. */
+function coverageHTML(c) {
+    const { target_month: target, covered, total } = c.summary;
+    const missing = total - covered;
+    const label = m => monthName(m, { short: true }).replace(/ (\d{2})(\d{2})$/, ' ’$2');
+    const head = c.months.map(m => `<th${m === target ? ' class="target"' : ''}>${esc(label(m))}</th>`).join('');
+    const rows = c.accounts.map(a => `<tr><td><a href="#/books/account/${a.id}">${esc(a.short_name)}</a> <span class="small muted">${a.type === 'bank' ? 'bank' : 'card'}</span></td>${c.months.map(m => {
+        const cell = c.matrix[a.id]?.[m];
+        const cls = m === target ? ' target' : '';
+        return cell && cell.imported
+            ? `<td class="ok${cls}" title="statement held${cell.date ? ', imported ' + esc(day(cell.date)) : ''}">✓</td>`
+            : `<td class="missing${cls}" title="no statement for ${esc(monthName(m))}">○</td>`;
+    }).join('')}</tr>`).join('');
+    return `<section class="card"><div class="card-head"><div><h2>Statements held</h2>
+        <p>${missing ? `${covered} of ${total} accounts have a statement for ${esc(monthName(target))}: <b style="color:var(--warn)">${missing} missing</b>` : `All ${total} accounts have a statement for ${esc(monthName(target))}.`}</p></div></div>
+        <div class="table-wrap"><table class="t coverage"><thead><tr><th>Account</th>${head}</tr></thead><tbody>${rows || `<tr><td colspan="${c.months.length + 1}" class="empty">No bank or card account yet.</td></tr>`}</tbody></table></div></section>`;
 }
 function wireDrop() {
     const zone = $('#drop');
@@ -1745,6 +1870,10 @@ async function viewChanges() {
             send('POST', '/api/changes/looked', { upto: h.newest }).then(() => refreshFrame());
         }
     }
+    S.manyRows = h.many_rows;
+    // Opened from a quiet mark: that change, open, in view.
+    const wanted = Number(new URLSearchParams(location.hash.split('?')[1] || '').get('entry')) || null;
+    if (wanted) S.changes.open.add(wanted);
     const mark = S.lastSeenMark;
     const entries = h.entries;
     const shown = entries.filter(e => entryMatches(e, mark));
@@ -1769,7 +1898,10 @@ async function viewChanges() {
             </div>
             <div class="entry-detail" id="detail-${e.id}"${open ? '' : ' hidden'}>${open ? '<p class="loading">Loading…</p>' : ''}</div></li>`;
     }).join('');
-    afterRender(() => S.changes.open.forEach(id => fillEntry(id)));
+    afterRender(() => {
+        S.changes.open.forEach(id => fillEntry(id));
+        if (wanted) $(`#entry-${wanted}`)?.scrollIntoView({ block: 'center' });
+    });
 
     const f = S.changes;
     const chip = (k, v, label, n) => `<button class="chip" data-act="changes-filter" data-k="${k}" data-v="${v}" aria-pressed="${String(f[k]) === String(v)}">${label}${n !== undefined ? ` <span class="n">${n}</span>` : ''}</button>`;
@@ -1817,14 +1949,16 @@ const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'flow_type_manual
 const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'flow', is_one_off: 'one-off', notes: 'note',
     amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'mixed',
     exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement' };
-async function shownValue(table, field, value, row, ctx) {
+async function shownValue(table, field, value, row, ctx, cur = 'SGD') {
     if (value === null || value === undefined || value === '') return '<span class="none">none</span>';
     if (field === 'type_id' || field === 'type_override_id') return esc(ctx.r.typeById.get(value)?.display_name || `type ${value}`);
     if (field === 'other_side_id' || field === 'account_id') return esc(ctx.r.accountById.get(value)?.name || `account ${value}`);
     if (field === 'service_id') return esc(ctx.services.find(s => s.id === value)?.name || `merchant ${value}`);
     if (['is_one_off', 'review_each_time', 'exclude_from_expense_views'].includes(field)) return value ? 'yes' : 'no';
-    if (table === 'anchors' && field === 'amount') return esc(money(value, ctx.r.accountById.get(row.account_id)?.currency || 'SGD'));
-    if (field === 'amount_minor' || field.endsWith('_amount_minor')) return esc(money(value, 'SGD'));
+    // Each changed row comes with its own currency (its account's): rupees
+    // keep Indian grouping here as everywhere.
+    if (table === 'anchors' && field === 'amount') return esc(money(value, cur));
+    if (field === 'amount_minor' || field.endsWith('_amount_minor')) return esc(money(value, cur));
     if (/date$/.test(field) && typeof value === 'string') return esc(day(value));
     return esc(String(value));
 }
@@ -1850,10 +1984,10 @@ async function changeRowsHTML(entry, { only = null } = {}) {
         if (c.op === 'update') {
             const fields = Object.keys(c.after).filter(k => !SKIP_FIELDS.has(k) && JSON.stringify(c.before[k]) !== JSON.stringify(c.after[k]));
             const parts = [];
-            for (const k of fields) parts.push(`<span class="ba"><span class="small muted">${esc(FIELD_WORDS[k] || k.replace(/_/g, ' '))}</span> <span class="before">${await shownValue(c.table, k, c.before[k], c.before, ctx)}</span> → <span class="after">${await shownValue(c.table, k, c.after[k], c.after, ctx)}</span></span>`);
+            for (const k of fields) parts.push(`<span class="ba"><span class="small muted">${esc(FIELD_WORDS[k] || k.replace(/_/g, ' '))}</span> <span class="before">${await shownValue(c.table, k, c.before[k], c.before, ctx, c.currency)}</span> → <span class="after">${await shownValue(c.table, k, c.after[k], c.after, ctx, c.currency)}</span></span>`);
             what = parts.join(' &nbsp; ') || '<span class="muted small">how it is labelled (no field you see changed)</span>';
         } else if (c.op === 'insert') {
-            what = `<span class="ba"><span class="after">added</span>${c.table === 'transactions' ? ` ${await shownValue(c.table, 'amount_minor', c.after.amount_minor, c.after, ctx)}` : c.table === 'anchors' ? ` ${await shownValue(c.table, 'amount', c.after.amount, c.after, ctx)}` : ''}</span>`;
+            what = `<span class="ba"><span class="after">added</span>${c.table === 'transactions' ? ` ${await shownValue(c.table, 'amount_minor', c.after.amount_minor, c.after, ctx, c.currency)}` : c.table === 'anchors' ? ` ${await shownValue(c.table, 'amount', c.after.amount, c.after, ctx, c.currency)}` : ''}</span>`;
         } else {
             what = `<span class="ba"><span class="before">removed</span></span>`;
         }
@@ -1868,7 +2002,7 @@ async function fillEntry(id) {
     if (!box) return;
     try {
         const entry = await get(`/api/history/${id}`, { fresh: true });
-        box.innerHTML = `<p class="small muted" style="margin-bottom:6px">${esc(when(entry.at))} · ${entry.via === 'chat' ? `Claude (${esc(entry.actor)})` : 'you, in fin'} · ${plural(entry.rows, 'row')}${entry.asked_first ? ` · over ${entry.rows > 20 ? 20 : entry.rows} rows: Claude said the count in chat and you said yes` : ''}</p>${await changeRowsHTML(entry)}`;
+        box.innerHTML = `<p class="small muted" style="margin-bottom:6px">${esc(when(entry.at))} · ${entry.via === 'chat' ? `Claude (${esc(entry.actor)})` : 'you, in fin'} · ${plural(entry.rows, 'row')}${entry.asked_first ? ` · over ${S.manyRows ?? 'the'} rows: Claude said the count (${entry.asked_count}) in chat and you said yes` : ''}</p>${await changeRowsHTML(entry)}`;
     } catch (err) { box.innerHTML = `<p class="notice bad">${esc(err.message)}</p>`; }
 }
 
@@ -1966,3 +2100,70 @@ ACT['row-oneoff'] = async el => {
     const r = await act('PUT', `/api/transactions/${el.dataset.tx}`, { is_one_off: el.checked ? 1 : 0 }, el.checked ? 'Marked one-off' : 'No longer one-off');
     if (r) openRowSheet(Number(el.dataset.tx));
 };
+
+// ---------------------------------------------------------------------------
+// Rates: a balance in another currency joins the S$ totals at the saved rate
+// for its day. Fetch the reference rate, or enter one in place of it. Opened
+// from a line or margin note with no rate, and from Lists.
+// ---------------------------------------------------------------------------
+
+ACT.rate = el => openRate(el.dataset.currency || 'INR', el.dataset.date || rateDay());
+function openRate(currency, date) {
+    openSheet(`${esc(currency)} rate`, `<p>A balance in ${esc(currency)} joins the S$ totals at the rate saved for its day, or the latest saved before it. With none, it is left out.</p>
+        <div class="fields two"><label class="field"><span>Currency</span><select id="rt-cur">${['INR', 'USD', 'EUR', 'GBP', 'AUD'].map(c => `<option${c === currency ? ' selected' : ''}>${c}</option>`).join('')}</select></label>
+            <label class="field"><span>For the day</span><input type="date" id="rt-date" value="${esc(date)}" max="${todayIso()}"></label></div>
+        <button class="btn primary block" data-act="rate-fetch">Fetch the reference rate</button>
+        <p class="small muted">The European Central Bank's rate for that day; a weekend or holiday takes the business day before, and the saved rate says so. A rate already saved for the day is kept.</p>
+        <hr class="rule">
+        <label class="field"><span>Or enter it: S$ for 1 <b id="rt-unit">${esc(currency)}</b></span><input type="text" inputmode="decimal" id="rt-rate" placeholder="for example 0.0153"></label>
+        <button class="btn block" data-act="rate-enter">Save this rate for the day</button>
+        <p class="small muted">An entered rate takes the place of any saved for that day. Every S$ figure is worked out on read, so the months that use it follow.</p>`);
+    $('#rt-cur').addEventListener('change', () => { $('#rt-unit').textContent = $('#rt-cur').value; });
+}
+ACT['rate-fetch'] = async () => {
+    const body = { currency: $('#rt-cur').value, date: $('#rt-date').value };
+    const r = await act('POST', '/api/rates/fetch', body, 'Rate saved');
+    if (r) {
+        const held = r.data.rate || {};
+        toast(r.data.created ? `Saved: 1 ${body.currency} = S$ ${held.rate} (${held.date})` : `Already saved for ${held.date}: 1 ${body.currency} = S$ ${held.rate}`);
+        closeSheet(); rerender();
+    }
+};
+ACT['rate-enter'] = async () => {
+    const rate = $('#rt-rate').value.trim();
+    if (!rate) { toast('Enter the rate, S$ for one unit', { bad: true }); return; }
+    const r = await act('PUT', '/api/rates', { currency: $('#rt-cur').value, date: $('#rt-date').value, rate }, 'Rate entered');
+    if (r) { closeSheet(); rerender(); }
+};
+
+// ---------------------------------------------------------------------------
+// The quiet mark's link: that change, opened, in Changes
+// ---------------------------------------------------------------------------
+
+ACT['goto-change'] = el => {
+    const id = Number(el.dataset.entry);
+    closeSheet();
+    S.changes = { ...S.changes, who: 'all', state: 'any', newOnly: false, asked: false };
+    S.changes.open.add(id);
+    location.hash = `#/changes?entry=${id}`;
+};
+
+// ---------------------------------------------------------------------------
+// The backup warning (fin-online D3): shown quietly in the shell when backups
+// are not configured (hosted only, never in local-dev) or none has succeeded
+// in 36 hours. The server decides; this only shows it.
+// ---------------------------------------------------------------------------
+
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        const res = await fetch('/api/backups/status', { headers: { Accept: 'application/json' } });
+        if (!res.ok) return;
+        const status = await res.json();
+        if (!status.warning) return;
+        const banner = document.createElement('div');
+        banner.className = 'backup-warning';
+        banner.setAttribute('role', 'status');
+        banner.textContent = `Backups: ${status.warning}` + (status.last_success_at ? ` (last success ${status.last_success_at})` : '');
+        document.querySelector('.topbar')?.after(banner);
+    } catch (_) { /* no banner if the status cannot be read */ }
+});

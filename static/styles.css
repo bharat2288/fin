@@ -432,3 +432,26 @@ table.t tr.clickable:hover td { background: var(--bg-elevated); }
     table.rows td:nth-child(4) { grid-column: 3; grid-row: 1; white-space: nowrap; }
 }
 .entry-row .act { justify-self: end; text-align: right; }
+
+/* ---------- The quiet mark: Claude changed this since you last looked ---------- */
+.cmark { display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; margin: 0 0 0 4px; border: 0; background: none;
+    cursor: pointer; vertical-align: middle; border-radius: 50%; }
+.cmark span { width: 8px; height: 8px; border-radius: 50%; background: var(--claude); box-shadow: 0 0 0 2px var(--claude-subtle); }
+.cmark:hover span, .cmark:focus-visible span { background: var(--text-primary); }
+@media (max-width: 760px) {
+    .cmark { width: var(--tap); height: var(--tap); margin: -11px -11px -11px -7px; }
+}
+
+/* ---------- The backup warning: quiet, under the top bar ---------- */
+.backup-warning { margin: 0; padding: 8px 16px; font-size: 13px; color: var(--warn); background: var(--warn-subtle);
+    border-bottom: 1px solid var(--border-subtle); text-align: center; }
+
+/* ---------- Statement coverage on Import ---------- */
+.coverage td, .coverage th { text-align: center; }
+.coverage td:first-child, .coverage th:first-child { text-align: left; }
+.coverage .ok { color: var(--ok); font-weight: 800; }
+.coverage .missing { color: var(--text-tertiary); }
+.coverage .target { background: var(--bg-raised); }
+.coverage .missing.target { color: var(--warn); font-weight: 800; }
+.rename-input { min-width: 180px; width: 100%; }
+.coverage td:first-child { min-width: 130px; }
