@@ -256,6 +256,11 @@ def _refuse_unconverted(conn: sqlite3.Connection) -> None:
             "this database is from before a row could name its other side. Convert it "
             "first: python convert_movements.py <path to database>"
         )
+    if "printed" not in {r[1] for r in conn.execute("PRAGMA table_info(statements)")}:
+        raise DatabaseNotConverted(
+            "this database is from before a row was filed under the statement it printed "
+            "on. Convert it first: python convert_printed_statements.py <path to database>"
+        )
 
 
 def get_connection() -> sqlite3.Connection:

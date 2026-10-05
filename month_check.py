@@ -12,8 +12,10 @@ What counts, so that a month whose rows are all there and correctly labelled
 comes out at exactly nothing unexplained:
 
     the rows      on the accounts net worth is made of: the household's own
-                  bank accounts and cards, archived or not (ruling 6), dated
-                  after the previous month-end up to this one.
+                  bank accounts and cards, archived or not (ruling 6), that
+                  count after the previous month-end up to this one: a row of
+                  a printed statement on its day in that statement's period,
+                  as the balances count it (balance_sheet.ROW_DAY, ruling 1).
     income        every income row on them.
     spending      spending and refund rows in the Household book on them,
                   plus the loan interest worked out for the month. A company's
@@ -81,7 +83,7 @@ def _rows_by_account(conn: sqlite3.Connection, after: str, upto: str) -> dict:
         "JOIN statements s ON t.statement_id = s.id "
         "JOIN accounts a ON s.account_id = a.id "
         "WHERE a.owner = ? AND a.type IN (?, ?) "
-        "AND t.date > ? AND t.date <= ? "
+        f"AND {balance_sheet.ROW_DAY} > ? AND {balance_sheet.ROW_DAY} <= ? "
         "GROUP BY a.id",
         (
             *INCOME_FLOWS, *SPENDING_FLOWS, book_type.DEFAULT_BOOK, book_type.DEFAULT_BOOK,

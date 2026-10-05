@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS statements (
     statement_date TEXT NOT NULL,   -- YYYY-MM-DD
     filename TEXT,                  -- original PDF filename
     imported_at TEXT DEFAULT (datetime('now')),
+    printed INTEGER NOT NULL DEFAULT 0,  -- 1 = one statement as printed: statement_date is its closing day and it holds the rows it printed; 0 = a calendar-month record (statement_date the 1st) of rows from a source that states no balance. An existing database gains it through convert_printed_statements.py
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     UNIQUE(account_id, statement_date)
 );

@@ -19,6 +19,7 @@ import conversion
 import convert_account_kinds
 import convert_minor_units
 import convert_movements
+import convert_printed_statements
 import db
 import retire_float_amounts
 
@@ -383,6 +384,7 @@ def test_a_database_through_both_steps_has_the_shape_of_a_new_one(old, tmp_path)
     # And through the two steps that come after them, which add to the shape.
     conversion.run_step(old, convert_account_kinds.STEP, today=DAY)
     conversion.run_step(old, convert_movements.STEP, today=DAY)
+    conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
     fresh = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(fresh))
     conn.executescript(db.SCHEMA_PATH.read_text())
@@ -535,6 +537,7 @@ def test_the_app_shows_a_converted_database_the_figures_its_floats_stated(old, s
     # name an other side: the two steps that follow the money steps.
     conversion.run_step(old, convert_account_kinds.STEP, today=DAY)
     conversion.run_step(old, convert_movements.STEP, today=DAY)
+    conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
 
     client = started_on(old)
 

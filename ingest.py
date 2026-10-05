@@ -119,22 +119,29 @@ def ensure_statement(
     account_id: int,
     statement_date: str,
     filename: str,
+    printed: bool = False,
 ) -> tuple[int, bool]:
     """Get or create a statement record.
 
     Returns (statement_id, is_new). If a record already exists for this
     account + date, returns the existing ID with is_new=False. Does not
     commit: the caller owns the transaction.
+
+    `printed` is a statement as printed: dated by its closing day, holding
+    the rows it printed. A month record already held on that day (one closing
+    on the 1st) becomes the printed one; a printed record never goes back.
     """
     existing = conn.execute(
         "SELECT id FROM statements WHERE account_id = ? AND statement_date = ?",
         (account_id, statement_date),
     ).fetchone()
     if existing:
+        if printed:
+            conn.execute("UPDATE statements SET printed = 1 WHERE id = ?", (existing["id"],))
         return (existing["id"], False)
 
     cur = conn.execute(
-        "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, ?)",
-        (account_id, statement_date, filename),
+        "INSERT INTO statements (account_id, statement_date, filename, printed) VALUES (?, ?, ?, ?)",
+        (account_id, statement_date, filename, 1 if printed else 0),
     )
     return (cur.lastrowid, True)

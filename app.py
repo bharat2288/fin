@@ -2448,6 +2448,7 @@ def api_import_confirm():
     accounts_created = []
     rules_skipped_generic = 0
     anchors_written = 0
+    rows_refiled = 0
 
     with get_db() as conn:
         try:
@@ -2468,16 +2469,33 @@ def api_import_confirm():
                 account_id = ensure_account(conn, account_name, stmt_type, currency_of[id(group)])
                 accounts_created.append(account_name)
 
-                # Create per-month statement records so coverage matrix reflects each month.
-                # A multi-month CSV (e.g. Citi Oct-Dec) creates 3 statement records.
+                # A row of a statement that states its balances is filed under
+                # that statement as printed, dated by its closing day: which
+                # statement a row printed on is what a card's balance and its
+                # check go by (ruling 1), whatever the row's own date. A row
+                # from a source with no balance goes on a record for its own
+                # calendar month, so the coverage matrix reflects each month
+                # (a multi-month CSV, e.g. Citi Oct-Dec, makes three).
                 filename = f"import_{import_id}_{account_name[:30]}"
+                printed_ids = [
+                    ensure_statement(conn, account_id, line["closing_date"], filename, printed=True)[0]
+                    for line in statement_lines
+                ]
                 month_stmt_ids: dict[str, int] = {}
                 for tx in active_txns:
+                    if tx.get("statement") is not None:
+                        continue
                     ym = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
                     if ym not in month_stmt_ids:
                         stmt_date = f"{ym}-01"
                         sid, _ = ensure_statement(conn, account_id, stmt_date, filename)
                         month_stmt_ids[ym] = sid
+
+                def statement_of(tx) -> int:
+                    if tx.get("statement") is not None:
+                        return printed_ids[tx["statement"]]
+                    ym = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
+                    return month_stmt_ids[ym]
 
                 # --- Deduplication ---
                 # Group import transactions by (date, description, amount) to handle
@@ -2497,24 +2515,41 @@ def api_import_confirm():
                 for key, import_count in import_counts.items():
                     date_val, desc_val, amount_val = key
 
-                    # Count existing matches for this account
-                    existing = conn.execute(
-                        """SELECT COUNT(*) FROM transactions t
+                    # Existing matches for this account, and whether each is
+                    # already filed under a printed statement.
+                    held_rows = conn.execute(
+                        """SELECT t.id, s.printed FROM transactions t
                            JOIN statements s ON t.statement_id = s.id
                            WHERE s.account_id = ?
-                             AND t.date = ? AND t.description = ? AND t.amount_minor = ?""",
+                             AND t.date = ? AND t.description = ? AND t.amount_minor = ?
+                           ORDER BY t.id""",
                         (account_id, date_val, desc_val, amount_val),
-                    ).fetchone()[0]
+                    ).fetchall()
+                    existing = len(held_rows)
 
                     # Only insert the net-new ones
                     to_insert = max(0, import_count - existing)
                     skipped = import_count - to_insert
                     duplicates_skipped += skipped
 
-                    # Link each transaction to its month's statement record
+                    # A row already held on a month record (imported before
+                    # from a source with no balance, or before rows were filed
+                    # by statement) that this statement printed is filed
+                    # under it now.
+                    on_month_records = [r["id"] for r in held_rows if not r["printed"]]
+                    printed_again = [
+                        tx for tx in import_by_key[key][to_insert:] if tx.get("statement") is not None
+                    ]
+                    for held_id, tx in zip(on_month_records, printed_again):
+                        conn.execute(
+                            "UPDATE transactions SET statement_id = ? WHERE id = ?",
+                            (statement_of(tx), held_id),
+                        )
+                        rows_refiled += 1
+
+                    # Link each transaction to its statement record
                     for tx in import_by_key[key][:to_insert]:
-                        tx_month = tx["date"][:7] if tx.get("date") else datetime.now().strftime("%Y-%m")
-                        statement_id = month_stmt_ids[tx_month]
+                        statement_id = statement_of(tx)
                         # A waiting row the operator gave a type or a merchant
                         # in the preview is labelled: it no longer waits.
                         tx_flow = tx.get("flow_type")
@@ -2648,6 +2683,7 @@ def api_import_confirm():
                 "services_created": services_created,
                 "rules_skipped_generic": rules_skipped_generic,
                 "anchors_written": anchors_written,
+                "rows_refiled": rows_refiled,
             }
             conn.execute(
                 "UPDATE batch_imports SET status = 'committed', result_json = ? WHERE id = ?",
@@ -2666,6 +2702,7 @@ def api_import_confirm():
                 "accounts": accounts_created,
                 "rules_skipped_generic": rules_skipped_generic,
                 "anchors_written": anchors_written,
+                "rows_refiled": rows_refiled,
             })
 
         except AnchorRefused as e:

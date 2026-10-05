@@ -6,7 +6,8 @@ is ever guessed. Balances are whole minor units of the account's currency,
 signed as the household sees them: cash and things owned positive, anything
 owed negative. A row's amount is positive for money out.
 
-    bank, card   the anchor less the account's own rows since
+    bank, card   the anchor less the account's own rows since, each row
+                 counted on its day in the statement it printed on (ROW_DAY)
     bank with    (Home Reno, a fixed deposit: no statement fin imports) the
     no statement supplied figure plus the transfer and movement rows naming
                  it since, on the household's accounts in its currency: money
@@ -79,6 +80,24 @@ SINCE_START = f"since {START.day} {START:%b %Y}"
 # The flows of a row a company's book counts as paid for it.
 PAID_FOR_FLOWS = ("expense", "refund")
 
+# The day a row counts on, as SQL over the row `t` and its statement record
+# `s` (ruling 1: a row belongs to the statement it printed on). A row filed
+# under a printed statement counts inside that statement's period: after the
+# account's previous printed statement closed, and on or before this one
+# closed. A late-posting row, dated before the previous statement closed,
+# counts on the first day after it, so it never moves a period already
+# closed; the balance on a statement's closing day is that statement's
+# closing balance. A row on a calendar-month record (a source with no
+# balance) counts on its own date. Within its statement's period a row
+# counts on its own date, so a month-end between two statements is moved by
+# the rows dated up to it.
+ROW_DAY = (
+    "(CASE WHEN s.printed = 1 THEN MIN(s.statement_date, MAX(t.date, COALESCE(("
+    "SELECT date(MAX(p.statement_date), '+1 day') FROM statements p "
+    "WHERE p.account_id = s.account_id AND p.printed = 1 "
+    "AND p.statement_date < s.statement_date), t.date))) ELSE t.date END)"
+)
+
 # Kinds whose balance moves by the account's own rows; the others move by the
 # movement rows that name them as their other side.
 OWN_ROW_KINDS = account_kind.STATEMENT_KINDS
@@ -122,12 +141,12 @@ def _anchor_before(conn: sqlite3.Connection, account_id: int, on: str, inclusive
 
 
 def _own_rows(conn: sqlite3.Connection, account_id: int, after: str, upto: str) -> tuple[int, int]:
-    """How many rows the account holds dated after one day up to another, and
-    what they add up to."""
+    """How many rows the account holds that count after one day up to
+    another (ROW_DAY), and what they add up to."""
     row = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(t.amount_minor), 0) FROM transactions t "
         "JOIN statements s ON t.statement_id = s.id "
-        "WHERE s.account_id = ? AND t.date > ? AND t.date <= ?",
+        f"WHERE s.account_id = ? AND {ROW_DAY} > ? AND {ROW_DAY} <= ?",
         (account_id, after, upto),
     ).fetchone()
     return row[0], row[1]
@@ -138,9 +157,10 @@ def _naming_rows(conn: sqlite3.Connection, account_id: int, after: str, upto: st
     one day up to another: how many, what they add up to, and how many of
     them are money in."""
     row = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(amount_minor), 0), "
-        "COALESCE(SUM(CASE WHEN amount_minor < 0 THEN 1 ELSE 0 END), 0) "
-        "FROM transactions WHERE other_side_id = ? AND flow_type = ? AND date > ? AND date <= ?",
+        "SELECT COUNT(*), COALESCE(SUM(t.amount_minor), 0), "
+        "COALESCE(SUM(CASE WHEN t.amount_minor < 0 THEN 1 ELSE 0 END), 0) "
+        "FROM transactions t JOIN statements s ON t.statement_id = s.id "
+        f"WHERE t.other_side_id = ? AND t.flow_type = ? AND {ROW_DAY} > ? AND {ROW_DAY} <= ?",
         (account_id, flow.MOVEMENT, after, upto),
     ).fetchone()
     return row[0], row[1], row[2]
@@ -169,7 +189,7 @@ def _moves_into(conn: sqlite3.Connection, account_id: int, currency: str | None,
         "JOIN statements s ON t.statement_id = s.id "
         "JOIN accounts a ON a.id = s.account_id "
         f"WHERE t.other_side_id = ? AND t.flow_type IN ({flows}) AND a.owner = ? "
-        "AND COALESCE(a.currency, ?) = ? AND s.account_id != ? AND t.date > ? AND t.date <= ?",
+        f"AND COALESCE(a.currency, ?) = ? AND s.account_id != ? AND {ROW_DAY} > ? AND {ROW_DAY} <= ?",
         (account_id, *INTO_UNSTATED_FLOWS, account_kind.HOUSEHOLD,
          TOTAL_CURRENCY, currency or TOTAL_CURRENCY, account_id, after, upto),
     ).fetchone()
@@ -385,7 +405,7 @@ def _counterparty_line(conn: sqlite3.Connection, account, as_at: date, month: st
         "FROM transactions t "
         "JOIN statements s ON t.statement_id = s.id "
         "JOIN accounts a ON s.account_id = a.id "
-        "WHERE a.owner = ? AND t.date > ? AND t.date <= ? "
+        f"WHERE a.owner = ? AND {ROW_DAY} > ? AND {ROW_DAY} <= ? "
         f"AND ({paid_for_row} OR {naming_row})",
         [
             *currency_params,

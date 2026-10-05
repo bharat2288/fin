@@ -16,6 +16,7 @@ import conversion
 import convert_account_kinds
 import convert_book_type
 import convert_minor_units
+import convert_printed_statements
 import db
 import retire_categories
 import retire_float_amounts
@@ -241,6 +242,7 @@ def test_a_database_through_every_step_has_the_shape_of_a_new_one(old, tmp_path)
     conversion.run_step(old, retire_float_amounts.STEP, today=DAY)
     # And through the step that came after them, which adds to the shape.
     conversion.run_step(old, convert_account_kinds.STEP, today=DAY)
+    conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
     fresh = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(fresh))
     conn.executescript(db.SCHEMA_PATH.read_text())
@@ -426,6 +428,7 @@ def test_the_app_serves_a_converted_database_by_book_and_type(old, started_on, m
     conversion.run_step(old, convert_minor_units.STEP, today=DAY)
     conversion.run_step(old, retire_float_amounts.STEP, today=DAY)
     conversion.run_step(old, convert_account_kinds.STEP, today=DAY)
+    conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
 
     client = started_on(old)
 
