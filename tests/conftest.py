@@ -54,6 +54,13 @@ def real_database_guard(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(sqlite3, "connect", guarded_connect)
 
 
+@pytest.fixture(autouse=True)
+def local_dev_app(monkeypatch: pytest.MonkeyPatch):
+    """Tests drive the Flask app as the laptop runs it: local-dev, no gate.
+    The gate's own tests (test_access_gate.py) turn this off where they need to."""
+    monkeypatch.setitem(fin_app.app.config, "LOCAL_DEV", True)
+
+
 @pytest.fixture
 def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "test_fin.db"

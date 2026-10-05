@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
+import access_gate
 import account_kind
 import anchors
 import balance_sheet
@@ -45,6 +46,11 @@ def get_db():
         conn.close()
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+# LOCAL_DEV: off unless a caller turns it on (python app.py, serve.py in
+# local-dev); without the access gate's identity every request is then refused
+# (fin-online D1, the second layer).
+app.config.update(LOCAL_DEV=False)
+app.wsgi_app = access_gate.RequireGateIdentity(app.wsgi_app, app.config)
 
 
 def format_type_display(parent: str | None, child: str | None) -> str:
@@ -3751,6 +3757,8 @@ def main(argv: list[str] | None = None) -> int:
         print(refused, file=sys.stderr)
         return 1
     print(f"fin running at http://localhost:{args.port}")
+    # The laptop path: loopback only, no access gate in front (fin-online D1).
+    app.config["LOCAL_DEV"] = True
     app.run(host="127.0.0.1", port=args.port, debug=args.debug)
     return 0
 
