@@ -1,9 +1,8 @@
 """What fin's screens keep that is not part of the book (fin-surfaces 02).
 
-- The "Claude may write" switch (01, off switches): with it off, every chat
-  write tool and every chat-side import (the upload command) is refused, and
-  reads still work. Only fin's own screens turn it on; the chat can only turn
-  it off (mcp_tools.stop_claude_writing), never on.
+- The refusal a chat-side import (the upload command) answers while the
+  "Claude may write" switch is off. The switch itself is chat_writes.py's
+  (chat-writes.json beside the book), the one switch; it is not kept here.
 - Where the operator last looked in the change history: Home's quiet line
   counts the chat's changes after it. It moves when Recent changes is opened
   or "Looks right" is tapped on Home (02, ruling 7).
@@ -13,8 +12,8 @@
   leave it" sets one aside: it leaves Home and the top of the queue and stays
   marked refused on its account (02, ruling 8).
 
-None of this is in a tracked table: flipping the switch, looking, or setting
-a refusal aside is not a change to the book and is not in the history.
+None of this is in a tracked table: looking, or setting a refusal aside, is
+not a change to the book and is not in the history.
 """
 
 from __future__ import annotations
@@ -22,16 +21,11 @@ from __future__ import annotations
 import json
 import sqlite3
 
-CLAUDE_MAY_WRITE = "claude_may_write"
 LAST_LOOKED = "last_looked_entry"
 LAST_LOOKED_AT = "last_looked_at"   # when the operator last looked (UTC), for Home's line
-KEYS = (CLAUDE_MAY_WRITE, LAST_LOOKED, LAST_LOOKED_AT)
+KEYS = (LAST_LOOKED, LAST_LOOKED_AT)
 
-# What a chat write tool says while the switch is off.
-WRITES_OFF = (
-    "the operator has switched off Claude's writes in fin; nothing was changed. "
-    "Reads still work. Only the operator can switch writes back on, in fin."
-)
+# What a chat-side import answers while the switch (chat_writes.py) is off.
 IMPORTS_OFF = (
     "Claude's writes are switched off in fin, so an import from Claude's side is "
     "refused; nothing was imported. The operator can import in fin, or switch writes back on there."
@@ -52,21 +46,6 @@ def _set(conn: sqlite3.Connection, key: str, value: str) -> None:
         (key, value),
     )
     conn.commit()
-
-
-def claude_may_write(conn: sqlite3.Connection) -> bool:
-    """On unless the operator switched it off."""
-    return _get(conn, CLAUDE_MAY_WRITE) != "0"
-
-
-def claude_write_changed_at(conn: sqlite3.Connection) -> str | None:
-    """When the switch was last flipped (UTC), or None if it never was."""
-    row = conn.execute("SELECT updated_at FROM app_settings WHERE key = ?", (CLAUDE_MAY_WRITE,)).fetchone()
-    return None if row is None else row[0]
-
-
-def set_claude_may_write(conn: sqlite3.Connection, on: bool) -> None:
-    _set(conn, CLAUDE_MAY_WRITE, "1" if on else "0")
 
 
 def last_looked(conn: sqlite3.Connection) -> int | None:

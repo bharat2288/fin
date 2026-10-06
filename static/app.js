@@ -101,6 +101,10 @@ const S = {
     manyRows: null,            // the server's count over which a chat change asks first (mcp_tools.MANY_ROWS)
 };
 
+/** The one "Claude may write" switch (chat_writes.py): {enabled, changed_at,
+ *  changed_by, unreadable?}. Read fresh: the chat can turn it off at any time. */
+function chatWrites() { return get('/api/chat-writes', { fresh: true }); }
+
 function todayIso() {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -185,10 +189,11 @@ function monthName(m, { short = false } = {}) {
     const [y, n] = m.split('-').map(Number);
     return `${(short ? MONTHS : LONG_MONTHS)[n - 1]} ${y}`;
 }
-/** A history time (UTC, "YYYY-MM-DD HH:MM:SS") in the viewer's own time. */
+/** A history time (UTC, "YYYY-MM-DD HH:MM:SS", or ISO with its Z as the
+ *  switch's changed_at) in the viewer's own time. */
 function when(utc) {
     if (!utc) return '—';
-    const t = new Date(utc.replace(' ', 'T') + 'Z');
+    const t = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(utc) ? utc : utc.replace(' ', 'T') + 'Z');
     if (Number.isNaN(t.getTime())) return utc;
     const hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
     const local = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
@@ -495,12 +500,14 @@ document.addEventListener('fin:theme', () => { if (typeof charts !== 'undefined'
 
 async function refreshFrame() {
     try {
-        const [settings, q] = await Promise.all([get('/api/settings', { fresh: true }), loadQueue()]);
+        const [settings, q, writes] = await Promise.all([get('/api/settings', { fresh: true }), loadQueue(), chatWrites()]);
         $$('[data-count="claude"]').forEach(el => { el.textContent = settings.claude_count ? settings.claude_count : ''; el.title = `${plural(settings.claude_count, 'change')} by Claude since you last looked`; });
         $$('[data-count="queue"]').forEach(el => { el.textContent = q.count ? q.count : ''; el.title = `${plural(q.count, 'thing')} waiting`; });
         const pill = $('#write-pill');
-        pill.classList.toggle('off', !settings.claude_may_write);
-        $('[data-write-state]').textContent = settings.claude_may_write ? 'on' : 'off';
+        pill.classList.toggle('off', !writes.enabled);
+        pill.title = writes.unreadable ? 'The switch could not be read, so Claude’s writes are off. Turn it on in Changes to save it again.'
+            : 'Whether Claude may write to fin from chat';
+        $('[data-write-state]').textContent = writes.enabled ? 'on' : 'off';
     } catch (_) { /* the page itself says what failed */ }
 }
 
@@ -1204,6 +1211,57 @@ async function showResolveSuggestion(row, { n = 1, where = 'card' } = {}) {
     return none;
 }
 
+// ---------------------------------------------------------------------------
+// Type suggestion: prepare, read and tick the names, send only the ticked
+// (ADR-005). Offered only while the server says it is on (it is off without
+// its key); nothing leaves fin until the operator has read the list.
+// ---------------------------------------------------------------------------
+
+async function suggestionsOn() {
+    try { return !!(await get('/api/suggestions/status')).enabled; } catch (_) { return false; }
+}
+function suggestEntryHTML({ lists = false } = {}) {
+    return `<p class="suggest-entry${lists ? ' suggest-entry--lists' : ''}"><span class="small muted">${lists ? 'Merchants no rule knows can be' : 'These can be'} sent for a type suggestion, one name at a time, after you read the list.</span>
+        <button type="button" class="btn sm quiet" data-act="suggest-types">${icon('list-bullets')}Suggest types…</button></p>`;
+}
+let suggestList = [];
+ACT['suggest-types'] = async el => {
+    el.disabled = true;
+    const r = await send('POST', '/api/suggestions/prepare');
+    el.disabled = false;
+    if (!r.ok) { toast(r.data.error || 'The list could not be prepared; nothing was sent.', { bad: true }); return; }
+    suggestList = r.data.merchants || [];
+    if (!suggestList.length) { toast('No new merchant names to ask about. Nothing was sent.'); return; }
+    const items = suggestList.map((m, i) => `<label class="check suggest-pick"><input type="checkbox" class="suggest-pick-box" data-index="${i}" checked data-change="suggest-tick"><span>${esc(m)}</span></label>`).join('');
+    openSheet('Read the list before anything is sent', `<p>Nothing has been sent. Each ticked name below is sent on its own, with the type list and nothing else. Untick any that is a person’s name or that you do not want sent.</p>
+        <div class="suggest-pick-head"><span class="small muted" id="suggest-n">${plural(suggestList.length, 'name')} ticked</span>
+            <span><button type="button" class="btn sm quiet" data-act="suggest-all" data-on="1">Tick all</button><button type="button" class="btn sm quiet" data-act="suggest-all" data-on="0">Untick all</button></span></div>
+        <div class="suggest-pick-list" role="group" aria-label="Merchant names to send">${items}</div>`,
+        { eyebrow: 'Suggest types', center: true,
+          foot: `<button class="btn" data-act="close-sheet">Not now</button><button class="btn primary" data-act="suggest-send" id="suggest-send">Send the ticked names</button>` });
+};
+function suggestTicked() {
+    return $$('.suggest-pick-box').filter(b => b.checked).map(b => suggestList[Number(b.dataset.index)]);
+}
+ACT['suggest-tick'] = () => {
+    const n = suggestTicked().length;
+    const label = $('#suggest-n'); if (label) label.textContent = `${plural(n, 'name')} ticked`;
+    const go = $('#suggest-send'); if (go) go.disabled = n === 0;
+};
+ACT['suggest-all'] = el => { $$('.suggest-pick-box').forEach(b => { b.checked = el.dataset.on === '1'; }); ACT['suggest-tick'](); };
+ACT['suggest-send'] = async el => {
+    const ticked = suggestTicked();
+    if (!ticked.length) { toast('Nothing ticked, so nothing was sent.'); return; }
+    el.disabled = true;
+    const r = await send('POST', '/api/suggestions/send', { merchants: ticked });
+    closeSheet();
+    if (!r.ok) { toast(r.data.error || 'Nothing was sent.', { bad: true }); return; }
+    const parts = [`${plural(r.data.sent, 'merchant name')} answered`];
+    if (r.data.stopped) parts.push(`Stopped: ${r.data.stopped}. ${r.data.remaining} not sent`);
+    toast(parts.join('. ') + '.', { bad: !!r.data.stopped, ms: 9000 });
+    rerender();
+};
+
 /** fin's guess for a waiting transfer, as words and the "Yes" it offers. */
 function transferGuessWords(g) {
     const other = g.other_side ? esc(g.other_side) : 'that account';
@@ -1284,9 +1342,10 @@ async function laneHTML(key, title, list) {
         const open = queueOpen[`${key}-${kind}`] || QUEUE_PAGE;
         const shown = await Promise.all(cards.slice(0, open).map(queueCardHTML));
         const more = cards.length - open;
+        const ask = kind === 'untyped' && (await suggestionsOn()) ? suggestEntryHTML() : '';
         return `<div class="q-group">
             <h3 class="q-group__head"><span>${esc(heading)} <span class="q-group__n">· ${items.length}</span></span><span class="num">${esc(sumByCurrency(items))}</span></h3>
-            ${shown.join('')}
+            ${ask}${shown.join('')}
             ${more > 0 ? `<button class="btn block q-show" data-act="queue-more" data-lane="${key}-${kind}">Show ${more} more</button>` : ''}</div>`;
     }));
     return `<section class="card card--lift lane-card" id="lane-${key}">
@@ -2728,12 +2787,13 @@ async function viewLists(tab) {
         ${renaming ? '' : `<td class="sl-sub">${esc(s.book || 'no book')} · ${typeCell(s)} · ${plural(s.rule_count, 'rule')} ${marks(s)}</td>`}</tr>`).join('');
     const chip = (k, l, n) => `<button class="chip" data-act="list-filter" data-f="${k}" aria-pressed="${listState.filter === k}">${l} <span class="n">${n}</span></button>`;
     const pending = Object.keys(listState.renames).length;
+    const ask = !renaming && services.some(filters.untyped) && (await suggestionsOn()) ? suggestEntryHTML({ lists: true }) : '';
     return `${head}<section class="card"><div class="section-header">${search('Search merchants')}
             <div class="row">${renaming
                 ? `<button class="btn" data-act="rename-mode" data-on="0">Stop renaming</button><button class="btn primary" data-act="rename-save" id="rename-save"${pending ? '' : ' disabled'}>${pending ? `Save ${plural(pending, 'rename')}` : 'Save renames'}</button>`
                 : `<button class="btn" data-act="rename-mode" data-on="1">${icon('pencil-simple')}Rename several</button><button class="btn primary" data-act="merchant-add">${icon('plus')}Add a merchant</button>`}</div></div>
         ${renaming ? '<p class="card-foot sl-lead">Type the new names, then save them together: one change in Changes, with Undo. Rules and rows keep pointing at the same merchant.</p>' : ''}
-        <div class="chips sl-chips">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('mixed', 'Mixed', services.filter(filters.mixed).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
+        ${ask}<div class="chips sl-chips">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('mixed', 'Mixed', services.filter(filters.mixed).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
         <div class="table-wrap"><table class="t sl-stack${renaming ? ' sl-renaming' : ''}"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty sl-name">None.</td></tr>'}</tbody></table></div>
         ${shown.length > 200 ? `<p class="card-foot">The first 200 of ${shown.length}; search to narrow.</p>` : ''}</section>`;
 }
@@ -3041,13 +3101,23 @@ function importPreviewHTML(p) {
             <div class="row"><button class="btn" data-act="import-clear">Start again</button><button class="btn primary" data-act="import-confirm">Import ${plural(rows, 'row')}</button></div></section>${groupsHTML}`
             : `<section class="card import-bar"><p>Nothing to import.</p><div class="row"><button class="btn" data-act="import-clear">Start again</button></div></section>`}`;
 }
+/** The choices a confirm may carry for one previewed row (app.py
+ *  _CONFIRM_ROW_CHOICES); its facts stay on the server. */
+const IMPORT_CHOICES = ['book', 'type_id', 'service_id', 'flow_type', 'other_side_id', '_skip', 'is_one_off', 'cat_source'];
+function importChoices(t) {
+    const out = {};
+    IMPORT_CHOICES.forEach(k => { if (k in t) out[k] = t[k]; });
+    return out;
+}
 ACT['import-clear'] = () => { importState.preview = null; importState.done = null; rerender(); };
 ACT['import-confirm'] = async el => {
     const p = importState.preview;
     el.disabled = true;
     const r = await send('POST', '/api/import/confirm', {
         import_id: p.import_id,
-        groups: p.groups.map(g => ({ account: g.account, transactions: g.transactions, statements: g.statements || [] })),
+        // Choices only: the facts are the preview the server kept (main's
+        // facts-free confirm); every group, in order, each row by position.
+        groups: p.groups.map(g => ({ account: g.account, transactions: g.transactions.map(importChoices) })),
     });
     if (!r.ok) { el.disabled = false; toast(r.data.error || 'Nothing was imported', { bad: true }); return; }
     importState.preview = null;
@@ -3258,8 +3328,8 @@ const STATE_WORDS = { any: 'Any', can: 'Can undo', refused: 'Undo refused', undo
 
 /** The "Claude may write" switch as folio's status row (walk C1, C1.1): on,
  *  a quiet row; off, the whole card turns burnt orange and says so. */
-function writeSwitchHTML(settings, h) {
-    const on = settings.claude_may_write;
+function writeSwitchHTML(state, h) {
+    const on = !!state.enabled;
     const sw = `<button class="switch" role="switch" aria-checked="${on}" data-act="claude-switch" aria-label="Claude may write">
         <span class="track" aria-hidden="true"></span><span class="switch-word">${on ? 'On' : 'Off'}</span></button>`;
     if (!on) {
@@ -3268,7 +3338,8 @@ function writeSwitchHTML(settings, h) {
                 <span class="write-icon" aria-hidden="true">${icon('prohibit')}</span>
                 <div class="write-text"><h2 id="write-head">Claude may not write</h2>
                     <p>Claude can still read fin and answer in chat. Every write from chat is refused and changes nothing.</p>
-                    ${settings.claude_write_changed_at ? `<p class="write-since">Off since ${esc(when(settings.claude_write_changed_at))}.</p>` : ''}</div>
+                    ${state.unreadable ? '<p class="write-since">The switch could not be read, so writes are off. Turning it on saves it again.</p>'
+                        : state.changed_at ? `<p class="write-since">Off since ${esc(when(state.changed_at))}.</p>` : ''}</div>
                 <div class="write-end">${sw}<button class="btn primary" data-act="claude-switch-on">Turn it back on</button></div>
             </div></section>`;
     }
@@ -3281,7 +3352,7 @@ function writeSwitchHTML(settings, h) {
 }
 
 async function viewChanges() {
-    const [h, settings, r, services] = await Promise.all([get('/api/history?limit=300&blockers=1', { fresh: true }), get('/api/settings', { fresh: true }), refs(), servicesList()]);
+    const [h, writes, r, services] = await Promise.all([get('/api/history?limit=300&blockers=1', { fresh: true }), chatWrites(), refs(), servicesList()]);
     const ctx = { r, services };
     if (!S.onChanges) {
         // The divider stays where the mark was when the page was opened; opening it is looking.
@@ -3349,7 +3420,7 @@ async function viewChanges() {
     // On a phone the filters fold behind one button that names what is on (walk C2.1).
     const active = [f.who !== 'all' ? WHO_WORDS[f.who] : '', f.state !== 'any' ? STATE_WORDS[f.state] : '', f.newOnly ? 'New' : '', f.asked ? 'Asked first' : ''].filter(Boolean);
     return `<div class="page-head"><div><span class="eyebrow">Changes</span><h1>Recent changes</h1><p>Every write, yours and Claude’s, in one undoable list. There is no confirm screen: you check here, and undo.</p></div></div>
-    ${writeSwitchHTML(settings, h)}
+    ${writeSwitchHTML(writes, h)}
     <section class="card changes-card">
         <button class="chip filters-fold" data-act="changes-fold" aria-expanded="${!!f.folded}" aria-controls="change-filters">${icon('funnel')} Filters${active.length ? ` · ${esc(active.join(', '))}` : ''}</button>
         <div class="filter-set${f.folded ? ' is-open' : ''}" id="change-filters">
@@ -3381,12 +3452,26 @@ function tickedChanged() {
     b.textContent = n ? `Undo ${n} selected` : 'Undo selected';
 }
 ACT['entry-tick'] = () => tickedChanged();
-async function setClaudeWrite(on) {
-    const r = await send('PUT', '/api/settings/claude-write', { on });
-    if (!r.ok) { toast(r.data.error || 'That did not work', { bad: true }); return; }
-    toast(on ? 'Claude may write again.' : 'Claude’s writes are off. Reads still work.');
-    rerender();
+/** Turn Claude's writes on or off, asked first both ways; the page then
+ *  shows the server's answer, never its own guess. */
+function setClaudeWrite(on) {
+    openSheet(on ? 'Let Claude write?' : 'Turn off Claude’s writes?',
+        on ? `<p>Claude may then change fin through its chat tools: labels, notes, figures, rules, merchants and rates. Every change lands in Changes and can be undone.</p>
+              <p class="muted">Only you can turn this on; the chat cannot.</p>`
+           : `<p>Every write Claude tries will be refused and change nothing. Claude can still read fin.</p>
+              <p class="muted">Only you can turn it back on, here.</p>`,
+        { eyebrow: 'Claude may write', center: true,
+          foot: `<button class="btn" data-act="close-sheet">Cancel</button><button class="btn primary" data-act="claude-switch-go" data-on="${on ? 1 : 0}">${on ? 'Turn on' : 'Turn off'}</button>` });
 }
+ACT['claude-switch-go'] = async el => {
+    const on = el.dataset.on === '1';
+    el.disabled = true;
+    const r = await send('PUT', '/api/chat-writes', { enabled: on });
+    closeSheet();
+    if (!r.ok) toast(r.data.error || 'The switch could not be saved; it is unchanged.', { bad: true });
+    else toast(r.data.enabled ? 'Claude may write again.' : 'Claude’s writes are off. Reads still work.');
+    rerender();
+};
 ACT['claude-switch'] = el => setClaudeWrite(el.getAttribute('aria-checked') !== 'true');
 ACT['claude-switch-on'] = () => setClaudeWrite(true);
 ACT['entry-open'] = el => {

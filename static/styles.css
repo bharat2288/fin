@@ -1474,3 +1474,19 @@ table.sl-stack td.sl-sub { display: none; }
     .row-figure { font-size: var(--text-2xl); }
 }
 .home-tile > .tag { align-self: flex-start; }
+
+/* Type suggestion (ADR-005): the quiet entry where unknown merchants wait,
+   and the names read and ticked before anything is sent. */
+.suggest-entry { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2);
+    margin: 0 0 var(--space-3); padding: 8px 12px; border: 1px dashed var(--border-default); border-radius: var(--radius-md); }
+.suggest-entry--lists { margin-top: var(--space-2); }
+.suggest-pick-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.suggest-pick-list { max-height: 46vh; overflow-y: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+    padding: 4px 12px; background: var(--bg-raised); }
+.suggest-pick { min-height: 36px; overflow-wrap: anywhere; }
+.suggest-pick + .suggest-pick { border-top: 1px solid var(--border-subtle); }
+@media (max-width: 720px) {
+    .suggest-entry .btn { min-height: var(--tap); }
+    .suggest-pick, .suggest-pick-head .btn { min-height: var(--tap); }
+    .suggest-pick-list { max-height: 50dvh; }
+}

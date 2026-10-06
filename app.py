@@ -25,6 +25,7 @@ import backup
 import balance_sheet
 import book_type
 import card_balance
+import chat_writes
 import db
 import flow
 import history
@@ -716,7 +717,46 @@ _RULE_CACHE_TABLES = frozenset({"merchant_rules", "services"})
 
 
 # ---------------------------------------------------------------------------
-# What the screens keep (screens.py): the "Claude may write" switch, where the
+# The "Claude may write" switch (chat_writes.py)
+# ---------------------------------------------------------------------------
+
+CHAT_WRITES_NOT_BOOLEAN = "enabled must be true or false"
+CHAT_WRITES_ON_ONLY_IN_APP = "Claude's writes can be turned back on only in fin's app."
+CHAT_WRITES_NOT_SAVED = "The switch could not be saved; it is unchanged."
+
+
+@app.route("/api/chat-writes", methods=["GET"])
+def api_chat_writes():
+    """Whether Claude may write: {enabled, changed_at, changed_by}, and
+    unreadable: true when the switch's file could not be read (then off)."""
+    return jsonify(chat_writes.read())
+
+
+@app.route("/api/chat-writes", methods=["PUT"])
+def api_chat_writes_set():
+    """Turn Claude's writes on or off: {"enabled": true|false}, a JSON
+    boolean. A chat client (or the upload credential, which writes as one)
+    may turn them off, never on (fin-surfaces 01, Off switches); the gate
+    keeps chat logins off app routes, and this route refuses it as well."""
+    data = request.get_json(silent=True)
+    on = data.get("enabled") if isinstance(data, dict) else None
+    if not isinstance(on, bool):
+        return jsonify({"error": CHAT_WRITES_NOT_BOOLEAN}), 400
+    # Read raw, not through _caller (which reads anything unknown as the
+    # app): only a request the front door stamped as the app turns it on.
+    if on and request.environ.get(access_gate.VIA_ENVIRON_KEY, history.VIA_APP) != history.VIA_APP:
+        return jsonify({"error": CHAT_WRITES_ON_ONLY_IN_APP}), 403
+    _via, actor = _caller()
+    try:
+        state = chat_writes.write(on, actor)
+    except OSError:
+        app.logger.warning("the chat-writes switch could not be saved")
+        return jsonify({"error": CHAT_WRITES_NOT_SAVED}), 500
+    return jsonify(state)
+
+
+# ---------------------------------------------------------------------------
+# What the screens keep (screens.py): where the
 # operator last looked in the history, and statements refused at upload.
 # None is a change to the book: these writes leave no history entry.
 # ---------------------------------------------------------------------------
@@ -734,44 +774,18 @@ def _chat_import_refused():
     return. None when the import may go ahead."""
     if not _from_chat():
         return None
-    with get_db() as conn:
-        if screens.claude_may_write(conn):
-            return None
+    # The one switch (chat_writes.py): off, or unreadable, refuses.
+    if chat_writes.enabled():
+        return None
     return jsonify({"error": screens.IMPORTS_OFF}), 403
 
 
 @app.route("/api/settings")
 def api_settings():
-    """The "Claude may write" switch and the history mark Home counts from."""
+    """The history mark Home counts from. The "Claude may write" switch is
+    its own route, /api/chat-writes (chat_writes.py)."""
     with get_db() as conn:
-        return jsonify({"claude_may_write": screens.claude_may_write(conn),
-                        "claude_write_changed_at": screens.claude_write_changed_at(conn),
-                        **screens.since_looked(conn)})
-
-
-@app.route("/api/settings/claude-write", methods=["PUT"])
-def api_settings_claude_write():
-    """Switch Claude's writes on or off. Body: on (true or false). Only from
-    fin's own screens: a chat client can never set it."""
-    if _from_chat():
-        return jsonify({"error": _SCREENS_ONLY}), 403
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data.get("on"), bool):
-        return jsonify({"error": "on must be true or false"}), 400
-    with get_db() as conn:
-        screens.set_claude_may_write(conn, data["on"])
-        return jsonify({"claude_may_write": screens.claude_may_write(conn)})
-
-
-@app.route("/api/settings/claude-write/off", methods=["POST"])
-def api_settings_claude_write_off():
-    """Switch Claude's writes off: from fin's screens or from the chat (01:
-    the switch "can only be turned off from chat's side", for a lost phone or
-    odd behaviour). It only ever turns writes off; turning them back on is
-    the PUT above, from fin's own screens only. Not a change to the book."""
-    with get_db() as conn:
-        screens.set_claude_may_write(conn, False)
-        return jsonify({"claude_may_write": screens.claude_may_write(conn)})
+        return jsonify(screens.since_looked(conn))
 
 
 @app.route("/api/changes/marks")
@@ -2487,13 +2501,20 @@ def api_suggestions_prepare():
     path = _suggestion_strings_path()
     if merchants:
         path.write_text(suggest.FILE_HEADER + "\n".join(merchants) + "\n", encoding="utf-8")
-    return jsonify({"count": len(merchants), "merchants": merchants, "file": str(path)})
+    # The list itself is the operator's to read, in the app or in the file;
+    # the file's path is not returned (hosted, it would name the volume).
+    return jsonify({"count": len(merchants), "merchants": merchants})
 
 
 @app.route("/api/suggestions/send", methods=["POST"])
 def api_suggestions_send():
     """Step two: one request per line the operator left in the file, each
-    answer stored in full. The first failed call stops the batch."""
+    answer stored in full. The first failed call stops the batch.
+
+    An optional JSON body `{"merchants": [...]}` is the operator's ticks in
+    the app's list (the hosted fin, where the file cannot be opened): only
+    names both still in the file and ticked are sent. A name fin did not
+    prepare is never sent, whatever is ticked."""
     api_key = suggest.key()
     if api_key is None:
         return _suggestions_off()
@@ -2511,6 +2532,12 @@ def api_suggestions_send():
         line.strip() for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.startswith("#")
     }
+    data = request.get_json(silent=True)
+    if data is not None:
+        ticked = data.get("merchants") if isinstance(data, dict) else None
+        if not isinstance(ticked, list) or not all(isinstance(m, str) for m in ticked):
+            return jsonify({"error": "merchants must be a list of names"}), 400
+        left_in_file &= {m.strip() for m in ticked}
 
     sent = 0
     stopped = None
@@ -2623,6 +2650,83 @@ def _upload_name(sent: str, index: int, folder: str) -> str:
         candidate = f"{stem}_{n}{ext}"
         n += 1
     return candidate
+
+
+# What an import preview holds as facts: the confirm writes these as the
+# upload read them, and takes from its request only the choices below.
+_PREVIEW_ROW_FACTS = (
+    "date", "description", "amount_sgd", "amount_foreign", "currency_foreign", "account", "statement",
+)
+_CONFIRM_ROW_CHOICES = (
+    "book", "type_id", "service_id", "flow_type", "other_side_id", "_skip", "is_one_off", "cat_source",
+)
+PREVIEW_NOT_OPEN = "This preview is no longer open. Upload the statement again."
+PREVIEW_MISMATCH = "The import does not match its preview; nothing was imported. Upload the statement again."
+
+
+def _stored_preview(groups: list[dict], statements: list | None = None) -> str:
+    """The facts of an upload's preview, as the response gives them, for its
+    batch_imports row: per group (in order) its account, currency and tie
+    lines, and per row (in order) its facts. With `statements`, what each
+    statement in the files came to (_statement_results), which the confirm
+    carries into its summary and Past imports shows."""
+    preview = {
+        "groups": [
+            {
+                "account": g["account"],
+                "currency": g["currency"],
+                "statements": g["statements"],
+                "transactions": [{k: tx.get(k) for k in _PREVIEW_ROW_FACTS} for tx in g["transactions"]],
+            }
+            for g in groups
+        ]
+    }
+    if statements is not None:
+        preview["statements"] = statements
+    # Serialised as the response is, so what is stored is what was shown.
+    return app.json.dumps(preview)
+
+
+class PreviewRefused(Exception):
+    """A confirm that does not answer an open preview: (message, status)."""
+
+
+def _confirmed_groups(conn, import_id, sent_groups) -> list[dict]:
+    """The groups a confirm writes: the open preview's stored facts, with the
+    request's choices per row. Raises PreviewRefused when the preview is not
+    open (409) or the request does not have its shape (400)."""
+    if isinstance(import_id, bool) or not isinstance(import_id, int):
+        raise PreviewRefused(PREVIEW_NOT_OPEN, 409)
+    held = conn.execute(
+        "SELECT status, result_json FROM batch_imports WHERE id = ?", (import_id,)
+    ).fetchone()
+    if held is None or held["status"] != "preview" or not held["result_json"]:
+        raise PreviewRefused(PREVIEW_NOT_OPEN, 409)
+    try:
+        stored = json.loads(held["result_json"])["groups"]
+    except (ValueError, KeyError, TypeError):
+        raise PreviewRefused(PREVIEW_NOT_OPEN, 409) from None
+    if not isinstance(sent_groups, list) or len(sent_groups) != len(stored):
+        raise PreviewRefused(PREVIEW_MISMATCH, 400)
+    out = []
+    for kept, sent in zip(stored, sent_groups):
+        if not isinstance(sent, dict) or sent.get("account") != kept["account"]:
+            raise PreviewRefused(PREVIEW_MISMATCH, 400)
+        sent_rows = sent.get("transactions")
+        if not isinstance(sent_rows, list) or len(sent_rows) != len(kept["transactions"]):
+            raise PreviewRefused(PREVIEW_MISMATCH, 400)
+        rows = []
+        for facts, chosen in zip(kept["transactions"], sent_rows):
+            if not isinstance(chosen, dict):
+                raise PreviewRefused(PREVIEW_MISMATCH, 400)
+            rows.append({**{k: chosen[k] for k in _CONFIRM_ROW_CHOICES if k in chosen}, **facts})
+        out.append({
+            "account": kept["account"],
+            "currency": kept["currency"],
+            "statements": kept["statements"],
+            "transactions": rows,
+        })
+    return out
 
 
 @app.route("/api/import/upload", methods=["POST"])
@@ -2845,19 +2949,22 @@ def api_import_upload():
         skipped += group_skip
         to_review += sum(1 for t in txns if t["review_each_time"])
 
-    # Save preview to batch_imports and fetch services list in one connection
+    # Save preview to batch_imports and fetch services list in one connection.
+    # The preview's facts stay on the server: confirm writes these, never the
+    # facts a request sends back (_stored_preview).
     with get_db() as conn:
         # What each statement in the files came to, kept with the import so
         # Past imports can say it: ties, off by (refused) or not checked.
         results = _statement_results(conn, statement_lines, errors, groups)
         conn.execute(
-            "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines, result_json) VALUES (?, ?, 'preview', ?, ?, ?)",
+            "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines, result_json) "
+            "VALUES (?, ?, 'preview', ?, ?, ?)",
             (
                 json.dumps(filenames),
                 json.dumps(list(all_groups.keys())),
                 total,
                 typed,
-                json.dumps({"statements": results}),
+                _stored_preview(groups, results),
             ),
         )
         conn.commit()
@@ -2898,32 +3005,27 @@ def api_import_upload():
 
 @app.route("/api/import/confirm", methods=["POST"])
 def api_import_confirm():
-    """Commit previewed transactions to the database.
+    """Commit an upload's preview to the database.
 
-    Expects JSON body:
+    The request brings choices, never facts. The facts are the preview the
+    upload stored on its batch_imports row (result_json): each group's
+    account, currency and statement tie lines, and each row's date,
+    description, amount, foreign amount and currency, account and statement.
+    Whatever a request sends for those is ignored. From each row it takes
+    only: book, type_id, service_id, flow_type, other_side_id, _skip,
+    is_one_off and cat_source; and new_services and new_rules.
+
+    Expects JSON body (the preview's groups echoed back with choices made):
     {
         "import_id": int,
         "groups": [
             {
-                "account": "account name",
+                "account": "account name, as the preview gave it",
                 "transactions": [
-                    {
-                        "date": "YYYY-MM-DD",
-                        "description": "...",
-                        "amount_sgd": 123.45,
-                        "amount_foreign": null,
-                        "currency_foreign": null,
-                        "book": "Household",
-                        "type_id": 5,
-                        "flow_type": "expense",
-                        "other_side_id": null,
-                        "_skip": false,
-                        "statement": 0
-                    }, ...
-                ],
-                "statements": [
-                    {"opening_minor": 5210000, "closing_minor": 4120050,
-                     "closing_date": "YYYY-MM-DD"}, ...
+                    {"book": "Household", "type_id": 5, "service_id": null,
+                     "flow_type": "expense", "other_side_id": null,
+                     "_skip": false, "is_one_off": false, "cat_source": "rule",
+                     ...the row's facts may be echoed back and are ignored}, ...
                 ]
             }, ...
         ],
@@ -2935,13 +3037,19 @@ def api_import_confirm():
         ]
     }
 
+    An import_id that names no preview, or one already confirmed or failed,
+    is refused (409) and nothing is written: upload the statement again. The
+    groups must be the preview's, in its order, each with its account and
+    its number of rows (rows by position); anything else is refused (400)
+    and nothing is written. A confirmed preview cannot be confirmed again.
+
     A book, a type or a flow that is not in its vocabulary, or an other side
     that is no account, refuses the whole import before anything is written,
     and so does an amount that is missing or is not a whole number of cents.
     The amount arrives as the decimal the preview showed and is stored as
     whole minor units.
 
-    A group's `statements` are the tie lines the upload gave it. Each is
+    A group's `statements` are the tie lines the upload stored. Each is
     checked again over the rows that name it and are about to be written:
     opening less their sum must equal closing, exactly, so a row of such a
     statement cannot be left out. Its closing balance is then written as a
@@ -2959,11 +3067,17 @@ def api_import_confirm():
         return jsonify({"error": "No data provided"}), 400
 
     import_id = data.get("import_id")
-    groups = data.get("groups", [])
     new_rules = data.get("new_rules", [])
     new_services = data.get("new_services", [])
 
     with get_db() as conn:
+        # The facts are the preview's as the upload read them; the request
+        # brings only its choices.
+        try:
+            groups = _confirmed_groups(conn, import_id, data.get("groups"))
+        except PreviewRefused as e:
+            message, status = e.args
+            return jsonify({"error": message}), status
         try:
             for labelled in [tx for g in groups for tx in g.get("transactions", [])] + new_services:
                 _checked_labels(conn, labelled)
@@ -3374,7 +3488,8 @@ def api_import_history():
             "status": r["status"],
             "total_lines": r["total_lines"],
             "categorized_lines": r["categorized_lines"],
-            "result": result,
+            # While open, result_json holds the preview's facts: not shown.
+            "result": result if r["status"] != "preview" else None,
             # Each statement's result (ties, off, not_checked), or None for
             # an import made before fin kept them.
             "statements": result.get("statements") if isinstance(result, dict) else None,

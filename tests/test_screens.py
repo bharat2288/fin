@@ -65,64 +65,71 @@ def upload_refused(client, *, closing_date="2026-09-30", difference=1234):
     return resp.get_json()
 
 
-# --- the "Claude may write" switch ------------------------------------------
+# --- the "Claude may write" switch (chat_writes.py, the one switch) ----------
+# The switch's own contract is tests/test_chat_writes_switch.py; these hold
+# what the screens add to it.
+
+
+def turn(client, on, **kwargs):
+    return client.put("/api/chat-writes", json={"enabled": on}, **kwargs)
 
 
 def test_the_switch_is_on_until_the_operator_turns_it_off(book):
-    assert book.get("/api/settings").get_json()["claude_may_write"] is True
-    resp = book.put("/api/settings/claude-write", json={"on": False})
-    assert resp.status_code == 200 and resp.get_json() == {"claude_may_write": False}
-    assert book.get("/api/settings").get_json()["claude_may_write"] is False
+    assert book.get("/api/chat-writes").get_json()["enabled"] is True
+    resp = turn(book, False)
+    assert resp.status_code == 200 and resp.get_json()["enabled"] is False
+    assert book.get("/api/chat-writes").get_json()["enabled"] is False
 
 
 def test_with_the_switch_off_chat_writes_are_refused_and_reads_work(book):
     tx = first_row(book)
-    book.put("/api/settings/claude-write", json={"on": False})
+    turn(book, False)
     before = book.get("/api/history").get_json()["entries"]
 
     answer = chat("set_note", tx_id=tx["id"], notes="sample note")
-    assert answer["ok"] is False and "switched off" in answer["error"]
+    assert answer["ok"] is False and "turned off" in answer["error"]
     assert chat("transactions", per_page=5)["ok"] is True
     assert book.get("/api/history").get_json()["entries"] == before
     assert first_row(book)["notes"] is None
 
-    book.put("/api/settings/claude-write", json={"on": True})
+    turn(book, True)
     done = chat("set_note", tx_id=tx["id"], notes="sample note")
     assert done["ok"] is True
 
     # Undo is a write too: refused while the switch is off.
-    book.put("/api/settings/claude-write", json={"on": False})
+    turn(book, False)
     before = book.get("/api/history").get_json()["entries"]
     refused = chat("undo", entry_id=done["change"]["entry_id"])
-    assert refused["ok"] is False and "switched off" in refused["error"]
+    assert refused["ok"] is False and "turned off" in refused["error"]
     assert first_row(book)["notes"] == "sample note"
     assert book.get("/api/history").get_json()["entries"] == before
-    book.put("/api/settings/claude-write", json={"on": True})
+    turn(book, True)
     assert chat("undo", entry_id=done["change"]["entry_id"])["ok"] is True
     assert first_row(book)["notes"] is None
 
 
 def test_the_switch_is_never_turned_on_from_the_chat(book):
-    resp = book.put("/api/settings/claude-write", json={"on": True}, environ_base=chat_environ())
+    resp = turn(book, True, environ_base=chat_environ())
     assert resp.status_code == 403
-    book.put("/api/settings/claude-write", json={"on": False})
+    turn(book, False)
     for tool in mcp_tools.TOOLS:
         args = {k: 1 if v.get("type") == "integer" else "x"
                 for k, v in tool.input_schema["properties"].items() if v.get("type") in ("integer", "string")}
         method, path, body = tool.request(args)
-        assert path != "/api/settings/claude-write", tool.name
-    assert book.get("/api/settings").get_json()["claude_may_write"] is False
+        assert not (path == "/api/chat-writes" and (body or {}).get("enabled") is not False), tool.name
+    assert book.get("/api/chat-writes").get_json()["enabled"] is False
 
 
 def test_the_chat_can_turn_writes_off_even_while_they_are_off(book):
     before = book.get("/api/history").get_json()["entries"]
-    answer = chat("stop_claude_writing")
-    assert answer["ok"] is True and answer["result"]["claude_may_write"] is False
-    assert book.get("/api/settings").get_json()["claude_may_write"] is False
+    answer = chat("turn_off_writes")
+    assert answer["ok"] is True
+    assert book.get("/api/chat-writes").get_json()["enabled"] is False
     # Again, with writes already off: still allowed, still off.
-    again = chat("stop_claude_writing")
-    assert again["ok"] is True and again["result"]["claude_may_write"] is False
+    again = chat("turn_off_writes")
+    assert again["ok"] is True
     assert "change" not in again
+    assert book.get("/api/chat-writes").get_json()["enabled"] is False
     assert book.get("/api/history").get_json()["entries"] == before
     tx = first_row(book)
     assert chat("set_note", tx_id=tx["id"], notes="x")["ok"] is False
@@ -134,7 +141,7 @@ def test_with_the_switch_off_an_import_from_the_chats_side_is_refused(client):
     still works."""
     upload = access_gate.AccessIdentity(email="", gate=access_gate.APP_GATE, client=access_gate.UPLOAD_ACTOR)
     environ = {"asgi.scope": {access_gate.ACCESS_IDENTITY_SCOPE_KEY: upload}}
-    client.put("/api/settings/claude-write", json={"on": False})
+    turn(client, False)
     up = client.post("/api/import/upload", data={"files": (io.BytesIO(b"x"), "sample.csv")},
                      content_type="multipart/form-data", environ_base=environ)
     assert up.status_code == 403 and "switched off" in up.get_json()["error"]
@@ -146,12 +153,12 @@ def test_with_the_switch_off_an_import_from_the_chats_side_is_refused(client):
 
 
 def test_the_switch_takes_only_true_or_false(book):
-    assert book.put("/api/settings/claude-write", json={"on": "no"}).status_code == 400
+    assert turn(book, "no").status_code == 400
 
 
 def test_flipping_the_switch_is_not_a_change_to_the_book(book):
     before = book.get("/api/history").get_json()["entries"]
-    book.put("/api/settings/claude-write", json={"on": False})
+    turn(book, False)
     assert book.get("/api/history").get_json()["entries"] == before
 
 
@@ -433,9 +440,9 @@ def test_between_two_of_your_figures_the_tie_line_shows_what_the_rows_moved(clie
 
 
 def test_the_switch_says_when_it_was_last_flipped(book):
-    assert book.get("/api/settings").get_json()["claude_write_changed_at"] is None
-    book.put("/api/settings/claude-write", json={"on": False})
-    assert book.get("/api/settings").get_json()["claude_write_changed_at"]
+    assert book.get("/api/chat-writes").get_json()["changed_at"] is None
+    turn(book, False)
+    assert book.get("/api/chat-writes").get_json()["changed_at"]
 
 
 def test_the_history_says_when_the_operator_last_looked(book):
