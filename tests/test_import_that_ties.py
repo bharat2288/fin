@@ -17,6 +17,7 @@ import pytest
 import parse_citi_pdf
 import parsers
 from parse_dbs import ParsedStatement, ParsedTransaction
+from previews import store_preview
 from test_parse_citi_pdf import CARD_PAGES
 
 BANK = "Sample Bank 0002"
@@ -319,6 +320,10 @@ def test_confirm_refuses_a_statement_whose_rows_no_longer_tie(client, conn, stan
     del dropped["groups"][0]["transactions"][-1]
     a_cent_out = upload(client)
     a_cent_out["groups"][0]["transactions"][0]["amount_sgd"] = 140.01
+    # A row dropped or a cent changed in the stored preview: the confirm's own
+    # tie check still guards the facts it writes.
+    store_preview(dropped)
+    store_preview(a_cent_out)
 
     for doctored in (skipped, dropped, a_cent_out):
         resp = confirm(client, doctored)
@@ -338,6 +343,7 @@ def test_confirm_refuses_a_statement_whose_balances_are_not_whole_cents_on_a_rea
     stand_in(ROWS, OPENING, CLOSING)
     preview = upload(client)
     preview["groups"][0]["statements"][0][field] = value
+    store_preview(preview)
 
     resp = confirm(client, preview)
 
@@ -352,6 +358,7 @@ def test_confirm_refuses_a_row_naming_a_statement_its_account_does_not_have(
     stand_in(ROWS, OPENING, CLOSING)
     preview = upload(client)
     preview["groups"][0]["transactions"][0]["statement"] = 4
+    store_preview(preview)
 
     resp = confirm(client, preview)
 
@@ -483,6 +490,7 @@ def test_a_confirm_that_fails_part_way_leaves_nothing_of_the_statement(client, c
     stand_in(ROWS, OPENING, CLOSING)
     preview = upload(client)
     preview["groups"][0]["transactions"][1]["description"] = None
+    store_preview(preview)
 
     resp = confirm(client, preview)
 
@@ -518,6 +526,7 @@ def test_a_failure_in_a_later_account_takes_the_earlier_one_with_it(client, conn
         parsers._PARSERS = [p for p in parsers._PARSERS if p["name"] != "Stand-in"]
     assert len(preview["groups"]) == 2
     preview["groups"][1]["transactions"][0]["description"] = None
+    store_preview(preview)
 
     resp = confirm(client, preview)
 

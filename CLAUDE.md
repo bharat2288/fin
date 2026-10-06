@@ -14,6 +14,7 @@ db.py               ← Database helpers, categorization engine
 suggest.py          ← Type suggestion for unknown merchants (off without OPENROUTER_API_KEY)
 history.py          ← Change history: every write recorded (schema.sql triggers), undoable
 mcp_tools.py        ← The chat tools over MCP; the tool list is the permission list
+chat_writes.py      ← The "Claude may write" switch: chat-writes.json beside the book; chat turns it off, never on
 fin_upload.py       ← Upload command: sends a folder of statements to fin's import
 schema.sql          ← SQLite schema (source of truth)
 parsers.py          ← Statement parser orchestrator

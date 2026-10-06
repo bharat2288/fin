@@ -17,6 +17,7 @@ import db
 import money
 import parsers
 from parse_dbs import ParsedStatement, ParsedTransaction
+from previews import store_preview
 
 
 # --- seeding and reading ---------------------------------------------------
@@ -386,6 +387,7 @@ def test_confirm_refuses_an_amount_that_is_not_whole_cents_and_writes_nothing(
     fake_statement(STATEMENT_ROWS)
     preview = upload(client)
     preview["groups"][0]["transactions"][2]["amount_sgd"] = bad
+    store_preview(preview)
 
     resp = confirm(client, preview)
 
@@ -399,6 +401,7 @@ def test_confirm_refuses_a_row_with_no_amount(client, conn, fake_statement):
     fake_statement(STATEMENT_ROWS)
     preview = upload(client)
     del preview["groups"][0]["transactions"][0]["amount_sgd"]
+    store_preview(preview)
 
     resp = confirm(client, preview)
 

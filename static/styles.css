@@ -234,6 +234,34 @@ body {
     color: var(--accent-camel);
 }
 
+.masters-divider {
+    height: 1px;
+    margin: var(--space-2) 0;
+    background: var(--border-subtle);
+}
+
+/* The "Claude may write" switch */
+.masters-switch {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    color: var(--text-primary);
+    font-family: var(--font-base);
+    font-size: 13px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.masters-switch:hover {
+    background: var(--bg-base);
+}
+
+.masters-switch input {
+    accent-color: var(--accent-camel);
+    cursor: pointer;
+}
+
 .tab-btn {
     padding: var(--space-3) var(--space-5);
     background: none;

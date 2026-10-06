@@ -80,6 +80,8 @@ business/
 
 # The nightly backup's status, written beside the book
 backup-status.json
+# The "Claude may write" switch, written beside the book
+chat-writes.json
 
 # Merchant names waiting for the operator to read before a type suggestion is sent
 suggestion-strings.txt

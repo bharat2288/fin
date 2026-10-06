@@ -19,6 +19,7 @@ from pdfplumber.utils.exceptions import PdfminerException
 
 import parse_hdfc
 import rates
+from previews import store_preview
 
 HDFC = "HDFC Bank Savings 1234"
 HEADER = "Date Narration Chq./Ref.No. ValueDt WithdrawalAmt. DepositAmt. ClosingBalance"
@@ -228,6 +229,7 @@ def test_confirm_refuses_a_currency_that_is_not_the_accounts(client, monkeypatch
 def test_confirm_refuses_a_currency_fin_does_not_hold(client, monkeypatch):
     preview = upload(client, monkeypatch)
     preview["groups"][0]["currency"] = "XXX"
+    store_preview(preview)
 
     resp = confirm(client, preview)
 
