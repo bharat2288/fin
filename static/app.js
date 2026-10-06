@@ -790,103 +790,311 @@ function restsOnHTML(sheet) {
         <p class="small" style="margin-top:10px">${words}${leftOut.length ? ` ${plural(leftOut.length, 'line is', 'lines are')} left out: ${leftOut.map(l => esc(l.name)).join(', ')}.` : ''}</p></div>`;
 }
 
+// Home's own pieces: the Claude line, the net worth hero, what it rests on,
+// the month check, what waits (folio's attention items) and the book tiles.
+
+/** When you last looked, as the line says it: "at 20:57 today", "on 3 Oct, 20:57". */
+function lookedWhen(utc) {
+    if (!utc) return '';
+    const w = when(utc);
+    return w.startsWith('today ') ? `at ${w.slice(6)} today` : `on ${w}`;
+}
+/** A machine date inside a server sentence, written out: 2026-08-31 → 31 Aug 2026. */
+function plainDates(text) {
+    return String(text || '').replace(/\b(\d{4}-\d{2}-\d{2})\b/g, (_, iso) => day(iso));
+}
+
+function homeClaudeLine(settings) {
+    const looked = lookedWhen(settings.last_looked_at);
+    if (settings.claude_count) {
+        return `<div class="notice claude home-claude"><span class="home-claude__mark" aria-hidden="true">✳</span>
+            <p class="home-claude__text"><b>${plural(settings.claude_count, 'change')} by Claude</b> since you last looked${looked ? ` ${esc(looked)}` : ''}${settings.latest_claude_at ? ` · newest ${esc(when(settings.latest_claude_at).replace(/^today /, ''))}` : ''}</p>
+            <div class="home-claude__act"><a class="btn sm" href="#/changes">Check them</a>
+            <button type="button" class="btn sm quiet" data-act="looks-right" data-upto="${esc(settings.newest)}">Looks right</button></div></div>`;
+    }
+    return `<div class="notice home-claude is-quiet"><span class="home-claude__mark" aria-hidden="true">✳</span>
+        <p class="home-claude__text">Nothing new from Claude since you last looked${looked ? ` ${esc(looked)}` : ''}.</p>
+        <div class="home-claude__act"><a class="link" href="#/changes">Recent changes</a></div></div>`;
+}
+
+/** What net worth rests on, Home's telling: short legend words that never
+ *  break, and the old figures named, each opening Enter a figure. */
+const HOME_REST_LABELS = { ties: 'statement ties', off: 'statement off', notchecked: 'not checked',
+    recent: 'your figure, new', stale: 'your figure, old', rows: 'from rows' };
+function homeRestsHTML(sheet) {
+    const { parts, whole, leftOut } = restsOnParts(sheet);
+    const keys = Object.keys(parts).filter(k => parts[k][1]);
+    const bar = keys.map(k => {
+        const share = parts[k][0] / (whole || 1);
+        return `<span class="sw-${k}" style="--seg:${(share * 1000).toFixed(1)}" title="${esc(REST_LABELS[k])}: ${pct(parts[k][0], whole)}">${share >= 0.08 ? `<b>${pct(parts[k][0], whole)}</b>` : ''}</span>`;
+    }).join('');
+    const legend = keys.map(k => `<a href="#/books" data-act="needs-look-link" title="${esc(sentence(REST_LABELS[k]))}"><span class="sw sw-${k}" aria-hidden="true"></span><span><b>${pct(parts[k][0], whole)}</b> ${esc(HOME_REST_LABELS[k])} <span class="home-rests__n">· ${parts[k][1]}</span></span></a>`).join('');
+    const old = sheet.sections.flatMap(s => s.lines)
+        .filter(l => !l.counted_in && l.in_total && l.rests_on?.source === 'supplied' && l.rests_on.age_days > STALE_DAYS)
+        .sort((a, b) => b.rests_on.age_days - a.rests_on.age_days);
+    const stale = parts.stale[0];
+    const words = stale
+        ? `<b>${pct(stale, whole)}</b> rests on your own figures over ${STALE_DAYS} days old. Each opens Enter a figure. Statements that tie hold <b>${pct(parts.ties[0], whole)}</b>.`
+        : `Statements that tie hold <b>${pct(parts.ties[0], whole)}</b> of what net worth rests on.`;
+    const oldTags = old.length ? `<div class="home-rests__old">${old.map(l => tag('stale', `${l.name}, ${l.rests_on.age_days} days`,
+        { act: 'figure', data: { account: l.account_id }, title: `Enter a figure for ${l.name}` })).join('')}</div>` : '';
+    return `<div class="home-rests"><div class="home-rests__head"><span class="eyebrow">What it rests on</span><span class="small muted">each figure by its size, owed included</span></div>
+        <div class="rests-bar" role="img" aria-label="What net worth rests on: ${keys.map(k => `${pct(parts[k][0], whole)} ${HOME_REST_LABELS[k]}`).join(', ')}">${bar}</div>
+        <div class="legend home-rests__legend">${legend}</div>
+        <div class="home-rests__more"><p class="home-rests__words">${words}${leftOut.length ? ` Left out: ${leftOut.map(l => esc(l.name)).join(', ')}.` : ''}</p>${oldTags}</div>
+        ${stale ? `<details class="home-rests__fold"><summary><b>${pct(stale, whole)}</b> rests on ${plural(old.length, 'old figure')}: which ${icon('caret-down')}</summary>
+            <p class="home-rests__words">${words}${leftOut.length ? ` Left out: ${leftOut.map(l => esc(l.name)).join(', ')}.` : ''}</p>${oldTags}</details>` : ''}</div>`;
+}
+
+function homeHero(now, before, prev) {
+    let since = '';
+    if (before) {
+        const change = now.net_worth_minor - before.net_worth_minor;
+        const on = esc(day(before.as_at, { year: false }));
+        since = change === 0
+            ? `<p class="home-hero__since">No change since ${on}</p>`
+            : `<p class="home-hero__since"><b class="num">${esc(money(change, 'SGD', { signed: true }))}</b> since ${on}</p>`;
+    }
+    const chips = [];
+    const mc = before && before.month_check;
+    if (mc && mc.available && mc.unexplained_minor !== null && mc.unexplained_minor !== undefined) {
+        chips.push(mc.unexplained_minor === 0
+            ? `<a class="delta-chip delta-chip--up" href="#/books" data-act="go-month-check" data-month="${prev}">${icon('check-circle')}${esc(monthName(prev, { short: true }))} adds up</a>`
+            : `<a class="delta-chip delta-chip--down" href="#/books" data-act="go-month-check" data-month="${prev}">${icon('warning-circle')}<span class="num">${esc(money(mc.unexplained_minor, 'SGD'))}</span> unexplained, ${esc(MONTHS[Number(prev.slice(5)) - 1])}</a>`);
+    }
+    if (now.left_out.length === 1) {
+        const l = now.left_out[0];
+        const line = now.sections.flatMap(s => s.lines).find(x => x.name === l.name);
+        const fix = line ? fixFor(line, now.as_at) : null;
+        const attrs = fix?.act ? ` data-act="${fix.act}"${Object.entries(fix.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}` : '';
+        chips.push(`<a class="delta-chip delta-chip--warn" href="${fix?.href || '#/books'}"${attrs} title="${esc(fix?.title || 'See why')}">${icon('warning')}${esc(l.name)}: ${esc(l.why)}, left out</a>`);
+    } else if (now.left_out.length > 1) {
+        const whys = [...new Set(now.left_out.map(l => l.why))];
+        chips.push(`<a class="delta-chip delta-chip--warn" href="#/books" data-act="needs-look-link" title="${esc(now.left_out.map(l => `${l.name}: ${l.why}`).join('; '))}">${icon('warning')}<span>${now.left_out.length} left out${whys.length === 1 ? `<span class="home-hero__why">, ${esc(whys[0])}</span>` : ''}</span></a>`);
+    }
+    return `<section class="hero-card home-hero">
+        <div class="home-hero__head"><span class="eyebrow">Net worth · today</span><a class="link" href="#/books">Balance sheet</a></div>
+        <div class="hero-figure">${heroFigure(now.net_worth_minor, now.currency)}</div>
+        ${since}
+        ${chips.length ? `<div class="chip-row home-hero__chips">${chips.join('')}</div>` : ''}
+        ${homeRestsHTML(now)}</section>`;
+}
+
+/** The month check beside net worth: the sum drawn, the gap as a chip, and
+ *  each reason ending in its fix. */
+function monthCheckMini(sheet) {
+    const mc = sheet.month_check;
+    if (!mc) return '';
+    const name = monthName(sheet.month);
+    const head = `<div class="home-mc__head"><span class="eyebrow">Month check · ${esc(name)}</span>
+        <button type="button" class="link" data-act="go-month-check" data-month="${sheet.month}">Open it</button></div>`;
+    if (!mc.available || mc.unexplained_minor === null) {
+        return `<section class="card home-mc">${head}<p class="card-empty">${esc(plainDates(mc.why) || 'Not worked out for this month.')}</p></section>`;
+    }
+    const m = v => esc(money(v, 'SGD'));
+    const line = (op, label, minor, cls = '') => `<tr${cls ? ` class="${cls}"` : ''}><td class="op">${op}</td><td>${label}</td><td class="r">${m(minor)}</td></tr>`;
+    const sum = `<table class="sum home-mc__sum"><tbody>
+        ${line('', `Start, ${esc(day(mc.from, { year: false }))}`, mc.opening_minor)}
+        ${line('+', 'income', mc.income_minor)}
+        ${line('−', 'spending', mc.spending_minor)}
+        ${line('+', 'currency change', mc.currency_change_minor)}
+        ${mc.outside_minor ? line(mc.outside_minor < 0 ? '−' : '+', 'moved to or from accounts left out', Math.abs(mc.outside_minor)) : ''}
+        ${line('=', 'expected', mc.expected_minor, 'eq')}
+        ${line('', `actual, ${esc(day(mc.to, { year: false }))}`, mc.actual_minor)}</tbody></table>`;
+    const gap = mc.unexplained_minor === 0
+        ? `<span class="delta-chip delta-chip--up">${icon('check-circle')}It adds up</span>`
+        : `<span class="delta-chip delta-chip--down">${icon('warning-circle')}<span class="num">${m(mc.unexplained_minor)}</span> unexplained</span>`;
+    const lines = sheet.sections.flatMap(s => s.lines);
+    const fixLink = fix => fix.href
+        ? `<a class="link" href="${fix.href}">${esc(fix.label)}</a>`
+        : `<button type="button" class="link" data-act="${fix.act}"${Object.entries(fix.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(fix.label)}</button>`;
+    const reasons = [];
+    if (mc.review && mc.review.count) {
+        reasons.push([`${mc.review.out_count} out (${m(mc.review.out_minor)}) and ${mc.review.in_count} in (${m(mc.review.in_minor)}) wait for a label`, { href: '#/queue', label: 'Label them' }]);
+    }
+    (mc.not_tying || []).forEach(l => {
+        const text = plainDates((l.text || '').replace(/^not checked\s*\((.*)\)$/, '$1'));
+        const fix = /no statement balance/.test(l.text || '') ? { href: '#/books/import', label: 'Import a statement' }
+            : l.status === 'off' ? { href: `#/books/account/${l.account_id}`, label: 'See the tie line' }
+                : { href: `#/books/account/${l.account_id}`, label: 'See the account' };
+        reasons.push([`${esc(l.name)}: ${esc(text)}`, fix]);
+    });
+    (mc.left_out || []).forEach(l => {
+        const why = /^no balance on (\d{4}-\d{2}-\d{2})$/.test(l.why) ? `no figure at ${day(l.why.slice(-10))}` : plainDates(l.why);
+        const ln = lines.find(x => x.name === l.name);
+        const f = ln ? fixFor(ln, sheet.as_at) : { href: '#/books', title: 'See why' };
+        reasons.push([`${esc(l.name)} left out: ${esc(why)}`, { ...f, label: f.title === 'See why' ? 'See the account' : f.title }]);
+    });
+    return `<section class="card home-mc">${head}
+        ${sum}
+        <div class="home-mc__gap"><span class="label">Unexplained</span>${gap}</div>
+        ${reasons.length ? `<ul class="home-mc__reasons">${reasons.map(([text, fix]) => `<li>${icon('warning-circle')}<span>${text} ${fixLink(fix)}</span></li>`).join('')}</ul>` : ''}</section>`;
+}
+
+/** One waiting thing, as folio's attention item: an icon tile, the title and
+ *  its marker, what it holds out, the amount, and its actions (one ink at
+ *  most; accepting fin's guess is camel; setting aside is quiet). */
+const HOME_ITEM_ICONS = { transfer: 'arrows-left-right', untyped: 'warning', mixed: 'list-bullets', bill: 'receipt',
+    refused: 'prohibit', off: 'prohibit', stale: 'clock', nofig: 'warning', aside: 'circle-dashed' };
+function homeItemHTML(item, guesses) {
+    const amount = item.kind === 'nofig' ? '' : item.kind === 'stale'
+        ? `<span class="num${item.shown < 0 ? ' neg' : ''}">${esc(money(item.shown, item.currency))}</span>`
+        : item.lane === 'in' || item.lane === 'out'
+            ? `${dirTag(item.lane)} <span class="num">${esc(money(item.amount, item.currency))}</span>`
+            : item.kind === 'refused' ? `<span class="num">off by ${esc(money(item.amount, item.currency))}</span>` : '';
+    const marker = { refused: tag('refused', 'refused', { act: 'refused-sum', data: { id: item.refused?.id }, title: 'See the tie line' }),
+        off: tag('off', 'off by', item.line ? { href: `#/books/account/${item.line.account_id}`, title: 'See the tie line' } : {}),
+        stale: tag('stale', 'stale'), nofig: tag('nofig', 'no figure'), mixed: tag('notchecked', 'mixed merchant'),
+        bill: tag('stale', 'missed bill'), untyped: tag('nofig', 'no type') }[item.kind] || '';
+    const btn = (label, cls, act, data = {}) => `<button type="button" class="btn sm${cls ? ' ' + cls : ''}" data-act="${act}"${Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(label)}</button>`;
+    const link = (label, cls, href) => `<a class="btn sm${cls ? ' ' + cls : ''}" href="${href}">${esc(label)}</a>`;
+    let actions;
+    let guessLine = '';
+    const guess = item.row && guesses ? guesses.get(item.row.id) : null;
+    if (item.kind === 'transfer') actions = btn('This was…', '', 'this-was', { tx: item.row.id });
+    else if (item.kind === 'untyped' && guess) {
+        guessLine = `<p class="att__guess">fin’s guess: <b>${esc(guess.name)}</b>, ${Math.round(guess.probability * 100)}% sure</p>`;
+        actions = btn(`Yes, ${guess.name}`, 'primary', 'home-guess-yes', { tx: item.row.id, type: guess.type_id, merchant: guess.merchant || '' })
+            + btn('Something else', '', 'resolve', { tx: item.row.id });
+    } else if (item.kind === 'untyped') actions = btn('This was…', '', 'resolve', { tx: item.row.id });
+    else if (item.kind === 'mixed') actions = btn(`Yes, ${item.row.display_type || 'no type'}`, 'primary', 'mixed-yes', { tx: item.row.id }) + btn('Another type', '', 'resolve', { tx: item.row.id });
+    else if (item.kind === 'refused') actions = btn('See the tie line', 'ink', 'refused-sum', { id: item.refused.id })
+        + link('Import a fixed file', '', '#/books/import') + btn('Known, leave it', 'quiet', 'aside', { id: item.refused.id, aside: 1 });
+    else actions = (item.actions || []).map(a => a.href ? link(a.label, a.primary ? 'ink' : '', a.href) : btn(a.label, a.primary ? 'ink' : '', a.act, a.data)).join('');
+    const mark = item.row ? rowMark(item.row.id) : item.line ? accountMark(item.line.account_id) : '';
+    return `<article class="att att--${item.kind}${item.kind === 'refused' ? ' is-blocking' : ''}">
+        <span class="att__ic" aria-hidden="true">${icon(HOME_ITEM_ICONS[item.kind] || 'info')}</span>
+        <div class="att__main"><p class="att__title">${esc(item.title)} ${marker}${mark}</p>
+            <p class="att__meta">${esc(item.meta || '')}</p>${guessLine}${item.holds ? `<p class="att__holds">${esc(item.holds)}</p>` : ''}</div>
+        ${amount ? `<div class="att__amt">${amount}</div>` : ''}
+        <div class="att__act">${actions}</div></article>`;
+}
+
+/** What a lane holds, said kind by kind: "5 transfers S$ 12,200.00 · 84 rows with no type S$ 6,477.50 · 7 bills not seen". */
+function laneSummary(list) {
+    const kinds = [['transfer', 'transfer', 'transfers', true], ['untyped', 'row with no type', 'rows with no type', true],
+        ['mixed', 'mixed-merchant row', 'mixed-merchant rows', true], ['bill', 'bill not seen', 'bills not seen', false],
+        ['refused', 'refused statement', 'refused statements', false], ['off', 'statement off', 'statements off', false],
+        ['stale', 'old figure', 'old figures', false], ['nofig', 'line with no figure', 'lines with no figure', false]];
+    return kinds.map(([k, one, many, summed]) => {
+        const of = list.filter(i => i.kind === k);
+        if (!of.length) return '';
+        const by = {};
+        of.forEach(i => { by[i.currency] = (by[i.currency] || 0) + (i.amount || 0); });
+        const sum = summed ? ` <b class="num">${Object.entries(by).map(([c, v]) => esc(money(v, c))).join(' · ')}</b>` : '';
+        return `<span>${of.length === 1 ? `1 ${one}` : `${of.length} ${many}`}${sum}</span>`;
+    }).filter(Boolean).join('<span class="sep" aria-hidden="true">·</span>');
+}
+
+async function homeGuesses(items) {
+    const rows = items.filter(i => i.kind === 'untyped' && i.row).map(i => i.row.id);
+    const out = new Map();
+    await Promise.all(rows.map(async id => {
+        try {
+            const s = await get(`/api/transactions/${id}/suggestion`);
+            if (s && (s.route === 'prefill' || s.route === 'top3') && s.types && s.types.length) out.set(id, { ...s.types[0], merchant: s.merchant });
+        } catch (_) { /* no guess: the card says "This was…" */ }
+    }));
+    return out;
+}
+
+/** A book's twelve months as small bars, on its own scale; the tile's month dark. */
+function homeBars(values, months, current, cls) {
+    const top = Math.max(...values.map(v => Math.abs(v)), 0);
+    return `<div class="home-bars ${cls}" role="img" aria-label="Twelve months, each on this book's own scale">${values.map((v, i) => {
+        const h = top ? Math.max(2, Math.round(Math.abs(v) / top * 100)) : 2;
+        return `<span class="${months[i] === current ? 'is-current' : ''}${v ? '' : ' is-zero'}" style="--h:${h}%" title="${esc(monthName(months[i], { short: true }))}"></span>`;
+    }).join('')}</div>`;
+}
+function homeVsAverage(minor, avgMinor, months) {
+    const span = `over ${plural(months, 'month')} with rows before it`;
+    if (!avgMinor && !minor) return `<span class="home-vs" title="${span}">same as its recent average</span>`;
+    if (!avgMinor) return `<span class="home-vs">no recent average to compare</span>`;
+    const p = Math.round((minor - avgMinor) / Math.abs(avgMinor) * 100);
+    if (p === 0) return `<span class="home-vs" title="${span}">same as its recent average ${esc(money(avgMinor, 'SGD'))}</span>`;
+    return `<span class="home-vs" title="The recent average is ${span}"><span aria-hidden="true">${p > 0 ? '▲' : '▼'}</span>${Math.abs(p)}% ${p > 0 ? 'above' : 'below'} its recent average ${esc(money(avgMinor, 'SGD'))}</span>`;
+}
+
 async function viewHome() {
     const month = currentMonth();
     const prev = prevMonth(month);
     const [settings, now, before, q, cards, r] = await Promise.all([
         get('/api/settings'), sheetFor(month),
         prev >= SHEET_START ? sheetFor(prev).catch(() => null) : Promise.resolve(null),
-        loadQueue(), get('/api/dashboard/stat-cards'), refs(),
+        loadQueue(), get(`/api/dashboard/stat-cards?ref_month=${prev}&history=12`), refs(),
     ]);
+    const shown = { out: q.lanes.out.slice(0, 3), in: q.lanes.in.slice(0, 3), books: q.lanes.books.slice(0, 3) };
+    const guesses = await homeGuesses([...shown.out, ...shown.in]);
 
-    const claude = settings.claude_count
-        ? `<div class="claude-line"><span class="spark" aria-hidden="true">✳</span>
-            <span class="grow"><b>${plural(settings.claude_count, 'change')} by Claude</b> since you last looked${settings.latest_claude_at ? ` · latest ${esc(when(settings.latest_claude_at))}` : ''}</span>
-            <a class="btn sm" href="#/changes">Check them</a>
-            <button class="btn sm quiet" data-act="looks-right" data-upto="${settings.newest}">Looks right</button></div>`
-        : `<div class="claude-line quiet"><span aria-hidden="true">✳</span><span class="grow">Nothing new from Claude since you last looked.</span>
-            <span class="small">Claude may write: <b>${settings.claude_may_write ? 'on' : 'off'}</b></span></div>`;
-
-    const chips = [];
-    if (before) {
-        const change = now.net_worth_minor - before.net_worth_minor;
-        chips.push(`<span class="chip" style="cursor:default"><span class="num">${esc(money(change, 'SGD', { signed: true }))}</span> since ${esc(day(before.as_at, { year: false }))}</span>`);
-        const mc = before.month_check;
-        if (mc && mc.available && mc.unexplained_minor !== null && mc.unexplained_minor !== undefined) {
-            chips.push(mc.unexplained_minor === 0
-                ? tag('ties', `${monthName(prev, { short: true })} adds up`, { href: '#/books' + '', title: 'The month check' })
-                : `<a class="tag unexplained" href="#/books" data-act="go-month-check" data-month="${prev}">${icon('warning-circle')}${esc(money(mc.unexplained_minor, 'SGD'))} unexplained in ${esc(monthName(prev, { short: true }))}</a>`);
-        }
-    }
-    now.left_out.forEach(l => {
-        const line = now.sections.flatMap(s => s.lines).find(x => x.name === l.name);
-        chips.push(tag('nofig', `${l.name}: ${l.why}, left out`, line ? fixFor(line, now.as_at) : {}));
-    });
-
-    const hero = `<section class="card home-hero">
-        <div class="spread"><span class="eyebrow">Net worth · today</span><a class="link small" href="#/books">Balance sheet</a></div>
-        <div class="hero-figure num">${heroFigure(now.net_worth_minor, now.currency)}</div>
-        <div class="chips">${chips.join('')}</div>
-        ${restsOnHTML(now)}</section>`;
-
-    const lane = (key, title, list, sum) => `<div class="lane">
-        <h3>${key === 'out' ? dirTag('out') : key === 'in' ? dirTag('in') : ''} ${title}
-            <span class="lane-sum">${plural(list.length, 'item')}${sum ? ` · transfers ${esc(sum)}` : ''}</span></h3>
-        ${list.length ? list.slice(0, 3).map(itemHTML).join('') : '<p class="muted small">Nothing waits here.</p>'}
-        ${list.length > 3 ? `<a class="link small" href="#/queue">${list.length - 3} more in the queue</a>` : ''}</div>`;
+    const lane = (key, title, list) => `<div class="home-lane home-lane--${key}">
+        <div class="home-lane__head"><h3>${key === 'out' || key === 'in' ? dirTag(key) : ''}${title}</h3>
+            <p class="home-lane__sum">${list.length ? laneSummary(list) : ''}</p></div>
+        ${list.length ? shown[key].map(i => homeItemHTML(i, guesses)).join('') : `<p class="card-empty">${icon('check-circle')}Nothing waits here.</p>`}
+        ${list.length > 3 ? `<a class="link home-lane__more" href="#/queue">${list.length - 3} more in the queue</a>` : ''}</div>`;
     const waits = `<section class="card home-waits">
-        <div class="card-head"><h2>Waiting for you</h2><a class="btn sm" href="#/queue">Open the queue · ${q.count}</a></div>
-        ${q.capped.length ? `<p class="small notice">Too many to read at once, so these counts and sums are short: ${esc(q.capped.join('; '))}.</p>` : ''}
-        ${q.count ? `<div class="waits-cols">${lane('out', 'Money out', q.lanes.out, q.sums.out)}${lane('in', 'Money in', q.lanes.in, q.sums.in)}</div>
-        ${q.lanes.books.length ? `<div style="margin-top:16px">${lane('books', 'Figures and statements', q.lanes.books)}</div>` : ''}`
-        : '<p class="empty">Nothing waits for you.</p>'}</section>`;
+        <div class="section-header"><h2>Waiting for you</h2><a class="btn sm" href="#/queue">Open the queue <span class="count">${q.count}</span></a></div>
+        ${q.capped.length ? `<div class="notice warn">${icon('warning')}<span>Too many to read at once, so these counts and sums are short: ${esc(q.capped.join('; '))}.</span></div>` : ''}
+        ${q.count ? `<div class="home-waits__cols">${lane('out', 'Money out', q.lanes.out)}${lane('in', 'Money in', q.lanes.in)}</div>
+        ${q.lanes.books.length ? lane('books', 'Figures and statements', q.lanes.books) : ''}`
+        : `<p class="home-empty">${icon('check-circle')}Nothing waits for you. Every statement ties.</p>`}</section>`;
 
-    const books = r.books.map(b => b.name);
-    const tile = (cls, eyebrow, label, minor, body) => `<div class="tile ${cls}"><div class="eyebrow">${esc(eyebrow)}</div>
-        <div class="label">${esc(label)}</div><div class="fig num">${esc(money(minor, 'SGD'))}</div><p>${body}</p></div>`;
+    // The book tiles: the month the check beside them covers, each its own
+    // figure with its own twelve months; never added.
+    const hist = cards.history || [];
+    const months = hist.map(h => h.month);
+    const tile = ({ cls, eyebrow, label, minor, avg, body, values, href, act, book, foot }) => `<a class="home-tile ${cls}" href="${href}"${act ? ` data-act="${act}" data-book="${esc(book)}" data-month="${esc(cards.ref_month)}"` : ''}>
+        <span class="home-tile__eyebrow">${esc(eyebrow)}</span>
+        <span class="home-tile__label">${esc(label)}</span>
+        <span class="home-tile__fig num">${esc(money(minor, 'SGD'))}</span>
+        ${avg}
+        <span class="home-tile__body">${body}</span>
+        ${values.length ? homeBars(values, months, cards.ref_month, cls) : ''}
+        <span class="home-tile__foot">${esc(foot)} ${icon('caret-right')}</span></a>`;
     const tiles = [];
-    books.forEach((name, i) => {
-        const key = name.toLowerCase();
+    r.books.forEach((b, i) => {
+        const key = b.name.toLowerCase();
         if (!(key in cards)) return;
         const minor = toMinor(cards[key]);
+        const values = hist.map(h => toMinor(h[key] || 0));
+        const avg = homeVsAverage(minor, toMinor(cards[`avg_${key}`] || 0), cards.avg_months || 3);
         if (i === 0) {
-            tiles.push(tile('household', 'Household', `${name} spending`, minor,
-                `${plural(cards.household_rows || 0, 'row')}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.`));
+            tiles.push(tile({ cls: 'is-household', eyebrow: 'Household', label: `${b.name} spending`, minor, avg, values, act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows',
+                body: `${plural(cards.household_rows || 0, 'row')}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
         } else {
-            tiles.push(tile('company', 'Company book', `${name}, its costs`, minor,
-                `Paid from our accounts. Not household spending; it moves ${esc(name)}’s company balance.`));
+            tiles.push(tile({ cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows',
+                body: `Paid from our accounts. Not household spending; it moves ${esc(b.name)}’s company balance.` }));
         }
     });
-    tiles.push(tile('movement', 'Movement, not spending', 'Loan principal repaid', toMinor(cards.loan_principal),
-        `What the loans fell by: instalments ${esc(money(toMinor(cards.loan_instalments), 'SGD'))} less interest ${esc(money(toMinor(cards.loan_interest), 'SGD'))}. Still the household’s money.`));
+    const loanValues = hist.map(h => toMinor(h.loan_principal || 0));
+    tiles.push(tile({ cls: 'is-movement', eyebrow: 'Movement, not spending', label: 'Loan principal repaid', minor: toMinor(cards.loan_principal), values: loanValues, href: '#/books', foot: 'See the loans',
+        avg: toMinor(cards.loan_instalments) ? '' : '<span class="home-vs">no instalment seen this month</span>',
+        body: `What the loans fell by: instalments ${esc(money(toMinor(cards.loan_instalments), 'SGD'))} less interest ${esc(money(toMinor(cards.loan_interest), 'SGD'))}. Still the household’s money.` }));
     const tilesCard = `<section class="card home-tiles">
-        <div class="card-head"><h2>${esc(cards.ref_label)}: ${tiles.length} figures, never added</h2><a class="link small" href="#/books/spending">Spending</a></div>
-        <div class="tiles">${tiles.join('')}</div>
-        <p class="never">Each book is its own figure, drawn three different ways so they never read as one sum. No total is shown between them.</p></section>`;
+        <div class="section-header"><h2>${esc(monthName(cards.ref_month))}: ${tiles.length} figures, never added</h2><a class="link" href="#/books/spending">Spending</a></div>
+        <div class="home-tiles__grid">${tiles.join('')}</div>
+        <p class="card-foot">Each book is its own figure, drawn three different ways so they never read as one sum. Each small chart has its own scale. No total is shown between them.</p></section>`;
 
     const mcCard = before ? monthCheckMini(before) : '';
-    return `<div class="home">${claude}${hero}${mcCard}${waits}${tilesCard}</div>`;
+    return `<div class="home">${homeClaudeLine(settings)}${homeHero(now, before, prev)}${mcCard}${waits}${tilesCard}</div>`;
 }
 
-function monthCheckMini(sheet) {
-    const mc = sheet.month_check;
-    if (!mc) return '';
-    const name = monthName(sheet.month);
-    if (!mc.available || mc.unexplained_minor === null) {
-        return `<section class="card home-mc"><span class="eyebrow">Month check · ${esc(name)}</span><p class="small" style="margin-top:8px">${esc(mc.why || 'Not worked out for this month.')}</p></section>`;
-    }
-    const reasons = [];
-    if (mc.review && mc.review.count) reasons.push(`${plural(mc.review.out_count, 'transfer')} out (${esc(money(mc.review.out_minor, 'SGD'))}) and ${mc.review.in_count} in (${esc(money(mc.review.in_minor, 'SGD'))}) wait for a label`);
-    (mc.not_tying || []).forEach(l => reasons.push(`${esc(l.name)}: ${esc(l.text)}`));
-    (mc.left_out || []).forEach(l => reasons.push(`${esc(l.name)} left out (${esc(l.why)})`));
-    return `<section class="card home-mc"><span class="eyebrow">Month check · ${esc(name)}</span>
-        <p class="small muted" style="margin:4px 0 10px">Start + income − spending + currency change, against the actual end.</p>
-        <div class="eyebrow" style="margin-top:6px">${mc.unexplained_minor === 0 ? 'It adds up' : 'Unexplained'}</div>
-        <div class="tile-fig num" style="font-family:var(--font-display);font-size:30px;font-weight:600;color:${mc.unexplained_minor === 0 ? 'var(--ok)' : 'var(--bad)'}">${esc(money(mc.unexplained_minor, 'SGD'))}</div>
-        <p class="small muted">expected ${esc(money(mc.expected_minor, 'SGD'))} · actual ${esc(money(mc.actual_minor, 'SGD'))}</p>
-        ${reasons.length ? `<ul class="small" style="padding-left:18px;margin:10px 0">${reasons.slice(0, 4).map(x => `<li>${x}</li>`).join('')}</ul>` : ''}
-        <button class="btn sm" data-act="go-month-check" data-month="${sheet.month}">Open the month check</button></section>`;
-}
+ACT['tile-book'] = el => {
+    S.spending.book = el.dataset.book; S.spending.span = 'month';
+    store.set('spending', S.spending);
+    S.month = el.dataset.month; store.set('month', S.month);
+    location.hash = '#/books/spending';
+};
+// One tap on fin's guess: the row takes the guessed type, as the resolve
+// sheet would save it with the guess on screen.
+ACT['home-guess-yes'] = async el => {
+    const row = await findRow(Number(el.dataset.tx));
+    if (!row) { toast('That row is no longer waiting', { bad: true }); return; }
+    const pattern = suggestPattern(row.description);
+    const body = { tx_id: row.id, service_name: el.dataset.merchant || row.service_name || titleCase(pattern || row.description),
+        type_id: Number(el.dataset.type), apply_scope: pattern ? 'service_default' : 'transaction', pattern, match_type: 'contains', suggestion_visible: true };
+    const r = await act('POST', '/api/transactions/resolve', body, 'Labelled');
+    if (r) rerender();
+};
 
 ACT['looks-right'] = async el => {
     const r = await send('POST', '/api/changes/looked', { upto: Number(el.dataset.upto) });

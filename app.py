@@ -1549,7 +1549,8 @@ def api_dashboard_stat_cards():
     Auto-picks reference month using the 15th rule:
       - If today >= 15th, ref = previous month
       - If today < 15th, ref = two months ago
-    Override with ?ref_month=YYYY-MM.
+    Override with ?ref_month=YYYY-MM. ?history=N (up to 24) adds history:
+    each book's card and loan_principal for the N months ending with it.
 
     Respects: book, exclude_one_off, account_id
 
@@ -1715,6 +1716,26 @@ def api_dashboard_stat_cards():
         waiting = _waiting_sides(conn)
         loan = loan_interest.month_figures(conn, f"{ref_y:04d}-{ref_m:02d}")
 
+        # ?history=N (at most 24): each card's figure for the N months ending
+        # with the reference month, oldest first, worked out as the card is.
+        history = []
+        try:
+            n_history = max(0, min(int(request.args.get("history") or 0), 24))
+        except ValueError:
+            n_history = 0
+        hy, hm = ref_y, ref_m
+        for _ in range(n_history):
+            data = ref_data if (hy, hm) == (ref_y, ref_m) else query_month(hy, hm)
+            month_loan = loan_interest.month_figures(conn, f"{hy:04d}-{hm:02d}")
+            entry = {"month": f"{hy:04d}-{hm:02d}",
+                     "loan_principal": money.from_minor(month_loan["principal_minor"])}
+            for name, key in books:
+                entry[key] = money.from_minor(data[key if name == book_type.DEFAULT_BOOK else f"paid_{key}"])
+            history.insert(0, entry)
+            hm -= 1
+            if hm == 0:
+                hm, hy = 12, hy - 1
+
     # Pick which spend to feature based on filter
     featured = book.lower() if book else "total"
     spend = money.from_minor(ref_data[featured])
@@ -1743,7 +1764,9 @@ def api_dashboard_stat_cards():
         "loan_interest": money.from_minor(loan["interest_minor"]),
         "loan_principal": money.from_minor(loan["principal_minor"]),
         "cash_out": money.from_minor(ref_data["household"] + loan["principal_minor"]),
-    }
+        }
+    if n_history:
+        payload["history"] = history
     for name, key in books:
         shown = key if name == book_type.DEFAULT_BOOK else f"paid_{key}"
         payload[key] = money.from_minor(ref_data[shown])

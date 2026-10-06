@@ -24,7 +24,8 @@ import sqlite3
 
 CLAUDE_MAY_WRITE = "claude_may_write"
 LAST_LOOKED = "last_looked_entry"
-KEYS = (CLAUDE_MAY_WRITE, LAST_LOOKED)
+LAST_LOOKED_AT = "last_looked_at"   # when the operator last looked (UTC), for Home's line
+KEYS = (CLAUDE_MAY_WRITE, LAST_LOOKED, LAST_LOOKED_AT)
 
 # What a chat write tool says while the switch is off.
 WRITES_OFF = (
@@ -73,6 +74,8 @@ def mark_looked(conn: sqlite3.Connection, upto: int | None = None) -> int:
     newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_entries WHERE open = 0").fetchone()[0]
     target = newest if upto is None else max(0, min(int(upto), newest))
     held = last_looked(conn)
+    # Looking is looking, whether or not the mark moves: keep when it happened.
+    _set(conn, LAST_LOOKED_AT, conn.execute("SELECT datetime('now')").fetchone()[0])
     if held is None or target > held:
         _set(conn, LAST_LOOKED, str(target))
         return target
@@ -88,7 +91,8 @@ def since_looked(conn: sqlite3.Connection) -> dict:
         (mark or 0,),
     ).fetchone()
     newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_entries WHERE open = 0").fetchone()[0]
-    return {"last_looked": mark, "claude_count": row[0], "latest_claude_at": row[1], "newest": newest}
+    return {"last_looked": mark, "last_looked_at": _get(conn, LAST_LOOKED_AT),
+            "claude_count": row[0], "latest_claude_at": row[1], "newest": newest}
 
 
 def claude_marks(conn: sqlite3.Connection) -> dict:

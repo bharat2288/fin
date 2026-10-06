@@ -176,6 +176,14 @@ def test_claudes_changes_are_counted_until_the_operator_looks(book):
     assert shown["last_looked"] == looked["last_looked"]
 
 
+def test_home_is_told_when_the_operator_last_looked(book):
+    assert book.get("/api/settings").get_json()["last_looked_at"] is None
+    looked = book.post("/api/changes/looked", json={}).get_json()
+    at = looked["last_looked_at"]
+    assert at and len(at) == 19 and at[4] == "-" and at[10] == " "   # UTC, as the history's times
+    assert book.get("/api/settings").get_json()["last_looked_at"] == at
+
+
 def test_the_mark_never_moves_back(book):
     tx = first_row(book)
     chat("set_note", tx_id=tx["id"], notes="one")
