@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS batch_imports (
     status TEXT DEFAULT 'preview',    -- 'preview', 'committed', 'failed'
     total_lines INTEGER DEFAULT 0,
     categorized_lines INTEGER DEFAULT 0,
-    result_json TEXT,                 -- JSON summary of what was committed
+    result_json TEXT,                 -- while status is 'preview': the preview's facts confirm writes; after: JSON summary (or the error)
     created_at TEXT DEFAULT (datetime('now'))
 );
 

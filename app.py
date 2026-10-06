@@ -2261,6 +2261,79 @@ def _upload_name(sent: str, index: int, folder: str) -> str:
     return candidate
 
 
+# What an import preview holds as facts: the confirm writes these as the
+# upload read them, and takes from its request only the choices below.
+_PREVIEW_ROW_FACTS = (
+    "date", "description", "amount_sgd", "amount_foreign", "currency_foreign", "account", "statement",
+)
+_CONFIRM_ROW_CHOICES = (
+    "book", "type_id", "service_id", "flow_type", "other_side_id", "_skip", "is_one_off", "cat_source",
+)
+PREVIEW_NOT_OPEN = "This preview is no longer open. Upload the statement again."
+PREVIEW_MISMATCH = "The import does not match its preview; nothing was imported. Upload the statement again."
+
+
+def _stored_preview(groups: list[dict]) -> str:
+    """The facts of an upload's preview, as the response gives them, for its
+    batch_imports row: per group (in order) its account, currency and tie
+    lines, and per row (in order) its facts."""
+    preview = {
+        "groups": [
+            {
+                "account": g["account"],
+                "currency": g["currency"],
+                "statements": g["statements"],
+                "transactions": [{k: tx.get(k) for k in _PREVIEW_ROW_FACTS} for tx in g["transactions"]],
+            }
+            for g in groups
+        ]
+    }
+    # Serialised as the response is, so what is stored is what was shown.
+    return app.json.dumps(preview)
+
+
+class PreviewRefused(Exception):
+    """A confirm that does not answer an open preview: (message, status)."""
+
+
+def _confirmed_groups(conn, import_id, sent_groups) -> list[dict]:
+    """The groups a confirm writes: the open preview's stored facts, with the
+    request's choices per row. Raises PreviewRefused when the preview is not
+    open (409) or the request does not have its shape (400)."""
+    if isinstance(import_id, bool) or not isinstance(import_id, int):
+        raise PreviewRefused(PREVIEW_NOT_OPEN, 409)
+    held = conn.execute(
+        "SELECT status, result_json FROM batch_imports WHERE id = ?", (import_id,)
+    ).fetchone()
+    if held is None or held["status"] != "preview" or not held["result_json"]:
+        raise PreviewRefused(PREVIEW_NOT_OPEN, 409)
+    try:
+        stored = json.loads(held["result_json"])["groups"]
+    except (ValueError, KeyError, TypeError):
+        raise PreviewRefused(PREVIEW_NOT_OPEN, 409) from None
+    if not isinstance(sent_groups, list) or len(sent_groups) != len(stored):
+        raise PreviewRefused(PREVIEW_MISMATCH, 400)
+    out = []
+    for kept, sent in zip(stored, sent_groups):
+        if not isinstance(sent, dict) or sent.get("account") != kept["account"]:
+            raise PreviewRefused(PREVIEW_MISMATCH, 400)
+        sent_rows = sent.get("transactions")
+        if not isinstance(sent_rows, list) or len(sent_rows) != len(kept["transactions"]):
+            raise PreviewRefused(PREVIEW_MISMATCH, 400)
+        rows = []
+        for facts, chosen in zip(kept["transactions"], sent_rows):
+            if not isinstance(chosen, dict):
+                raise PreviewRefused(PREVIEW_MISMATCH, 400)
+            rows.append({**{k: chosen[k] for k in _CONFIRM_ROW_CHOICES if k in chosen}, **facts})
+        out.append({
+            "account": kept["account"],
+            "currency": kept["currency"],
+            "statements": kept["statements"],
+            "transactions": rows,
+        })
+    return out
+
+
 @app.route("/api/import/upload", methods=["POST"])
 def api_import_upload():
     """Accept statement files, parse, label with book and type, return preview.
@@ -2476,15 +2549,19 @@ def api_import_upload():
         skipped += group_skip
         to_review += sum(1 for t in txns if t["review_each_time"])
 
-    # Save preview to batch_imports and fetch services list in one connection
+    # Save preview to batch_imports and fetch services list in one connection.
+    # The preview's facts stay on the server: confirm writes these, never the
+    # facts a request sends back (_stored_preview).
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines) VALUES (?, ?, 'preview', ?, ?)",
+            "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines, result_json) "
+            "VALUES (?, ?, 'preview', ?, ?, ?)",
             (
                 json.dumps(filenames),
                 json.dumps(list(all_groups.keys())),
                 total,
                 typed,
+                _stored_preview(groups),
             ),
         )
         conn.commit()
@@ -2525,32 +2602,27 @@ def api_import_upload():
 
 @app.route("/api/import/confirm", methods=["POST"])
 def api_import_confirm():
-    """Commit previewed transactions to the database.
+    """Commit an upload's preview to the database.
 
-    Expects JSON body:
+    The request brings choices, never facts. The facts are the preview the
+    upload stored on its batch_imports row (result_json): each group's
+    account, currency and statement tie lines, and each row's date,
+    description, amount, foreign amount and currency, account and statement.
+    Whatever a request sends for those is ignored. From each row it takes
+    only: book, type_id, service_id, flow_type, other_side_id, _skip,
+    is_one_off and cat_source; and new_services and new_rules.
+
+    Expects JSON body (the preview's groups echoed back with choices made):
     {
         "import_id": int,
         "groups": [
             {
-                "account": "account name",
+                "account": "account name, as the preview gave it",
                 "transactions": [
-                    {
-                        "date": "YYYY-MM-DD",
-                        "description": "...",
-                        "amount_sgd": 123.45,
-                        "amount_foreign": null,
-                        "currency_foreign": null,
-                        "book": "Household",
-                        "type_id": 5,
-                        "flow_type": "expense",
-                        "other_side_id": null,
-                        "_skip": false,
-                        "statement": 0
-                    }, ...
-                ],
-                "statements": [
-                    {"opening_minor": 5210000, "closing_minor": 4120050,
-                     "closing_date": "YYYY-MM-DD"}, ...
+                    {"book": "Household", "type_id": 5, "service_id": null,
+                     "flow_type": "expense", "other_side_id": null,
+                     "_skip": false, "is_one_off": false, "cat_source": "rule",
+                     ...the row's facts may be echoed back and are ignored}, ...
                 ]
             }, ...
         ],
@@ -2562,13 +2634,19 @@ def api_import_confirm():
         ]
     }
 
+    An import_id that names no preview, or one already confirmed or failed,
+    is refused (409) and nothing is written: upload the statement again. The
+    groups must be the preview's, in its order, each with its account and
+    its number of rows (rows by position); anything else is refused (400)
+    and nothing is written. A confirmed preview cannot be confirmed again.
+
     A book, a type or a flow that is not in its vocabulary, or an other side
     that is no account, refuses the whole import before anything is written,
     and so does an amount that is missing or is not a whole number of cents.
     The amount arrives as the decimal the preview showed and is stored as
     whole minor units.
 
-    A group's `statements` are the tie lines the upload gave it. Each is
+    A group's `statements` are the tie lines the upload stored. Each is
     checked again over the rows that name it and are about to be written:
     opening less their sum must equal closing, exactly, so a row of such a
     statement cannot be left out. Its closing balance is then written as a
@@ -2583,11 +2661,17 @@ def api_import_confirm():
         return jsonify({"error": "No data provided"}), 400
 
     import_id = data.get("import_id")
-    groups = data.get("groups", [])
     new_rules = data.get("new_rules", [])
     new_services = data.get("new_services", [])
 
     with get_db() as conn:
+        # The facts are the preview's as the upload read them; the request
+        # brings only its choices.
+        try:
+            groups = _confirmed_groups(conn, import_id, data.get("groups"))
+        except PreviewRefused as e:
+            message, status = e.args
+            return jsonify({"error": message}), status
         try:
             for labelled in [tx for g in groups for tx in g.get("transactions", [])] + new_services:
                 _checked_labels(conn, labelled)
@@ -2970,7 +3054,11 @@ def api_import_history():
             "status": r["status"],
             "total_lines": r["total_lines"],
             "categorized_lines": r["categorized_lines"],
-            "result": json.loads(r["result_json"]) if r["result_json"] else None,
+            # While open, result_json holds the preview's facts: not shown.
+            "result": (
+                json.loads(r["result_json"])
+                if r["result_json"] and r["status"] != "preview" else None
+            ),
             "created_at": r["created_at"],
         })
     return jsonify(result)
