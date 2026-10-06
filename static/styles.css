@@ -735,7 +735,92 @@ li.empty { list-style: none; margin-top: 8px; }
 /* == PLACE: queue == */
 /* ========================================================================== */
 
-.lane-card .card-head h2 { display: flex; align-items: center; gap: 8px; }
+/* The Queue: an Ops-style hero (folio .console-hero), then money out and money
+   in side by side, each column ending at its last card (Q1.1) and split under
+   what its rows hold out of the books (Q1.2), then figures and statements. */
+.queue > * + * { margin-top: 16px; }
+.q-hero .q-hero__line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 14px; margin: 8px 0 6px; font-family: var(--font-base); }
+.q-hero__count { font-family: var(--font-base); font-size: clamp(44px, 9vw, 72px); font-weight: var(--font-bold); letter-spacing: -0.035em; line-height: 1; }
+.q-hero__words { font-family: var(--font-display); font-size: clamp(22px, 3.4vw, 30px); font-weight: var(--font-bold); letter-spacing: -0.02em; line-height: 1.15; }
+.q-hero__sub { color: var(--text-secondary); max-width: 640px; }
+.q-empty { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--border-default); border-radius: var(--radius-xl);
+    color: var(--text-secondary); font-size: 13.5px; }
+.q-empty svg { width: 18px; height: 18px; color: var(--semantic-success); }
+/* the jump chips: solid needs you, dashed is context */
+.q-jump { cursor: pointer; }
+.q-jump .num { color: var(--text-primary); }
+.q-jump.k-out svg, .q-jump.k-in svg { color: var(--k); }
+.q-jump.delta-chip--warn .num { color: inherit; }
+.q-jump--context { background: transparent; border: 1px dashed var(--border-emphasis); }
+.q-cols { align-items: start; }
+.lane-card .section-header h2 { display: flex; align-items: center; gap: 10px; }
+.lane-card .section-header p { margin-top: 2px; }
+.lane-card > .item + .item { margin-top: 10px; }
+
+/* a group under its own heading: what it holds out, its count, its sum */
+.q-group + .q-group { margin-top: 22px; }
+.q-group__head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin: 0 0 10px; padding: 0 2px 8px;
+    border-bottom: 1px solid var(--border-subtle); font-size: 13px; font-weight: var(--font-semibold); color: var(--text-secondary); }
+.q-group__head .num { font-weight: var(--font-bold); color: var(--text-primary); }
+.q-group__n { color: var(--text-tertiary); font-weight: var(--font-semibold); }
+.q-group .item + .item { margin-top: 10px; }
+.q-show { margin-top: 10px; }
+
+/* a card: what it was, its date and account, the amount right; the guess, then the buttons */
+.q-card .what { line-height: 1.6; }
+.q-card .act { align-items: center; }
+.queue .item .act { align-items: center; }
+.queue .item .act .link { font-size: 13px; }
+.q-card .act .btn svg { width: 14px; height: 14px; }
+.q-guess, .q-more { grid-column: 1 / -1; min-width: 0; }
+.q-rows > summary { display: inline-flex; align-items: center; list-style: none; font-size: 13px; }
+.q-rows > summary::-webkit-details-marker { display: none; }
+.q-rows table { margin-top: 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); overflow: hidden; }
+.q-rows table.t td { font-size: 12.5px; }
+
+/* fin's guess: a camel-tinted box, the guess in bold, a small meter and how sure */
+.guess { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 12px; border-radius: var(--radius-xl);
+    background: var(--accent-primary-subtle); color: var(--text-primary); font-size: 13.5px; overflow-wrap: anywhere; }
+.guess b { font-weight: var(--font-bold); }
+.guess__meter { position: relative; flex: none; width: 64px; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--text-primary) 14%, transparent); overflow: hidden; }
+.guess__meter i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--text-secondary); }
+.guess__sure { color: var(--text-secondary); font-size: 12.5px; }
+.guess__act { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.guess__act .btn svg { width: 15px; height: 15px; }
+
+/* the "This was…" step */
+.ww-label { margin: 4px 0 -4px; font-size: 13px; font-weight: var(--font-semibold); color: var(--text-secondary); }
+.choice.is-chosen { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: default;
+    border: 1.5px solid var(--text-primary); padding: 9.5px 11.5px; }
+.choice.is-chosen > div { min-width: 0; }
+.choice.is-chosen span { display: block; }
+.choice.is-chosen .link { flex: none; }
+.choice.more strong { font-weight: var(--font-semibold); }
+#ww-ask:not(:empty) { display: flex; flex-direction: column; gap: 12px; }
+.scope-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl); background: color-mix(in srgb, var(--bg-raised) 45%, var(--bg-surface)); font-size: 13.5px; }
+.scope-line > div { min-width: 0; overflow-wrap: anywhere; }
+.scope-line .link { flex: none; }
+.scope-pick { display: grid; gap: 2px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.ww-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+#fg-pick[hidden], .scope-more[hidden], #ww-guess[hidden], #ww-label[hidden] { display: none; }
+
+/* Enter a figure: the account named plainly, with the figure it replaces */
+.fg-target .spread { align-items: baseline; }
+.fg-target > .small { color: var(--text-secondary); margin-top: 2px; }
+.fg-now { margin-top: 8px; font-size: 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.fg-now b { font-weight: var(--font-bold); }
+
+@media (max-width: 720px) {
+    .q-hero .chip-row { gap: 8px; }
+    .q-jump { min-height: var(--tap); }
+    .q-card .act .btn { flex: 1 1 auto; }
+    .q-card .act .link { min-height: var(--tap); }
+    .q-rows > summary { min-height: var(--tap); padding: 0; }
+    .guess__act .btn { flex: 1 1 auto; min-height: var(--tap); }
+    .choice.is-chosen .link, .scope-line .link { min-height: var(--tap); }
+    .scope-pick input[type="text"] { margin-top: 4px; }
+}
 
 /* ========================================================================== */
 /* == PLACE: books == */

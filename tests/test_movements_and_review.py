@@ -656,3 +656,64 @@ def test_a_waiting_row_given_a_type_in_the_preview_is_saved_as_spending(client, 
     assert what_it_is(row(client, TRANSFERS[2][1])) == ("expense", None, "Household", "Education")
     assert [tx["description"] for tx in review_list(client)] == [TRANSFERS[0][1], TRANSFERS[1][1]]
     assert household_spend(client) == 12000.50
+
+
+# --- fin's guess for a waiting transfer: how the same text was labelled before --------
+
+LANDLORD = "PAYNOW TO SAMPLE LANDLORD REF 4400"
+
+
+def _landlord_rows(client) -> list[dict]:
+    return sorted((tx for tx in listed(client) if tx["description"] == LANDLORD), key=lambda tx: tx["date"])
+
+
+def test_a_transfer_gets_a_guess_once_two_earlier_rows_were_labelled_the_same_way(client, ledger):
+    bring_in(client, BANK, [(1, LANDLORD, 2100.00), (2, LANDLORD, 2100.00), (3, LANDLORD, 2100.00)])
+    first, second, third = _landlord_rows(client)
+    rent = spending_type(client, "Rent")
+
+    assert client.get(f"/api/review/{third['id']}/suggestion").get_json() == {"guess": None}
+    client.post(f"/api/review/{first['id']}/label", json={"choice": "spending", "type_id": rent})
+    # one earlier label is not enough to guess from
+    assert client.get(f"/api/review/{third['id']}/suggestion").get_json() == {"guess": None}
+    client.post(f"/api/review/{second['id']}/label", json={"choice": "spending", "type_id": rent})
+
+    guess = client.get(f"/api/review/{third['id']}/suggestion").get_json()["guess"]
+    assert (guess["choice"], guess["type"], guess["book"], guess["agree"], guess["of"], guess["probability"]) == (
+        "spending", "Rent", "Household", 2, 2, 1.0)
+    # the body is what the label takes, and saving it labels the row that way
+    resp = client.post(f"/api/review/{third['id']}/label", json=guess["body"])
+    assert resp.status_code == 200, resp.get_json()
+    assert what_it_is(row_by_id(client, third["id"])) == ("expense", None, "Household", "Rent")
+
+
+def test_a_guess_names_the_account_a_move_went_to_and_needs_most_labels_to_agree(client, ledger):
+    bring_in(client, BANK, [(1, LANDLORD, 500.00), (2, LANDLORD, 500.00), (3, LANDLORD, 500.00), (4, LANDLORD, 500.00)])
+    a, b, c, d = _landlord_rows(client)
+    client.post(f"/api/review/{a['id']}/label", json={"choice": "own_account", "account_id": ledger[CARD]})
+    client.post(f"/api/review/{b['id']}/label", json={"choice": "own_account", "account_id": ledger[CARD]})
+    client.post(f"/api/review/{c['id']}/label", json={"choice": "company", "account_id": ledger["Moom"]})
+
+    guess = client.get(f"/api/review/{d['id']}/suggestion").get_json()["guess"]
+    assert (guess["choice"], guess["other_side"], guess["agree"], guess["of"]) == ("own_account", CARD, 2, 3)
+    assert guess["body"] == {"choice": "own_account", "account_id": ledger[CARD]}
+
+    client.post(f"/api/review/{b['id']}/label", json={"choice": "company", "account_id": ledger["Moom"]})
+    # now two of three say company, one says own account: 2/3 still agrees enough
+    assert client.get(f"/api/review/{d['id']}/suggestion").get_json()["guess"]["choice"] == "company"
+
+
+def test_a_guess_never_crosses_money_in_and_money_out(client, ledger):
+    bring_in(client, BANK, [(1, LANDLORD, -300.00), (2, LANDLORD, -300.00), (3, LANDLORD, 300.00)])
+    rows = _landlord_rows(client)
+    ins = [tx for tx in rows if tx["amount_sgd"] < 0]
+    out = [tx for tx in rows if tx["amount_sgd"] > 0][0]
+    for tx in ins:
+        client.post(f"/api/review/{tx['id']}/label", json={"choice": "own_account", "account_id": ledger[CARD]})
+
+    assert client.get(f"/api/review/{out['id']}/suggestion").get_json() == {"guess": None}
+    assert client.get("/api/review/987654/suggestion").status_code == 404
+
+
+def row_by_id(client, tx_id: int) -> dict:
+    return [tx for tx in listed(client) if tx["id"] == tx_id][0]

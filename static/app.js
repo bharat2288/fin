@@ -607,17 +607,17 @@ function rowItem(row, kind) {
     };
     if (kind === 'transfer') {
         return { ...base, holds: lane === 'out' ? 'Held out of spending until you say what it was' : 'Held out of income until you say what it was',
-            actions: [{ label: 'This was…', act: 'this-was', data: { tx: row.id }, primary: true }] };
+            actions: [{ label: 'This was…', act: 'this-was', data: { tx: row.id } }] };
     }
     if (kind === 'untyped') {
         return { ...base, holds: lane === 'out' ? 'Counted in spending as “No type”' : 'A refund with no type; counted back as “No type”',
-            actions: [{ label: 'This was…', act: 'resolve', data: { tx: row.id }, primary: true }] };
+            actions: [{ label: 'This was…', act: 'resolve', data: { tx: row.id } }] };
     }
     // a mixed merchant: its rows take a default type and are looked at each time
     const type = row.display_type || 'no type';
     return { ...base, holds: `${row.service_name || 'A mixed merchant'} sells more than one kind of thing: is ${type} right?`,
         actions: [{ label: `Yes, ${type}`, act: 'mixed-yes', data: { tx: row.id }, primary: true },
-            { label: 'Another type', act: 'resolve', data: { tx: row.id } }] };
+            { label: 'Another type', act: 'resolve', data: { tx: row.id, kind: 'mixed' } }] };
 }
 
 async function loadQueue() {
@@ -665,13 +665,13 @@ async function loadQueue() {
                 key: `refused-${f.id}`, kind: f.set_aside ? 'aside' : 'refused', lane: f.set_aside ? 'aside' : 'books', refused: f,
                 currency: f.currency, amount: Math.abs(f.difference_minor),
                 title: `${f.account_name}: the ${day(f.statement_date)} statement was refused`,
-                meta: `its rows do not tie: off by ${money(Math.abs(f.difference_minor), f.currency)}`,
+                meta: '',
                 holds: `None of its ${plural(f.rows, 'row')} is in the books; the balance rests on the last statement that tied and the rows since`,
                 actions: f.set_aside
                     ? [{ label: 'Bring it back', act: 'aside', data: { id: f.id, aside: 0 } }, { label: 'See the tie line', act: 'refused-sum', data: { id: f.id } }]
-                    : [{ label: 'Known, leave it', act: 'aside', data: { id: f.id, aside: 1 }, primary: true },
-                        { label: 'See the tie line', act: 'refused-sum', data: { id: f.id } },
-                        { label: 'Import a fixed file', href: '#/books/import' }],
+                    : [{ label: 'See the tie line', act: 'refused-sum', data: { id: f.id }, primary: true },
+                        { label: 'Known, leave it', act: 'aside', data: { id: f.id, aside: 1 } },
+                        { label: 'Import a fixed file', href: '#/books/import', link: true }],
             };
             items.push(item);
         });
@@ -695,12 +695,20 @@ async function loadQueue() {
             }
             if (!line.in_total && line.balance === 'no figure') {
                 const figure = acct && acct.takes_a_figure;
+                const aside = refused.refused.find(f => f.set_aside && f.account_id === line.account_id);
                 items.push({ ...base, key: `nofig-${line.account_id}`, kind: 'nofig', amount: 0,
                     title: `${line.name} has no figure`,
                     meta: figure ? 'nothing entered yet' : 'no statement balance held',
-                    holds: 'Left out of net worth until it has one',
-                    actions: [figure ? { label: 'Enter a figure', act: 'figure', data: { account: line.account_id }, primary: true }
-                        : { label: 'Import a statement', href: '#/books/import', primary: true }] });
+                    holds: aside ? `Left out of net worth until it has one. Its ${day(aside.statement_date)} statement was refused and you set it aside:`
+                        : 'Left out of net worth until it has one',
+                    holdsTag: aside ? tag('aside', `refused · set aside, off by ${money(Math.abs(aside.difference_minor), aside.currency)}`,
+                        { act: 'refused-sum', data: { id: aside.id }, title: 'See the tie line' }) : '',
+                    actions: aside
+                        ? [{ label: 'Import a fixed file', href: '#/books/import', primary: true },
+                            { label: 'See the tie line', act: 'refused-sum', data: { id: aside.id } },
+                            { label: 'Bring it back', act: 'aside', data: { id: aside.id, aside: 0 }, link: true }]
+                        : [figure ? { label: 'Enter a figure', act: 'figure', data: { account: line.account_id }, primary: true }
+                            : { label: 'Import a statement', href: '#/books/import', primary: true }] });
             }
         }));
         const lanes = { out: [], in: [], books: [], aside: [] };
@@ -728,14 +736,17 @@ function itemHTML(item) {
         : item.lane === 'in' ? `${dirTag('in')} <span class="num">${esc(money(item.amount, item.currency))}</span>`
             : item.lane === 'out' ? `${dirTag('out')} <span class="num">${esc(money(item.amount, item.currency))}</span>`
                 : '';
-    const marker = { refused: tag('refused', 'refused'), aside: tag('aside', 'refused · set aside'), off: tag('off', 'off by'),
+    const offBy = item.refused ? tag('off', `off by ${money(Math.abs(item.refused.difference_minor), item.refused.currency)}`,
+        { act: 'refused-sum', data: { id: item.refused.id }, title: 'See the tie line' }) : '';
+    const marker = { refused: tag('refused', 'refused') + ' ' + offBy, aside: tag('aside', 'refused · set aside') + ' ' + offBy, off: tag('off', 'off by'),
         stale: tag('stale', 'stale'), nofig: tag('nofig', 'no figure'), mixed: tag('notchecked', 'mixed merchant'),
         bill: tag('stale', 'missed bill'), untyped: tag('nofig', 'no type'), transfer: '' }[item.kind] || '';
+    const cls = a => a.link ? 'link' : `btn sm${a.primary ? ' ink' : ''}`;
     const actions = (item.actions || []).map(a => a.href
-        ? `<a class="btn sm${a.primary ? ' ink' : ''}" href="${a.href}">${esc(a.label)}</a>`
-        : `<button type="button" class="btn sm${a.primary ? ' ink' : ''}" data-act="${a.act}"${Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(a.label)}</button>`).join('');
+        ? `<a class="${cls(a)}" href="${a.href}">${esc(a.label)}</a>`
+        : `<button type="button" class="${cls(a)}" data-act="${a.act}"${Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(a.label)}</button>`).join('');
     return `<article class="item ${item.kind}">
-        <div><div class="what">${esc(item.title)} ${marker}${item.row ? rowMark(item.row.id) : item.line ? accountMark(item.line.account_id) : ''}</div><div class="meta">${esc(item.meta || '')}</div>${item.holds ? `<div class="holds">${esc(item.holds)}</div>` : ''}</div>
+        <div><div class="what">${esc(item.title)} ${marker}${item.row ? rowMark(item.row.id) : item.line ? accountMark(item.line.account_id) : ''}</div><div class="meta">${esc(item.meta || '')}</div>${item.holds ? `<div class="holds">${esc(item.holds)}${item.holdsTag ? ' ' + item.holdsTag : ''}</div>` : ''}</div>
         <div class="amt">${amount}</div>
         <div class="act">${actions}</div></article>`;
 }
@@ -906,25 +917,193 @@ ACT['needs-look-link'] = () => { S.needsLook = true; location.hash = '#/books'; 
 // Queue
 // ---------------------------------------------------------------------------
 
-const queueOpen = { out: 12, in: 12, books: 12 };
+// The Queue's cards: rows with no type from one merchant share a card (Q1.3),
+// each lane is split under what its rows hold out of the books (Q1.2), and
+// fin's guess sits on the card with a one-tap "Yes" (Q2.1, Q2.2).
+const queueOpen = {};
+const QUEUE_PAGE = 6;
+const queueGroups = new Map();     // a card's key -> its rows, for "This was… (all 4)"
+const transferGuesses = new Map(); // a waiting transfer's id -> fin's guess for it
+const LANE_GROUPS = {
+    out: [['transfer', 'Held out of spending until you say what it was'], ['untyped', 'In spending as “No type”'],
+        ['mixed', 'Mixed merchants: is the type right?'], ['bill', 'Bills with no payment seen']],
+    in: [['transfer', 'Held out of income until you say what it was'], ['untyped', 'Refunds with no type'],
+        ['mixed', 'Mixed merchants: is the type right?']],
+};
+
+/** Amounts added up, each currency apart: "S$ 12,200.00 · ₹ 4,000.00". */
+function sumByCurrency(list, amountOf = i => i.amount) {
+    const by = {};
+    list.forEach(i => { by[i.currency] = (by[i.currency] || 0) + amountOf(i); });
+    return Object.entries(by).map(([c, m]) => money(m, c)).join(' · ');
+}
+/** The untyped rows of a lane, one card per merchant text. */
+function merchantCards(items) {
+    const cards = [];
+    const byText = new Map();
+    items.forEach(i => {
+        if (i.kind !== 'untyped') { cards.push({ ...i, rows: i.row ? [i.row] : [] }); return; }
+        const text = (i.row.description || '').trim().toUpperCase();
+        let card = byText.get(text);
+        if (!card) { card = { ...i, key: `card-${i.row.id}`, rows: [], amount: 0 }; byText.set(text, card); cards.push(card); }
+        card.rows.push(i.row);
+        card.amount += i.amount;
+    });
+    return cards;
+}
+
+/** fin's stored type guess for a row with no type, as the card and the step
+ *  show it. The server hands over the route; this only draws it. Returns
+ *  {html, actions, top3, visible}. */
+async function showResolveSuggestion(row, { n = 1, where = 'card' } = {}) {
+    const none = { html: '', actions: '', top3: '', visible: false };
+    let suggestion;
+    try { suggestion = await get(`/api/transactions/${row.id}/suggestion`); } catch (_) { return none; }
+    if (!suggestion || !suggestion.types || !suggestion.types.length) return none;
+    const r = await refs();
+    const share = p => Math.round(p * 100);
+    const all = n > 1 ? ` (all ${n})` : '';
+    const yes = (t, cls) => `<button type="button" class="btn ${cls}" data-act="guess-yes" data-tx="${row.id}" data-type="${t.type_id}" data-group="${esc(groupKeyOf(row))}">${icon('check-circle')}Yes, ${esc(t.name)}${all}</button>`;
+    if (suggestion.route === 'prefill') {
+        const top = suggestion.types[0];
+        const book = r.typeById.get(top.type_id)?.proposed_book;
+        return {
+            html: `<div class="guess"><span>fin’s guess: <b>${esc(top.name)}</b>${book ? `, ${esc(book)}` : ''}</span>
+                <span class="guess__meter" aria-hidden="true"><i style="width:${share(top.probability)}%"></i></span><span class="guess__sure">${share(top.probability)}% sure</span>
+                ${where === 'step' ? `<div class="guess__act">${yes(top, 'primary')}</div>` : ''}</div>`,
+            actions: yes(top, 'sm primary'), top3: '', visible: true,
+        };
+    }
+    if (suggestion.route === 'top3') {
+        const words = suggestion.types.map(t => `<b>${esc(t.name)}</b> ${share(t.probability)}%`).join(' · ');
+        return {
+            html: `<div class="guess"><span>fin’s guesses: ${words}</span>
+                ${where === 'step' ? `<div class="guess__act">${suggestion.types.map(t => yes(t, 'subtle')).join('')}</div>` : ''}</div>`,
+            actions: '', top3: words, visible: true,
+        };
+    }
+    return none;
+}
+
+/** fin's guess for a waiting transfer, as words and the "Yes" it offers. */
+function transferGuessWords(g) {
+    const other = g.other_side ? esc(g.other_side) : 'that account';
+    const words = {
+        spending: [`<b>spending</b>, ${esc(g.type || '')}${g.book ? `, ${esc(g.book)}` : ''}`, `Yes, ${g.type || 'spending'}`],
+        gift: ['<b>a gift</b>', 'Yes, a gift'],
+        own_account: [`<b>a move to my own account</b>, ${other}`, `Yes, a move to ${g.other_side || 'it'}`],
+        company: [`<b>money into a company</b>, ${other}`, `Yes, into ${g.other_side || 'the company'}`],
+        loan_to_person: [`<b>a loan to a person</b>, ${other}`, `Yes, a loan to ${g.other_side || 'them'}`],
+        loan_repayment: [`<b>a loan repayment</b>, ${other}`, `Yes, repaying ${g.other_side || 'the loan'}`],
+        income: [`<b>income</b>, ${esc(g.type || '')}`, `Yes, income`],
+    }[g.choice] || [esc(g.choice), 'Yes'];
+    return { what: words[0], yes: words[1] };
+}
+function transferGuessHTML(row, g, { where = 'card' } = {}) {
+    if (!g) return { html: '', actions: '' };
+    const w = transferGuessWords(g);
+    const p = Math.round(g.probability * 100);
+    const yes = cls => `<button type="button" class="btn ${cls}" data-act="review-guess-yes" data-tx="${row.id}">${icon('check-circle')}${esc(w.yes)}</button>`;
+    return {
+        html: `<div class="guess"><span>fin’s guess: ${w.what}</span>
+            <span class="guess__meter" aria-hidden="true"><i style="width:${p}%"></i></span><span class="guess__sure">${p}% sure · ${g.agree === g.of ? `the last ${g.of} went the same way` : `${g.agree} of the last ${g.of} went this way`}</span>
+            ${where === 'step' ? `<div class="guess__act">${yes('primary')}</div>` : ''}</div>`,
+        actions: yes('sm primary'),
+    };
+}
+async function transferGuess(row) {
+    try {
+        const g = (await get(`/api/review/${row.id}/suggestion`)).guess;
+        if (g) transferGuesses.set(row.id, g); else transferGuesses.delete(row.id);
+        return g;
+    } catch (_) { return null; }
+}
+function groupKeyOf(row) {
+    for (const [key, rows] of queueGroups) if (rows.some(x => x.id === row.id)) return key;
+    return '';
+}
+
+/** One card in a money lane: a transfer, a merchant's rows with no type, a
+ *  mixed merchant's row or a missed bill. */
+async function queueCardHTML(card) {
+    const n = card.rows.length;
+    if (n) queueGroups.set(card.key, card.rows);
+    const row = card.rows[0];
+    let guess = { html: '', actions: '' };
+    if (card.kind === 'untyped') guess = await showResolveSuggestion(row, { n });
+    else if (card.kind === 'transfer') guess = transferGuessHTML(row, await transferGuess(row));
+    const amount = `${dirTag(card.lane)} <span class="num">${esc(sumByCurrency([card], c => c.amount))}</span>`;
+    const marker = { untyped: tag('nofig', 'no type'), mixed: tag('notchecked', 'mixed merchant'), bill: tag('stale', 'missed bill') }[card.kind] || '';
+    const count = n > 1 ? ` <span class="tag yours">${n} rows</span>` : '';
+    let meta = card.meta;
+    if (n > 1) {
+        const dates = card.rows.map(x => x.date).sort();
+        const accounts = new Set(card.rows.map(x => x.account_name));
+        meta = `${dates[0] === dates[n - 1] ? day(dates[0]) : `${day(dates[0])} to ${day(dates[n - 1])}`} · ${accounts.size === 1 ? card.rows[0].account_name : plural(accounts.size, 'account')}`;
+    }
+    const data = a => Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('') + (card.rows.length ? ` data-group="${esc(card.key)}"` : '');
+    const all = n > 1 ? ` (all ${n})` : '';
+    const own = (card.actions || []).map(a => a.href
+        ? `<a class="btn sm${a.primary ? ' ink' : ''}" href="${a.href}">${esc(a.label)}</a>`
+        : `<button type="button" class="btn sm${a.primary && !guess.actions ? ' ink' : ''}" data-act="${a.act}"${data(a)}>${esc(guess.actions && /^This was/.test(a.label) ? 'Something else' : a.label + (/^This was/.test(a.label) ? all : ''))}</button>`).join('');
+    const seeRows = n > 1 ? `<details class="q-rows"><summary class="link">See the ${n} rows</summary>
+        <table class="t table-tight"><tbody>${card.rows.map(x => `<tr><td>${esc(day(x.date))}</td><td>${esc(x.account_name || '')}</td>
+            <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td></tr>`).join('')}</tbody></table></details>` : '';
+    return `<article class="item q-card ${card.kind}">
+        <div><div class="what">${esc(card.title)} ${marker}${count}${row ? rowMark(row.id) : ''}</div><div class="meta">${esc(meta || '')}</div>${card.holds && card.kind === 'mixed' ? `<div class="holds">${esc(card.holds)}</div>` : ''}</div>
+        <div class="amt">${amount}</div>
+        ${guess.html ? `<div class="q-guess">${guess.html}</div>` : ''}
+        <div class="act">${guess.actions || ''}${own}</div>
+        ${seeRows ? `<div class="q-more">${seeRows}</div>` : ''}</article>`;
+}
+
+async function laneHTML(key, title, list) {
+    const groups = await Promise.all(LANE_GROUPS[key].map(async ([kind, heading]) => {
+        const items = list.filter(i => i.kind === kind);
+        if (!items.length) return '';
+        const cards = merchantCards(items);
+        const open = queueOpen[`${key}-${kind}`] || QUEUE_PAGE;
+        const shown = await Promise.all(cards.slice(0, open).map(queueCardHTML));
+        const more = cards.length - open;
+        return `<div class="q-group">
+            <h3 class="q-group__head"><span>${esc(heading)} <span class="q-group__n">· ${items.length}</span></span><span class="num">${esc(sumByCurrency(items))}</span></h3>
+            ${shown.join('')}
+            ${more > 0 ? `<button class="btn block q-show" data-act="queue-more" data-lane="${key}-${kind}">Show ${more} more</button>` : ''}</div>`;
+    }));
+    return `<section class="card card--lift lane-card" id="lane-${key}">
+        <div class="section-header"><h2>${dirTag(key)} ${title}</h2><span class="section-header__aside"><b>${list.length}</b> ${list.length === 1 ? 'item' : 'items'}</span></div>
+        ${list.length ? groups.join('') : '<p class="card-empty">Nothing waits here.</p>'}</section>`;
+}
+
 async function viewQueue() {
     const q = await loadQueue();
-    const lane = (key, title, list, note) => `<section class="card lane-card" id="lane-${key}">
-        <div class="card-head"><h2>${key === 'out' ? dirTag('out') + ' ' : key === 'in' ? dirTag('in') + ' ' : ''}${title}</h2>
-            <p>${plural(list.length, 'item')}${note ? ' · ' + esc(note) : ''}</p></div>
-        ${list.length ? list.slice(0, queueOpen[key] || 999).map(itemHTML).join('') : '<p class="empty">Nothing waits here.</p>'}
-        ${list.length > (queueOpen[key] || 999) ? `<button class="btn block" style="margin-top:10px" data-act="queue-more" data-lane="${key}">Show all ${list.length}</button>` : ''}
-        </section>`;
-    const jump = [['out', 'Out', q.lanes.out.length], ['in', 'In', q.lanes.in.length], ['books', 'Figures and statements', q.lanes.books.length]]
-        .map(([k, l, n]) => `<a class="chip" href="#/queue" data-act="jump" data-to="lane-${k}">${l} <span class="n">${n}</span></a>`).join('');
-    return `<div class="page-head"><div><h1>Queue</h1><p>${q.count ? `${plural(q.count, 'thing waits', 'things wait')} for you. Money out and money in are kept apart.` : 'Nothing waits for you.'}</p>
-            ${q.capped.length ? `<p class="small notice">Too many to read at once, so the counts and sums here are short: ${esc(q.capped.join('; '))}.</p>` : ''}</div>
-            <div class="chips phone-only">${jump}</div></div>
-        <div class="waits">
-            <div class="waits-cols">${lane('out', 'Money out', q.lanes.out, q.sums.out ? `transfers ${q.sums.out}` : '')}${lane('in', 'Money in', q.lanes.in, q.sums.in ? `transfers ${q.sums.in}` : '')}</div>
-            ${lane('books', 'Figures and statements', q.lanes.books, 'what the balances rest on')}
-            ${q.lanes.aside.length ? `<section class="card"><div class="card-head"><h2>Set aside</h2><p>Known, left as they are. Still marked refused on their accounts.</p></div>${q.lanes.aside.map(itemHTML).join('')}</section>` : ''}
-        </div>`;
+    queueGroups.clear();
+    const [out, inn] = await Promise.all([laneHTML('out', 'Money out', q.lanes.out), laneHTML('in', 'Money in', q.lanes.in)]);
+    const booksOpen = queueOpen.books || 12;
+    const books = `<section class="card card--lift lane-card" id="lane-books">
+        <div class="section-header"><div><h2>Figures and statements</h2><p>What the balances rest on</p></div><span class="section-header__aside"><b>${q.lanes.books.length}</b> ${q.lanes.books.length === 1 ? 'item' : 'items'}</span></div>
+        ${q.lanes.books.length ? q.lanes.books.slice(0, booksOpen).map(itemHTML).join('') : '<p class="card-empty">Nothing waits here.</p>'}
+        ${q.lanes.books.length > booksOpen ? `<button class="btn block q-show" data-act="queue-more" data-lane="books">Show all ${q.lanes.books.length}</button>` : ''}</section>`;
+    const aside = q.lanes.aside.length ? `<section class="card lane-card" id="lane-aside"><div class="section-header"><div><h2>Set aside</h2>
+        <p>Known, left as they are. Still marked refused on their accounts.</p></div><span class="section-header__aside"><b>${q.lanes.aside.length}</b> ${q.lanes.aside.length === 1 ? 'statement' : 'statements'}</span></div>${q.lanes.aside.map(itemHTML).join('')}</section>` : '';
+    const chip = (to, cls, ic, label, n) => `<a class="delta-chip q-jump ${cls}" href="#/queue" data-act="jump" data-to="lane-${to}">${icon(ic)}${label} <span class="num">${n}</span></a>`;
+    const chips = [
+        q.lanes.out.length ? chip('out', 'k-out', 'arrow-circle-up', 'Money out', q.lanes.out.length) : '',
+        q.lanes.in.length ? chip('in', 'k-in', 'arrow-circle-down', 'Money in', q.lanes.in.length) : '',
+        q.lanes.books.length ? chip('books', 'delta-chip--warn', 'warning', 'Figures and statements', q.lanes.books.length) : '',
+        q.lanes.aside.length ? chip('aside', 'q-jump--context', 'circle-dashed', 'Set aside', q.lanes.aside.length) : '',
+    ].join('');
+    const hero = `<section class="hero-card q-hero">
+        <span class="eyebrow">Queue</span>
+        ${q.count ? `<h1 class="q-hero__line"><span class="q-hero__count num">${q.count}</span> <span class="q-hero__words">${q.count === 1 ? 'thing waits' : 'things wait'} for you</span></h1>
+            <p class="q-hero__sub">Money out and money in are kept apart, each under what it holds out of the books.</p>
+            <div class="chip-row">${chips}</div>`
+        : `<h1 class="q-hero__line"><span class="q-hero__words">Nothing waits for you</span></h1>
+            <p class="q-empty">${icon('check-circle')}Every row has a label and every statement ties.</p>${chips ? `<div class="chip-row">${chips}</div>` : ''}`}
+        ${q.capped.length ? `<p class="notice warn small" style="margin-top:12px">${icon('warning')}<span>Too many to read at once, so the counts and sums here are short: ${esc(q.capped.join('; '))}.</span></p>` : ''}</section>`;
+    return `<div class="queue">${hero}
+        <div class="waits-cols q-cols">${out}${inn}</div>
+        ${books}${aside}</div>`;
 }
 ACT['queue-more'] = el => { queueOpen[el.dataset.lane] = 9999; rerender(); };
 ACT.jump = el => $('#' + el.dataset.to)?.scrollIntoView({ behavior: 'smooth' });
@@ -939,10 +1118,10 @@ async function findRow(txId) {
     return one && one.transactions[0] || null;
 }
 
-function rowHead(row) {
+function rowHead(row, { more = 0 } = {}) {
     const minor = toMinor(row.amount_sgd, row.currency);
     return `<div class="record-target"><div class="spread"><b>${esc(row.description)}</b>${rowAmount(minor, row.currency)}</div>
-        <div class="small muted">${esc(day(row.date))} · ${esc(row.account_name || '')}${row.service_name ? ' · ' + esc(row.service_name) : ''}</div></div>`;
+        <div class="small muted">${esc(day(row.date))} · ${esc(row.account_name || '')}${row.service_name ? ' · ' + esc(row.service_name) : ''}${more ? ` · and ${plural(more, 'more row')} from it` : ''}</div></div>`;
 }
 
 function typeOptions(types, selected, { kind = 'spending', blank = 'Choose a type' } = {}) {
@@ -954,55 +1133,6 @@ function bookOptions(books, selected, blank = 'As the type says') {
     return `<option value="">${esc(blank)}</option>` + books.map(b => `<option value="${esc(b.name)}"${b.name === selected ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
 }
 
-// "This was…" for a transfer waiting for review: one choice, then what it asks.
-ACT['this-was'] = async el => {
-    const txId = Number(el.dataset.tx);
-    const row = await findRow(txId);
-    if (!row) { toast('That row is no longer waiting', { bad: true }); return; }
-    const r = await refs();
-    const minor = toMinor(row.amount_sgd, row.currency);
-    const choices = r.review.choices.map(c => `<button type="button" class="choice" data-act="this-was-choice" data-tx="${txId}" data-choice="${esc(c.name)}">
-        <strong>${esc(sentence(c.label))}</strong><span>${esc(c.description)}</span></button>`).join('');
-    openSheet(minor < 0 ? 'Money in · what was it?' : 'Money out · what was it?', `${rowHead(row)}<div class="choices">${choices}</div><div id="choice-ask"></div>`);
-};
-ACT['this-was-choice'] = async el => {
-    const txId = Number(el.dataset.tx);
-    const r = await refs();
-    const row = await findRow(txId);
-    const choice = r.review.choices.find(c => c.name === el.dataset.choice);
-    $$('.choice', sheetBody()).forEach(b => b.setAttribute('aria-pressed', String(b === el)));
-    const ask = $('#choice-ask');
-    let fields = '';
-    if (choice.asks === 'type') {
-        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types)}</select></label>
-            <label class="field"><span>Book</span><select id="cw-book">${bookOptions(r.books)}</select></label>`;
-    } else if (choice.asks === 'account') {
-        const allowed = r.accounts.filter(a => choice.kinds.includes(a.type) && a.id !== row?.account_id && a.status !== 'archived');
-        fields = `<label class="field"><span>Which account</span><select id="cw-account"><option value="">Choose</option>${allowed.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.currency)})</option>`).join('')}</select></label>`;
-    } else if (choice.asks === 'person') {
-        const people = r.accounts.filter(a => a.type === 'person');
-        fields = `<label class="field"><span>Who</span><select id="cw-person"><option value="">A new name…</option>${people.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></label>
-            <label class="field"><span>New name</span><input type="text" id="cw-person-name" placeholder="Only for someone new"></label>`;
-    } else if (choice.asks === 'income_kind') {
-        fields = `<label class="field"><span>What kind of income</span><select id="cw-income">${typeOptions(r.types, null, { kind: 'income', blank: 'Choose' })}</select></label>`;
-    }
-    ask.innerHTML = `<div class="fields" style="margin-top:12px">${fields}</div>
-        <button class="btn primary block" style="margin-top:12px" data-act="this-was-save" data-tx="${txId}" data-choice="${esc(choice.name)}">Save: ${esc(choice.label)}</button>`;
-};
-ACT['this-was-save'] = async el => {
-    const body = { choice: el.dataset.choice };
-    const val = id => $('#' + id)?.value;
-    if (val('cw-type')) body.type_id = Number(val('cw-type'));
-    if (val('cw-book')) body.book = val('cw-book');
-    if (val('cw-account')) body.account_id = Number(val('cw-account'));
-    if (val('cw-person')) body.account_id = Number(val('cw-person'));
-    else if (val('cw-person-name')) body.person = val('cw-person-name').trim();
-    if (val('cw-income')) body.income_kind_id = Number(val('cw-income'));
-    const r = await act('POST', `/api/review/${el.dataset.tx}/label`, body, 'Labelled');
-    if (r) { closeSheet(); rerender(); }
-};
-
-// "This was…" for a row with no type: the resolve step, with the type suggestion.
 function suggestPattern(description) {
     let pattern = (description || '').toUpperCase();
     if (/\b(PAYNOW|FAST PAYMENT|TRANSFER|I-BANK|GIRO)\b/.test(pattern)) return '';
@@ -1016,94 +1146,206 @@ function suggestPattern(description) {
 }
 function titleCase(s) { return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); }
 
-let resolveTxId = null;
-let resolveSuggestionVisible = false;
-ACT.resolve = async el => {
+// "This was…": one step for every row that waits for a label (Q4.1). The row,
+// then fin's guess with one "Yes" (Q4.2), then the choices; once one is picked
+// the others fold away and its questions sit straight under it (Q4.4). For a
+// row with no type, "spending" names the merchant, and which rows it labels is
+// one plain line, with the rule's words behind "change" (Q4.3).
+const CHOICE_ORDER = ['spending', 'own_account', 'company'];
+const COUNT_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'];
+let step = null;
+ACT['this-was'] = el => openStepFor(el);
+ACT.resolve = el => openStepFor(el);
+async function openStepFor(el) {
     const txId = Number(el.dataset.tx);
     const row = await findRow(txId);
     if (!row) { toast('That row is no longer waiting', { bad: true }); return; }
-    openResolve(row);
-};
-async function openResolve(row) {
-    const [r, services] = await Promise.all([refs(), servicesList()]);
-    resolveTxId = row.id;
-    const pattern = suggestPattern(row.description);
-    const minor = toMinor(row.amount_sgd, row.currency);
-    openSheet(minor < 0 ? 'Money in · this was…' : 'Money out · this was…', `${rowHead(row)}
-        <div class="fields">
-            <label class="field"><span>Merchant</span><input type="text" id="rs-merchant" list="rs-merchants" value="${esc(row.service_name || titleCase(pattern || row.description))}" autocomplete="off"></label>
-            <datalist id="rs-merchants">${services.map(s => `<option value="${esc(s.name)}">`).join('')}</datalist>
-            <label class="field"><span>Type</span><select id="rs-type">${typeOptions(r.types, row.type_id)}</select></label>
-            <p class="small muted" id="resolve-suggestion" hidden></p>
-            <label class="field"><span>Book</span><select id="rs-book">${bookOptions(r.books, null, 'As the merchant or type says')}</select></label>
-            <fieldset class="fields" style="border:0;padding:0;margin:0"><legend class="small" style="font-weight:600;color:var(--text-secondary);margin-bottom:4px">Applies to</legend>
-                <label class="check"><input type="radio" name="rs-scope" value="service_default" checked> Every row of this merchant (its default)</label>
-                <label class="check"><input type="radio" name="rs-scope" value="transaction"> This row only</label>
-                <label class="check"><input type="radio" name="rs-scope" value="rule"> Rows matching the pattern below</label></fieldset>
-            <div class="fields two"><label class="field"><span>Pattern</span><input type="text" id="rs-pattern" value="${esc(pattern)}"></label>
-                <label class="field"><span>Match</span><select id="rs-match"><option value="contains">contains</option><option value="startswith">starts with</option></select></label></div>
-        </div>
-        <button class="btn primary block" data-act="resolve-save">Save</button>`);
-    $('#rs-merchant').addEventListener('change', () => {
-        const svc = services.find(s => s.name.toLowerCase() === $('#rs-merchant').value.trim().toLowerCase());
-        if (svc && svc.type_id && !$('#rs-type').value) $('#rs-type').value = String(svc.type_id);
-    });
-    showResolveSuggestion(row.id);
+    const group = (el.dataset.group && queueGroups.get(el.dataset.group)) || [row];
+    openWhatWas(row, group, { mixed: el.dataset.kind === 'mixed' });
 }
-
-/** What fin's stored type suggestion offers for the row: a type to pre-fill,
- *  three to offer, or nothing. The route is the server's; nothing is decided here. */
-async function showResolveSuggestion(txId) {
-    resolveSuggestionVisible = false;
-    const el = document.getElementById('resolve-suggestion');
-    if (!el) return;
-    el.hidden = true;
-    el.textContent = '';
-    const typeSelect = document.getElementById('rs-type');
-    if (typeSelect.value) return;
-    let suggestion;
-    try { suggestion = await get(`/api/transactions/${txId}/suggestion`); } catch (_) { return; }
-    if (resolveTxId !== txId || !suggestion || !suggestion.types || !suggestion.types.length) return;
-    const share = p => `${Math.round(p * 100)}%`;
-    if (suggestion.route === 'prefill') {
-        const top = suggestion.types[0];
-        typeSelect.value = String(top.type_id);
-        el.textContent = `fin's guess: ${top.name} (${share(top.probability)}). Keep it or change it.`;
-    } else if (suggestion.route === 'top3') {
-        el.textContent = 'fin’s guesses: ';
-        suggestion.types.forEach(t => {
-            const b = document.createElement('button');
-            b.type = 'button'; b.className = 'btn sm'; b.style.marginRight = '6px';
-            b.textContent = `${t.name} (${share(t.probability)})`;
-            b.onclick = () => { typeSelect.value = String(t.type_id); };
-            el.appendChild(b);
-        });
-    } else {
+async function openWhatWas(row, group, { mixed = false } = {}) {
+    const [r, incomeKinds, services, q] = await Promise.all([refs(), get('/api/types?kind=income'), servicesList(), loadQueue()]);
+    const minor = toMinor(row.amount_sgd, row.currency);
+    const untyped = row.flow_type !== 'review';
+    const pattern = suggestPattern(row.description);
+    const merchant = row.service_name || titleCase(pattern || row.description || '');
+    const waiting = q.lanes.out.concat(q.lanes.in).filter(i => i.kind === 'untyped' && i.row.id !== row.id);
+    const others = pattern ? waiting.filter(i => (i.row.description || '').toUpperCase().includes(pattern)).length : group.length - 1;
+    let guess;
+    if (untyped) guess = await showResolveSuggestion(row, { n: group.length, where: 'step' });
+    else guess = transferGuessHTML(row, await transferGuess(row), { where: 'step' });
+    step = { row, group, untyped, mixed, choice: null, more: false, merchant, pattern, others, r, incomeKinds, services,
+        suggestionVisible: !!(guess && guess.visible), guessed: !!(guess && guess.html) };
+    const title = `${minor < 0 ? 'Money in' : 'Money out'} · what was it?`;
+    openSheet(title, `${rowHead(row, { more: group.length - 1 })}
+        <div id="ww-guess">${guess.html || ''}</div>
+        <p class="ww-label" id="ww-label">${guess.html ? 'Or something else' : 'What was it?'}</p>
+        <div class="choices" id="ww-choices"></div>
+        <div id="ww-ask"></div>`, { eyebrow: group.length > 1 ? `This was… · all ${group.length} rows` : 'This was…' });
+    drawChoices();
+}
+function drawChoices() {
+    const { r, choice } = step;
+    const all = r.review.choices;
+    const tile = c => `<button type="button" class="choice" data-act="ww-pick" data-choice="${esc(c.name)}">
+        <strong>${esc(c.name === 'spending' && step.guessed ? 'Spending, another type' : sentence(c.label))}</strong><span>${esc(c.description)}</span></button>`;
+    const box = $('#ww-choices');
+    if (!box) return;
+    $('#ww-guess').hidden = !!choice;
+    $('#ww-label').hidden = !!choice;
+    if (choice) {
+        box.innerHTML = `<div class="choice is-chosen" aria-live="polite"><div><strong>${esc(sentence(choice.label))}</strong><span>${esc(choice.description)}</span></div>
+            <button type="button" class="link" data-act="ww-change">Change</button></div>`;
         return;
     }
-    el.hidden = false;
-    resolveSuggestionVisible = true;
+    const first = CHOICE_ORDER.map(n => all.find(c => c.name === n)).filter(Boolean);
+    const rest = all.filter(c => !CHOICE_ORDER.includes(c.name));
+    box.innerHTML = first.map(tile).join('') + (step.more || !rest.length ? rest.map(tile).join('')
+        : `<button type="button" class="choice more" data-act="ww-more"><strong>${esc(sentence(rest.map(c => c.label).slice(0, 3).join(', ')))}…</strong><span>${COUNT_WORDS[rest.length] || rest.length} more</span></button>`);
+    $('#ww-ask').innerHTML = '';
 }
-
-ACT['resolve-save'] = async () => {
-    const services = await servicesList();
-    const name = $('#rs-merchant').value.trim();
-    const typeId = Number($('#rs-type').value);
-    if (!name) { toast('Say which merchant it was', { bad: true }); return; }
-    if (!typeId) { toast('Choose a type', { bad: true }); return; }
-    const scope = $('input[name="rs-scope"]:checked').value;
-    const body = { tx_id: resolveTxId, service_name: name, type_id: typeId, apply_scope: scope,
-        pattern: $('#rs-pattern').value.trim(), match_type: $('#rs-match').value, suggestion_visible: resolveSuggestionVisible };
-    const book = $('#rs-book').value;
-    if (book) body.book = book;
-    const svc = services.find(s => s.name.toLowerCase() === name.toLowerCase());
-    if (svc) body.service_id = svc.id;
-    if (scope === 'rule' && !body.pattern) { toast('A rule needs a pattern', { bad: true }); return; }
-    const r = await act('POST', '/api/transactions/resolve', body, 'Saved');
-    if (r) {
-        if (r.data.backfilled) toast(`${plural(r.data.backfilled, 'other matching row')} took the same label`);
-        closeSheet(); rerender();
+ACT['ww-more'] = () => { step.more = true; drawChoices(); $('#ww-choices .choice:nth-child(4)')?.focus(); };
+ACT['ww-change'] = () => { step.choice = null; drawChoices(); $('#ww-choices .choice')?.focus(); };
+ACT['ww-pick'] = el => {
+    const { r, row, untyped, incomeKinds } = step;
+    const choice = r.review.choices.find(c => c.name === el.dataset.choice);
+    step.choice = choice;
+    drawChoices();
+    let fields = '';
+    if (choice.asks === 'type') {
+        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types, row.type_id)}</select></label>
+            <label class="field"><span>Book</span><select id="cw-book">${bookOptions(r.books, null, untyped ? 'As the merchant or type says' : 'As the type says')}</select></label>`;
+    } else if (choice.asks === 'account') {
+        const allowed = r.accounts.filter(a => choice.kinds.includes(a.type) && !step.group.some(x => x.account_id === a.id) && a.status !== 'archived');
+        fields = `<label class="field"><span>Which account</span><select id="cw-account"><option value="">Choose</option>${allowed.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.currency)})</option>`).join('')}</select></label>`;
+    } else if (choice.asks === 'person') {
+        const people = r.accounts.filter(a => a.type === 'person');
+        fields = `<label class="field"><span>Who</span><select id="cw-person"><option value="">A new name…</option>${people.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></label>
+            <label class="field"><span>New name</span><input type="text" id="cw-person-name" placeholder="Only for someone new"></label>`;
+    } else if (choice.asks === 'income_kind') {
+        fields = `<label class="field"><span>What kind of income</span><select id="cw-income">${typeOptions(incomeKinds, null, { kind: 'income', blank: 'Choose' })}</select></label>`;
     }
+    const n = step.group.length;
+    let scope = '';
+    if (untyped && choice.name === 'spending') {
+        const deflt = step.mixed ? 'transaction' : 'service_default';
+        scope = `<div class="scope-line"><div><b id="ww-scope-words"></b><div class="small muted">${step.others ? `${plural(step.others, 'other row is', 'other rows are')} waiting from it` : 'No other row is waiting from it'}</div></div>
+                <button type="button" class="link" data-act="ww-scope" aria-expanded="false" aria-controls="ww-scope-more">change</button></div>
+            <div class="fields scope-more" id="ww-scope-more" hidden>
+                <label class="field"><span>Merchant</span><input type="text" id="rs-merchant" list="rs-merchants" value="${esc(step.merchant)}" autocomplete="off"></label>
+                <datalist id="rs-merchants">${step.services.map(s => `<option value="${esc(s.name)}">`).join('')}</datalist>
+                <fieldset class="scope-pick"><legend class="sr-only">Which rows</legend>
+                    <label class="check"><input type="radio" name="rs-scope" value="service_default"${deflt === 'service_default' ? ' checked' : ''}> Every row from this merchant</label>
+                    <label class="check"><input type="radio" name="rs-scope" value="transaction"${deflt === 'transaction' ? ' checked' : ''}> Only this row</label>
+                    <label class="check"><input type="radio" name="rs-scope" value="rule"> Rows whose text contains</label>
+                    <input type="text" id="rs-pattern" value="${esc(step.pattern)}" aria-label="The text the rows contain"></fieldset></div>`;
+    } else if (untyped) {
+        scope = `<p class="small muted">${n > 1 ? `Labels these ${n} rows.` : 'Labels this row only.'}</p>`;
+    }
+    $('#ww-ask').innerHTML = `<div class="fields">${fields}</div>${scope}
+        <button class="btn primary block" id="ww-save" data-act="ww-save">Save: ${esc(choice.label)}</button>`;
+    const words = () => {
+        const w = $('#ww-scope-words');
+        if (!w) return;
+        const s = $('input[name="rs-scope"]:checked')?.value;
+        const name = $('#rs-merchant')?.value.trim() || step.merchant;
+        w.textContent = s === 'transaction' ? 'Label only this row'
+            : s === 'rule' ? `Label rows whose text contains ${$('#rs-pattern').value.trim() || '…'}` : `Label every row from ${name} the same way`;
+    };
+    const saveWords = () => {
+        const t = $('#cw-type');
+        const picked = t && t.value ? t.options[t.selectedIndex].text : '';
+        $('#ww-save').textContent = `Save: ${choice.label}${picked ? ', ' + picked : ''}`;
+    };
+    $('#ww-ask').oninput = () => { words(); saveWords(); };
+    $('#ww-ask').onchange = () => { words(); saveWords(); };
+    words(); saveWords();
+    setTimeout(() => ($('#ww-ask select, #ww-ask input') || $('#ww-save'))?.focus(), 30);
+};
+ACT['ww-scope'] = el => {
+    const more = $('#ww-scope-more');
+    more.hidden = !more.hidden;
+    el.setAttribute('aria-expanded', String(!more.hidden));
+    el.textContent = more.hidden ? 'change' : 'done';
+};
+/** What resolve takes for a row with no type and the type chosen for it. */
+function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern, book = '', visible = false } = {}) {
+    const name = merchant || row.service_name || titleCase(suggestPattern(row.description) || row.description || '');
+    const body = { tx_id: row.id, service_name: name, type_id: typeId, apply_scope: scope,
+        pattern: pattern ?? suggestPattern(row.description), match_type: 'contains', suggestion_visible: visible };
+    if (book) body.book = book;
+    return body;
+}
+/** Save a type for a row with no type. A merchant text too plain to make a
+ *  rule from (a PayNow or a GIRO) labels the card's other rows one by one. */
+async function saveResolve(body, group = []) {
+    const services = await servicesList();
+    const svc = services.find(s => s.name.toLowerCase() === body.service_name.toLowerCase());
+    if (svc) body.service_id = svc.id;
+    const r = await act('POST', '/api/transactions/resolve', body, 'Saved');
+    if (!r) return;
+    const rest = body.apply_scope !== 'transaction' && !body.pattern ? group.filter(x => x.id !== body.tx_id) : [];
+    let done = 0;
+    for (const x of rest) {
+        const more = await send('POST', '/api/transactions/resolve', { ...body, tx_id: x.id, apply_scope: 'transaction', service_id: r.data.service_id ?? body.service_id });
+        if (!more.ok) { toast(more.data.error || 'One of the rows could not be labelled', { bad: true }); break; }
+        done += 1;
+    }
+    if (done) toast(`${plural(done, 'other row')} on this card took the same label`);
+    else if (r.data.backfilled) toast(`${plural(r.data.backfilled, 'other matching row')} took the same label`);
+    closeSheet(); rerender();
+}
+ACT['ww-save'] = async () => {
+    const { row, choice, untyped, group } = step;
+    const val = id => $('#' + id)?.value;
+    if (untyped && choice.name === 'spending') {
+        const typeId = Number(val('cw-type'));
+        const name = (val('rs-merchant') || '').trim();
+        const scope = $('input[name="rs-scope"]:checked').value;
+        if (!name) { toast('Say which merchant it was', { bad: true }); return; }
+        if (!typeId) { toast('Choose a type', { bad: true }); return; }
+        const pattern = (val('rs-pattern') || '').trim();
+        if (scope === 'rule' && !pattern) { toast('Say what text the rows contain', { bad: true }); return; }
+        await saveResolve(resolveBody(row, typeId, { merchant: name, scope, pattern, book: val('cw-book'), visible: step.suggestionVisible }), group);
+        return;
+    }
+    const body = { choice: choice.name };
+    if (val('cw-type')) body.type_id = Number(val('cw-type'));
+    if (val('cw-book')) body.book = val('cw-book');
+    if (val('cw-account')) body.account_id = Number(val('cw-account'));
+    if (val('cw-person')) body.account_id = Number(val('cw-person'));
+    else if (val('cw-person-name')) body.person = val('cw-person-name').trim();
+    if (val('cw-income')) body.income_kind_id = Number(val('cw-income'));
+    const rows = untyped ? group : [row];
+    if (rows.length === 1) {
+        const r = await act('POST', `/api/review/${row.id}/label`, body, 'Labelled');
+        if (r) { closeSheet(); rerender(); }
+        return;
+    }
+    let done = 0;
+    for (const x of rows) {
+        const r = await send('POST', `/api/review/${x.id}/label`, body);
+        if (!r.ok) { toast(`${done ? `${plural(done, 'row')} labelled; then: ` : ''}${r.data.error || 'that did not work'}`, { bad: true }); break; }
+        done += 1;
+    }
+    if (done) { toast(`${plural(done, 'row')} labelled. Each can be undone in Changes.`); closeSheet(); rerender(); refreshFrame(); }
+};
+// "Yes, Groceries": fin's type guess, saved at once for the merchant's rows.
+ACT['guess-yes'] = async el => {
+    const row = await findRow(Number(el.dataset.tx));
+    if (!row) { toast('That row is no longer waiting', { bad: true }); return; }
+    el.disabled = true;
+    await saveResolve(resolveBody(row, Number(el.dataset.type), { visible: true }), queueGroups.get(el.dataset.group) || [row]);
+    el.disabled = false;
+};
+// "Yes, Rent": fin's guess for a transfer, from how the same payee was labelled before.
+ACT['review-guess-yes'] = async el => {
+    const g = transferGuesses.get(Number(el.dataset.tx));
+    if (!g) return;
+    el.disabled = true;
+    const r = await act('POST', `/api/review/${el.dataset.tx}/label`, g.body, 'Labelled');
+    el.disabled = false;
+    if (r) { closeSheet(); rerender(); }
 };
 
 ACT['mixed-yes'] = async el => {
@@ -1134,14 +1376,16 @@ ACT['refused-sum'] = async el => {
     const all = (await get('/api/statements/refused')).refused;
     const f = all.find(x => String(x.id) === el.dataset.id);
     if (!f) return;
-    openSheet(`Refused: ${esc(f.account_name)}`, `<p>The ${esc(day(f.statement_date))} statement does not tie, so none of its rows was written.
-        The balance rests on the last statement that tied, plus the rows since.</p>${refusedSum(f)}
+    openSheet(esc(f.account_name), `<div class="ww-tags">${tag('refused', 'refused')} ${tag('off', `off by ${money(Math.abs(f.difference_minor), f.currency)}`)}${f.set_aside ? ' ' + tag('aside', 'set aside') : ''}</div>
+        <p>The ${esc(day(f.statement_date))} statement does not tie, so none of its rows was written.
+        The balance rests on the last statement that tied, plus the rows since.</p>
+        <div class="record-target">${refusedSum(f)}</div>
         <p class="small muted">A row was probably missed when the file was read. Import a fixed file and it goes through the same tie check.</p>
-        <div class="row">${f.set_aside ? `<button class="btn" data-act="aside" data-id="${f.id}" data-aside="0">Bring it back</button>`
-            : `<button class="btn primary" data-act="aside" data-id="${f.id}" data-aside="1">Known, leave it</button>`}
-            <a class="btn" href="#/books/import">Import a fixed file</a>
-            ${f.account_id ? `<a class="btn quiet" href="#/books/account/${f.account_id}">The account</a>` : ''}</div>`,
-    { sub: `refused at upload ${esc(when(f.refused_at))}${f.set_aside ? ' · set aside' : ''}` });
+        ${f.account_id ? `<a class="link small" href="#/books/account/${f.account_id}">The account</a>` : ''}`,
+    { eyebrow: `Tie line · refused at upload ${esc(when(f.refused_at))}`,
+        foot: `${f.set_aside ? `<button class="btn" data-act="aside" data-id="${f.id}" data-aside="0">Bring it back</button>`
+            : `<button class="btn" data-act="aside" data-id="${f.id}" data-aside="1">Known, leave it</button>`}
+            <a class="btn primary" href="#/books/import">Import a fixed file</a>` });
 };
 
 ACT['bill-pause'] = async el => {
@@ -1150,27 +1394,68 @@ ACT['bill-pause'] = async el => {
 };
 
 // Enter a figure: one sheet, opened from the queue, an account's page and Lists.
+// Opened from one account it names that account plainly and shows the figure
+// it replaces (Q7.1, Q7.2); opened from Lists it offers the picker.
+const KIND_WORDS = { loan: 'a loan', holding: 'a holding', company: 'a company', person: 'a person', bank: 'a bank account', card: 'a card' };
+const OWED_KINDS = ['loan'];   // account_kind.OWED_KINDS: typed positive, saved as owed
 ACT.figure = async el => openFigure(el.dataset.account ? Number(el.dataset.account) : null);
 async function openFigure(accountId) {
-    const r = await refs();
+    const [r, sheet] = await Promise.all([refs(), sheetFor(currentMonth()).catch(() => null)]);
     const takes = r.accounts.filter(a => a.takes_a_figure && a.status !== 'archived');
-    const chosen = takes.find(a => a.id === accountId) || takes[0];
+    const named = takes.find(a => a.id === accountId);
+    const chosen = named || takes[0];
     if (!chosen) { toast('No account takes a figure: add a loan, a holding, a company or a person in Lists', { bad: true }); return; }
-    const owedHint = a => a.type === 'loan' ? 'What is owed. It is saved as owed (negative).' : a.type === 'holding' ? 'What it is worth.' : 'The balance.';
-    openSheet('Enter a figure', `<div class="fields">
-        <label class="field"><span>Account</span><select id="fg-account">${takes.map(a => `<option value="${a.id}"${a.id === chosen.id ? ' selected' : ''}>${esc(a.name)} · ${esc(a.type)} · ${esc(a.currency)}</option>`).join('')}</select></label>
-        <label class="field"><span>Amount in <b id="fg-cur">${esc(SIGNS[chosen.currency] || chosen.currency)}</b></span><input type="text" inputmode="decimal" id="fg-amount" placeholder="0.00"></label>
-        <p class="small muted" id="fg-hint">${esc(owedHint(chosen))}</p>
+    const lines = sheet ? sheet.sections.flatMap(s => s.lines).filter(l => !l.counted_in) : [];
+    const sign = a => SIGNS[a.currency] || a.currency;
+    const owes = a => OWED_KINDS.includes(a.type);
+    const label = a => owes(a) ? `What is owed now, in ${sign(a)}` : a.type === 'holding' ? `What it is worth now, in ${sign(a)}` : `The balance now, in ${sign(a)}`;
+    const target = a => {
+        const l = lines.find(x => x.account_id === a.id);
+        const ro = l && l.rests_on;
+        const stale = ro && ro.source === 'supplied' && ro.age_days > STALE_DAYS;
+        const now = l && l.balance_minor !== null && l.balance_minor !== undefined
+            ? `<div class="fg-now">Now <b class="num${l.balance_minor < 0 ? ' neg' : ''}">${esc(money(l.balance_minor, l.currency))}</b> ${stale ? tag('stale', 'stale') : ''}</div>
+                ${ro ? `<div class="small muted">${ro.source === 'supplied' ? 'your figure' : 'statement'} ${esc(day(ro.date))}, ${esc(plural(ro.age_days, 'day'))} old</div>` : ''}`
+            : '<div class="small muted">No figure yet: it is left out of net worth until it has one.</div>';
+        return `<div class="spread"><b>${esc(a.name)}</b>${named && takes.length > 1 ? '<button type="button" class="link" data-act="fg-another" aria-controls="fg-pick" aria-expanded="false">Another account</button>' : ''}</div>
+            <div class="small">${esc(KIND_WORDS[a.type] || a.type)}, in ${esc(sign(a))}${owes(a) ? ' · owed' : ''}</div>${now}`;
+    };
+    const hint = (a, typed) => {
+        if (!owes(a)) return a.type === 'holding' ? 'What it is worth, as a plain number.' : 'The balance, as a plain number.';
+        const n = Number(String(typed || '').replace(/[, ]/g, ''));
+        const shown = typed && Number.isFinite(n) && n > 0 ? money(-toMinor(n, a.currency), a.currency) : `${sign(a)} −…`;
+        return `Type the plain number. It is saved as owed and shows as ${shown}.`;
+    };
+    const placeholder = a => {
+        const l = lines.find(x => x.account_id === a.id);
+        return l && l.balance_minor ? groupFor(a.currency).format(Math.abs(l.balance_minor) / 10 ** digitsOf(a.currency)) : '0.00';
+    };
+    openSheet('Enter a figure', `<div class="record-target fg-target" id="fg-target">${target(chosen)}</div>
+        <label class="field" id="fg-pick"${named ? ' hidden' : ''}><span>Account</span><select id="fg-account">${takes.map(a => `<option value="${a.id}"${a.id === chosen.id ? ' selected' : ''}>${esc(a.name)}, ${esc(KIND_WORDS[a.type] || a.type)}, in ${esc(sign(a))}</option>`).join('')}</select></label>
+        <div class="fields">
+        <label class="field"><span id="fg-label">${esc(label(chosen))}</span><input type="text" inputmode="decimal" id="fg-amount" placeholder="${esc(placeholder(chosen))}" aria-describedby="fg-hint"></label>
+        <p class="hint" id="fg-hint">${esc(hint(chosen))}</p>
         <label class="field"><span>On</span><input type="date" id="fg-date" value="${todayIso()}"></label>
         <label class="field"><span>Note</span><input type="text" id="fg-note" placeholder="Where the figure came from"></label></div>
-        <button class="btn primary block" data-act="figure-save">Save the figure</button>
-        <p class="small muted">A figure you enter is the fact: nothing checks it. It shows as “your figure” with its date, and turns stale after ${STALE_DAYS} days.</p>`);
+        <p class="small muted">A figure you enter is the fact: nothing checks it. It shows as “your figure” with its date, and turns stale after ${STALE_DAYS} days.</p>`,
+    { eyebrow: 'Your figure', foot: '<button class="btn primary" data-act="figure-save">Save the figure</button>' });
+    const current = () => r.accountById.get(Number($('#fg-account').value));
     $('#fg-account').addEventListener('change', () => {
-        const a = r.accountById.get(Number($('#fg-account').value));
-        $('#fg-cur').textContent = SIGNS[a.currency] || a.currency;
-        $('#fg-hint').textContent = owedHint(a);
+        const a = current();
+        $('#fg-target').innerHTML = target(a);
+        $('#fg-label').textContent = label(a);
+        $('#fg-amount').placeholder = placeholder(a);
+        $('#fg-hint').textContent = hint(a, $('#fg-amount').value);
     });
+    $('#fg-amount').addEventListener('input', () => { $('#fg-hint').textContent = hint(current(), $('#fg-amount').value); });
 }
+ACT['fg-another'] = el => {
+    const pick = $('#fg-pick');
+    pick.hidden = false;
+    el.setAttribute('aria-expanded', 'true');
+    el.hidden = true;
+    $('#fg-account').focus();
+};
 ACT['figure-save'] = async () => {
     const body = { account_id: Number($('#fg-account').value), amount: $('#fg-amount').value.replace(/[, ]/g, ''), date: $('#fg-date').value };
     const note = $('#fg-note').value.trim();
