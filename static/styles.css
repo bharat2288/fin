@@ -2461,3 +2461,7 @@ input[type="checkbox"]:focus-visible {
     background: var(--bg-surface);
     border-bottom: 1px solid var(--border-default);
 }
+
+/* Type suggestion: the names to send, ticked in the confirm dialog */
+.suggest-pick-list { max-height: 50vh; overflow-y: auto; margin-top: 12px; }
+.suggest-pick { display: flex; align-items: center; gap: 8px; min-height: 32px; }
