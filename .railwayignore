@@ -15,3 +15,9 @@ business/
 .env
 .env.*
 specs/
+chat-writes.json
+*.log
+.venv/
+venv/
+__pycache__/
+.claude/
