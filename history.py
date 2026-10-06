@@ -153,6 +153,28 @@ def _entry(conn: sqlite3.Connection, r) -> dict:
     }
 
 
+def record_asked(conn: sqlite3.Connection, entry_id: int, expected_count: int) -> None:
+    """Record that a chat change stands on the count the operator agreed to
+    in chat ("asked first, yes in chat"), in change_asked, and commit."""
+    conn.execute(
+        "INSERT OR REPLACE INTO change_asked (entry_id, expected_count) VALUES (?, ?)",
+        (entry_id, expected_count),
+    )
+    conn.commit()
+
+
+def asked_counts(conn: sqlite3.Connection, entry_ids) -> dict[int, int]:
+    """For each of these entries that was asked first in chat, the count the
+    operator agreed to."""
+    ids = [int(i) for i in entry_ids]
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    return dict(conn.execute(
+        f"SELECT entry_id, expected_count FROM change_asked WHERE entry_id IN ({marks})", ids,
+    ).fetchall())
+
+
 def entries(conn: sqlite3.Connection, limit: int = 50, before: int | None = None) -> list[dict]:
     """Closed entries, newest first."""
     sql = "SELECT * FROM change_entries WHERE open = 0"
@@ -185,6 +207,45 @@ def entry(conn: sqlite3.Connection, entry_id: int) -> dict | None:
         )
     ]
     return shown
+
+
+def brief(conn: sqlite3.Connection, entry_id: int, scan: int = 400) -> dict | None:
+    """What an entry did, in short, so its line in the list can say it in
+    words: the first row it changed (before and after), whether every row
+    took the same new values (same_change), and whether every row had the
+    same name (same_label). An entry that changed one row twice counts it
+    once, from its first before to its last after. None for no rows."""
+    rows: dict[tuple[str, int], dict] = {}
+    for tbl, row_id, op, before, after in conn.execute(
+        "SELECT tbl, row_id, op, before, after FROM change_rows WHERE entry_id = ? ORDER BY id LIMIT ?",
+        (entry_id, scan),
+    ):
+        key = (tbl, row_id)
+        if key in rows:
+            rows[key]["after"] = _shown(tbl, after)
+            rows[key]["op"] = "delete" if after is None else rows[key]["op"]
+        else:
+            rows[key] = {"table": tbl, "row_id": row_id, "op": op,
+                         "before": _shown(tbl, before), "after": _shown(tbl, after)}
+    if not rows:
+        return None
+    shown = list(rows.values())
+
+    def changed(c: dict) -> tuple:
+        if c["op"] != "update":
+            return (c["table"], c["op"])
+        b, a = c["before"] or {}, c["after"] or {}
+        return (c["table"], "update", tuple(sorted(
+            (k, json.dumps(a.get(k))) for k in a if k != "id" and b.get(k) != a.get(k))))
+
+    def named(c: dict):
+        row = c["after"] or c["before"] or {}
+        return row.get("description") or row.get("name") or row.get("pattern")
+
+    first = shown[0]
+    return {**first,
+            "same_change": all(changed(c) == changed(first) for c in shown),
+            "same_label": all(named(c) == named(first) for c in shown)}
 
 
 def row_entries(conn: sqlite3.Connection, tbl: str, row_id: int) -> list[dict]:
@@ -307,6 +368,7 @@ def discard(conn: sqlite3.Connection, entry_id: int) -> None:
         conn.execute("UPDATE change_entries SET undoes = NULL WHERE undoes = ?", (entry_id,))
         _write_back(conn, entry_id)
         conn.execute("DELETE FROM change_rows WHERE entry_id = ?", (entry_id,))
+        conn.execute("DELETE FROM change_asked WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM change_entries WHERE id = ?", (entry_id,))
         conn.commit()
     except BaseException:

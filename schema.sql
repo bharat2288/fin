@@ -185,6 +185,40 @@ CREATE TABLE IF NOT EXISTS batch_imports (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- What the screens keep between visits (screens.py): the last change the
+-- operator looked at in the history. (The "Claude may write" switch is not
+-- here: chat_writes.py keeps it beside the book.) Not a tracked table:
+-- looking is not a change to the book.
+-- A new table, made empty by CREATE IF NOT EXISTS on start; no existing row
+-- is converted.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,           -- declared in screens.py
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- A statement refused at upload because its rows do not tie to its own
+-- balances (screens.py). None of its rows is written; this keeps the tie line
+-- so the queue and the account page can say so until a file that ties is
+-- imported for the same account and day. No file name is kept. Not a
+-- tracked table. A new table, made empty by CREATE IF NOT EXISTS on start;
+-- no existing row is converted.
+CREATE TABLE IF NOT EXISTS refused_statements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_name TEXT NOT NULL,     -- as the statement names it, card numbers masked
+    account_id INTEGER REFERENCES accounts(id),  -- the account it would land on; NULL = none yet
+    statement_date TEXT NOT NULL,   -- YYYY-MM-DD, its closing day
+    currency TEXT NOT NULL DEFAULT 'SGD',
+    opening_minor INTEGER NOT NULL,
+    rows_minor INTEGER NOT NULL,    -- the change its rows make to the balance (tie.figures)
+    closing_minor INTEGER NOT NULL,
+    difference_minor INTEGER NOT NULL,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    refused_at TEXT NOT NULL DEFAULT (datetime('now')),
+    set_aside_at TEXT,              -- "Known, leave it": off Home and the queue's top; still refused
+    UNIQUE (account_name, statement_date)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_transactions_statement ON transactions(statement_id);
@@ -404,3 +438,15 @@ BEGIN
         json_object('id', OLD.id, 'service_id', OLD.service_id, 'amount', OLD.amount, 'currency', OLD.currency, 'frequency', OLD.frequency, 'periods', OLD.periods, 'account_id', OLD.account_id, 'last_paid', OLD.last_paid, 'renewal_date', OLD.renewal_date, 'status', OLD.status, 'link', OLD.link, 'notes', OLD.notes, 'match_pattern', OLD.match_pattern, 'created_at', OLD.created_at, 'book', OLD.book, 'type_id', OLD.type_id), NULL);
 END;
 -- history:end
+
+-- "Asked first, yes in chat" (fin-surfaces 01 Q3, 02 Changes): a chat change
+-- over mcp_tools.MANY_ROWS rows stands only when the call carried the count
+-- the operator agreed to in chat; this records that count against its entry.
+-- Written by mcp_tools.call, read by the history routes. Not a tracked table.
+-- A new table, made empty by CREATE IF NOT EXISTS on start; no existing row
+-- is converted or rewritten.
+CREATE TABLE IF NOT EXISTS change_asked (
+    entry_id INTEGER PRIMARY KEY REFERENCES change_entries(id),
+    expected_count INTEGER NOT NULL,
+    at TEXT NOT NULL DEFAULT (datetime('now'))
+);

@@ -30,14 +30,16 @@ import db
 import flow
 import history
 import loan_interest
+import mcp_tools
 import money
 import month_check
 import pairing
 import rates
 import review
+import screens
 import suggest
 import tie
-from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
+from db import first_rule, get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
 
 
 @contextmanager
@@ -293,8 +295,9 @@ def _label_for(conn, description: str, amount_minor: int) -> dict:
 
 def _tie_line(conn, stmt, figures: dict) -> dict:
     """The tie line of a parsed statement as the import preview shows it:
-    opening, what the rows add up to, closing and the difference, each in
-    whole minor units and as text, and whether it ties."""
+    opening, what the rows add up to (and money in and out apart), closing
+    and the difference, each in whole minor units and as text, and whether
+    it ties."""
     account = stmt.accounts[0] if stmt.accounts else "Unknown"
     try:
         currency = _account_currency(conn, account, stmt.currency)
@@ -303,6 +306,7 @@ def _tie_line(conn, stmt, figures: dict) -> dict:
     return {
         "file": stmt.filename,
         "account": mask_card_number(account),
+        "currency": currency,
         "opening_date": stmt.opening_date,
         "closing_date": stmt.closing_date,
         "status": "ties" if figures["difference_minor"] == 0 else "off",
@@ -311,7 +315,57 @@ def _tie_line(conn, stmt, figures: dict) -> dict:
         "rows_sum": anchors.format_amount(figures["rows_minor"], currency),
         "closing": anchors.format_amount(figures["closing_minor"], currency),
         "difference": anchors.format_amount(abs(figures["difference_minor"]), currency),
+        # The rows kept apart, each a positive amount: money in and money out.
+        "in_minor": -sum(t.amount_minor for t in stmt.transactions if t.amount_minor < 0),
+        "out_minor": sum(t.amount_minor for t in stmt.transactions if t.amount_minor > 0),
     }
+
+
+def _statement_results(conn, statement_lines: dict, errors: list, groups: list) -> list:
+    """Each statement of an upload and what it came to: a statement that ties,
+    one refused for being off, and an account's rows from a source that
+    states no balance (not checked). Kept on the import (Past imports)."""
+    from ingest import find_account
+
+    def account_id(name: str):
+        try:
+            return find_account(conn, name)
+        except Exception:
+            return None
+
+    out = []
+    for name, lines in statement_lines.items():
+        for line in lines:
+            out.append({"account": mask_card_number(name), "account_id": account_id(name),
+                        "date": line.get("closing_date"), "status": line["status"],
+                        "difference_minor": line.get("difference_minor"), "currency": line.get("currency")})
+    for e in errors:
+        line = e.get("tie")
+        if line:
+            out.append({"account": line["account"], "account_id": account_id(line["account"]),
+                        "date": line.get("closing_date"), "status": "off",
+                        "difference_minor": line.get("difference_minor"), "currency": line.get("currency")})
+    for g in groups:
+        if g["tie"] != "ties" and g["total"]:
+            out.append({"account": g["account"], "account_id": account_id(g["account"]),
+                        "date": None, "status": "not_checked", "difference_minor": None,
+                        "currency": g.get("currency")})
+    return out
+
+
+def _record_refused(conn, stmt, line: dict) -> None:
+    """Keep a statement refused at upload (screens.py), and commit."""
+    from ingest import find_account
+    account = stmt.accounts[0] if stmt.accounts else "Unknown"
+    screens.record_refused(
+        conn,
+        account_name=mask_card_number(account),
+        account_id=find_account(conn, account),
+        statement_date=stmt.closing_date or stmt.statement_date,
+        currency=line["currency"],
+        figures=line,
+    )
+    conn.commit()
 
 
 class AnchorRefused(Exception):
@@ -548,7 +602,71 @@ def api_history():
     except ValueError:
         return jsonify({"error": "limit and before must be whole numbers"}), 400
     with get_db() as conn:
-        return jsonify({"entries": history.entries(conn, limit, before)})
+        shown = history.entries(conn, limit, before)
+        asked = history.asked_counts(conn, [e["id"] for e in shown])
+        for e in shown:
+            e["asked_first"] = e["id"] in asked
+            e["asked_count"] = asked.get(e["id"])
+        # Who undid what, and what each change did in short, so a line can
+        # say it in words (the walk's C3.1, C6.2, C9.1).
+        by_id = {e["id"]: e for e in shown}
+        for e in shown:
+            e["first"] = history.brief(conn, e["id"])
+            if e["first"]:
+                _change_currencies(conn, [e["first"]])
+            for key, other_id in (("undone_by_who", e["undone_by"]), ("undoes_who", e["undoes"])):
+                other = by_id.get(other_id) if other_id else None
+                if other_id and other is None:
+                    found = conn.execute("SELECT via, actor, at FROM change_entries WHERE id = ?", (other_id,)).fetchone()
+                    other = dict(found) if found else None
+                e[key] = None if other is None else {"via": other["via"], "actor": other["actor"], "at": other["at"]}
+        if request.args.get("blockers") == "1":
+            # What would refuse each entry's undo, named, so the list can say
+            # so before the operator taps it.
+            for e in shown:
+                later = history.blocker(conn, e["id"]) if e["undone_by"] is None else None
+                e["blocked_by"] = None if later is None else {
+                    "id": later["id"], "summary": later["summary"], "at": later["at"],
+                    "via": later["via"], "actor": later["actor"],
+                    "first": history.brief(conn, later["id"]),
+                }
+                if e["blocked_by"] and e["blocked_by"]["first"]:
+                    _change_currencies(conn, [e["blocked_by"]["first"]])
+        return jsonify({"entries": shown, "many_rows": mcp_tools.MANY_ROWS,
+                        **screens.since_looked(conn)})
+
+
+def _change_currencies(conn, changes: list[dict]) -> None:
+    """Give each changed row the currency its amounts are in (and a bank
+    row its account_id, from its statement): a row's and a
+    figure's are their account's, an account's its own, a bill's its own.
+    A statement removed by the same entry still names its account there."""
+    def account_currency(account_id):
+        if account_id is None:
+            return None
+        found = conn.execute("SELECT currency FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        return (found[0] or "SGD") if found else None
+
+    statement_account = {
+        c["row_id"]: (c["after"] or c["before"] or {}).get("account_id")
+        for c in changes if c["table"] == "statements"
+    }
+    for c in changes:
+        row = c["after"] or c["before"] or {}
+        currency = None
+        if c["table"] == "transactions":
+            sid = row.get("statement_id")
+            account_id = statement_account.get(sid)
+            if account_id is None and sid is not None:
+                found = conn.execute("SELECT account_id FROM statements WHERE id = ?", (sid,)).fetchone()
+                account_id = found[0] if found else None
+            currency = account_currency(account_id)
+            c["account_id"] = account_id
+        elif c["table"] in ("anchors", "statements"):
+            currency = account_currency(row.get("account_id"))
+        elif c["table"] in ("accounts", "subscriptions"):
+            currency = row.get("currency")
+        c["currency"] = currency or "SGD"
 
 
 @app.route("/api/history/<int:entry_id>")
@@ -560,6 +678,10 @@ def api_history_entry(entry_id: int):
         if shown is None:
             return jsonify({"error": "no such change"}), 404
         shown["blocked_by"] = history.blocker(conn, entry_id) if shown["undone_by"] is None else None
+        asked = history.asked_counts(conn, [entry_id])
+        shown["asked_first"] = entry_id in asked
+        shown["asked_count"] = asked.get(entry_id)
+        _change_currencies(conn, shown["changes"])
     return jsonify(shown)
 
 
@@ -631,6 +753,107 @@ def api_chat_writes_set():
         app.logger.warning("the chat-writes switch could not be saved")
         return jsonify({"error": CHAT_WRITES_NOT_SAVED}), 500
     return jsonify(state)
+
+
+# ---------------------------------------------------------------------------
+# What the screens keep (screens.py): where the
+# operator last looked in the history, and statements refused at upload.
+# None is a change to the book: these writes leave no history entry.
+# ---------------------------------------------------------------------------
+
+def _from_chat() -> bool:
+    return _caller()[0] == history.VIA_CHAT
+
+
+_SCREENS_ONLY = "only fin's own screens can do that; nothing was changed"
+
+
+def _chat_import_refused():
+    """An import from the chat's side (the upload command, stamped via chat)
+    while the operator has switched Claude's writes off: the refusal to
+    return. None when the import may go ahead."""
+    if not _from_chat():
+        return None
+    # The one switch (chat_writes.py): off, or unreadable, refuses.
+    if chat_writes.enabled():
+        return None
+    return jsonify({"error": screens.IMPORTS_OFF}), 403
+
+
+@app.route("/api/settings")
+def api_settings():
+    """The history mark Home counts from. The "Claude may write" switch is
+    its own route, /api/chat-writes (chat_writes.py)."""
+    with get_db() as conn:
+        return jsonify(screens.since_looked(conn))
+
+
+@app.route("/api/changes/marks")
+def api_changes_marks():
+    """The quiet mark (01, "For 02" item 4): the rows the chat changed since
+    the operator last looked, and the accounts whose balance-sheet line it
+    touched, each with the newest such change (its id in the history)."""
+    with get_db() as conn:
+        return jsonify(screens.claude_marks(conn))
+
+
+@app.route("/api/changes/looked", methods=["POST"])
+def api_changes_looked():
+    """The operator looked: Recent changes was opened, or "Looks right" was
+    tapped on Home. Body: upto, the newest entry they saw (optional; the
+    newest entry when left out). The mark never moves back."""
+    if _from_chat():
+        return jsonify({"error": _SCREENS_ONLY}), 403
+    data = request.get_json(silent=True) or {}
+    upto = data.get("upto")
+    if upto is not None and (isinstance(upto, bool) or not isinstance(upto, int)):
+        return jsonify({"error": "upto must be a change number"}), 400
+    with get_db() as conn:
+        screens.mark_looked(conn, upto)
+        return jsonify(screens.since_looked(conn))
+
+
+@app.route("/api/statements/refused")
+def api_statements_refused():
+    """Statements refused at upload that still stand (no file that ties has
+    been imported for the same account and day), newest first; ?account_id=
+    for one account's. Each with its tie line in whole minor units and
+    whether it was set aside ("Known, leave it")."""
+    account_id = request.args.get("account_id", type=int)
+    with get_db() as conn:
+        return jsonify({"refused": screens.refused(conn, account_id)})
+
+
+@app.route("/api/statements/refused/<int:refused_id>/set-aside", methods=["POST"])
+def api_statements_refused_set_aside(refused_id: int):
+    """"Known, leave it": off Home and the queue's top, still marked refused
+    on its account. Body: aside (default true); false brings it back."""
+    if _from_chat():
+        return jsonify({"error": _SCREENS_ONLY}), 403
+    data = request.get_json(silent=True) or {}
+    aside = data.get("aside", True)
+    if not isinstance(aside, bool):
+        return jsonify({"error": "aside must be true or false"}), 400
+    with get_db() as conn:
+        if not screens.set_aside(conn, refused_id, aside):
+            return jsonify({"error": "no such refused statement"}), 404
+    return jsonify({"ok": True, "id": refused_id, "set_aside": aside})
+
+
+@app.route("/api/accounts/<int:acct_id>/ties")
+def api_account_ties(acct_id: int):
+    """One account's tie lines, newest first: for each statement balance
+    after the first, the balance before it, what the rows between add up to,
+    the balance stated and the difference (zero when it ties)."""
+    with get_db() as conn:
+        account = conn.execute("SELECT * FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+        if account is None:
+            return jsonify({"error": "no such account"}), 404
+        return jsonify({
+            "account_id": acct_id,
+            "currency": account["currency"] or "SGD",
+            "ties": balance_sheet.tie_lines(conn, account),
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -1396,7 +1619,8 @@ def api_dashboard_stat_cards():
     Auto-picks reference month using the 15th rule:
       - If today >= 15th, ref = previous month
       - If today < 15th, ref = two months ago
-    Override with ?ref_month=YYYY-MM.
+    Override with ?ref_month=YYYY-MM. ?history=N (up to 24) adds history:
+    each book's card and loan_principal for the N months ending with it.
 
     Respects: book, exclude_one_off, account_id
 
@@ -1415,6 +1639,11 @@ def api_dashboard_stat_cards():
       moom, kalesh                each company's costs paid from accounts the
                                   household owns. Beside the headline, never
                                   added into it.
+      <book>_out, _back, _out_rows,  each book's card split as Spending shows
+      _back_rows, avg_<book>_out     it: money out, refunds back beside it.
+      <book>_missing                 no row in the month and an account that
+                                     carried the book's rows has no statement
+                                     for it: not a real zero.
       waiting, waiting_total      every transfer waiting, whenever dated: the
                                   review list, with waiting_out_count,
                                   _out_total, waiting_in_count, _in_total
@@ -1496,6 +1725,16 @@ def api_dashboard_stat_cards():
         for _ in companies
     )
 
+    # Each book's card split the way Spending shows it: money out, and money
+    # back in refunds (a negative row) kept beside it, never taken off.
+    side_sums = "".join(
+        f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN amount_minor ELSE 0 END), "
+        f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN -amount_minor ELSE 0 END), "
+        f"COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN 1 END), "
+        f"COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN 1 END), "
+        for _ in books
+    )
+
     with get_db() as conn:
         def query_month(y: int, m: int) -> dict:
             """Query spend totals for a single month, in whole minor units."""
@@ -1511,11 +1750,14 @@ def api_dashboard_stat_cards():
                 params += [name, account_kind.HOUSEHOLD] if name == book_type.DEFAULT_BOOK else [name]
             for name, _ in companies:
                 params += [name, account_kind.HOUSEHOLD]
+            for name, _ in books:
+                params += [name, account_kind.HOUSEHOLD] * 4
             params += [book_type.DEFAULT_BOOK, account_kind.HOUSEHOLD, start, end] + extra_params
             row = conn.execute(f"""
                 SELECT
                     {book_sums}
                     {paid_sums}
+                    {side_sums}
                     SUM(amount_minor),
                     COUNT(CASE WHEN t.type_id IS NULL THEN 1 END),
                     COUNT(*),
@@ -1534,6 +1776,12 @@ def api_dashboard_stat_cards():
             for i, (_, key) in enumerate(companies):
                 result[f"paid_{key}"] = row[n + i] or 0
             n += len(companies)
+            for _, key in books:
+                result[f"out_{key}"] = row[n] or 0
+                result[f"back_{key}"] = row[n + 1] or 0
+                result[f"out_rows_{key}"] = row[n + 2] or 0
+                result[f"back_rows_{key}"] = row[n + 3] or 0
+                n += 4
             result["total"] = row[n] or 0
             result["untyped"] = row[n + 1] or 0
             result["tx_count"] = row[n + 2] or 0
@@ -1549,7 +1797,36 @@ def api_dashboard_stat_cards():
         averages = {
             key: money.mean_minor(sum(d[key] for d in avg_data), n)
             for key in ["total"] + [key for _, key in books] + [f"paid_{key}" for _, key in companies]
+            + [f"out_{key}" for _, key in books]
         }
+
+        # A book with no row in the month while an account that carried its
+        # rows in the year before has no statement for the month: the card
+        # is missing, not a real zero (Spending hatches the same month).
+        ref_key = f"{ref_y:04d}-{ref_m:02d}"
+        year_ago = f"{ref_y - 1:04d}-{ref_m:02d}-01"
+        missing = {}
+        for name, key in books:
+            if ref_data[f"out_rows_{key}"] or ref_data[f"back_rows_{key}"]:
+                continue
+            carried = conn.execute(f"""
+                SELECT DISTINCT s.account_id FROM transactions t
+                JOIN statements s ON t.statement_id = s.id
+                JOIN accounts a ON s.account_id = a.id
+                WHERE {book_expr('t')} = ? AND a.owner = ?
+                  AND t.flow_type IN ('expense', 'refund')
+                  AND (a.status = 'active' OR a.status IS NULL)
+                  AND a.type IN (?, ?)
+                  AND t.date >= ? AND t.date < ?
+            """, (name, account_kind.HOUSEHOLD, *account_kind.STATEMENT_KINDS, year_ago, f"{ref_key}-01")).fetchall()
+            for c in carried:
+                held = conn.execute(
+                    "SELECT 1 FROM statements WHERE account_id = ? AND substr(statement_date, 1, 7) = ?",
+                    (c[0], ref_key),
+                ).fetchone()
+                if not held:
+                    missing[key] = True
+                    break
 
         # The transfers dated in the reference month that nobody has labelled:
         # what the household figure is waiting on.
@@ -1561,6 +1838,27 @@ def api_dashboard_stat_cards():
         # Everything waiting, whenever it is dated: the review list's own count.
         waiting = _waiting_sides(conn)
         loan = loan_interest.month_figures(conn, f"{ref_y:04d}-{ref_m:02d}")
+
+        # ?history=N (at most 24): each card's figure for the N months ending
+        # with the reference month, oldest first, worked out as the card is.
+        history = []
+        try:
+            n_history = max(0, min(int(request.args.get("history") or 0), 24))
+        except ValueError:
+            n_history = 0
+        hy, hm = ref_y, ref_m
+        for _ in range(n_history):
+            data = ref_data if (hy, hm) == (ref_y, ref_m) else query_month(hy, hm)
+            month_loan = loan_interest.month_figures(conn, f"{hy:04d}-{hm:02d}")
+            entry = {"month": f"{hy:04d}-{hm:02d}",
+                     "loan_principal": money.from_minor(month_loan["principal_minor"])}
+            for name, key in books:
+                entry[key] = money.from_minor(data[key if name == book_type.DEFAULT_BOOK else f"paid_{key}"])
+                entry[f"out_{key}"] = money.from_minor(data[f"out_{key}"])
+            history.insert(0, entry)
+            hm -= 1
+            if hm == 0:
+                hm, hy = 12, hy - 1
 
     # Pick which spend to feature based on filter
     featured = book.lower() if book else "total"
@@ -1590,11 +1888,19 @@ def api_dashboard_stat_cards():
         "loan_interest": money.from_minor(loan["interest_minor"]),
         "loan_principal": money.from_minor(loan["principal_minor"]),
         "cash_out": money.from_minor(ref_data["household"] + loan["principal_minor"]),
-    }
+        }
+    if n_history:
+        payload["history"] = history
     for name, key in books:
         shown = key if name == book_type.DEFAULT_BOOK else f"paid_{key}"
         payload[key] = money.from_minor(ref_data[shown])
         payload[f"avg_{key}"] = money.from_minor(averages[shown])
+        payload[f"{key}_out"] = money.from_minor(ref_data[f"out_{key}"])
+        payload[f"{key}_back"] = money.from_minor(ref_data[f"back_{key}"])
+        payload[f"{key}_out_rows"] = ref_data[f"out_rows_{key}"]
+        payload[f"{key}_back_rows"] = ref_data[f"back_rows_{key}"]
+        payload[f"avg_{key}_out"] = money.from_minor(averages[f"out_{key}"])
+        payload[f"{key}_missing"] = bool(missing.get(key))
     return jsonify(payload)
 
 
@@ -1702,7 +2008,9 @@ def api_transactions():
     flow=review is the review list: the transfers waiting for a label. It
     hides no merchant, so it lists every row the waiting count counts.
     """
-    filters, params = _build_filters(request.args, hide=request.args.get("flow") != flow.REVIEW)
+    # A row asked for by id is shown whatever its merchant's hiding says.
+    hide = request.args.get("flow") != flow.REVIEW and request.args.get("tx_id") is None
+    filters, params = _build_filters(request.args, hide=hide)
 
     flow_filter = request.args.get("flow")
     if flow_filter:
@@ -1712,6 +2020,23 @@ def api_transactions():
             return jsonify({"error": str(e)}), 400
         filters += " AND COALESCE(t.flow_type, 'expense') = ?"
         params.append(flow_filter)
+
+    # tx_id: one row, as a row's own sheet reads it.
+    tx_id = request.args.get("tx_id", type=int)
+    if tx_id is not None:
+        filters += " AND t.id = ?"
+        params.append(tx_id)
+
+    # look=mixed: rows of a mixed merchant (looked at each time) that nobody
+    # has set by hand yet: the queue's "is this type right?" items. Only a
+    # typed spending or refund row: an untyped one is already the queue's
+    # "no type" item and a transfer waiting for review its "This was…" item,
+    # so the same row is never listed twice.
+    if request.args.get("look") == "mixed":
+        filters += (
+            " AND COALESCE(svc.review_each_time, 0) = 1 AND COALESCE(t.cat_source, 'auto') != 'manual'"
+            " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL"
+        )
 
     # Type filter (from chart selection or multi-select dropdown): type names,
     # a parent taking its sub-types with it. __untyped__ is the list of rows
@@ -1802,7 +2127,7 @@ def api_transactions():
                 t.is_one_off, COALESCE(t.flow_type, 'expense') as flow_type, t.flow_type_manual,
                 t.notes,
                 t.other_side_id, oa.name as other_side_name,
-                a.name as account_name,
+                a.name as account_name, s.account_id,
                 COALESCE(a.currency, 'SGD') as currency,
                 t.service_id,
                 svc.name as service_name,
@@ -1975,6 +2300,7 @@ def api_resolve_transaction():
             # Step 2: Create merchant rule if pattern provided (optional for PayNow/transfers)
             rule_id = None
             backfilled = 0
+            backfilled_ids = []
             if pattern and apply_scope in {"rule", "service_default"}:
                 rule_exists = conn.execute(
                     "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
@@ -2002,17 +2328,28 @@ def api_resolve_transaction():
                         (service_id, override_book, override_type_id, rule_id),
                     )
 
-                # Backfill other transactions matching this pattern with NULL service
+                # Backfill the other rows matching this pattern that have no
+                # merchant, or have this merchant but still no type.
                 match_cond = _build_match_condition(match_type)
+                fill_where = (
+                    f"(service_id IS NULL OR (service_id = ? AND type_id IS NULL AND id != ?)) "
+                    f"AND {match_cond}"
+                )
+                fill_params = (service_id, tx_id, pattern.upper())
+                backfilled_ids = [
+                    r[0] for r in conn.execute(
+                        f"SELECT id FROM transactions WHERE {fill_where}", fill_params
+                    ).fetchall()
+                ]
                 cur = conn.execute(
                     f"UPDATE transactions SET service_id = ?, book = ?, type_id = ?, cat_source = ? "
-                    f"WHERE service_id IS NULL AND {match_cond}",
+                    f"WHERE {fill_where}",
                     (
                         service_id,
                         book,
                         type_id,
                         "rule_override" if apply_scope == "rule" else "service_default",
-                        pattern.upper(),
+                        *fill_params,
                     ),
                 )
                 backfilled = cur.rowcount
@@ -2069,6 +2406,7 @@ def api_resolve_transaction():
                 "book": book,
                 "type_id": type_id,
                 "backfilled": backfilled,
+                "backfilled_ids": backfilled_ids,
             })
         except BookNeeded as e:
             conn.rollback()
@@ -2326,10 +2664,12 @@ PREVIEW_NOT_OPEN = "This preview is no longer open. Upload the statement again."
 PREVIEW_MISMATCH = "The import does not match its preview; nothing was imported. Upload the statement again."
 
 
-def _stored_preview(groups: list[dict]) -> str:
+def _stored_preview(groups: list[dict], statements: list | None = None) -> str:
     """The facts of an upload's preview, as the response gives them, for its
     batch_imports row: per group (in order) its account, currency and tie
-    lines, and per row (in order) its facts."""
+    lines, and per row (in order) its facts. With `statements`, what each
+    statement in the files came to (_statement_results), which the confirm
+    carries into its summary and Past imports shows."""
     preview = {
         "groups": [
             {
@@ -2341,6 +2681,8 @@ def _stored_preview(groups: list[dict]) -> str:
             for g in groups
         ]
     }
+    if statements is not None:
+        preview["statements"] = statements
     # Serialised as the response is, so what is stored is what was shown.
     return app.json.dumps(preview)
 
@@ -2401,7 +2743,12 @@ def api_import_upload():
     One that does not is refused: none of its rows is in the preview, and its
     entry in `errors` carries the same line under `tie`, with the difference.
     A source with no balance is not checked. No row is skipped by default.
+    Refused (403) from the chat's side (the upload command) while the
+    "Claude may write" switch is off; the operator's own import still works.
     """
+    refused = _chat_import_refused()
+    if refused is not None:
+        return refused
     if "files" not in request.files:
         return jsonify({"error": "No files uploaded"}), 400
 
@@ -2445,11 +2792,11 @@ def api_import_upload():
                         _account_currency(conn, name, stmt.currency)
                     tie.check(stmt)
                 except tie.DoesNotTie as e:
-                    errors.append({
-                        "file": filename,
-                        "error": str(e),
-                        "tie": _tie_line(conn, stmt, e.figures),
-                    })
+                    line = _tie_line(conn, stmt, e.figures)
+                    errors.append({"file": filename, "error": str(e), "tie": line})
+                    # Kept so the queue and the account page say so until a
+                    # file that ties is imported (screens.py). No file name.
+                    _record_refused(conn, stmt, line)
                 except ValueError as e:
                     errors.append({"file": filename, "error": str(e)})
                 else:
@@ -2606,6 +2953,9 @@ def api_import_upload():
     # The preview's facts stay on the server: confirm writes these, never the
     # facts a request sends back (_stored_preview).
     with get_db() as conn:
+        # What each statement in the files came to, kept with the import so
+        # Past imports can say it: ties, off by (refused) or not checked.
+        results = _statement_results(conn, statement_lines, errors, groups)
         conn.execute(
             "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines, result_json) "
             "VALUES (?, ?, 'preview', ?, ?, ?)",
@@ -2614,7 +2964,7 @@ def api_import_upload():
                 json.dumps(list(all_groups.keys())),
                 total,
                 typed,
-                _stored_preview(groups),
+                _stored_preview(groups, results),
             ),
         )
         conn.commit()
@@ -2709,6 +3059,9 @@ def api_import_confirm():
     All or nothing: every write of one confirm is one transaction, and any
     failure rolls all of it back.
     """
+    refused = _chat_import_refused()
+    if refused is not None:
+        return refused
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
@@ -3049,6 +3402,16 @@ def api_import_confirm():
                 "anchors_written": anchors_written,
                 "rows_refiled": rows_refiled,
             }
+            # The statements' results the upload kept stay with the import.
+            held = conn.execute(
+                "SELECT result_json FROM batch_imports WHERE id = ?", (import_id,)
+            ).fetchone()
+            try:
+                kept = json.loads(held["result_json"]) if held and held["result_json"] else {}
+            except ValueError:
+                kept = {}
+            if isinstance(kept, dict) and "statements" in kept:
+                result_summary["statements"] = kept["statements"]
             conn.execute(
                 "UPDATE batch_imports SET status = 'committed', result_json = ? WHERE id = ?",
                 (json.dumps(result_summary), import_id),
@@ -3092,15 +3455,33 @@ def api_import_confirm():
 @app.route("/api/import/history")
 def api_import_history():
     """List past imports."""
+    from ingest import find_account
     with get_db() as conn:
         rows = conn.execute(
             "SELECT * FROM batch_imports ORDER BY created_at DESC"
         ).fetchall()
+        found = {}
 
-    result = []
+        def account_of(entry: dict):
+            # An account the import itself created was not there at upload.
+            if entry.get("account_id") is None and entry.get("account"):
+                if entry["account"] not in found:
+                    found[entry["account"]] = find_account(conn, entry["account"])
+                return {**entry, "account_id": found[entry["account"]]}
+            return entry
+
+        results = {}
+        for r in rows:
+            kept = json.loads(r["result_json"]) if r["result_json"] else None
+            if isinstance(kept, dict) and isinstance(kept.get("statements"), list):
+                kept = {**kept, "statements": [account_of(e) for e in kept["statements"]]}
+            results[r["id"]] = kept
+
+    shown = []
     for r in rows:
         accounts_raw = json.loads(r["accounts"]) if r["accounts"] else []
-        result.append({
+        result = results[r["id"]]
+        shown.append({
             "id": r["id"],
             "filenames": json.loads(r["filenames"]) if r["filenames"] else [],
             "accounts": [mask_card_number(a) for a in accounts_raw],
@@ -3108,13 +3489,13 @@ def api_import_history():
             "total_lines": r["total_lines"],
             "categorized_lines": r["categorized_lines"],
             # While open, result_json holds the preview's facts: not shown.
-            "result": (
-                json.loads(r["result_json"])
-                if r["result_json"] and r["status"] != "preview" else None
-            ),
+            "result": result if r["status"] != "preview" else None,
+            # Each statement's result (ties, off, not_checked), or None for
+            # an import made before fin kept them.
+            "statements": result.get("statements") if isinstance(result, dict) else None,
             "created_at": r["created_at"],
         })
-    return jsonify(result)
+    return jsonify(shown)
 
 
 # ---------------------------------------------------------------------------
@@ -3252,6 +3633,7 @@ def api_rules():
              LEFT JOIN types tp ON ty.parent_id = tp.id
             ORDER BY COALESCE(tp.name, ty.name), ty.name, mr.priority DESC, mr.pattern
         """).fetchall()
+        labelled = _rows_labelled_by_rule(conn)
     return jsonify([{
         "id": r["id"],
         "pattern": r["pattern"],
@@ -3269,7 +3651,24 @@ def api_rules():
         "type_name": r["type_name"],
         "parent_type": r["parent_type"],
         "display_type": format_type_display(r["parent_type"], r["type_name"]),
+        "rows_labelled": labelled.get(r["id"], 0),
     } for r in rows])
+
+
+def _rows_labelled_by_rule(conn) -> dict[int, int]:
+    """How many rows each rule labels now: every row whose label came from
+    the rules (not by hand), counted against the rule that wins for it, as
+    a re-run would find it. Transfers and card payments are not counted."""
+    counts: dict[int, int] = {}
+    for tx in conn.execute(
+        "SELECT description, amount_minor FROM transactions "
+        "WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment') "
+        "AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')"
+    ):
+        rule = first_rule(tx["description"] or "", conn, tx["amount_minor"])
+        if rule is not None:
+            counts[rule["id"]] = counts.get(rule["id"], 0) + 1
+    return counts
 
 
 @app.route("/api/rules", methods=["POST"])
@@ -3699,6 +4098,89 @@ def api_review_label(tx_id: int):
         "other_side_name": mask_card_number(named["name"]) if named else None,
         "created_account": new_person is not None,
     })
+
+
+# How many of the latest labels a transfer's guess looks back over, how many
+# must agree before fin offers one, and what share of them.
+REVIEW_GUESS_LOOK_BACK = 10
+REVIEW_GUESS_AT_LEAST = 2
+REVIEW_GUESS_SHARE = 0.6
+
+
+def _label_as_choice(row) -> tuple | None:
+    """A row labelled by hand, read back as the review choice that would
+    label it the same way: (choice, the label's body). None when no choice
+    writes what the row holds."""
+    flow_name, kind, type_name = row["flow_type"], row["other_kind"], row["type_name"]
+    if flow_name == "expense":
+        if type_name == review.GIFT_GIVEN_TYPE:
+            return "gift", {}
+        if row["type_id"] is None:
+            return None
+        return "spending", {"type_id": row["type_id"], **({"book": row["book"]} if row["book"] else {})}
+    if flow_name == "income":
+        if type_name == review.GIFT_RECEIVED_KIND:
+            return "gift", {}
+        return ("income", {"income_kind_id": row["type_id"]}) if row["type_id"] is not None else None
+    if row["other_side_id"] is None:
+        return None
+    for choice in review.CHOICES:
+        if choice.flow == flow_name and choice.asks in (review.ASKS_ACCOUNT, review.ASKS_PERSON) and kind in choice.kinds:
+            return choice.name, {"account_id": row["other_side_id"]}
+    return None
+
+
+@app.route("/api/review/<int:tx_id>/suggestion")
+def api_review_suggestion(tx_id: int):
+    """fin's guess for a waiting transfer: how the latest rows with the same
+    text, going the same way, were labelled by hand. Offered only when at
+    least REVIEW_GUESS_AT_LEAST of them agree and they are at least
+    REVIEW_GUESS_SHARE of those looked at. Read-only; it asks nobody.
+
+    Returns guess: null, or {choice, body (what /label takes), type, book,
+    other_side, agree, of, probability}."""
+    with get_db() as conn:
+        tx = conn.execute(
+            "SELECT id, description, amount_minor FROM transactions WHERE id = ?", (tx_id,)
+        ).fetchone()
+        if tx is None:
+            return jsonify({"error": "no such row"}), 404
+        rows = conn.execute(
+            "SELECT t.flow_type, t.other_side_id, t.type_id, t.book, a.type AS other_kind, "
+            "a.name AS other_name, ty.name AS type_name, p.name AS parent_name "
+            "FROM transactions t LEFT JOIN accounts a ON a.id = t.other_side_id "
+            "LEFT JOIN types ty ON ty.id = t.type_id LEFT JOIN types p ON p.id = ty.parent_id "
+            "WHERE t.id != ? AND t.flow_type_manual = 1 AND t.flow_type != ? "
+            "AND UPPER(TRIM(t.description)) = UPPER(TRIM(?)) AND (t.amount_minor < 0) = (? < 0) "
+            "ORDER BY t.date DESC, t.id DESC LIMIT ?",
+            (tx_id, flow.REVIEW, tx["description"], tx["amount_minor"], REVIEW_GUESS_LOOK_BACK),
+        ).fetchall()
+    tally: dict = {}
+    for r in rows:
+        read = _label_as_choice(r)
+        if read is None:
+            continue
+        key = (read[0], json.dumps(read[1], sort_keys=True))
+        if key not in tally:
+            tally[key] = {"count": 0, "row": r, "choice": read[0], "body": read[1]}
+        tally[key]["count"] += 1
+    if not rows or not tally:
+        return jsonify({"guess": None})
+    top = max(tally.values(), key=lambda t: t["count"])
+    share = top["count"] / len(rows)
+    if top["count"] < REVIEW_GUESS_AT_LEAST or share < REVIEW_GUESS_SHARE:
+        return jsonify({"guess": None})
+    r = top["row"]
+    return jsonify({"guess": {
+        "choice": top["choice"],
+        "body": {"choice": top["choice"], **top["body"]},
+        "type": format_type_display(r["parent_name"], r["type_name"]) if r["type_name"] else None,
+        "book": r["book"],
+        "other_side": mask_card_number(r["other_name"]) if r["other_name"] else None,
+        "agree": top["count"],
+        "of": len(rows),
+        "probability": round(share, 2),
+    }})
 
 
 @app.route("/api/pair-matching", methods=["POST"])

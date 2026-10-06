@@ -168,6 +168,36 @@ def test_resolve_as_a_rule_override_writes_the_rule_and_every_matching_row(
     assert (kept["book"], kept["display_type"]) == ("Household", "Shopping")
 
 
+def test_resolve_fills_matching_rows_that_have_the_merchant_but_no_type(
+    client, conn, statement
+):
+    """A merchant already on every row, none of them typed: the group sheet's
+    "all rows" labels every one, not only the row it was opened on."""
+    ads = merchant(conn, "Sample Ads")
+    tx = row(conn, statement, "SAMPLE*ADS 1001", service_id=ads)
+    others = [row(conn, statement, f"SAMPLE*ADS {n}", service_id=ads) for n in (1002, 1003)]
+    typed = row(conn, statement, "SAMPLE*ADS 1004", service_id=ads, type_name="Dining")
+
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": tx,
+        "service_name": "Sample Ads",
+        "service_id": ads,
+        "book": "Moom",
+        "type_id": type_id(conn, "Advertising"),
+        "pattern": "SAMPLE*ADS",
+        "apply_scope": "service_default",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["backfilled"] == 2
+    assert sorted(body["backfilled_ids"]) == sorted(others)
+    for t in [tx, *others]:
+        assert shown(client, t)["display_type"] == "Advertising"
+    # A row that already had its type keeps it.
+    assert shown(client, typed)["display_type"] == "Dining"
+
+
 def test_resolve_as_the_merchant_default_writes_the_merchant_and_the_row(
     client, conn, statement
 ):

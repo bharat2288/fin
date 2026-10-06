@@ -172,6 +172,25 @@ def _own_rows(conn: sqlite3.Connection, account_id: int, after: str, upto: str) 
     return row[0], row[1]
 
 
+def _own_rows_split(conn: sqlite3.Connection, account_id: int, after: str, upto: str) -> dict:
+    """The same rows as _own_rows, kept apart: money in and money out, each
+    as a positive amount, and the rows' ids (an account's page lists its rows
+    under the statement they tie into)."""
+    members = card_balance.members(conn, account_id)
+    held = ", ".join("?" for _ in members)
+    rows = conn.execute(
+        "SELECT t.id, t.amount_minor FROM transactions t "
+        "JOIN statements s ON t.statement_id = s.id "
+        f"WHERE s.account_id IN ({held}) AND {ROW_DAY} > ? AND {ROW_DAY} <= ? ORDER BY t.id",
+        (*members, after, upto),
+    ).fetchall()
+    return {
+        "in_minor": -sum(r[1] for r in rows if r[1] < 0),
+        "out_minor": sum(r[1] for r in rows if r[1] > 0),
+        "row_ids": [r[0] for r in rows],
+    }
+
+
 def _naming_rows(conn: sqlite3.Connection, account_id: int, after: str, upto: str) -> tuple[int, int, int]:
     """The movement rows naming the account as their other side, dated after
     one day up to another: how many, what they add up to, and how many of
@@ -676,3 +695,68 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
             + "; ".join(f"{entry['name']} ({entry['why']})" for entry in left_out)
         ) if left_out else None,
     }
+
+
+def tie_lines(conn: sqlite3.Connection, account) -> list[dict]:
+    """An account's tie lines, newest first, for its page: for each statement
+    balance with an anchor before it, that earlier balance, what the rows
+    between add up to (as the change they make: money out lowers it), the
+    balance stated and the difference, worked out as _check works it out,
+    with money in and money out apart and the ids of the rows between.
+    A supplied figure is the fact and is never checked; it is listed with
+    `status` "your figure". The first statement balance is "not checked"."""
+    kind = account["type"]
+    held = conn.execute(
+        "SELECT date, amount, source FROM anchors WHERE account_id = ? ORDER BY date",
+        (account["id"],),
+    ).fetchall()
+    lines = []
+    earlier = None
+    for anchor in held:
+        line = {
+            "date": anchor["date"],
+            "source": anchor["source"],
+            "label": SOURCE_LABELS[anchor["source"]],
+            "closing_minor": anchor["amount"],
+            "opening_minor": None,
+            "opening_date": None,
+            "rows": None,
+            "rows_minor": None,
+            "difference_minor": None,
+            "in_minor": None,
+            "out_minor": None,
+            "row_ids": [],
+        }
+        if anchor["source"] == anchors.SUPPLIED and earlier is not None and kind in OWN_ROW_KINDS:
+            # A figure is the fact and is never checked; what the rows since
+            # the balance before it moved is shown beside it, and what moved
+            # with no row is the rest.
+            count, between = _own_rows(conn, account["id"], earlier["date"], anchor["date"])
+            line.update(
+                status="your figure",
+                opening_minor=earlier["amount"],
+                opening_date=earlier["date"],
+                rows=count,
+                rows_minor=-between,
+                **_own_rows_split(conn, account["id"], earlier["date"], anchor["date"]),
+            )
+            line["moved_minor"] = anchor["amount"] - (earlier["amount"] - between)
+        elif anchor["source"] != anchors.STATEMENT or kind not in OWN_ROW_KINDS:
+            line["status"] = "your figure" if anchor["source"] == anchors.SUPPLIED else "not_checked"
+        elif earlier is None:
+            line["status"] = "not_checked"
+        else:
+            count, between = _own_rows(conn, account["id"], earlier["date"], anchor["date"])
+            difference = earlier["amount"] - between - anchor["amount"]
+            line.update(
+                opening_minor=earlier["amount"],
+                opening_date=earlier["date"],
+                rows=count,
+                rows_minor=-between,
+                difference_minor=difference,
+                status="ties" if difference == 0 else "off",
+                **_own_rows_split(conn, account["id"], earlier["date"], anchor["date"]),
+            )
+        lines.append(line)
+        earlier = anchor
+    return list(reversed(lines))

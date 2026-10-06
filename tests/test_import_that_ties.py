@@ -532,3 +532,48 @@ def test_a_failure_in_a_later_account_takes_the_earlier_one_with_it(client, conn
 
     assert resp.status_code == 500
     assert held(conn) == before
+
+
+# --- Past imports keep what each statement came to (walk B10.2) ---------------
+
+
+def test_past_imports_say_what_each_statement_came_to(client, stand_in):
+    stand_in(ROWS, OPENING, CLOSING)
+    assert confirm(client, upload(client)).status_code == 200
+    stand_in(ROWS, OPENING, CLOSING + 1, closing_date="2026-09-30", opening_date="2026-09-01")
+    upload(client)
+
+    # Both land in the same second here: tell them apart by their order.
+    imported, refused = sorted(client.get("/api/import/history").get_json(), key=lambda b: b["id"])
+
+    assert imported["status"] == "committed"
+    (tied,) = imported["statements"]
+    assert (tied["account"], tied["date"], tied["status"], tied["difference_minor"]) == (
+        BANK, "2026-08-31", "ties", 0,
+    )
+    assert tied["account_id"] is not None
+    assert imported["result"]["transactions_saved"] == len(ROWS)
+    assert refused["status"] == "preview"
+    (off,) = refused["statements"]
+    assert (off["status"], off["date"], off["account_id"]) == ("off", "2026-09-30", tied["account_id"])
+    assert abs(off["difference_minor"]) == 1
+
+
+def test_a_source_with_no_balance_is_kept_as_not_checked(client, stand_in):
+    stand_in(ROWS)
+    upload(client)
+
+    (past,) = client.get("/api/import/history").get_json()
+
+    (unchecked,) = past["statements"]
+    assert (unchecked["account"], unchecked["status"], unchecked["date"]) == (BANK, "not_checked", None)
+
+
+def test_a_tie_line_keeps_money_in_and_out_apart_tied_or_refused(client, stand_in):
+    stand_in(ROWS, OPENING, CLOSING)
+    (tied,) = upload(client)["groups"][0]["statements"]
+    assert (tied["in_minor"], tied["out_minor"]) == (90000, 14000 + 1000000 + 150000 + 15950)
+    assert tied["opening_minor"] + tied["in_minor"] - tied["out_minor"] == tied["closing_minor"]
+    stand_in(ROWS, OPENING, CLOSING + 1)
+    (refused,) = upload(client)["errors"]
+    assert (refused["tie"]["in_minor"], refused["tie"]["out_minor"]) == (tied["in_minor"], tied["out_minor"])

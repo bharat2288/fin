@@ -271,3 +271,50 @@ def test_the_household_view_of_the_charts_adds_up_to_the_headline(client, month)
     ).get_json()["transactions"]
     assert sum(cents(t["amount_sgd"]) for t in listed) == cents(shown["household"])
     assert len(listed) == shown["household_rows"]
+
+
+def test_history_gives_each_cards_figure_month_by_month(client, month):
+    """Home's book tiles draw twelve months each: the figures are the cards'
+    own, month by month, oldest first, and never one added across books."""
+    shown = cards(client, "&history=3")
+    assert [h["month"] for h in shown["history"]] == ["2026-06", "2026-07", MONTH]
+    last = shown["history"][-1]
+    assert (last["household"], last["moom"], last["kalesh"]) == (shown["household"], shown["moom"], shown["kalesh"])
+    assert last["loan_principal"] == shown["loan_principal"]
+    assert shown["history"][0]["household"] == 0
+    assert "history" not in cards(client)
+    assert len(cards(client, "&history=99")["history"]) == 24
+    assert "history" not in cards(client, "&history=x")
+
+
+def test_each_card_states_money_out_and_refunds_back_apart(client, month):
+    shown = cards(client)
+
+    assert cents(shown["household_out"]) == GROCER + CAFE + STALL
+    assert cents(shown["household_back"]) == -REBATE
+    assert (shown["household_out_rows"], shown["household_back_rows"]) == (3, 1)
+    assert cents(shown["moom_out"]) == MOOM
+    assert cents(shown["moom_back"]) == 0
+    # The net figure stays as it was.
+    assert cents(shown["household"]) == HOUSEHOLD
+
+
+def test_a_book_with_no_row_and_no_statement_for_the_month_is_marked_missing(client, conn):
+    card_id = make_account(client, "Sample Card 0003", "card", last_four="0003")
+    conn.execute(
+        "INSERT INTO statements (account_id, statement_date, filename)"
+        " VALUES (?, ?, 'sample.csv')",
+        (card_id, f"{EARLIER}-31"),
+    )
+    conn.commit()
+    july = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    row(conn, july, "SMPL ADS", ADS, book="Moom", type_name="Advertising", day=f"{EARLIER}-10")
+
+    shown = cards(client)
+
+    assert shown["moom_missing"] is True
+    assert shown["kalesh_missing"] is False
+
+    # Once August's statement is in, an empty month is a real zero.
+    statement(conn, card_id)
+    assert cards(client)["moom_missing"] is False

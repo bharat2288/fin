@@ -18,6 +18,8 @@ Rulings this module carries:
   off, every write tool refuses with a fixed message before anything runs,
   and reads still work. turn_off_writes turns it off, and works when it is
   already off; no tool turns it on: only the operator, in fin's app.
+- A change over MANY_ROWS that stands on the operator's agreed count is
+  recorded as asked first (history.record_asked), so Changes can say so.
 - No tool imports a statement, changes or deletes an imported row, edits an
   account other than adding a company or a person, sends merchants to the
   type-suggestion service, runs a conversion or touches subscriptions.
@@ -533,6 +535,14 @@ def call(name: str, args: dict | None, actor: str) -> dict:
                 conn.close()
                 db.invalidate_rules_cache()
             return _stopped(name, rows)
+        if rows > MANY_ROWS:
+            # It stands on the count the operator agreed to in chat: say so
+            # in the history ("asked first, yes in chat").
+            conn = db.get_connection()
+            try:
+                history.record_asked(conn, int(entry_id), rows)
+            finally:
+                conn.close()
         answer["change"] = {"entry_id": int(entry_id), "rows": rows}
         return answer
 

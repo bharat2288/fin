@@ -1162,8 +1162,10 @@ def test_g8_the_thresholds_are_read_from_one_place(client, conn, statement, key,
     assert routes() == ["prefill", "top3", "top3", "blank"]
     # And no screen decides for itself: the page is handed the route.
     page = (Path(__file__).parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    # The resolve step's suggestion, up to the end of its function (the
+    # queue's "This was…" step; prepare-and-send went in fin-surfaces 02).
     start = page.index("async function showResolveSuggestion")
-    dialog = page[start:page.index("async function startTypeSuggestions")]
+    dialog = page[start:page.index("\n}\n", start)]
     assert "suggestion.route === 'prefill'" in dialog and "suggestion.route === 'top3'" in dialog
     assert not re.search(r"probability\s*[<>]=?|[<>]=?\s*0?\.\d", dialog)
 
