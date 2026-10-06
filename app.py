@@ -1625,6 +1625,11 @@ def api_dashboard_stat_cards():
       moom, kalesh                each company's costs paid from accounts the
                                   household owns. Beside the headline, never
                                   added into it.
+      <book>_out, _back, _out_rows,  each book's card split as Spending shows
+      _back_rows, avg_<book>_out     it: money out, refunds back beside it.
+      <book>_missing                 no row in the month and an account that
+                                     carried the book's rows has no statement
+                                     for it: not a real zero.
       waiting, waiting_total      every transfer waiting, whenever dated: the
                                   review list, with waiting_out_count,
                                   _out_total, waiting_in_count, _in_total
@@ -1706,6 +1711,16 @@ def api_dashboard_stat_cards():
         for _ in companies
     )
 
+    # Each book's card split the way Spending shows it: money out, and money
+    # back in refunds (a negative row) kept beside it, never taken off.
+    side_sums = "".join(
+        f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN amount_minor ELSE 0 END), "
+        f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN -amount_minor ELSE 0 END), "
+        f"COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN 1 END), "
+        f"COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN 1 END), "
+        for _ in books
+    )
+
     with get_db() as conn:
         def query_month(y: int, m: int) -> dict:
             """Query spend totals for a single month, in whole minor units."""
@@ -1721,11 +1736,14 @@ def api_dashboard_stat_cards():
                 params += [name, account_kind.HOUSEHOLD] if name == book_type.DEFAULT_BOOK else [name]
             for name, _ in companies:
                 params += [name, account_kind.HOUSEHOLD]
+            for name, _ in books:
+                params += [name, account_kind.HOUSEHOLD] * 4
             params += [book_type.DEFAULT_BOOK, account_kind.HOUSEHOLD, start, end] + extra_params
             row = conn.execute(f"""
                 SELECT
                     {book_sums}
                     {paid_sums}
+                    {side_sums}
                     SUM(amount_minor),
                     COUNT(CASE WHEN t.type_id IS NULL THEN 1 END),
                     COUNT(*),
@@ -1744,6 +1762,12 @@ def api_dashboard_stat_cards():
             for i, (_, key) in enumerate(companies):
                 result[f"paid_{key}"] = row[n + i] or 0
             n += len(companies)
+            for _, key in books:
+                result[f"out_{key}"] = row[n] or 0
+                result[f"back_{key}"] = row[n + 1] or 0
+                result[f"out_rows_{key}"] = row[n + 2] or 0
+                result[f"back_rows_{key}"] = row[n + 3] or 0
+                n += 4
             result["total"] = row[n] or 0
             result["untyped"] = row[n + 1] or 0
             result["tx_count"] = row[n + 2] or 0
@@ -1759,7 +1783,36 @@ def api_dashboard_stat_cards():
         averages = {
             key: money.mean_minor(sum(d[key] for d in avg_data), n)
             for key in ["total"] + [key for _, key in books] + [f"paid_{key}" for _, key in companies]
+            + [f"out_{key}" for _, key in books]
         }
+
+        # A book with no row in the month while an account that carried its
+        # rows in the year before has no statement for the month: the card
+        # is missing, not a real zero (Spending hatches the same month).
+        ref_key = f"{ref_y:04d}-{ref_m:02d}"
+        year_ago = f"{ref_y - 1:04d}-{ref_m:02d}-01"
+        missing = {}
+        for name, key in books:
+            if ref_data[f"out_rows_{key}"] or ref_data[f"back_rows_{key}"]:
+                continue
+            carried = conn.execute(f"""
+                SELECT DISTINCT s.account_id FROM transactions t
+                JOIN statements s ON t.statement_id = s.id
+                JOIN accounts a ON s.account_id = a.id
+                WHERE {book_expr('t')} = ? AND a.owner = ?
+                  AND t.flow_type IN ('expense', 'refund')
+                  AND (a.status = 'active' OR a.status IS NULL)
+                  AND a.type IN (?, ?)
+                  AND t.date >= ? AND t.date < ?
+            """, (name, account_kind.HOUSEHOLD, *account_kind.STATEMENT_KINDS, year_ago, f"{ref_key}-01")).fetchall()
+            for c in carried:
+                held = conn.execute(
+                    "SELECT 1 FROM statements WHERE account_id = ? AND substr(statement_date, 1, 7) = ?",
+                    (c[0], ref_key),
+                ).fetchone()
+                if not held:
+                    missing[key] = True
+                    break
 
         # The transfers dated in the reference month that nobody has labelled:
         # what the household figure is waiting on.
@@ -1787,6 +1840,7 @@ def api_dashboard_stat_cards():
                      "loan_principal": money.from_minor(month_loan["principal_minor"])}
             for name, key in books:
                 entry[key] = money.from_minor(data[key if name == book_type.DEFAULT_BOOK else f"paid_{key}"])
+                entry[f"out_{key}"] = money.from_minor(data[f"out_{key}"])
             history.insert(0, entry)
             hm -= 1
             if hm == 0:
@@ -1827,6 +1881,12 @@ def api_dashboard_stat_cards():
         shown = key if name == book_type.DEFAULT_BOOK else f"paid_{key}"
         payload[key] = money.from_minor(ref_data[shown])
         payload[f"avg_{key}"] = money.from_minor(averages[shown])
+        payload[f"{key}_out"] = money.from_minor(ref_data[f"out_{key}"])
+        payload[f"{key}_back"] = money.from_minor(ref_data[f"back_{key}"])
+        payload[f"{key}_out_rows"] = ref_data[f"out_rows_{key}"]
+        payload[f"{key}_back_rows"] = ref_data[f"back_rows_{key}"]
+        payload[f"avg_{key}_out"] = money.from_minor(averages[f"out_{key}"])
+        payload[f"{key}_missing"] = bool(missing.get(key))
     return jsonify(payload)
 
 
@@ -2226,6 +2286,7 @@ def api_resolve_transaction():
             # Step 2: Create merchant rule if pattern provided (optional for PayNow/transfers)
             rule_id = None
             backfilled = 0
+            backfilled_ids = []
             if pattern and apply_scope in {"rule", "service_default"}:
                 rule_exists = conn.execute(
                     "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
@@ -2253,17 +2314,28 @@ def api_resolve_transaction():
                         (service_id, override_book, override_type_id, rule_id),
                     )
 
-                # Backfill other transactions matching this pattern with NULL service
+                # Backfill the other rows matching this pattern that have no
+                # merchant, or have this merchant but still no type.
                 match_cond = _build_match_condition(match_type)
+                fill_where = (
+                    f"(service_id IS NULL OR (service_id = ? AND type_id IS NULL AND id != ?)) "
+                    f"AND {match_cond}"
+                )
+                fill_params = (service_id, tx_id, pattern.upper())
+                backfilled_ids = [
+                    r[0] for r in conn.execute(
+                        f"SELECT id FROM transactions WHERE {fill_where}", fill_params
+                    ).fetchall()
+                ]
                 cur = conn.execute(
                     f"UPDATE transactions SET service_id = ?, book = ?, type_id = ?, cat_source = ? "
-                    f"WHERE service_id IS NULL AND {match_cond}",
+                    f"WHERE {fill_where}",
                     (
                         service_id,
                         book,
                         type_id,
                         "rule_override" if apply_scope == "rule" else "service_default",
-                        pattern.upper(),
+                        *fill_params,
                     ),
                 )
                 backfilled = cur.rowcount
@@ -2320,6 +2392,7 @@ def api_resolve_transaction():
                 "book": book,
                 "type_id": type_id,
                 "backfilled": backfilled,
+                "backfilled_ids": backfilled_ids,
             })
         except BookNeeded as e:
             conn.rollback()

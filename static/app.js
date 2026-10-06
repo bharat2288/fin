@@ -1064,18 +1064,27 @@ async function viewHome() {
         ${values.length ? homeBars(values, months, cards.ref_month, cls) : ''}
         <span class="home-tile__foot">${esc(foot)} ${icon('caret-right')}</span></a>`;
     const tiles = [];
+    // Money out is the figure, as Spending shows it; refunds sit beside it,
+    // never taken off. A month with no statement in is marked, not a zero.
     r.books.forEach((b, i) => {
         const key = b.name.toLowerCase();
         if (!(key in cards)) return;
-        const minor = toMinor(cards[key]);
-        const values = hist.map(h => toMinor(h[key] || 0));
-        const avg = homeVsAverage(minor, toMinor(cards[`avg_${key}`] || 0), cards.avg_months || 3);
+        const minor = toMinor(cards[`${key}_out`] ?? cards[key] ?? 0);
+        const values = hist.map(h => toMinor(h[`out_${key}`] ?? h[key] ?? 0));
+        const backMinor = toMinor(cards[`${key}_back`] || 0);
+        const back = backMinor ? `<span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}back ${esc(money(backMinor, 'SGD'))}</span> in refunds, not taken off` : '';
+        const missing = cards[`${key}_missing`];
+        const avg = missing
+            ? `<span class="tag stale">${icon('warning')}no statement for ${esc(monthName(cards.ref_month, { short: true }))}</span>`
+            : homeVsAverage(minor, toMinor(cards[`avg_${key}_out`] ?? cards[`avg_${key}`] ?? 0), cards.avg_months || 3);
+        const go = missing ? { href: '#/books/import', foot: 'Import the statement' } : { act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows' };
+        const outRows = cards[`${key}_out_rows`] ?? (i === 0 ? cards.household_rows : 0) ?? 0;
         if (i === 0) {
-            tiles.push(tile({ cls: 'is-household', eyebrow: 'Household', label: `${b.name} spending`, minor, avg, values, act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows',
-                body: `${plural(cards.household_rows || 0, 'row')}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
+            tiles.push(tile({ cls: 'is-household', eyebrow: 'Household', label: `${b.name} spending`, minor, avg, values, ...go,
+                body: `${plural(outRows, 'row')} out${back ? ` · ${back}` : ''}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
         } else {
-            tiles.push(tile({ cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows',
-                body: `Paid from our accounts. Not household spending; it moves ${esc(b.name)}’s company balance.` }));
+            tiles.push(tile({ cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, ...go,
+                body: `${back ? `Money out · ${back}. ` : ''}Paid from our accounts. Not household spending; it moves ${esc(b.name)}’s company balance.` }));
         }
     });
     const loanValues = hist.map(h => toMinor(h.loan_principal || 0));
@@ -1494,15 +1503,19 @@ async function saveResolve(body, group = []) {
     if (svc) body.service_id = svc.id;
     const r = await act('POST', '/api/transactions/resolve', body, 'Saved');
     if (!r) return;
-    const rest = body.apply_scope !== 'transaction' && !body.pattern ? group.filter(x => x.id !== body.tx_id) : [];
+    // The group's other rows the rule did not reach (a merchant text too plain
+    // for a rule, or rows whose text the pattern misses) are labelled one by one.
+    const reached = new Set(r.data.backfilled_ids || []);
+    const rest = body.apply_scope === 'transaction' || (body.apply_scope === 'rule' && body.pattern) ? []
+        : group.filter(x => x.id !== body.tx_id && !reached.has(x.id) && !x.type_id);
     let done = 0;
     for (const x of rest) {
         const more = await send('POST', '/api/transactions/resolve', { ...body, tx_id: x.id, apply_scope: 'transaction', service_id: r.data.service_id ?? body.service_id });
         if (!more.ok) { toast(more.data.error || 'One of the rows could not be labelled', { bad: true }); break; }
         done += 1;
     }
-    if (done) toast(`${plural(done, 'other row')} on this card took the same label`);
-    else if (r.data.backfilled) toast(`${plural(r.data.backfilled, 'other matching row')} took the same label`);
+    const others = done + (r.data.backfilled || 0);
+    if (others) toast(`${plural(others, 'other row')} took the same label`);
     closeSheet(); rerender();
 }
 ACT['ww-save'] = async () => {
