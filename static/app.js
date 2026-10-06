@@ -1606,7 +1606,7 @@ ACT['bill-pause'] = async el => {
 // Enter a figure: one sheet, opened from the queue, an account's page and Lists.
 // Opened from one account it names that account plainly and shows the figure
 // it replaces (Q7.1, Q7.2); opened from Lists it offers the picker.
-const KIND_WORDS = { loan: 'a loan', holding: 'a holding', company: 'a company', person: 'a person', bank: 'a bank account', card: 'a card' };
+const KIND_PHRASE = { loan: 'a loan', holding: 'a holding', company: 'a company', person: 'a person', bank: 'a bank account', card: 'a card' };
 const OWED_KINDS = ['loan'];   // account_kind.OWED_KINDS: typed positive, saved as owed
 ACT.figure = async el => openFigure(el.dataset.account ? Number(el.dataset.account) : null);
 async function openFigure(accountId) {
@@ -1628,7 +1628,7 @@ async function openFigure(accountId) {
                 ${ro ? `<div class="small muted">${ro.source === 'supplied' ? 'your figure' : 'statement'} ${esc(day(ro.date))}, ${esc(plural(ro.age_days, 'day'))} old</div>` : ''}`
             : '<div class="small muted">No figure yet: it is left out of net worth until it has one.</div>';
         return `<div class="spread"><b>${esc(a.name)}</b>${named && takes.length > 1 ? '<button type="button" class="link" data-act="fg-another" aria-controls="fg-pick" aria-expanded="false">Another account</button>' : ''}</div>
-            <div class="small">${esc(KIND_WORDS[a.type] || a.type)}, in ${esc(sign(a))}${owes(a) ? ' · owed' : ''}</div>${now}`;
+            <div class="small">${esc(KIND_PHRASE[a.type] || a.type)}, in ${esc(sign(a))}${owes(a) ? ' · owed' : ''}</div>${now}`;
     };
     const hint = (a, typed) => {
         if (!owes(a)) return a.type === 'holding' ? 'What it is worth, as a plain number.' : 'The balance, as a plain number.';
@@ -1641,7 +1641,7 @@ async function openFigure(accountId) {
         return l && l.balance_minor ? groupFor(a.currency).format(Math.abs(l.balance_minor) / 10 ** digitsOf(a.currency)) : '0.00';
     };
     openSheet('Enter a figure', `<div class="record-target fg-target" id="fg-target">${target(chosen)}</div>
-        <label class="field" id="fg-pick"${named ? ' hidden' : ''}><span>Account</span><select id="fg-account">${takes.map(a => `<option value="${a.id}"${a.id === chosen.id ? ' selected' : ''}>${esc(a.name)}, ${esc(KIND_WORDS[a.type] || a.type)}, in ${esc(sign(a))}</option>`).join('')}</select></label>
+        <label class="field" id="fg-pick"${named ? ' hidden' : ''}><span>Account</span><select id="fg-account">${takes.map(a => `<option value="${a.id}"${a.id === chosen.id ? ' selected' : ''}>${esc(a.name)}, ${esc(KIND_PHRASE[a.type] || a.type)}, in ${esc(sign(a))}</option>`).join('')}</select></label>
         <div class="fields">
         <label class="field"><span id="fg-label">${esc(label(chosen))}</span><input type="text" inputmode="decimal" id="fg-amount" placeholder="${esc(placeholder(chosen))}" aria-describedby="fg-hint"></label>
         <p class="hint" id="fg-hint">${esc(hint(chosen))}</p>
