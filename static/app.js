@@ -3047,16 +3047,185 @@ ACT['import-confirm'] = async el => {
 // Changes: every write, yours and Claude's, one undoable list
 // ---------------------------------------------------------------------------
 
+// Who made a change and where, in plain words (walk C3.2): never the
+// gate's client name, and the change number only inside an opened change.
+function whereFrom(e) {
+    if (e.via !== 'chat') return 'in fin';
+    const a = String(e.actor || '').toLowerCase();
+    if (/phone|mobile|ios|android/.test(a)) return 'on phone';
+    if (a.includes('code')) return 'in Claude Code';
+    if (a.includes('desktop')) return 'in the Claude app';
+    if (a.includes('web')) return 'on the web';
+    return 'in chat';
+}
 function whoTag(e) {
-    if (e.via === 'chat') return tag('claude', 'Claude', { title: e.actor });
-    return tag('you', 'you', { title: 'in fin' });
+    return e.via === 'chat' ? tag('claude', 'Claude') : tag('you', 'you');
+}
+function whoName(x, { cap = true } = {}) { return x && x.via === 'chat' ? 'Claude' : (cap ? 'You' : 'you'); }
+function whoseName(x) { return x && x.via === 'chat' ? 'Claude’s' : 'your'; }
+/** A time inside a sentence: "at 20:53" today, else "on 3 Oct, 20:53". */
+function timeWords(utc) {
+    const w = when(utc);
+    return w.startsWith('today ') ? `at ${w.slice(6)}` : `on ${w}`;
+}
+/** The viewer's own day of a history time, for the day headings (C3.3). */
+function localDay(utc) {
+    const t = new Date(String(utc).replace(' ', 'T') + 'Z');
+    if (Number.isNaN(t.getTime())) return '';
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+}
+function dayHeading(iso) {
+    const today = todayIso();
+    const y = new Date(); y.setDate(y.getDate() - 1);
+    const yesterday = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, '0')}-${String(y.getDate()).padStart(2, '0')}`;
+    if (iso === today) return 'Today';
+    if (iso === yesterday) return 'Yesterday';
+    return iso ? day(iso) : 'Earlier';
+}
+
+const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
+const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'kind', is_one_off: 'one-off', notes: 'note',
+    amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'mixed',
+    exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement' };
+// An empty old or new value said plainly, never as bad news (C4.2).
+const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty' };
+const FLOW_WORDS = { expense: 'money out', income: 'money in', refund: 'a refund', review: 'waiting for a label', transfer: 'a move between own accounts' };
+function isEmpty(v) { return v === null || v === undefined || v === ''; }
+function changedFields(c) {
+    const b = c.before || {}, a = c.after || {};
+    return Object.keys(a).filter(k => !SKIP_FIELDS.has(k) && JSON.stringify(b[k]) !== JSON.stringify(a[k]));
+}
+/** A stored value as words (escaped), or '' when empty. */
+function valueText(table, field, value, ctx, cur = 'SGD') {
+    if (isEmpty(value)) return '';
+    if (field === 'type_id' || field === 'type_override_id') return esc(ctx.r.typeById.get(value)?.display_name || 'a type no longer listed');
+    if (field === 'other_side_id' || field === 'account_id') return esc(ctx.r.accountById.get(value)?.name || 'an account no longer listed');
+    if (field === 'service_id') return esc(ctx.services.find(s => s.id === value)?.name || 'a merchant no longer listed');
+    if (['is_one_off', 'review_each_time', 'exclude_from_expense_views'].includes(field)) return value ? 'yes' : 'no';
+    if (field === 'flow_type') return esc(FLOW_WORDS[value] || String(value).replace(/_/g, ' '));
+    // Each changed row comes with its own currency (its account's): rupees
+    // keep Indian grouping here as everywhere.
+    if (table === 'transactions' && field === 'amount_minor') return esc(money(-value, cur, { signed: true }));
+    if (table === 'anchors' && field === 'amount') return esc(money(value, cur));
+    if (field === 'amount_minor' || field.endsWith('_amount_minor')) return esc(money(value, cur));
+    if (/date$/.test(field) && typeof value === 'string') return esc(day(value));
+    return esc(String(value));
+}
+function emptyText(field) { return EMPTY_WORDS[field] || 'empty'; }
+function rowName(c) {
+    const row = c.after || c.before || {};
+    return row.description || row.name || row.pattern || row.pair || '';
+}
+function accountOf(c, ctx) {
+    const row = c.after || c.before || {};
+    const id = c.account_id ?? row.account_id;
+    return id ? (ctx.r.accountById.get(id)?.name || '') : '';
+}
+/** A bank row's amount as a change shows it: money out negative (S$ −84.20), money in with a plus. */
+function txAmount(c) {
+    const row = c.after || c.before || {};
+    return isEmpty(row.amount_minor) ? '' : money(-row.amount_minor, c.currency || 'SGD', { signed: true });
+}
+
+/** What one change to a bank row did, as clauses: the first names the row
+ *  (subject), the rest say "it". Lower case; the caller capitalises. */
+function rowClauses(c, ctx, subject) {
+    const b = c.before || {}, a = c.after || {};
+    const out = [];
+    for (const k of changedFields(c)) {
+        const s = out.length ? 'it' : subject;
+        const now = valueText(c.table, k, a[k], ctx, c.currency), was = valueText(c.table, k, b[k], ctx, c.currency);
+        if (k === 'type_id') out.push(now ? `typed ${s} as ${now}` : `took the type off ${s}`);
+        else if (k === 'notes') out.push(!now ? `removed the note “${was}” on ${s}` : !was ? `noted “${now}” on ${s}` : `changed the note on ${s} to “${now}”`);
+        else if (k === 'is_one_off') out.push(a[k] ? `marked ${s} one-off` : `marked ${s} as not one-off`);
+        else if (k === 'service_id') out.push(now ? `gave ${s} the merchant ${now}` : `took the merchant off ${s}`);
+        else if (k === 'book') out.push(now ? `moved ${s} to the ${now} book` : `took the book off ${s}`);
+        else if (k === 'flow_type') out.push(`labelled ${s} as ${now}`);
+        else if (k === 'other_side_id') out.push(now ? `linked ${s} to ${now}` : `took the other side off ${s}`);
+        else if (k === 'description') out.push(`renamed ${s} to “${now}”`);
+        else if (k === 'date') out.push(`moved ${s} to ${now}`);
+        else out.push(`changed the ${esc(FIELD_WORDS[k] || k.replace(/_/g, ' '))} of ${s}`);
+    }
+    return out;
+}
+function joinClauses(list, max = 3) {
+    const shown = list.slice(0, max);
+    if (list.length > max) shown.push('more');
+    if (shown.length <= 1) return shown[0] || '';
+    return `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}`;
+}
+/** What a change did, in words, from its first row (walk C3.1): "typed GIANT
+ *  HYPERMARKET as Groceries and noted “Party supplies”". subject overrides the
+ *  row's name ("it" in a sentence about the row). '' when words fail. */
+function changeWords(first, ctx, { rows = 1, subject = null } = {}) {
+    if (!first) return '';
+    const c = first, a = c.after || {}, b = c.before || {};
+    const name = esc(rowName(c));
+    const acct = esc(accountOf(c, ctx) || 'an account');
+    if (c.table === 'statements' && c.op === 'insert') return `imported the ${acct} statement of ${esc(day(a.statement_date))}`;
+    if (c.table === 'statements' && c.op === 'delete') return `took out the ${acct} statement of ${esc(day(b.statement_date))}`;
+    const many = rows > 1;
+    if (many && !first.same_change) return '';
+    if (c.table === 'transactions') {
+        const subj = subject || (many ? (first.same_label ? `${rows} ${name} rows` : `${rows} rows`) : name);
+        if (c.op === 'insert') return `added ${subj}`;
+        if (c.op === 'delete') return `took out ${subj}`;
+        return joinClauses(rowClauses(c, ctx, subj));
+    }
+    if (many) return '';
+    if (c.table === 'anchors') {
+        const fig = valueText('anchors', 'amount', (c.op === 'delete' ? b : a).amount, ctx, c.currency);
+        if (c.op === 'insert') return `entered a figure for ${acct}: ${fig}`;
+        if (c.op === 'delete') return `deleted the figure for ${acct} of ${esc(day(b.date))}`;
+        return `corrected the figure for ${acct} to ${fig}`;
+    }
+    const noun = { services: 'the merchant', merchant_rules: 'the rule', accounts: 'the account', subscriptions: 'the bill', rates: 'the rate' }[c.table];
+    if (!noun) return '';
+    const what = c.table === 'merchant_rules' ? `${noun} “${name}”` : c.table === 'rates' ? `${noun} ${name} for ${esc(day((a.date || b.date || '')))}` : `${noun} ${name}`;
+    if (c.op === 'insert') return `added ${what}`;
+    if (c.op === 'delete') return `deleted ${what}`;
+    if (c.table !== 'rates' && b.name && a.name && b.name !== a.name) return `renamed ${noun} ${esc(b.name)} to ${esc(a.name)}`;
+    return `changed ${what}`;
+}
+/** An undo, said in words (walk C9.1): "Undid Claude’s note on STARBUCKS
+ *  SAMPLE: back to “Meeting”". first is the undo's own first row, so its
+ *  after is what was put back. */
+function undoWords(e, ctx, byId) {
+    const whose = whoseName(e.undoes_who);
+    const undone = byId.get(e.undoes);
+    const c = e.first;
+    if (undone && undone.undoes) return `Undid ${whose} undo${c && c.table === 'transactions' && e.rows === 1 ? ` on ${esc(rowName(c))}` : ''}`;
+    if (c && c.table === 'transactions' && e.rows === 1 && c.op === 'update') {
+        const fields = changedFields(c);
+        if (fields.length === 1) {
+            const k = fields[0];
+            const back = valueText(c.table, k, c.after[k], ctx, c.currency);
+            const word = esc(FIELD_WORDS[k] || k.replace(/_/g, ' '));
+            return `Undid ${whose} ${word} on ${esc(rowName(c))}: ${back ? `back to “${back}”` : `now ${emptyText(k)}`}`;
+        }
+        return `Undid ${whose} change to ${esc(rowName(c))}`;
+    }
+    const plain = String(e.summary || '').replace(/^Undid:\s*/, '');
+    return `Undid ${whose} change: ${esc(plain.charAt(0).toLowerCase() + plain.slice(1))}`;
+}
+function entryTitle(e, ctx, byId) {
+    if (e.undoes) return undoWords(e, ctx, byId);
+    return sentence(changeWords(e.first, ctx, { rows: e.rows })) || esc(e.summary || 'A change');
+}
+/** Why an undo is refused, naming who and what (walk C6.2). */
+function refusalWords(e, ctx) {
+    const by = e.blocked_by;
+    const did = changeWords(by.first, ctx, { rows: 1, subject: 'it' });
+    const yours = by.via === 'chat' ? 'Claude’s' : 'yours';
+    const target = e.rows === 1 ? 'this row' : 'the same rows';
+    const what = did && by.first && by.first.table === 'transactions' && e.rows === 1
+        ? `${whoName(by, { cap: false })} ${did} ${timeWords(by.at)}`
+        : `${esc(sentence(String(by.summary || 'a change')).toLowerCase())} ${timeWords(by.at)}`;
+    return `${whoName(by)} changed ${target} after it: ${what}. Undo ${yours} first.`;
 }
 function entryState(e) {
-    if (e.undone_by) return `<span class="small muted">undone by #${e.undone_by}</span>`;
-    if (e.blocked_by) {
-        return `<div class="refusal"><b>⊘ Undo refused</b>: change #${e.blocked_by.id} (${esc(e.blocked_by.summary || 'no summary')}, ${esc(when(e.blocked_by.at))}) touched the same rows. Undo that one first.
-            <button class="link" data-act="trace" data-entry="${e.id}" data-blocker="${e.blocked_by.id}">Show where</button></div>`;
-    }
+    if (e.undone_by) return `<span class="state-word">undone</span>`;
+    if (e.blocked_by) return tag('refused', 'Undo refused');
     return `<button class="btn sm" data-act="undo" data-entry="${e.id}">${e.undoes ? 'Undo the undo' : 'Undo'}</button>`;
 }
 function entryMatches(e, mark) {
@@ -3071,13 +3240,41 @@ function entryMatches(e, mark) {
     if (f.asked && !e.asked_first) return false;
     return true;
 }
+const WHO_WORDS = { all: 'Everyone', claude: 'Claude', you: 'You' };
+const STATE_WORDS = { any: 'Any', can: 'Can undo', refused: 'Undo refused', undone: 'Was undone', undos: 'Is an undo' };
+
+/** The "Claude may write" switch as folio's status row (walk C1, C1.1): on,
+ *  a quiet row; off, the whole card turns burnt orange and says so. */
+function writeSwitchHTML(settings, h) {
+    const on = settings.claude_may_write;
+    const sw = `<button class="switch" role="switch" aria-checked="${on}" data-act="claude-switch" aria-label="Claude may write">
+        <span class="track" aria-hidden="true"></span><span class="switch-word">${on ? 'On' : 'Off'}</span></button>`;
+    if (!on) {
+        return `<section class="card write-card is-off" aria-labelledby="write-head">
+            <div class="write-row">
+                <span class="write-icon" aria-hidden="true">${icon('prohibit')}</span>
+                <div class="write-text"><h2 id="write-head">Claude may not write</h2>
+                    <p>Claude can still read fin and answer in chat. Every write from chat is refused and changes nothing.</p>
+                    ${settings.claude_write_changed_at ? `<p class="write-since">Off since ${esc(when(settings.claude_write_changed_at))}.</p>` : ''}</div>
+                <div class="write-end">${sw}<button class="btn primary" data-act="claude-switch-on">Turn it back on</button></div>
+            </div></section>`;
+    }
+    return `<section class="card write-card" aria-labelledby="write-head">
+        <div class="write-row">
+            <span class="write-key"><span class="write-icon" aria-hidden="true">${icon('chat')}</span><span id="write-head">Chat writes</span></span>
+            <p class="write-text">Claude may write to fin straight from chat; each write lands here with Undo. Over ${esc(h.many_rows)} rows, Claude says the count in chat and waits for your yes.</p>
+            <div class="write-end">${sw}</div>
+        </div></section>`;
+}
 
 async function viewChanges() {
-    const [h, settings] = await Promise.all([get('/api/history?limit=300&blockers=1', { fresh: true }), get('/api/settings', { fresh: true })]);
+    const [h, settings, r, services] = await Promise.all([get('/api/history?limit=300&blockers=1', { fresh: true }), get('/api/settings', { fresh: true }), refs(), servicesList()]);
+    const ctx = { r, services };
     if (!S.onChanges) {
         // The divider stays where the mark was when the page was opened; opening it is looking.
         S.onChanges = true;
         S.lastSeenMark = h.last_looked;
+        S.lastSeenAt = h.last_looked_at;
         if (h.newest && h.newest !== h.last_looked) {
             send('POST', '/api/changes/looked', { upto: h.newest }).then(() => refreshFrame());
         }
@@ -3088,24 +3285,41 @@ async function viewChanges() {
     if (wanted) S.changes.open.add(wanted);
     const mark = S.lastSeenMark;
     const entries = h.entries;
+    const byId = new Map(entries.map(e => [e.id, e]));
     const shown = entries.filter(e => entryMatches(e, mark));
     const count = fn => entries.filter(fn).length;
+    // The divider counts Claude's changes only (walk C5.1): your own writes are not news.
+    const claudeNew = count(e => e.via === 'chat' && e.id > (mark || 0));
     let dividerDone = mark === null;
-    const items = shown.map(e => {
-        let divider = '';
+    let lastDay = null;
+    const items = shown.map((e, i) => {
+        let lead = '';
         if (!dividerDone && e.id <= mark) {
             dividerDone = true;
-            if (shown.indexOf(e) > 0) divider = `<li class="divider" role="separator">You last looked here</li>`;
+            if (i > 0) {
+                lead += `<li class="divider" role="separator"><span>${S.lastSeenAt ? `You last looked ${esc(timeWords(S.lastSeenAt))}` : 'You last looked here'}${claudeNew ? ` · ${plural(claudeNew, 'change')} by Claude ${claudeNew === 1 ? 'is' : 'are'} new above` : ''}</span></li>`;
+            }
         }
+        const d = localDay(e.at);
+        if (d !== lastDay) { lastDay = d; lead += `<li class="day-head" role="presentation">${esc(dayHeading(d))}</li>`; }
         const open = S.changes.open.has(e.id);
-        return `${divider}<li class="entry${e.via === 'chat' ? ' claude' : ''}${e.undone_by ? ' undone' : ''}" id="entry-${e.id}">
+        const amount = e.rows === 1 && e.first && e.first.table === 'transactions' ? txAmount(e.first) : '';
+        const meta = [
+            `${whoTag(e)} <span>${esc(whereFrom(e))}</span>`,
+            esc(when(e.at)),
+            plural(e.rows, 'row'),
+            amount ? `<span class="num">${esc(amount)}</span>` : '',
+            e.undone_by ? `undone by ${esc(whoName(e.undone_by_who, { cap: false }))} ${esc(e.undone_by_who ? timeWords(e.undone_by_who.at) : '')}` : '',
+        ].filter(Boolean).join(' <span class="sep" aria-hidden="true">·</span> ');
+        return `${lead}<li class="entry${e.via === 'chat' ? ' claude' : ''}${e.undone_by ? ' undone' : ''}${e.blocked_by ? ' refused' : ''}" id="entry-${e.id}">
             <div class="entry-row">
-                <label class="sel"><input type="checkbox" data-entry="${e.id}" aria-label="Select change ${e.id}"${e.undone_by || e.blocked_by ? ' disabled' : ''}></label>
-                <div class="when small">${esc(when(e.at))} ${whoTag(e)}</div>
-                <div class="summary"><button data-act="entry-open" data-entry="${e.id}" aria-expanded="${open}">${esc(e.summary || 'A change')}
-                    ${e.asked_first ? tag('asked', 'asked first, yes in chat') : ''}${e.undoes ? ` <span class="small muted">· undid #${e.undoes}</span>` : ''}</button>
-                    <span class="small muted">#${e.id}${e.via === 'chat' ? ' · ' + esc(e.actor) : ''}</span></div>
-                <div class="rows num small r">${plural(e.rows, 'row')}</div>
+                <label class="sel"><input type="checkbox" data-change="entry-tick" data-entry="${e.id}" aria-label="Select this change"${e.undone_by || e.blocked_by ? ' disabled' : ''}></label>
+                <div class="entry-main">
+                    <button class="entry-title" data-act="entry-open" data-entry="${e.id}" aria-expanded="${open}" aria-controls="detail-${e.id}">${icon('caret-right', 'caret')}<span>${entryTitle(e, ctx, byId)}</span></button>
+                    <div class="entry-meta">${meta}${e.asked_first ? ' ' + tag('asked', 'asked first, yes in chat') : ''}</div>
+                    ${e.blocked_by ? `<div class="notice bad refusal">${icon('prohibit')}<div><b>Undo refused.</b> ${refusalWords(e, ctx)}
+                        <button class="btn sm" data-act="trace" data-entry="${e.id}" data-blocker="${e.blocked_by.id}">Show where</button></div></div>` : ''}
+                </div>
                 <div class="act">${entryState(e)}</div>
             </div>
             <div class="entry-detail" id="detail-${e.id}"${open ? '' : ' hidden'}>${open ? '<p class="loading">Loading…</p>' : ''}</div></li>`;
@@ -3113,41 +3327,55 @@ async function viewChanges() {
     afterRender(() => {
         S.changes.open.forEach(id => fillEntry(id));
         if (wanted) $(`#entry-${wanted}`)?.scrollIntoView({ block: 'center' });
+        tickedChanged();
     });
 
     const f = S.changes;
     const chip = (k, v, label, n) => `<button class="chip" data-act="changes-filter" data-k="${k}" data-v="${v}" aria-pressed="${String(f[k]) === String(v)}">${label}${n !== undefined ? ` <span class="n">${n}</span>` : ''}</button>`;
     const newCount = count(e => e.id > (mark || 0));
-    return `<div class="page-head"><div><h1>Recent changes</h1><p>Every write, yours and Claude’s, in one undoable list. There is no confirm screen: you check here, and undo.</p></div></div>
-    <section class="card">
-        <div class="spread"><button class="switch" role="switch" aria-checked="${settings.claude_may_write}" data-act="claude-switch">
-            <span class="track" aria-hidden="true"></span> Claude may write</button>
-            <p class="small" style="flex:1 1 260px">${settings.claude_may_write
-                ? 'Claude writes to fin straight from chat; each write lands here with Undo. Over ' + h.many_rows + ' rows, Claude says the count in chat and waits for your yes.'
-                : 'Off: every write from chat is refused and changes nothing. Reads still work. Only you can turn it back on, here.'}</p></div>
-        ${mark !== null && newCount ? `<p class="notice" style="margin-top:12px;background:var(--claude-subtle)">✳ <b>${plural(newCount, 'change')}</b> since you last looked are above the dashed line.</p>` : ''}
-    </section>
-    <section class="card">
-        <div class="chips" style="margin-bottom:8px"><span class="small muted" style="align-self:center">Who</span>${chip('who', 'all', 'Everyone', entries.length)}${chip('who', 'claude', 'Claude', count(e => e.via === 'chat'))}${chip('who', 'you', 'You', count(e => e.via !== 'chat'))}</div>
-        <div class="chips" style="margin-bottom:8px"><span class="small muted" style="align-self:center">Undo</span>${chip('state', 'any', 'Any')}${chip('state', 'can', 'Can undo', count(e => !e.undone_by && !e.blocked_by))}${chip('state', 'refused', 'Undo refused', count(e => e.blocked_by))}${chip('state', 'undone', 'Undone', count(e => e.undone_by))}${chip('state', 'undos', 'Undos', count(e => e.undoes))}</div>
-        <div class="chips"><button class="chip" data-act="changes-toggle" data-k="newOnly" aria-pressed="${f.newOnly}">New since you last looked <span class="n">${newCount}</span></button>
-            <button class="chip" data-act="changes-toggle" data-k="asked" aria-pressed="${f.asked}">Asked first in chat <span class="n">${count(e => e.asked_first)}</span></button></div>
-        <div class="spread" style="margin-top:14px"><span class="small muted">${shown.length} of ${entries.length} changes · tap one for before → after</span>
-            <button class="btn" data-act="batch-undo">Undo selected</button></div>
-        <ul class="log" style="margin-top:8px">${items || '<li class="empty">No changes match.</li>'}</ul>
-        <p class="small muted" style="margin-top:10px">Undo is refused when a later change touched the same rows; the refusal names that change. Undo selected runs newest first and stops at the first refusal. An undo is a change too, and can be undone.</p>
+    // On a phone the filters fold behind one button that names what is on (walk C2.1).
+    const active = [f.who !== 'all' ? WHO_WORDS[f.who] : '', f.state !== 'any' ? STATE_WORDS[f.state] : '', f.newOnly ? 'New' : '', f.asked ? 'Asked first' : ''].filter(Boolean);
+    return `<div class="page-head"><div><span class="eyebrow">Changes</span><h1>Recent changes</h1><p>Every write, yours and Claude’s, in one undoable list. There is no confirm screen: you check here, and undo.</p></div></div>
+    ${writeSwitchHTML(settings, h)}
+    <section class="card changes-card">
+        <button class="chip filters-fold" data-act="changes-fold" aria-expanded="${!!f.folded}" aria-controls="change-filters">${icon('funnel')} Filters${active.length ? ` · ${esc(active.join(', '))}` : ''}</button>
+        <div class="filter-set${f.folded ? ' is-open' : ''}" id="change-filters">
+            <div class="filter-group"><span class="filter-label">Who</span><div class="chips">${chip('who', 'all', 'Everyone', entries.length)}${chip('who', 'claude', 'Claude', count(e => e.via === 'chat'))}${chip('who', 'you', 'You', count(e => e.via !== 'chat'))}</div></div>
+            <div class="filter-group"><span class="filter-label">Undo</span><div class="chips">${chip('state', 'any', 'Any')}${chip('state', 'can', 'Can undo', count(e => !e.undone_by && !e.blocked_by))}${chip('state', 'refused', 'Undo refused', count(e => e.blocked_by))}${chip('state', 'undone', 'Was undone', count(e => e.undone_by))}${chip('state', 'undos', 'Is an undo', count(e => e.undoes))}</div></div>
+            <div class="filter-group"><span class="filter-label">Also</span><div class="chips"><button class="chip" data-act="changes-toggle" data-k="newOnly" aria-pressed="${f.newOnly}">New since you last looked <span class="n">${newCount}</span></button>
+                <button class="chip" data-act="changes-toggle" data-k="asked" aria-pressed="${f.asked}">Asked first in chat <span class="n">${count(e => e.asked_first)}</span></button></div></div>
+        </div>
+        <div class="log-bar"><span class="small muted">${shown.length} of ${plural(entries.length, 'change')}. Open one to see each row before and after.</span>
+            <button class="btn primary" data-act="batch-undo" id="batch-undo" hidden>Undo selected</button></div>
+        <ul class="log">${items || '<li class="empty">No changes match.</li>'}</ul>
+        <p class="card-foot">Undo is refused when a later change touched the same rows; the refusal says which. Undo selected runs newest first and stops at the first refusal. An undo is a change too, and can be undone.</p>
     </section>`;
 }
 window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/changes')) S.onChanges = false; });
 ACT['changes-filter'] = el => { S.changes[el.dataset.k] = el.dataset.v; rerender(); };
 ACT['changes-toggle'] = el => { S.changes[el.dataset.k] = !S.changes[el.dataset.k]; rerender(); };
-ACT['claude-switch'] = async el => {
-    const on = el.getAttribute('aria-checked') !== 'true';
+ACT['changes-fold'] = el => {
+    S.changes.folded = !S.changes.folded;
+    el.setAttribute('aria-expanded', String(S.changes.folded));
+    $('#change-filters')?.classList.toggle('is-open', S.changes.folded);
+};
+// "Undo selected" shows only once something is ticked, and says how many (walk C2.2).
+function tickedChanged() {
+    const n = $$('.log input[data-change="entry-tick"]:checked').length;
+    const b = $('#batch-undo');
+    if (!b) return;
+    b.hidden = n === 0;
+    b.textContent = n ? `Undo ${n} selected` : 'Undo selected';
+}
+ACT['entry-tick'] = () => tickedChanged();
+async function setClaudeWrite(on) {
     const r = await send('PUT', '/api/settings/claude-write', { on });
     if (!r.ok) { toast(r.data.error || 'That did not work', { bad: true }); return; }
     toast(on ? 'Claude may write again.' : 'Claude’s writes are off. Reads still work.');
     rerender();
-};
+}
+ACT['claude-switch'] = el => setClaudeWrite(el.getAttribute('aria-checked') !== 'true');
+ACT['claude-switch-on'] = () => setClaudeWrite(true);
 ACT['entry-open'] = el => {
     const id = Number(el.dataset.entry);
     const box = $(`#detail-${id}`);
@@ -3157,65 +3385,67 @@ ACT['entry-open'] = el => {
     fillEntry(id);
 };
 
-const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
-const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'flow', is_one_off: 'one-off', notes: 'note',
-    amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'mixed',
-    exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement' };
-async function shownValue(table, field, value, row, ctx, cur = 'SGD') {
-    if (value === null || value === undefined || value === '') return '<span class="none">none</span>';
-    if (field === 'type_id' || field === 'type_override_id') return esc(ctx.r.typeById.get(value)?.display_name || `type ${value}`);
-    if (field === 'other_side_id' || field === 'account_id') return esc(ctx.r.accountById.get(value)?.name || `account ${value}`);
-    if (field === 'service_id') return esc(ctx.services.find(s => s.id === value)?.name || `merchant ${value}`);
-    if (['is_one_off', 'review_each_time', 'exclude_from_expense_views'].includes(field)) return value ? 'yes' : 'no';
-    // Each changed row comes with its own currency (its account's): rupees
-    // keep Indian grouping here as everywhere.
-    if (table === 'anchors' && field === 'amount') return esc(money(value, cur));
-    if (field === 'amount_minor' || field.endsWith('_amount_minor')) return esc(money(value, cur));
-    if (/date$/.test(field) && typeof value === 'string') return esc(day(value));
-    return esc(String(value));
-}
 function rowLabel(table, row, ctx) {
-    if (!row) return table;
-    if (table === 'transactions') return `${esc(row.description)} <span class="muted small">· ${esc(day(row.date, { year: false }))}</span>`;
-    if (table === 'anchors') return `figure for ${esc(ctx.r.accountById.get(row.account_id)?.name || 'an account')} on ${esc(day(row.date))}`;
+    if (!row) return esc(table);
+    if (table === 'transactions') return `${esc(row.description)} <span class="muted">· ${esc(day(row.date, { year: false }))}</span>`;
+    if (table === 'anchors') return `figure of ${esc(day(row.date))}`;
     if (table === 'services') return `merchant ${esc(row.name)}`;
     if (table === 'merchant_rules') return `rule ${esc(row.pattern)}`;
     if (table === 'accounts') return `account ${esc(row.name)}`;
-    if (table === 'statements') return `statement of ${esc(ctx.r.accountById.get(row.account_id)?.name || 'an account')}, ${esc(day(row.statement_date))}`;
+    if (table === 'statements') return `statement of ${esc(day(row.statement_date))}`;
     if (table === 'subscriptions') return `bill ${esc(ctx.services.find(s => s.id === row.service_id)?.name || row.match_pattern || '')}`;
     if (table === 'rates') return `rate ${esc(row.pair)} ${esc(day(row.date))}`;
-    return `${esc(table)} ${row.id}`;
+    return esc(table);
 }
-async function changeRowsHTML(entry, { only = null } = {}) {
+function beforeCell(c, k, ctx) {
+    const was = valueText(c.table, k, (c.before || {})[k], ctx, c.currency);
+    const now = valueText(c.table, k, (c.after || {})[k], ctx, c.currency);
+    if (!was) return `<span class="empty-val">${emptyText(k)}</span>`;
+    // A value actually taken away keeps its red strike; a value replaced is struck quietly.
+    return `<span class="was${now ? '' : ' gone'}">${was}</span>`;
+}
+function afterCell(c, k, ctx) {
+    const now = valueText(c.table, k, (c.after || {})[k], ctx, c.currency);
+    return now ? `<span class="now">${now}</span>` : `<span class="empty-val">${emptyText(k)}</span>`;
+}
+/** A change opened (walk C4.1): one line per field, with the row's account
+ *  and amount, before and after in their own columns. */
+async function changeRowsHTML(entry) {
     const ctx = { r: await refs(), services: await servicesList() };
-    const changes = only ? entry.changes.filter(c => c.table === only.table && c.row_id === only.row_id) : entry.changes;
+    const changes = entry.changes;
     const out = [];
+    const txRows = new Set(changes.filter(c => c.table === 'transactions').map(c => c.row_id));
     for (const c of changes.slice(0, 60)) {
         const row = c.after || c.before;
-        let what;
-        if (c.op === 'update') {
-            const fields = Object.keys(c.after).filter(k => !SKIP_FIELDS.has(k) && JSON.stringify(c.before[k]) !== JSON.stringify(c.after[k]));
-            const parts = [];
-            for (const k of fields) parts.push(`<span class="ba"><span class="small muted">${esc(FIELD_WORDS[k] || k.replace(/_/g, ' '))}</span> <span class="before">${await shownValue(c.table, k, c.before[k], c.before, ctx, c.currency)}</span> → <span class="after">${await shownValue(c.table, k, c.after[k], c.after, ctx, c.currency)}</span></span>`);
-            what = parts.join(' &nbsp; ') || '<span class="muted small">how it is labelled (no field you see changed)</span>';
-        } else if (c.op === 'insert') {
-            what = `<span class="ba"><span class="after">added</span>${c.table === 'transactions' ? ` ${await shownValue(c.table, 'amount_minor', c.after.amount_minor, c.after, ctx, c.currency)}` : c.table === 'anchors' ? ` ${await shownValue(c.table, 'amount', c.after.amount, c.after, ctx, c.currency)}` : ''}</span>`;
-        } else {
-            what = `<span class="ba"><span class="before">removed</span></span>`;
-        }
-        const history = c.table === 'transactions' ? ` <button class="link small" data-act="row" data-tx="${c.row_id}">this row’s history</button>` : '';
-        out.push(`<tr><td>${rowLabel(c.table, row, ctx)}${history}</td><td>${what}</td></tr>`);
+        const name = c.table === 'transactions' && txRows.size > 1
+            ? `<button class="link" data-act="row" data-tx="${c.row_id}">${esc(row.description)}</button> <span class="muted">· ${esc(day(row.date, { year: false }))}</span>`
+            : rowLabel(c.table, row, ctx);
+        const acct = esc(accountOf(c, ctx));
+        const amt = c.table === 'transactions' ? esc(txAmount(c)) : c.table === 'anchors' ? valueText('anchors', 'amount', row.amount, ctx, c.currency) : '';
+        const lines = c.op === 'update' ? changedFields(c).map(k => [esc(FIELD_WORDS[k] || k.replace(/_/g, ' ')), beforeCell(c, k, ctx), afterCell(c, k, ctx)])
+            : c.op === 'insert' ? [['added', '<span class="empty-val">not there</span>', '<span class="now">added</span>']]
+            : [['removed', '<span class="was gone">there</span>', '<span class="empty-val">removed</span>']];
+        if (!lines.length) lines.push(['how it is labelled', '<span class="empty-val">no field you see changed</span>', '']);
+        lines.forEach(([field, was, now], i) => {
+            out.push(`<tr${i ? ' class="cont"' : ''}><td class="c-row">${i ? '' : name}${!i && acct ? `<span class="c-sub">${acct}</span>` : ''}</td><td class="c-acct">${i ? '' : acct}</td>
+                <td class="c-field">${field}</td><td class="c-was">${was}</td><td class="c-now">${now}</td><td class="c-amt r num">${i ? '' : amt}</td></tr>`);
+        });
     }
     const more = changes.length > 60 ? `<p class="small muted">+ ${changes.length - 60} more rows.</p>` : '';
-    return `<div class="table-wrap"><table class="t"><thead><tr><th>Row</th><th>Before → after</th></tr></thead><tbody>${out.join('')}</tbody></table></div>${more}`;
+    const one = txRows.size === 1 ? changes.find(c => c.table === 'transactions') : null;
+    const open = one ? `<p class="detail-foot"><button class="link" data-act="row" data-tx="${one.row_id}">Open ${esc(rowName(one))}</button> for its note, one-off and its own history</p>` : '';
+    return `<div class="table-shell"><table class="t table-tight diff-table"><thead><tr><th>Row</th><th class="c-acct">Account</th><th>What changed</th><th>Before</th><th>After</th><th class="r c-amt">Amount</th></tr></thead>
+        <tbody>${out.join('')}</tbody></table></div>${more}${open}`;
 }
 async function fillEntry(id) {
     const box = $(`#detail-${id}`);
     if (!box) return;
     try {
         const entry = await get(`/api/history/${id}`, { fresh: true });
-        box.innerHTML = `<p class="small muted" style="margin-bottom:6px">${esc(when(entry.at))} · ${entry.via === 'chat' ? `Claude (${esc(entry.actor)})` : 'you, in fin'} · ${plural(entry.rows, 'row')}${entry.asked_first ? ` · over ${S.manyRows ?? 'the'} rows: Claude said the count (${entry.asked_count}) in chat and you said yes` : ''}</p>${await changeRowsHTML(entry)}`;
-    } catch (err) { box.innerHTML = `<p class="notice bad">${esc(err.message)}</p>`; }
+        // The time and who are on the line above; only what is new here (walk C4.1).
+        const asked = entry.asked_first ? `<p class="notice claude">${icon('chat')}<span>Over ${esc(S.manyRows ?? 'the')} rows: Claude said the count (${esc(entry.asked_count)}) in chat and you said yes.</span></p>` : '';
+        box.innerHTML = `${asked}${await changeRowsHTML(entry)}<p class="change-no">change ${entry.id}</p>`;
+    } catch (err) { box.innerHTML = `<p class="notice bad">${icon('warning-circle')}<span>${esc(err.message)}</span></p>`; }
 }
 
 async function undoEntry(id, { quiet = false } = {}) {
@@ -3226,19 +3456,19 @@ async function undoEntry(id, { quiet = false } = {}) {
         if (location.hash.startsWith('#/changes')) rerender();
         return null;
     }
-    if (!quiet) toast(`Undone: change #${id}`, { undo: r.data.by });
+    if (!quiet) toast('Undone. The undo is in Recent changes, and can itself be undone.', { undo: r.data.by });
     refreshFrame();
     rerender();
     return r.data;
 }
 ACT.undo = el => undoEntry(Number(el.dataset.entry));
 ACT['batch-undo'] = async () => {
-    const ids = $$('.log input[type="checkbox"]:checked').map(x => Number(x.dataset.entry)).sort((a, b) => b - a);
-    if (!ids.length) { toast('Tick the changes to undo first'); return; }
+    const ids = $$('.log input[data-change="entry-tick"]:checked').map(x => Number(x.dataset.entry)).sort((a, b) => b - a);
+    if (!ids.length) return;
     let done = 0;
     for (const id of ids) {
         const r = await send('POST', `/api/history/${id}/undo`);
-        if (!r.ok) { toast(`Undid ${done} of ${ids.length}. #${id} was refused: ${r.data.error || ''}`, { bad: true, ms: 10000 }); break; }
+        if (!r.ok) { toast(`Undid ${done} of ${ids.length}. One was refused: ${r.data.error || ''}`, { bad: true, ms: 10000 }); break; }
         done += 1;
     }
     if (done === ids.length) toast(`Undid ${plural(done, 'change')}. Each undo is in the list and can itself be undone.`);
@@ -3257,51 +3487,119 @@ ACT.trace = async el => {
     openTimeline(shared.table, shared.row_id, { blocker: blockerId, blocked: id });
 };
 
-async function timelineHTML(table, rowId, { blocker = null, blocked = null } = {}) {
+/** Every change to one row, newest first, each opened (at most 12). */
+async function rowHistory(table, rowId) {
     const list = (await get(`/api/history/row/${table}/${rowId}`, { fresh: true })).entries;
     const details = await Promise.all(list.slice(0, 12).map(e => get(`/api/history/${e.id}`, { fresh: true })));
-    const items = [];
-    for (let i = 0; i < details.length; i++) {
-        const e = details[i];
-        const isBlocker = e.id === blocker;
-        items.push(`<li class="${e.via === 'chat' ? 'claude' : ''}${isBlocker ? ' blocker' : ''}">
-            <div class="small">${esc(when(e.at))} ${whoTag(e)} <span class="muted">#${e.id}</span>${e.undone_by ? ' <span class="muted">· undone</span>' : ''}</div>
-            <div><b>${esc(e.summary)}</b></div>
-            ${isBlocker ? `<p class="refusal">This is why change #${blocked} cannot be undone: it changed this row later. Undo #${e.id} first.</p>` : ''}
-            ${await changeRowsHTML(e, { only: { table, row_id: rowId } })}
-            ${e.id === blocked ? '<p class="refusal small">The change whose undo was refused.</p>' : ''}</li>`);
+    return { list, details };
+}
+/** One step of a row's own history: only what changed on this row, one line
+ *  per field (walk C7.2); no repeated name, no link to the sheet you are in. */
+function stepLines(e, table, rowId, ctx) {
+    const mine = e.changes.filter(c => c.table === table && c.row_id === rowId);
+    const lines = [];
+    for (const c of mine) {
+        if (c.op === 'insert') {
+            const amt = table === 'transactions' ? txAmount(c) : '';
+            if (amt) lines.push(`<div class="diff-line"><span class="num">${esc(amt)}</span></div>`);
+        } else if (c.op === 'update') {
+            for (const k of changedFields(c)) {
+                lines.push(`<div class="diff-line"><span class="field">${esc(FIELD_WORDS[k] || k.replace(/_/g, ' '))}</span> ${beforeCell(c, k, ctx)} ${icon('caret-right', 'to')} ${afterCell(c, k, ctx)}</div>`);
+            }
+        } else lines.push('<div class="diff-line"><span class="was gone">taken out</span></div>');
     }
+    return lines.join('');
+}
+function stepTitle(e, table, rowId, ctx) {
+    const mine = e.changes.find(c => c.table === table && c.row_id === rowId);
+    if (!mine) return esc(e.summary || 'A change');
+    if (mine.op === 'insert' && table === 'transactions') {
+        const acct = accountOf(mine, ctx);
+        return `Came in${acct ? ` with the ${esc(acct)} statement` : ''}`;
+    }
+    if (e.undoes) return 'Undid a change to it';
+    return sentence(changeWords({ ...mine, same_change: true, same_label: true }, ctx, { rows: 1, subject: 'it' })) || esc(e.summary || 'A change');
+}
+async function timelineHTML(table, rowId, { blocker = null, blocked = null } = {}, held = null) {
+    const { list, details } = held || await rowHistory(table, rowId);
+    const ctx = { r: await refs(), services: await servicesList() };
+    let refusedOne = blocked ? details.find(d => d.id === blocked) : null;
+    if (blocked && !refusedOne) refusedOne = await get(`/api/history/${blocked}`, { fresh: true }).catch(() => null);
+    const items = details.map(e => {
+        const isBlocker = e.id === blocker;
+        const head = `<div class="step-meta">${esc(when(e.at))} ${whoTag(e)} <span>${esc(whereFrom(e))}</span>${e.undone_by ? ' <span class="state-word">· undone</span>' : ''}</div>
+            <div class="step-title">${stepTitle(e, table, rowId, ctx)}</div>${stepLines(e, table, rowId, ctx)}`;
+        if (isBlocker) {
+            // The fix sits at the blocker (walk C7.1, option A): undo only this one.
+            const theirs = refusedOne ? `${whoseName(refusedOne) === 'your' ? 'your' : 'Claude’s'} change ${esc(timeWords(refusedOne.at))}` : 'that change';
+            return `<li class="step blocker"><div class="notice bad">${icon('prohibit')}<div>${head}
+                <p class="why">This is why ${theirs} cannot be undone: ${esc(whoName(e, { cap: false }))} changed this row after it.</p>
+                ${e.undone_by ? '' : `<button class="btn sm" data-act="undo-blocker" data-entry="${e.id}" data-table="${esc(table)}" data-row="${rowId}">Undo only this</button>`}</div></div></li>`;
+        }
+        return `<li class="step${e.via === 'chat' ? ' claude' : ''}${e.id === blocked ? ' was-refused' : ''}">${head}
+            ${e.id === blocked ? `<p class="refused-note">${icon('prohibit')} The change whose undo was refused.</p>` : ''}</li>`;
+    });
     return items.length ? `<ul class="timeline">${items.join('')}</ul>${list.length > 12 ? `<p class="small muted">+ ${list.length - 12} older.</p>` : ''}`
         : '<p class="small muted">No change has touched it since it came in.</p>';
 }
+ACT['undo-blocker'] = async el => {
+    const r = await send('POST', `/api/history/${Number(el.dataset.entry)}/undo`);
+    if (!r.ok) { toast(r.data.error || 'Undo refused; nothing was changed', { bad: true, ms: 9000 }); return; }
+    toast('Undone. The change it blocked can now be undone from the list.', { undo: r.data.by });
+    refreshFrame();
+    if (location.hash.startsWith('#/changes')) rerender();
+    const table = el.dataset.table, rowId = Number(el.dataset.row);
+    if (table === 'transactions') openRowSheet(rowId); else openTimeline(table, rowId);
+};
 async function openTimeline(table, rowId, opts) {
-    openSheet('Its own history', '<p class="loading">Loading…</p>');
+    openSheet('Its own history', '<p class="loading">Loading…</p>', { eyebrow: 'One row', sub: 'Newest first.' });
     sheetBody().innerHTML = await timelineHTML(table, rowId, opts);
 }
 
-// One row: its facts, its note, the one-off toggle, "This was…", and its history.
+const LABEL_SOURCE_WORDS = { manual: 'by hand', service_default: 'its merchant', rule_override: 'a rule', fallback: 'its wording', derived: 'worked out from figures', auto: 'the rules' };
+const LABEL_FIELDS = ['type_id', 'service_id', 'flow_type', 'book'];
+/** Who labelled a row and when, from its own history (walk C8.2). */
+function labelledBy(found, details) {
+    for (const d of details) {
+        if (d.undone_by) continue;
+        const c = d.changes.find(x => x.table === 'transactions' && x.row_id === found.id && x.op === 'update');
+        if (c && changedFields(c).some(k => LABEL_FIELDS.includes(k))) return `${whoName(d)}${d.undoes ? ', by an undo' : ''}, ${when(d.at)}`;
+    }
+    return found.cat_source ? (LABEL_SOURCE_WORDS[found.cat_source] || 'the rules') : 'not yet';
+}
+
+// One row: its amount, its facts, its note, the one-off toggle, "This was…", and its history.
 ACT.row = el => openRowSheet(Number(el.dataset.tx));
 async function openRowSheet(txId, opts = {}) {
-    openSheet('A row', '<p class="loading">Loading…</p>');
+    openSheet('A row', '<p class="loading">Loading…</p>', { eyebrow: 'One row' });
     const found = (await get(`/api/transactions?tx_id=${txId}`, { fresh: true })).transactions[0];
     if (!found) { sheetBody().innerHTML = '<p class="notice">This row is no longer in the books (an import was undone, perhaps).</p>' + await timelineHTML('transactions', txId, opts); return; }
     ACT.__lastRow = found;
-    const label = found.flow_type === 'review' ? tag('nofig', 'waiting for a label') : found.display_type ? esc(found.display_type) : (['expense', 'refund'].includes(found.flow_type) ? tag('nofig', 'no type') : esc(found.flow_type));
+    const held = await rowHistory('transactions', txId);
+    const waiting = found.flow_type === 'review';
+    const untyped = !found.display_type && ['expense', 'refund'].includes(found.flow_type);
+    const label = waiting ? tag('nofig', 'waiting for a label') : found.display_type ? esc(found.display_type) : (untyped ? tag('nofig', 'no type') : esc(FLOW_WORDS[found.flow_type] || found.flow_type));
+    const minor = toMinor(found.amount_sgd, found.currency);
     $('#sheet-title').textContent = found.description;
-    sheetBody().innerHTML = `${rowHead(found)}
-        <table class="t small"><tbody>
-            <tr><td class="muted">Book</td><td>${esc(found.book || '')}</td></tr>
-            <tr><td class="muted">Type</td><td>${label}</td></tr>
-            <tr><td class="muted">Flow</td><td>${esc(found.flow_type)}${found.other_side_name ? ' · ' + esc(found.other_side_name) : ''}</td></tr>
-            <tr><td class="muted">Merchant</td><td>${esc(found.service_name || '—')}</td></tr>
-            <tr><td class="muted">Labelled by</td><td>${esc({ manual: 'you or Claude, by hand', service_default: 'its merchant', rule_override: 'a rule', fallback: 'its wording', derived: 'worked out from figures', auto: 'the rules' }[found.cat_source] || found.cat_source || '')}</td></tr>
-        </tbody></table>
-        <div class="row"><button class="btn primary" data-act="${found.flow_type === 'review' ? 'this-was' : 'resolve'}" data-tx="${found.id}">This was…</button>
-            <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off</label></div>
+    // "This was…" is the row's one main action only while it waits for a label (walk C8.3).
+    const thisWas = waiting || untyped
+        ? `<button class="btn ink" data-act="${waiting ? 'this-was' : 'resolve'}" data-tx="${found.id}">This was…</button>`
+        : `<button class="link" data-act="resolve" data-tx="${found.id}">Change what this was…</button>`;
+    sheetBody().innerHTML = `<div class="row-figure-block">
+            <div class="row-figure num">${esc(money(-minor, found.currency, { signed: true }))}</div>
+            <p class="row-figure-sub">${minor > 0 ? 'Money out' : 'Money in'} · ${esc(day(found.date))}${found.account_name ? ' · ' + esc(found.account_name) : ''}</p></div>
+        <dl class="facts">
+            <div><dt>Book</dt><dd>${esc(found.book || '—')}</dd></div>
+            <div><dt>Type</dt><dd>${label}</dd></div>
+            ${found.other_side_name ? `<div><dt>Other side</dt><dd>${esc(found.other_side_name)}</dd></div>` : ''}
+            <div><dt>Merchant</dt><dd>${found.service_name ? esc(found.service_name) : '<span class="muted">none yet</span>'}</dd></div>
+            <div><dt>Labelled by</dt><dd>${esc(labelledBy(found, held.details))}</dd></div>
+        </dl>
+        <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off <span class="muted small">(Spending can leave it out)</span></label>
         <label class="field"><span>Note</span><textarea id="row-note">${esc(found.notes || '')}</textarea></label>
-        <button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>
-        <h3>Its own history</h3><div id="row-history"><p class="loading">Loading…</p></div>`;
-    $('#row-history').innerHTML = await timelineHTML('transactions', txId, opts);
+        <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}</div>
+        <h3 class="history-head">Its own history</h3><div id="row-history"><p class="loading">Loading…</p></div>`;
+    $('#row-history').innerHTML = await timelineHTML('transactions', txId, opts, held);
     if (opts.blocker) $('#row-history .blocker')?.scrollIntoView({ block: 'center' });
 }
 ACT['row-note'] = async el => {

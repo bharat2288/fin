@@ -407,3 +407,45 @@ def test_a_start_after_a_crash_closes_the_entry_left_open_before_reseeding(temp_
         assert conn.execute("SELECT COUNT(*) FROM merchant_rules WHERE pattern = ?", (pattern,)).fetchone()[0] == 1
     finally:
         conn.close()
+
+
+# --- the list says what each change did (the walk's C3.1, C6.2, C9.1) -------
+
+
+def test_each_line_carries_its_first_row_before_and_after(imported):
+    tx = a_row(imported)
+    label(imported, tx["id"], notes="party supplies")
+    line = entries(imported)[0]
+    first = line["first"]
+    assert (first["table"], first["row_id"], first["op"]) == ("transactions", tx["id"], "update")
+    assert first["before"]["notes"] == tx["notes"] and first["after"]["notes"] == "party supplies"
+    assert first["after"]["description"] == tx["description"]
+    assert first["same_change"] is True and first["same_label"] is True
+    assert first["currency"] == "SGD" and isinstance(first["account_id"], int)
+
+
+def test_an_import_says_its_rows_differ(client):
+    bring_in(client, BANK, ROWS, opening=100000, closing=100000 - 14000 - 15950)
+    line = next(e for e in entries(client) if e["summary"] == "Imported a statement")
+    assert line["first"]["op"] == "insert"
+    assert line["first"]["same_label"] is False
+
+
+def test_an_undo_and_the_change_it_undid_name_each_other_by_who_and_when(imported):
+    tx = a_row(imported)
+    label(imported, tx["id"], notes="moved")
+    changed = entries(imported)[0]
+    imported.post(f"/api/history/{changed['id']}/undo")
+    undo_line, original = entries(imported)[:2]
+    assert undo_line["undoes_who"]["via"] == "app" and undo_line["undoes_who"]["at"] == original["at"]
+    assert original["undone_by_who"]["via"] == "app" and original["undone_by_who"]["at"] == undo_line["at"]
+    assert undo_line["first"]["after"]["notes"] == tx["notes"]
+
+
+def test_a_blocker_comes_with_what_it_did(imported):
+    tx = a_row(imported)
+    label(imported, tx["id"], book="Moom")
+    label(imported, tx["id"], is_one_off=1)
+    lines = imported.get("/api/history?blockers=1").get_json()["entries"]
+    blocked = lines[1]
+    assert blocked["blocked_by"]["first"]["after"]["is_one_off"] == 1

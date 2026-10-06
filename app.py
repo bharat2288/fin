@@ -606,6 +606,19 @@ def api_history():
         for e in shown:
             e["asked_first"] = e["id"] in asked
             e["asked_count"] = asked.get(e["id"])
+        # Who undid what, and what each change did in short, so a line can
+        # say it in words (the walk's C3.1, C6.2, C9.1).
+        by_id = {e["id"]: e for e in shown}
+        for e in shown:
+            e["first"] = history.brief(conn, e["id"])
+            if e["first"]:
+                _change_currencies(conn, [e["first"]])
+            for key, other_id in (("undone_by_who", e["undone_by"]), ("undoes_who", e["undoes"])):
+                other = by_id.get(other_id) if other_id else None
+                if other_id and other is None:
+                    found = conn.execute("SELECT via, actor, at FROM change_entries WHERE id = ?", (other_id,)).fetchone()
+                    other = dict(found) if found else None
+                e[key] = None if other is None else {"via": other["via"], "actor": other["actor"], "at": other["at"]}
         if request.args.get("blockers") == "1":
             # What would refuse each entry's undo, named, so the list can say
             # so before the operator taps it.
@@ -614,13 +627,17 @@ def api_history():
                 e["blocked_by"] = None if later is None else {
                     "id": later["id"], "summary": later["summary"], "at": later["at"],
                     "via": later["via"], "actor": later["actor"],
+                    "first": history.brief(conn, later["id"]),
                 }
+                if e["blocked_by"] and e["blocked_by"]["first"]:
+                    _change_currencies(conn, [e["blocked_by"]["first"]])
         return jsonify({"entries": shown, "many_rows": mcp_tools.MANY_ROWS,
                         **screens.since_looked(conn)})
 
 
 def _change_currencies(conn, changes: list[dict]) -> None:
-    """Give each changed row the currency its amounts are in: a row's and a
+    """Give each changed row the currency its amounts are in (and a bank
+    row its account_id, from its statement): a row's and a
     figure's are their account's, an account's its own, a bill's its own.
     A statement removed by the same entry still names its account there."""
     def account_currency(account_id):
@@ -643,6 +660,7 @@ def _change_currencies(conn, changes: list[dict]) -> None:
                 found = conn.execute("SELECT account_id FROM statements WHERE id = ?", (sid,)).fetchone()
                 account_id = found[0] if found else None
             currency = account_currency(account_id)
+            c["account_id"] = account_id
         elif c["table"] in ("anchors", "statements"):
             currency = account_currency(row.get("account_id"))
         elif c["table"] in ("accounts", "subscriptions"):
@@ -726,7 +744,9 @@ def _chat_import_refused():
 def api_settings():
     """The "Claude may write" switch and the history mark Home counts from."""
     with get_db() as conn:
-        return jsonify({"claude_may_write": screens.claude_may_write(conn), **screens.since_looked(conn)})
+        return jsonify({"claude_may_write": screens.claude_may_write(conn),
+                        "claude_write_changed_at": screens.claude_write_changed_at(conn),
+                        **screens.since_looked(conn)})
 
 
 @app.route("/api/settings/claude-write", methods=["PUT"])

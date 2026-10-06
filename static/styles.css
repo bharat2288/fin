@@ -1330,41 +1330,143 @@ table.sl-stack td.sl-sub { display: none; }
 /* == PLACE: changes == */
 /* ========================================================================== */
 
+/* --- the "Claude may write" switch: folio's status row; off, the whole card in the warning tone (C1, C1.1) --- */
+.write-card { padding: 14px 18px; }
+.write-row { display: flex; align-items: center; gap: var(--space-3) var(--space-5); flex-wrap: wrap; }
+.write-key { display: inline-flex; align-items: center; gap: 8px; flex: none; min-width: 130px;
+    font-size: var(--text-xs); font-weight: var(--font-bold); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
+.write-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-lg); flex: none;
+    background: var(--accent-pop-subtle); color: var(--accent-pop); }
+.write-icon svg { width: 16px; height: 16px; }
+.write-text { flex: 1 1 320px; min-width: 0; color: var(--text-secondary); font-size: 13.5px; }
+.write-end { display: flex; align-items: center; gap: var(--space-3); flex: none; margin-left: auto; }
+.switch-word { min-width: 2em; }
+.write-card.is-off { border: 1.5px solid var(--semantic-warning); background: color-mix(in srgb, var(--semantic-warning) 8%, var(--bg-surface)); }
+.write-card.is-off .write-row { align-items: flex-start; }
+.write-card.is-off .write-icon { width: 36px; height: 36px; background: color-mix(in srgb, var(--semantic-warning) 16%, var(--bg-surface)); color: var(--semantic-warning); }
+.write-card.is-off .write-icon svg { width: 20px; height: 20px; }
+.write-card.is-off h2 { color: var(--semantic-warning); margin-bottom: 2px; }
+.write-card.is-off .write-text p { color: var(--text-primary); }
+.write-card.is-off .write-text .write-since { margin-top: 4px; font-size: 13px; color: var(--text-secondary); }
+.write-card.is-off .write-end { align-self: center; }
+
+/* --- filters: scope chips in labelled groups; on a phone folded behind one button (C2.1) --- */
+.filters-fold { display: none; }
+.filter-set { display: grid; gap: 10px; }
+.filter-group { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.filter-label { flex: none; width: 44px; font-size: var(--text-xs); font-weight: var(--font-bold); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
+.log-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; min-height: 38px; margin: 16px 0 4px; }
+.log-bar .btn[hidden] { display: none; }
+
+/* --- the log: day headings, a tight line per change (C3) --- */
 .log { list-style: none; margin: 0; padding: 0; }
+.day-head { padding: 16px 4px 6px; border-bottom: 1px solid var(--border-default);
+    font-size: var(--text-xs); font-weight: var(--font-bold); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
 .entry { border-bottom: 1px solid var(--border-subtle); }
-.entry-row { display: grid; grid-template-columns: 44px 130px minmax(0, 1fr) 70px minmax(110px, 36%); gap: 10px; align-items: center; padding: 8px 6px; }
-.entry-row .sel { display: grid; place-items: center; width: 44px; height: 44px; }
-.entry-row .sel input { width: 20px; height: 20px; }
-.entry-row .summary { min-width: 0; }
-.entry-row .summary button { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font-weight: var(--font-semibold); min-height: 44px; width: 100%; color: var(--text-primary); }
+.entry-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 8px 4px; }
+.entry-row .sel { display: grid; place-items: center; width: 44px; height: 44px; cursor: pointer; }
+.entry-row .sel input { width: 18px; height: 18px; }
+.entry-main { min-width: 0; }
+.entry-title { display: flex; align-items: flex-start; gap: 6px; width: 100%; min-height: 30px; padding: 4px 0; border: 0; background: none; text-align: left; cursor: pointer;
+    font: inherit; font-size: 14.5px; font-weight: var(--font-semibold); line-height: 1.4; color: var(--text-primary); overflow-wrap: anywhere; }
+.entry-title .caret { width: 12px; height: 12px; margin-top: 4px; color: var(--text-tertiary); transition: transform var(--duration-fast) var(--ease-default); }
+.entry-title[aria-expanded="true"] .caret { transform: rotate(90deg); color: var(--text-primary); }
+.entry-title:hover span { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--border-emphasis); }
+.entry-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; padding-left: 18px; font-size: 12.5px; color: var(--text-tertiary); }
+.entry-meta .num { color: var(--text-secondary); font-weight: var(--font-semibold); }
+.entry-meta .sep { color: var(--border-emphasis); }
 .entry-row .act { justify-self: end; text-align: right; }
+.state-word { font-size: 12.5px; color: var(--text-tertiary); }
 /* a change Claude made: its teal "Claude" tag says so; the row takes a faint teal tint, never a stripe */
 .entry.claude > .entry-row { background: color-mix(in srgb, var(--accent-pop) 5%, var(--bg-surface)); border-radius: var(--radius-md); }
-.entry.undone .summary button { color: var(--text-tertiary); text-decoration: line-through; }
-.entry-detail { padding: 4px 12px 16px 60px; }
-.divider { display: flex; align-items: center; gap: 12px; color: var(--accent-pop); font-weight: var(--font-bold); font-size: 13px; padding: 10px 6px; }
-.divider::before, .divider::after { content: ""; flex: 1; border-top: 2px dashed var(--accent-pop); }
-.ba { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
-.ba .before { color: var(--text-tertiary); text-decoration: line-through; }
-.ba .after { color: var(--text-primary); font-weight: var(--font-bold); }
-.ba .none { font-style: italic; color: var(--text-tertiary); }
-.refusal { color: var(--semantic-error); font-size: 13px; }
-/* a change's timeline: the rail is drawn, not a border */
-.timeline { position: relative; list-style: none; margin: 0 0 0 8px; padding: 0; }
-.timeline::before { content: ""; position: absolute; left: -1px; top: 6px; bottom: 6px; width: 2px; background: var(--border-default); border-radius: 1px; }
-.timeline li { position: relative; padding: 0 0 14px 18px; }
-.timeline li::before { content: ""; position: absolute; left: -7px; top: 6px; width: 12px; height: 12px; border-radius: 50%; background: var(--bg-surface); border: 2px solid var(--border-emphasis); }
-.timeline li.claude::before { border-color: var(--accent-pop); }
-.timeline li.blocker { margin: 0 0 10px 10px; padding: 10px 12px 10px 14px; border: 1px solid var(--semantic-error); border-radius: var(--radius-xl);
-    background: color-mix(in srgb, var(--semantic-error) 7%, var(--bg-surface)); }
-.timeline li.blocker::before { left: -17px; top: 14px; border-color: var(--semantic-error); background: var(--semantic-error); }
+.entry.undone .entry-title span { color: var(--text-tertiary); text-decoration: line-through; }
+/* a refused undo: a whole-border band under the change, naming who and what (C6) */
+.refusal { margin: 8px 0 2px 18px; }
+.refusal .btn { margin-left: 6px; vertical-align: middle; }
+/* the "You last looked" divider: a dashed teal rule (C5) */
+.divider { display: flex; align-items: center; gap: 12px; padding: 12px 4px; color: var(--accent-pop); font-weight: var(--font-bold); font-size: 13px; text-align: center; }
+.divider::before, .divider::after { content: ""; flex: 1 1 24px; border-top: 2px dashed var(--accent-pop); }
+.divider span { flex: 0 1 auto; }
+
+/* --- a change opened: before and after in their own columns (C4) --- */
+.entry-detail { padding: 2px 4px 16px 74px; }
+.entry-detail > .notice { margin-bottom: 10px; }
+.diff-table .c-sub { display: none; }
+.diff-table td.c-row { white-space: normal; }
+.diff-table td.c-field { color: var(--text-tertiary); white-space: nowrap; }
+.diff-table tr.cont td { border-top: 0; }
+.empty-val { color: var(--text-tertiary); font-style: italic; }
+.was { color: var(--text-tertiary); text-decoration: line-through; }
+.was.gone { color: var(--semantic-error); }
+.now { color: var(--text-primary); font-weight: var(--font-bold); }
+.detail-foot { margin-top: 10px; font-size: 13px; color: var(--text-secondary); }
+.change-no { margin-top: 6px; text-align: right; font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
+
+/* --- a row's own history: the rail is drawn, not a border; the blocker a whole-border notice (C7) --- */
+.timeline { position: relative; list-style: none; margin: 0; padding: 0; }
+.timeline::before { content: ""; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 2px; background: var(--border-default); border-radius: 1px; }
+.timeline .step { position: relative; padding: 0 0 16px 28px; }
+.timeline .step::before { content: ""; position: absolute; left: 1px; top: 5px; width: 14px; height: 14px; border-radius: 50%; background: var(--bg-elevated); border: 2px solid var(--border-emphasis); }
+.timeline .step.claude::before { border-color: var(--accent-pop); }
+.timeline .step.was-refused::before { border-color: var(--semantic-error); }
+.timeline .step.blocker::before { top: 14px; border-color: var(--semantic-error); background: var(--semantic-error); }
+.timeline .step.blocker .notice { display: flex; }
+.step-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; font-size: 12.5px; color: var(--text-tertiary); }
+.step-title { margin: 2px 0; font-weight: var(--font-semibold); color: var(--text-primary); overflow-wrap: anywhere; }
+.diff-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 13px; }
+.diff-line .field { color: var(--text-tertiary); }
+.diff-line .to { width: 10px; height: 10px; color: var(--text-tertiary); }
+.step .why { margin: 6px 0 8px; font-size: 13px; color: var(--text-primary); }
+.refused-note { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; color: var(--semantic-error); }
+
+/* --- the row sheet: the name once, the amount first, plain facts (C8) --- */
+.row-figure { font-family: var(--font-display); font-size: var(--text-3xl); font-weight: var(--font-bold); letter-spacing: -0.02em; line-height: 1.05; }
+.row-figure-sub { margin-top: 4px; font-size: 13px; color: var(--text-secondary); }
+.facts { margin: 0; }
+.facts > div { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border-subtle); font-size: 13.5px; }
+.facts dt { color: var(--text-tertiary); }
+.facts dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.row-actions { gap: 12px; }
+.history-head { margin-top: 8px; }
+
 @media (max-width: 720px) {
-    .entry-row { grid-template-columns: 44px minmax(0, 1fr) auto; grid-template-areas: "sel sum act" "sel when act"; row-gap: 0; }
-    .entry-row .sel { grid-area: sel; }
-    .entry-row .when { grid-area: when; font-size: 12.5px; }
-    .entry-row .summary { grid-area: sum; }
-    .entry-row .rows { display: none; }
-    .entry-row .act { grid-area: act; }
-    .entry-row .summary button { min-height: var(--tap); }
-    .entry-detail { padding-left: 12px; }
+    .write-card { padding: 14px; }
+    .write-row { gap: 10px; }
+    .write-text { flex-basis: 100%; }
+    .write-end { width: 100%; margin-left: 0; justify-content: space-between; }
+    .filters-fold { display: inline-flex; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+    .filters-fold svg { width: 15px; height: 15px; flex: none; }
+    .filter-set { display: none; margin-top: 12px; }
+    .filter-set.is-open { display: grid; }
+    .filter-group { align-items: flex-start; }
+    .filter-label { width: 100%; }
+    .log-bar { margin-top: 12px; }
+    .entry-row { grid-template-columns: 44px minmax(0, 1fr); grid-template-areas: "sel main" "sel act"; padding: 6px 0; }
+    .entry-row .sel { grid-area: sel; align-self: start; }
+    .entry-main { grid-area: main; }
+    .entry-row .act { grid-area: act; justify-self: start; text-align: left; padding-left: 18px; }
+    .entry-title { min-height: var(--tap); align-items: center; }
+    .entry-title .caret { margin-top: 0; }
+    .refusal { margin-left: 0; flex-wrap: wrap; }
+    .refusal .btn { display: flex; margin: 8px 0 0; }
+    .divider { flex-direction: column; gap: 6px; font-size: 12.5px; }
+    .divider::before { flex: none; width: 100%; }
+    .divider::after { display: none; }
+    .entry.refused .act, .entry.undone .act { display: none; }
+    .entry-detail { padding: 0 0 14px; }
+    .diff-table thead { display: none; }
+    .diff-table tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "row amt" "field field" "was now";
+        border-bottom: 1px solid var(--border-subtle); padding: 6px 0; }
+    .diff-table tbody tr:last-child { border-bottom: 0; }
+    .diff-table td { border: 0; padding: 2px 10px; }
+    .diff-table td.c-row { grid-area: row; }
+    .diff-table td.c-amt { grid-area: amt; }
+    .diff-table td.c-field { grid-area: field; }
+    .diff-table td.c-was { grid-area: was; }
+    .diff-table td.c-now { grid-area: now; }
+    .diff-table td.c-acct, .diff-table td:empty { display: none; }
+    .diff-table .c-sub { display: block; font-size: 12px; font-weight: 400; color: var(--text-tertiary); }
+    .diff-table tr.cont { border-top: 0; }
+    .facts > div { grid-template-columns: 100px minmax(0, 1fr); }
+    .row-figure { font-size: var(--text-2xl); }
 }

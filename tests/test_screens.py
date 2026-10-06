@@ -430,3 +430,15 @@ def test_between_two_of_your_figures_the_tie_line_shows_what_the_rows_moved(clie
     # 1,000.00 + 50.00 - 200.00 = 850.00 from the rows; the figure says 900.00.
     assert later["moved_minor"] == 5000
     assert len(later["row_ids"]) == 2 and first["row_ids"] == []
+
+
+def test_the_switch_says_when_it_was_last_flipped(book):
+    assert book.get("/api/settings").get_json()["claude_write_changed_at"] is None
+    book.put("/api/settings/claude-write", json={"on": False})
+    assert book.get("/api/settings").get_json()["claude_write_changed_at"]
+
+
+def test_the_history_says_when_the_operator_last_looked(book):
+    assert book.get("/api/history").get_json()["last_looked_at"] is None
+    book.post("/api/changes/looked", json={})
+    assert book.get("/api/history").get_json()["last_looked_at"]

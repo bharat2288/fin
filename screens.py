@@ -59,6 +59,12 @@ def claude_may_write(conn: sqlite3.Connection) -> bool:
     return _get(conn, CLAUDE_MAY_WRITE) != "0"
 
 
+def claude_write_changed_at(conn: sqlite3.Connection) -> str | None:
+    """When the switch was last flipped (UTC), or None if it never was."""
+    row = conn.execute("SELECT updated_at FROM app_settings WHERE key = ?", (CLAUDE_MAY_WRITE,)).fetchone()
+    return None if row is None else row[0]
+
+
 def set_claude_may_write(conn: sqlite3.Connection, on: bool) -> None:
     _set(conn, CLAUDE_MAY_WRITE, "1" if on else "0")
 
@@ -91,7 +97,12 @@ def since_looked(conn: sqlite3.Connection) -> dict:
         (mark or 0,),
     ).fetchone()
     newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_entries WHERE open = 0").fetchone()[0]
-    return {"last_looked": mark, "last_looked_at": _get(conn, LAST_LOOKED_AT),
+    # When the operator last looked; a book from before that key falls back to when the mark last moved.
+    looked_at = _get(conn, LAST_LOOKED_AT)
+    if looked_at is None:
+        row_at = conn.execute("SELECT updated_at FROM app_settings WHERE key = ?", (LAST_LOOKED,)).fetchone()
+        looked_at = row_at[0] if row_at else None
+    return {"last_looked": mark, "last_looked_at": looked_at,
             "claude_count": row[0], "latest_claude_at": row[1], "newest": newest}
 
 
