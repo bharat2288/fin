@@ -209,6 +209,45 @@ def entry(conn: sqlite3.Connection, entry_id: int) -> dict | None:
     return shown
 
 
+def brief(conn: sqlite3.Connection, entry_id: int, scan: int = 400) -> dict | None:
+    """What an entry did, in short, so its line in the list can say it in
+    words: the first row it changed (before and after), whether every row
+    took the same new values (same_change), and whether every row had the
+    same name (same_label). An entry that changed one row twice counts it
+    once, from its first before to its last after. None for no rows."""
+    rows: dict[tuple[str, int], dict] = {}
+    for tbl, row_id, op, before, after in conn.execute(
+        "SELECT tbl, row_id, op, before, after FROM change_rows WHERE entry_id = ? ORDER BY id LIMIT ?",
+        (entry_id, scan),
+    ):
+        key = (tbl, row_id)
+        if key in rows:
+            rows[key]["after"] = _shown(tbl, after)
+            rows[key]["op"] = "delete" if after is None else rows[key]["op"]
+        else:
+            rows[key] = {"table": tbl, "row_id": row_id, "op": op,
+                         "before": _shown(tbl, before), "after": _shown(tbl, after)}
+    if not rows:
+        return None
+    shown = list(rows.values())
+
+    def changed(c: dict) -> tuple:
+        if c["op"] != "update":
+            return (c["table"], c["op"])
+        b, a = c["before"] or {}, c["after"] or {}
+        return (c["table"], "update", tuple(sorted(
+            (k, json.dumps(a.get(k))) for k in a if k != "id" and b.get(k) != a.get(k))))
+
+    def named(c: dict):
+        row = c["after"] or c["before"] or {}
+        return row.get("description") or row.get("name") or row.get("pattern")
+
+    first = shown[0]
+    return {**first,
+            "same_change": all(changed(c) == changed(first) for c in shown),
+            "same_label": all(named(c) == named(first) for c in shown)}
+
+
 def row_entries(conn: sqlite3.Connection, tbl: str, row_id: int) -> list[dict]:
     """The entries that changed one row, newest first."""
     if tbl not in TRACKED:

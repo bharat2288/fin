@@ -394,3 +394,15 @@ def test_look_mixed_never_lists_a_row_the_queue_lists_elsewhere(book, conn):
     untyped = {r["id"] for r in book.get("/api/transactions?types=__untyped__").get_json()["transactions"]}
     review = {r["id"] for r in book.get("/api/transactions?flow=review").get_json()["transactions"]}
     assert rows[0]["id"] in untyped and rows[1]["id"] in review
+
+
+def test_the_switch_says_when_it_was_last_flipped(book):
+    assert book.get("/api/settings").get_json()["claude_write_changed_at"] is None
+    book.put("/api/settings/claude-write", json={"on": False})
+    assert book.get("/api/settings").get_json()["claude_write_changed_at"]
+
+
+def test_the_history_says_when_the_operator_last_looked(book):
+    assert book.get("/api/history").get_json()["last_looked_at"] is None
+    book.post("/api/changes/looked", json={})
+    assert book.get("/api/history").get_json()["last_looked_at"]

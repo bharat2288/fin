@@ -58,6 +58,12 @@ def claude_may_write(conn: sqlite3.Connection) -> bool:
     return _get(conn, CLAUDE_MAY_WRITE) != "0"
 
 
+def claude_write_changed_at(conn: sqlite3.Connection) -> str | None:
+    """When the switch was last flipped (UTC), or None if it never was."""
+    row = conn.execute("SELECT updated_at FROM app_settings WHERE key = ?", (CLAUDE_MAY_WRITE,)).fetchone()
+    return None if row is None else row[0]
+
+
 def set_claude_may_write(conn: sqlite3.Connection, on: bool) -> None:
     _set(conn, CLAUDE_MAY_WRITE, "1" if on else "0")
 
@@ -88,7 +94,9 @@ def since_looked(conn: sqlite3.Connection) -> dict:
         (mark or 0,),
     ).fetchone()
     newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_entries WHERE open = 0").fetchone()[0]
-    return {"last_looked": mark, "claude_count": row[0], "latest_claude_at": row[1], "newest": newest}
+    looked_at = conn.execute("SELECT updated_at FROM app_settings WHERE key = ?", (LAST_LOOKED,)).fetchone()
+    return {"last_looked": mark, "last_looked_at": looked_at[0] if looked_at else None,
+            "claude_count": row[0], "latest_claude_at": row[1], "newest": newest}
 
 
 def claude_marks(conn: sqlite3.Connection) -> dict:
