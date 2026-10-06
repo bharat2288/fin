@@ -2172,13 +2172,14 @@ ACT['figure-delete-yes'] = async el => {
 
 // ---------------------------------------------------------------------------
 // Spending: the old dashboard's views under Books, one book or every book
-// with a total each, never one sum
+// with a total each, never one sum. Money out is the total; refunds are
+// money back, shown beside it and never taken off it.
 // ---------------------------------------------------------------------------
 
 const charts = [];
 function totalsByCurrency(rows) {
     const by = {};
-    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + toMinor(row.amount_sgd, c); });
+    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + Math.abs(toMinor(row.amount_sgd, c)); });
     return by;
 }
 function totalsText(by) {
@@ -2195,114 +2196,286 @@ function groupRows(rows, keyOf) {
     return [...groups.entries()].map(([name, list]) => ({ name, list, by: totalsByCurrency(list), sgd: totalsByCurrency(list).SGD || 0 }))
         .sort((a, b) => b.sgd - a.sgd);
 }
+/** A refund: money back on a spending row (a negative amount). */
+function isRefund(row) { return toMinor(row.amount_sgd, row.currency) < 0; }
+/** The months the coverage list must reach back to hold `from`, counted to today. */
+function monthsSince(from) {
+    let n = 1, m = currentMonth();
+    while (m > from && n < 40) { m = prevMonth(m); n += 1; }
+    return n;
+}
+/** The filter state, with the old single type read as a list of one. */
+function spendState() {
+    const sp = S.spending;
+    if (!Array.isArray(sp.types)) sp.types = sp.type ? [sp.type] : [];
+    delete sp.type;
+    if (sp.fold === undefined) sp.fold = false;
+    return sp;
+}
+function typeWord(name, r) {
+    if (name === '__untyped__') return 'No type';
+    const t = r.types.find(x => x.name === name);
+    return t ? (t.display_name || t.name) : name;
+}
+/** The filters folded behind "Filters" on a phone, each a removable chip. */
+function activeSpendFilters(sp, r) {
+    const out = sp.types.map(t => ({ label: typeWord(t, r), k: 'type', v: t }));
+    if (sp.search) out.push({ label: `“${sp.search}”`, k: 'search' });
+    if (sp.account) out.push({ label: r.accountById.get(Number(sp.account))?.name || 'one account', k: 'account' });
+    if (!sp.oneOffs) out.push({ label: 'no one-offs', k: 'oneOffs' });
+    if (sp.fold) out.push({ label: 'sub-types folded', k: 'fold' });
+    return out;
+}
+/** Search, types, account, one-offs and the sub-type fold: inline on the desk, in a sheet on a phone. */
+function spendFilterFields(sp, r) {
+    const accounts = r.accounts.filter(a => ['bank', 'card'].includes(a.type));
+    const chosen = sp.types.map(t => `<button type="button" class="chip" aria-pressed="true" data-act="spend-type-drop" data-v="${esc(t)}" aria-label="Remove ${esc(typeWord(t, r))}">${esc(typeWord(t, r))} ${icon('x')}</button>`).join('');
+    const left = r.types.filter(t => t.kind === 'spending' && !sp.types.includes(t.name));
+    return `<div class="sp-fields">
+        <label class="field sp-search"><span>Search</span><input type="search" data-sp-search value="${esc(sp.search)}" placeholder="Merchant, description or type"></label>
+        <div class="field sp-types"><span class="sp-label">Types</span><div class="chips">${chosen}
+            <label class="sp-add"><span class="sr-only">Add a type</span><select data-change="spend-type-add"><option value="">${sp.types.length ? '+ add a type' : 'Every type'}</option>
+                ${sp.types.includes('__untyped__') ? '' : '<option value="__untyped__">No type</option>'}${left.map(t => `<option value="${esc(t.name)}">${esc(t.display_name || t.name)}</option>`).join('')}</select></label></div></div>
+        <label class="field sp-account"><span>Account</span><select data-change="spend-account"><option value="">Every account</option>${accounts.map(a => `<option value="${a.id}"${String(a.id) === String(sp.account) ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
+        <div class="sp-checks"><label class="check"><input type="checkbox" data-change="spend-oneoffs"${sp.oneOffs ? ' checked' : ''}> Include one-offs</label>
+            <label class="check"><input type="checkbox" data-change="spend-fold"${sp.fold ? ' checked' : ''}> Fold sub-types into their parent</label></div>
+    </div>`;
+}
+/** A spending row: no money-out pill (every row here is money out); a refund says so. */
+function spendRowTr(row) {
+    const minor = toMinor(row.amount_sgd, row.currency);
+    const label = row.display_type ? esc(row.display_type) : tag('nofig', 'no type');
+    const amount = minor < 0
+        ? `<span class="sl-refund">${icon('arrow-circle-down')}refund</span> <span class="num sl-back">${esc(money(-minor, row.currency))} back</span>`
+        : `<span class="num">${esc(money(minor, row.currency))}</span>`;
+    return `<tr class="clickable" data-act="row" data-tx="${row.id}">
+        <td class="num">${esc(day(row.date, { year: false }))}</td>
+        <td>${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${esc(row.account_name || '')}</div></td>
+        <td>${label}</td>
+        <td class="r">${amount}</td></tr>`;
+}
 
 async function viewSpending() {
-    const sp = S.spending;
+    const sp = spendState();
     const r = await refs();
     const months = monthsBack(S.month, 12);
     const span = sp.span === 'year' ? months : [S.month];
+    const household = r.books[0].name;
     const books = sp.book === 'all' ? r.books.map(b => b.name) : [sp.book];
     const qs = book => {
         const p = new URLSearchParams({ book, start: months[0] + '-01', end: monthEnd(S.month), expense_only: 'true', sort: 'date', sort_dir: 'desc' });
         if (sp.search) p.set('search', sp.search);
-        if (sp.type) p.set('types', sp.type);
+        if (sp.types.length) p.set('types', sp.types.join(','));
         if (sp.account) p.set('account_id', sp.account);
         if (!sp.oneOffs) p.set('exclude_one_off', 'true');
         return p.toString();
     };
     // Every page is read: a total is never one page's sum.
-    const lists = await Promise.all(books.map(b => getAllRows(qs(b))));
+    const [lists, coverage] = await Promise.all([
+        Promise.all(books.map(b => getAllRows(qs(b)))),
+        get(`/api/statements/coverage?months=${monthsSince(months[0])}`).catch(() => null),
+    ]);
     const perBook = books.map((book, i) => {
         const year = lists[i].transactions;
-        const rows = year.filter(row => span.includes(row.date.slice(0, 7)));
+        const inSpan = year.filter(row => span.includes(row.date.slice(0, 7)));
+        const rows = inSpan.filter(row => !isRefund(row));
+        const back = inSpan.filter(isRefund);
         const others = [...new Set(year.map(row => row.currency || 'SGD').filter(c => c !== 'SGD'))];
-        return { book, year, rows, by: totalsByCurrency(rows), short: shownOf(lists[i]), others };
+        return { book, year, rows, back, all: inSpan, by: totalsByCurrency(rows), backBy: totalsByCurrency(back), short: shownOf(lists[i]), others };
     });
-    ACT.__rows = new Map(perBook.flatMap(b => b.rows).map(x => [x.id, x]));
+    ACT.__rows = new Map(perBook.flatMap(b => b.all).map(x => [x.id, x]));
+    const spanWords = span.length === 1 ? `${monthName(S.month)}${S.month === currentMonth() ? ' so far' : ''}` : `12 months to ${monthName(S.month, { short: true })}`;
 
-    const totals = `<div class="tiles">${perBook.map((b, i) => `<div class="tile ${i === 0 && b.book === r.books[0].name ? '' : 'company'}">
-        <div class="eyebrow">${esc(b.book)}${i === 0 && b.book === r.books[0].name ? ' · household spending' : ' · its costs'}</div>
-        <div class="fig num">${esc(totalsText(b.by))}</div><p>${plural(b.rows.length, 'row')} · ${span.length === 1 ? esc(monthName(S.month)) : `12 months to ${esc(monthName(S.month, { short: true }))}`}</p>
-        ${b.short ? `<p class="small" style="color:var(--warn)">Short: too many rows to read at once (${esc(b.short)} over 12 months). Narrow the filters.</p>` : ''}</div>`).join('')}</div>
-        ${perBook.length > 1 ? '<p class="never">Each book has its own total. They are never added together.</p>' : ''}`;
+    // P1.3: a month with nothing in it says why, and where the latest rows are.
+    let emptyNote = '';
+    if (sp.span !== 'year' && perBook.every(b => !b.all.length)) {
+        const latest = perBook.flatMap(b => b.year).map(x => x.date).sort().pop();
+        const filtered = activeSpendFilters(sp, r).length;
+        emptyNote = `<div class="notice sl-empty-month">${icon('calendar-blank')}<div class="grow"><b>Nothing in ${esc(monthName(S.month))}${S.month === currentMonth() ? ' yet' : ''}.</b>
+            ${latest ? `The latest rows are from ${esc(day(latest, { year: latest.slice(0, 4) !== S.month.slice(0, 4) }))}${S.month === currentMonth() ? `; ${esc(LONG_MONTHS[Number(S.month.slice(5)) - 1])}’s statements are not in` : ''}.` : filtered ? 'Nothing matches the filters in the 12 months either.' : 'No statement for it is in.'}</div>
+            ${latest ? `<button class="btn" data-act="spend-month" data-m="${latest.slice(0, 7)}">Look at ${esc(LONG_MONTHS[Number(latest.slice(5, 7)) - 1])}</button>` : ''}</div>`;
+    }
 
+    // P1.1, P1.2: one tile per book; money out is its total, refunds beside it.
+    const tiles = `<div class="stat-tiles sl-tiles">${perBook.map(b => {
+        const isHouse = b.book === household;
+        return `<div class="stat-tile${isHouse ? '' : ' hatch'}">
+            <div class="sl-tile-head"><span class="stat-tile__label">${isHouse ? 'Household spending' : `${esc(b.book)} · its costs`}</span>${isHouse ? '' : '<span class="outside-tag">not household</span>'}</div>
+            <div class="stat-tile__figure">${esc(totalsText(b.by))}</div>
+            <div class="stat-tile__sub">${plural(b.rows.length, 'row')} out · ${esc(spanWords)}</div>
+            ${b.back.length ? `<div class="sl-back-line"><span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}back in refunds ${esc(totalsText(b.backBy))}</span><span class="muted small">${plural(b.back.length, 'row')}, not taken off</span></div>` : ''}
+            ${b.short ? `<p class="small sl-short">${icon('warning')}Short: too many rows to read at once (${esc(b.short)} over 12 months). Narrow the filters.</p>` : ''}</div>`;
+    }).join('')}</div>
+        <p class="card-foot">${perBook.length > 1 ? 'Each book has its own total. They are never added together. ' : ''}Refunds are shown beside spending, never taken off it.</p>`;
+
+    // P3.1: a month with no statement in for this book's accounts is marked, not drawn as nothing spent.
+    const missingFor = b => {
+        if (!coverage) return new Set();
+        const ids = new Set(b.year.map(x => x.account_id).filter(id => coverage.matrix[id]));
+        const out = new Set();
+        if (!ids.size) return out;
+        months.forEach(m => {
+            if (m >= currentMonth()) return;
+            if (b.year.some(x => x.date.startsWith(m))) return;
+            if ([...ids].some(id => coverage.matrix[id][m] && !coverage.matrix[id][m].imported)) out.add(m);
+        });
+        return out;
+    };
+    const fold = sp.fold;
+    const typeKey = row => (fold ? (row.parent_type || row.type) : row.display_type) || 'No type';
     const body = perBook.map(b => {
+        // P1.4: a book with no costs in the 12 months folds to one line.
+        if (!b.year.length) {
+            return `<section class="card sl-folded"><h2>${esc(b.book)}</h2><p>No costs in the 12 months to ${esc(monthName(S.month, { short: true }))}${activeSpendFilters(sp, r).length ? ' that match the filters' : ''}, so there is no chart.</p>
+                <a class="link" href="#/books">Look at ${esc(b.book)} on the balance sheet</a></section>`;
+        }
+        b.missing = missingFor(b);
         let content;
         if (sp.view === 'flat') {
-            content = `<div class="table-wrap"><table class="t rows"><thead><tr><th>Date</th><th>Description</th><th>Type</th><th class="r">Amount</th></tr></thead>
-                <tbody>${b.rows.slice(0, 300).map(row => rowTr(row)).join('') || '<tr><td colspan="4" class="empty">No rows.</td></tr>'}</tbody></table></div>
-                ${b.rows.length > 300 ? `<p class="small muted">The first 300 of ${b.rows.length} rows; narrow the filters to see the rest.</p>` : ''}`;
+            const list = b.all;
+            content = list.length ? `<div class="table-wrap"><table class="t rows sl-rows"><thead><tr><th>Date</th><th>Description</th><th>Type</th><th class="r">Amount</th></tr></thead>
+                <tbody>${list.slice(0, 300).map(spendRowTr).join('')}</tbody></table></div>
+                <p class="card-foot">Every row here is money out unless it says refund.${list.length > 300 ? ` The first 300 of ${list.length} rows; narrow the filters to see the rest.` : ''}</p>`
+                : `<p class="card-empty">No rows in ${esc(spanWords)}.</p>`;
         } else {
-            const groups = groupRows(b.rows, sp.view === 'type' ? row => row.display_type || 'No type' : row => row.service_name || row.description);
-            content = `<div class="table-wrap"><table class="t"><thead><tr><th>${sp.view === 'type' ? 'Type' : 'Merchant'}</th><th class="r">Rows</th><th class="r">Total</th><th class="r desk-only">Share</th></tr></thead><tbody>
-                ${groups.slice(0, 60).map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${g.name === 'No type' ? tag('nofig', 'No type') : esc(g.name)}</td><td class="r num">${g.list.length}</td>
-                    <td class="r num">${esc(totalsText(g.by))}</td><td class="r num desk-only">${pct(g.sgd, b.by.SGD || 0)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">No rows.</td></tr>'}</tbody></table></div>`;
+            const keyOf = sp.view === 'type' ? typeKey : row => row.service_name || row.description;
+            const groups = groupRows(b.rows, keyOf);
+            const backs = groupRows(b.back, keyOf);
+            const noun = sp.view === 'type' ? 'Type' : 'Merchant';
+            const nameCell = g => g.name === 'No type' ? tag('nofig', 'No type') : esc(g.name);
+            content = groups.length || backs.length ? `<div class="table-wrap"><table class="t sl-groups"><thead><tr><th>${noun}</th><th class="r">Rows</th><th class="r">Total</th><th class="r desk-only">Share</th></tr></thead><tbody>
+                ${groups.slice(0, 60).map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
+                    <td class="r num">${esc(totalsText(g.by))}</td><td class="r num desk-only">${pct(g.sgd, b.by.SGD || 0)}</td></tr>`).join('')}
+                ${groups.length > 60 ? `<tr><td colspan="4" class="muted">…and ${groups.length - 60} more</td></tr>` : ''}
+                ${backs.length ? `<tr class="section"><td colspan="4">Back in: refunds, not spending</td></tr>
+                    ${backs.map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
+                        <td class="r num sl-back">${esc(totalsText(g.by))} back</td><td class="r small muted desk-only">not in the share</td></tr>`).join('')}` : ''}
+                </tbody></table></div>`
+                : `<p class="card-empty">No rows in ${esc(spanWords)}.</p>`;
         }
-        return `<section class="card"><div class="card-head"><h2>${esc(b.book)}</h2><p>total <b class="num">${esc(totalsText(b.by))}</b> · ${plural(b.rows.length, 'row')}</p></div>
-            <div class="chart-box small"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)} by month"></canvas></div>
-            <p class="small muted" style="margin:6px 0 10px">By month, 12 months to ${esc(monthName(S.month, { short: true }))}, on its own scale. Tap a month to look at it.
-                ${b.others.length ? `<b>S$ rows only</b>; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows are shown in the table and its total, not in the chart.` : 'In S$.'}</p>
+        const missingWords = b.missing.size ? ` A hatched month has no statement in for some of this book’s accounts; <a class="link" href="#/books/import">import it</a>.` : '';
+        return `<section class="card"><div class="section-header"><h2>${esc(b.book)}</h2>
+                <span class="section-header__aside">out <b class="num">${esc(totalsText(b.by))}</b>${b.back.length ? ` · back <b class="num">${esc(totalsText(b.backBy))}</b>` : ''} · ${plural(b.all.length, 'row')}</span></div>
+            <div class="chart-box small sl-chart"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)}, money out by month"></canvas></div>
+            <p class="small muted sl-chart-note">Money out by month, 12 months to ${esc(monthName(S.month, { short: true }))}, on its own scale. Tap a month to look at it.
+                ${b.others.length ? `<b>S$ rows only</b>; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows are shown in the table and its total, not in the chart.` : 'In S$.'}${missingWords}</p>
             ${content}</section>`;
     }).join('');
 
     afterRender(() => drawSpendingCharts(perBook, months));
-    const accounts = r.accounts.filter(a => ['bank', 'card'].includes(a.type));
+    const active = activeSpendFilters(sp, r);
+    const seg = (label, k, opts) => `<div class="sp-group"><span class="sp-label">${label}</span><div class="seg" role="group" aria-label="${label}">${opts.map(([v, l]) =>
+        `<button type="button" data-act="spend-set" data-k="${k}" data-v="${esc(v)}" aria-pressed="${String(sp[k] === v)}">${esc(l)}</button>`).join('')}</div></div>`;
     return `${booksNav('spending')}
-    <div class="page-head"><div><h1>Spending</h1><p>Household spending and each company’s costs, a book at a time or every book with its own total.</p></div>${monthPicker()}</div>
-    <section class="card"><div class="fields" style="gap:10px">
-        <div class="row"><div class="seg" role="group" aria-label="Book">${[['all', 'All books'], ...r.books.map(b => [b.name, b.name])].map(([k, l]) =>
-            `<button data-act="spend-set" data-k="book" data-v="${esc(k)}" aria-pressed="${sp.book === k}">${esc(l)}</button>`).join('')}</div>
-            <div class="seg" role="group" aria-label="View">${[['flat', 'Every row'], ['merchant', 'By merchant'], ['type', 'By type']].map(([k, l]) =>
-            `<button data-act="spend-set" data-k="view" data-v="${k}" aria-pressed="${sp.view === k}">${l}</button>`).join('')}</div>
-            <div class="seg" role="group" aria-label="Period">${[['month', monthName(S.month, { short: true })], ['year', '12 months']].map(([k, l]) =>
-            `<button data-act="spend-set" data-k="span" data-v="${k}" aria-pressed="${sp.span === k}">${esc(l)}</button>`).join('')}</div></div>
-        <div class="fields two" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
-            <label class="field"><span>Search</span><input type="search" id="sp-search" value="${esc(sp.search)}" placeholder="Merchant, description or type"></label>
-            <label class="field"><span>Type</span><select data-change="spend-type"><option value="">Every type</option><option value="__untyped__"${sp.type === '__untyped__' ? ' selected' : ''}>No type</option>
-                ${r.types.filter(t => t.kind === 'spending').map(t => `<option value="${esc(t.name)}"${sp.type === t.name ? ' selected' : ''}>${esc(t.display_name || t.name)}</option>`).join('')}</select></label>
-            <label class="field"><span>Account</span><select data-change="spend-account"><option value="">Every account</option>${accounts.map(a => `<option value="${a.id}"${String(a.id) === String(sp.account) ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
-            <label class="check" style="align-self:end"><input type="checkbox" data-change="spend-oneoffs"${sp.oneOffs ? ' checked' : ''}> Include one-offs</label></div>
-        </div></section>
-    <section class="card">${totals}</section>
+    <div class="page-head"><div><span class="eyebrow">Books</span><h1>Spending</h1><p>Household spending and each company’s costs, a book at a time or every book with its own total.</p></div></div>
+    <section class="card sp-filterbar">
+        <div class="sp-row">
+            <div class="sp-group sp-period"><span class="sp-label">Period</span><div class="sp-period-row">
+                <label class="sp-month"><span class="sr-only">Month</span><select data-change="month">${sheetMonths().map(m => `<option value="${m}"${m === S.month ? ' selected' : ''}>${monthName(m, { short: true })}${m === currentMonth() ? ' (so far)' : ''}</option>`).join('')}</select></label>
+                <div class="seg" role="group" aria-label="Period">${[['month', 'Month'], ['year', '12 months']].map(([v, l]) => `<button type="button" data-act="spend-set" data-k="span" data-v="${v}" aria-pressed="${String(sp.span === v)}">${l}</button>`).join('')}</div></div></div>
+            ${seg('Book', 'book', [['all', 'All'], ...r.books.map(b => [b.name, b.name])])}
+            ${seg('View', 'view', [['flat', 'Every row'], ['merchant', 'By merchant'], ['type', 'By type']])}
+        </div>
+        <div class="sp-more">${spendFilterFields(sp, r)}${active.length ? '<button type="button" class="link sp-clear" data-act="spend-clear">Clear filters</button>' : ''}</div>
+        <div class="sp-fold-row">
+            <button type="button" class="btn subtle" data-act="spend-filters" aria-haspopup="dialog">${icon('funnel')}Filters${active.length ? ` <span class="count">${active.length}</span>` : ''}</button>
+            ${active.map(f => `<button type="button" class="chip" data-act="spend-drop" data-k="${f.k}" data-v="${esc(f.v || '')}" aria-label="Remove ${esc(f.label)}">${esc(f.label)} ${icon('x')}</button>`).join('')}
+        </div>
+    </section>
+    ${emptyNote}
+    <section class="card">${tiles}</section>
     ${body}`;
 }
-function setSpending(k, v) { S.spending[k] = v; store.set('spending', S.spending); rerender(); }
+function setSpending(k, v) {
+    S.spending[k] = v; store.set('spending', S.spending); rerender();
+    if ($('#sheets .sp-sheet')) setTimeout(openSpendFilters, 0);   // the sheet shows what was just set
+}
 ACT['spend-set'] = el => setSpending(el.dataset.k, el.dataset.v);
-ACT['spend-type'] = el => setSpending('type', el.value);
+ACT['spend-month'] = el => { S.month = el.dataset.m; store.set('month', S.month); rerender(); };
+ACT['spend-type-add'] = el => { if (el.value) setSpending('types', [...spendState().types, el.value]); };
+ACT['spend-type-drop'] = el => setSpending('types', spendState().types.filter(t => t !== el.dataset.v));
 ACT['spend-account'] = el => setSpending('account', el.value);
 ACT['spend-oneoffs'] = el => setSpending('oneOffs', el.checked);
+ACT['spend-fold'] = el => setSpending('fold', el.checked);
+ACT['spend-drop'] = el => {
+    const k = el.dataset.k;
+    if (k === 'type') setSpending('types', spendState().types.filter(t => t !== el.dataset.v));
+    else if (k === 'search') setSpending('search', '');
+    else if (k === 'account') setSpending('account', '');
+    else if (k === 'oneOffs') setSpending('oneOffs', true);
+    else if (k === 'fold') setSpending('fold', false);
+};
+ACT['spend-clear'] = () => {
+    Object.assign(S.spending, { types: [], search: '', account: '', oneOffs: true, fold: false });
+    store.set('spending', S.spending); rerender();
+    if ($('#sheets .sp-sheet')) setTimeout(openSpendFilters, 0);
+};
+ACT['spend-filters'] = () => openSpendFilters();
+async function openSpendFilters() {
+    const r = await refs();
+    const sp = spendState();
+    openSheet('Filters', `<div class="sp-sheet">${spendFilterFields(sp, r)}</div>`, { eyebrow: 'Spending',
+        foot: '<button type="button" class="btn" data-act="spend-clear">Clear every filter</button><button type="button" class="btn primary" data-act="close-sheet">Done</button>' });
+}
 ACT['spend-drill'] = el => {
-    if (el.dataset.view === 'type') { S.spending.type = el.dataset.key === 'No type' ? '__untyped__' : el.dataset.key; S.spending.search = ''; }
-    else { S.spending.search = el.dataset.key; }
-    S.spending.view = 'flat'; store.set('spending', S.spending); rerender();
+    const sp = spendState();
+    if (el.dataset.view === 'type') { sp.types = [el.dataset.key === 'No type' ? '__untyped__' : el.dataset.key]; sp.search = ''; }
+    else { sp.search = el.dataset.key; }
+    sp.view = 'flat'; store.set('spending', S.spending); rerender();
 };
 document.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && e.target.id === 'sp-search') setSpending('search', e.target.value.trim());
+    if (e.key === 'Enter' && e.target.matches && e.target.matches('[data-sp-search]')) setSpending('search', e.target.value.trim());
 });
-document.addEventListener('search', e => { if (e.target.id === 'sp-search') setSpending('search', e.target.value.trim()); }, true);
+document.addEventListener('search', e => { if (e.target.matches && e.target.matches('[data-sp-search]')) setSpending('search', e.target.value.trim()); }, true);
 
+/** A hatch for a month with no statement in: the warning tone in stripes. */
+function hatchPattern(color, ground) {
+    const c = document.createElement('canvas');
+    c.width = 8; c.height = 8;
+    const g = c.getContext('2d');
+    g.fillStyle = ground; g.fillRect(0, 0, 8, 8);
+    g.strokeStyle = color; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(-2, 10); g.lineTo(10, -2); g.moveTo(-2, 2); g.lineTo(2, -2); g.moveTo(6, 10); g.lineTo(10, 6); g.stroke();
+    return g.createPattern(c, 'repeat');
+}
 function drawSpendingCharts(perBook, months) {
     charts.splice(0).forEach(c => c.destroy());
     if (typeof Chart === 'undefined') return;
     const tk = chartTokens();
+    const st = getComputedStyle(document.documentElement);
+    const warn = st.getPropertyValue('--semantic-warning').trim();
+    const narrow = window.innerWidth < 560;
     perBook.forEach((b, i) => {
         const canvas = document.getElementById(`chart-${b.book}`);
         if (!canvas) return;
-        const sums = months.map(m => b.year.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD')
+        const missing = b.missing || new Set();
+        const sums = months.map(m => b.year.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD' && !isRefund(row))
             .reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0) / 100);
+        const top = Math.max(...sums, 1);
         const fill = tk.books[i % tk.books.length];
+        const label = m => MONTHS[Number(m.slice(5)) - 1];
         charts.push(new Chart(canvas, {
             type: 'bar',
-            data: { labels: months.map(m => MONTHS[Number(m.slice(5)) - 1]), datasets: [{ label: `${b.book}, S$ rows only`, data: sums,
-                backgroundColor: months.map(m => m === S.month ? tk.current : fill), borderRadius: 4, barPercentage: 0.64, categoryPercentage: 1 }] },
+            data: { labels: months.map(m => missing.has(m) ? [label(m), narrow ? '⧗' : '⧗ missing'] : label(m)), datasets: [
+                { label: `${b.book}, money out`, data: sums,
+                    backgroundColor: months.map(m => m === S.month ? tk.current : fill), borderRadius: 4, barPercentage: 0.64, categoryPercentage: 1 },
+                { label: 'no statement in', data: months.map(m => missing.has(m) ? top : null),
+                    backgroundColor: hatchPattern(tk.base, tk.surface), borderColor: tk.base, borderWidth: 1, borderRadius: 4, barPercentage: 0.64, categoryPercentage: 1 },
+            ] },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false,
-                plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => money(Math.round(c.raw * 100), 'SGD') } } },
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.datasetIndex === 1 ? 'No statement in yet for this month: import it' : money(Math.round(c.raw * 100), 'SGD') } } },
                 scales: {
-                    x: { grid: { display: false }, border: { color: tk.base }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 } } },
-                    y: { border: { display: false }, grid: { color: tk.grid, lineWidth: 1 }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 }, callback: v => `S$ ${v >= 1000 ? (v / 1000) + 'k' : v}` } },
+                    x: { stacked: true, grid: { display: false }, border: { color: tk.base },
+                        ticks: { font: { family: tk.mono, size: narrow ? 9 : 10 }, maxRotation: 0, autoSkip: false, color: c => missing.has(months[c.index]) ? warn : tk.ink } },
+                    y: { stacked: true, border: { display: false }, grid: { color: tk.grid, lineWidth: 1 }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 }, maxTicksLimit: 5, callback: v => `S$ ${v >= 1000 ? (v / 1000) + 'k' : v}` } },
                 },
-                onClick: (_e, els) => { if (els.length) { S.month = months[els[0].index]; store.set('month', S.month); rerender(); } },
+                onClick: (_e, els) => {
+                    if (!els.length) return;
+                    const m = months[els[0].index];
+                    if (missing.has(m)) { location.hash = '#/books/import'; return; }
+                    S.month = m; store.set('month', S.month); rerender();
+                },
             },
         }));
     });
@@ -2310,52 +2483,108 @@ function drawSpendingCharts(perBook, months) {
 
 // ---------------------------------------------------------------------------
 // Bills: the subscriptions, under Spending. A missed renewal is a queue item.
+// Grouped by book, each with its own monthly line; missed bills first.
 // ---------------------------------------------------------------------------
 
+function billEvery(s) {
+    return s.periods > 1 ? `every ${s.periods} ${s.frequency.replace('ly', '').replace('month', 'months').replace('year', 'years').replace('quarter', 'quarters')}` : s.frequency;
+}
+function billMissedTag(s, missed) {
+    return `<button type="button" class="tag stale" data-act="bill-queue" data-id="${s.id}" title="Open it in the queue">${icon('hourglass')}no payment seen for ${esc(day(missed.due, { year: false }))}</button>`;
+}
 async function viewBills() {
     const [subs, r] = await Promise.all([get('/api/subscriptions'), refs()]);
-    const active = subs.filter(s => s.status === 'active');
-    const perBook = {};
-    active.forEach(s => { const b = s.book || r.books[0].name; perBook[b] = (perBook[b] || 0) + toMinor(s.monthly_sgd, 'SGD'); });
     ACT.__subs = new Map(subs.map(s => [s.id, s]));
-    const rows = subs.map(s => {
-        const missed = billMissed(s);
+    const household = r.books[0].name;
+    const byBook = new Map(r.books.map(b => [b.name, []]));
+    subs.forEach(s => { const b = s.book || household; if (!byBook.has(b)) byBook.set(b, []); byBook.get(b).push({ s, missed: billMissed(s) }); });
+    const statusOrder = { active: 0, paused: 1, deactivated: 2 };
+    const row = ({ s, missed }) => {
         const cur = s.currency || 'SGD';
-        return `<tr class="clickable" data-act="bill" data-id="${s.id}">
-            <td><b>${esc(s.service_name || s.match_pattern)}</b><div class="small muted">${esc(s.book || '')}${s.display_type ? ' · ' + esc(s.display_type) : ''}</div></td>
-            <td class="r num">${esc(money(toMinor(s.amount, cur), cur))}${s.is_variable ? '<div class="small muted">varies</div>' : ''}</td>
-            <td>${esc(s.periods > 1 ? `every ${s.periods} ${s.frequency.replace('ly', '').replace('month', 'months').replace('year', 'years').replace('quarter', 'quarters')}` : s.frequency)}</td>
-            <td class="r num desk-only">${esc(money(toMinor(s.monthly_sgd, 'SGD'), 'SGD'))}</td>
-            <td class="desk-only small">${esc(s.account_name || '')}</td>
+        const name = esc(s.service_name || s.match_pattern);
+        const state = missed ? billMissedTag(s, missed) : s.status !== 'active' ? tag('aside', s.status === 'deactivated' ? 'stopped' : s.status) : '';
+        const sub = missed ? billMissedTag(s, missed)
+            : `${esc(billEvery(s))}${s.status === 'active' ? ` · next ${esc(day(s.computed_renewal, { year: false }))}` : ''}${s.account_name ? ' · ' + esc(s.account_name) : ''} ${s.status !== 'active' ? state : ''}`;
+        return `<tr class="clickable${s.status === 'active' ? '' : ' sl-inactive'}" data-act="bill" data-id="${s.id}">
+            <td class="sl-name"><b>${name}</b><div class="small muted">${esc(s.display_type || 'no type')}</div>${state ? `<div class="sl-state">${state}</div>` : ''}</td>
+            <td class="r num sl-fig">${esc(money(toMinor(s.amount, cur), cur))}${s.is_variable ? '<div class="small muted">varies</div>' : ''}</td>
+            <td>${esc(billEvery(s))}</td>
+            <td class="r num">${esc(money(toMinor(s.monthly_sgd, 'SGD'), 'SGD'))}</td>
+            <td class="small">${esc(s.account_name || '')}</td>
             <td class="num">${esc(day(s.tx_last_paid || s.last_paid))}</td>
             <td class="num">${s.status === 'active' ? esc(day(s.computed_renewal)) : '—'}</td>
-            <td>${missed ? tag('stale', `missed: due ${day(missed.due, { year: false })}`, { href: '#/queue' }) : s.status === 'active' ? '<span class="small">active</span>' : tag('yours', s.status)}</td></tr>`;
+            <td class="sl-sub">${sub}</td></tr>`;
+    };
+    const groups = [...byBook.entries()].map(([book, list]) => {
+        const active = list.filter(x => x.s.status === 'active');
+        const monthly = active.reduce((a, x) => a + toMinor(x.s.monthly_sgd, 'SGD'), 0);
+        const missed = list.filter(x => x.missed).sort((a, b) => a.missed.due.localeCompare(b.missed.due));
+        const paid = list.filter(x => !x.missed).sort((a, b) => (statusOrder[a.s.status] ?? 3) - (statusOrder[b.s.status] ?? 3)
+            || String(a.s.computed_renewal || '').localeCompare(String(b.s.computed_renewal || '')));
+        const head = `<tr class="section sl-book"><td colspan="5" class="sl-name">${esc(book)}</td>
+            <td colspan="3" class="r sl-fig">${esc(money(monthly, 'SGD'))} a month · ${list.length ? (missed.length ? `${missed.length} of ${list.length} not seen` : plural(list.length, 'bill')) : 'no bills'}</td></tr>`;
+        return head + missed.map(row).join('')
+            + (missed.length && paid.length ? '<tr class="section sl-sub-head"><td colspan="8" class="sl-name">Paid as expected</td></tr>' : '')
+            + paid.map(row).join('');
     }).join('');
     return `${booksNav('bills')}
-    <div class="page-head"><div><h1>Bills</h1><p>What renews and when, from the rows that pay it. A renewal with no payment seen goes to the queue.</p></div>
-        <div class="row"><button class="btn" data-act="bills-refresh">Refresh from rows</button><button class="btn primary" data-act="bill" data-id="">Add a bill</button></div></div>
-    <section class="card"><div class="tiles">${Object.entries(perBook).map(([b, m]) => `<div class="tile"><div class="eyebrow">${esc(b)}</div><div class="fig num">${esc(money(m, 'SGD'))}</div><p>a month, active bills</p></div>`).join('')}</div>
-        <p class="never">Monthly figures in S$ at the bill's own rate; each book's bills are their own total.</p></section>
-    <section class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Bill</th><th class="r">Amount</th><th>How often</th><th class="r desk-only">A month</th><th class="desk-only">Paid from</th><th>Last paid</th><th>Next</th><th>State</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="8" class="empty">No bills yet.</td></tr>'}</tbody></table></div></section>`;
+    <div class="page-head"><div><span class="eyebrow">Books</span><h1>Bills</h1><p>What renews and when, from the rows that pay it. A renewal with no payment seen also waits in the queue.</p></div>
+        <div class="row"><button class="btn" data-act="bills-refresh">${icon('arrows-clockwise')}Refresh from rows</button><button class="btn primary" data-act="bill" data-id="">${icon('plus')}Add a bill</button></div></div>
+    <section class="card"><div class="table-wrap"><table class="t sl-stack sl-bills"><thead><tr><th>Bill</th><th class="r">Amount</th><th>How often</th><th class="r">A month</th><th>Paid from</th><th>Last paid</th><th>Next</th></tr></thead>
+        <tbody>${subs.length ? groups : '<tr><td colspan="8" class="empty sl-name">No bills yet.</td></tr>'}</tbody></table></div>
+        <p class="card-foot">Monthly figures in S$ at each bill’s own rate. Each book’s bills are their own total; no line adds the books.</p></section>`;
 }
 ACT.bill = async el => {
     const [r, services] = await Promise.all([refs(), servicesList()]);
     const s = el.dataset.id ? ACT.__subs.get(Number(el.dataset.id)) : null;
+    const missed = s ? billMissed(s) : null;
     const sel = (id, opts, v) => `<select id="${id}">${opts.map(([k, l]) => `<option value="${esc(k)}"${String(k) === String(v ?? '') ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
-    openSheet(s ? esc(s.service_name || 'Bill') : 'Add a bill', `<div class="fields">
+    const paid = s && (s.tx_last_paid || s.last_paid);
+    const missedNote = missed ? `<div class="notice warn sl-missed">${icon('hourglass')}<div class="grow"><b>No payment seen for ${esc(day(missed.due))}.</b>
+        <div class="small">${paid ? `Last paid ${esc(money(toMinor(s.tx_amount ?? s.amount, s.currency || 'SGD'), s.currency || 'SGD'))} on ${esc(day(paid))}${s.account_name ? ` from ${esc(s.account_name)}` : ''}.` : 'No payment seen yet.'}</div>
+        <div class="row sl-missed-acts"><button type="button" class="btn sm" data-act="bill-stopped" data-id="${s.id}">It has stopped</button>
+            <button type="button" class="btn sm" data-act="bill-find" data-id="${s.id}">Find the payment</button>
+            <button type="button" class="link" data-act="bill-queue" data-id="${s.id}">Open it in the queue</button></div></div></div>` : '';
+    openSheet(s ? esc(s.service_name || 'Bill') : 'Add a bill', `${missedNote}<div class="fields">
         <label class="field"><span>Merchant</span>${sel('bl-svc', [['', 'Choose'], ...services.map(x => [x.id, x.name])], s?.service_id)}</label>
         <div class="fields two"><label class="field"><span>Amount</span><input type="text" inputmode="decimal" id="bl-amount" value="${s ? esc(s.amount) : ''}"></label>
             <label class="field"><span>Currency</span>${sel('bl-cur', ['SGD', 'USD', 'INR', 'EUR', 'GBP', 'AUD'].map(c => [c, c]), s?.currency || 'SGD')}</label></div>
         <div class="fields two"><label class="field"><span>How often</span>${sel('bl-freq', [['monthly', 'monthly'], ['quarterly', 'quarterly'], ['yearly', 'yearly']], s?.frequency || 'monthly')}</label>
             <label class="field"><span>Every how many</span><input type="number" min="1" id="bl-periods" value="${s ? s.periods : 1}"></label></div>
         <label class="field"><span>Paid from</span>${sel('bl-acct', [['', '—'], ...r.accounts.filter(a => ['bank', 'card'].includes(a.type)).map(a => [a.id, a.name])], s?.account_id)}</label>
-        <div class="fields two"><label class="field"><span>Renews on</span><input type="date" id="bl-renew" value="${esc(s?.renewal_date || '')}"></label>
-            <label class="field"><span>State</span>${sel('bl-status', [['active', 'active'], ['paused', 'paused'], ['deactivated', 'stopped']], s?.status || 'active')}</label></div>
+        <div class="fields two"><label class="field"><span>Counts from</span><input type="date" id="bl-renew" value="${esc(s?.renewal_date || '')}"></label>
+            ${s && s.status === 'active' && s.computed_renewal ? `<div class="field"><span class="sp-label">Next renewal</span><div class="sl-readonly num">${esc(day(s.computed_renewal))}</div></div>` : ''}</div>
+        <label class="field"><span>State</span>${sel('bl-status', [['active', 'active'], ['paused', 'paused'], ['deactivated', 'stopped']], s?.status || 'active')}</label>
         <label class="field"><span>Matches rows containing</span><input type="text" id="bl-pattern" value="${esc(s?.match_pattern || '')}"></label>
         <label class="field"><span>Where to manage it</span><input type="url" id="bl-link" value="${esc(s?.link || '')}"></label>
-        <label class="field"><span>Note</span><input type="text" id="bl-notes" value="${esc(s?.notes || '')}"></label></div>
-        <div class="row"><button class="btn primary" data-act="bill-save" data-id="${s ? s.id : ''}">Save</button>${s ? `<button class="btn danger" data-act="bill-delete" data-id="${s.id}">Delete</button>` : ''}</div>`);
+        <label class="field"><span>Note</span><input type="text" id="bl-notes" value="${esc(s?.notes || '')}"></label></div>`,
+    { eyebrow: s ? 'Bill' : 'Bills', foot: `${s ? `<button class="btn danger" data-act="bill-delete" data-id="${s.id}">${icon('trash')}Delete</button>` : ''}<button class="btn primary" data-act="bill-save" data-id="${s ? s.id : ''}">Save</button>` });
+};
+ACT['bill-stopped'] = async el => {
+    const r = await act('PUT', `/api/subscriptions/${el.dataset.id}`, { status: 'deactivated' }, 'Bill marked stopped');
+    if (r) { closeSheet(); rerender(); }
+};
+ACT['bill-find'] = el => {
+    const s = ACT.__subs.get(Number(el.dataset.id));
+    const missed = billMissed(s);
+    const sp = spendState();
+    Object.assign(sp, { book: s.book || 'all', view: 'flat', span: 'month', search: s.match_pattern || s.service_name || '', types: [], account: '', oneOffs: true });
+    store.set('spending', S.spending);
+    if (missed) { S.month = missed.due.slice(0, 7) > currentMonth() ? currentMonth() : missed.due.slice(0, 7); store.set('month', S.month); }
+    closeSheet();
+    location.hash = '#/books/spending';
+};
+// That bill's own queue item: the queue opened in full, the item brought into view.
+ACT['bill-queue'] = el => {
+    const s = ACT.__subs.get(Number(el.dataset.id));
+    const title = `${s.service_name || s.match_pattern}: no payment seen`;
+    queueOpen.out = 9999;
+    afterNextRender = () => {
+        const item = $$('#view article.item.bill').find(a => ($('.what', a)?.textContent || '').trim().startsWith(title));
+        if (item) { item.setAttribute('tabindex', '-1'); item.scrollIntoView({ block: 'center' }); item.focus({ preventScroll: true }); }
+    };
+    closeSheet();
+    location.hash = '#/queue';
 };
 // Each bill's last payment from the rows that match it, and its renewal moved
 // on past a payment seen.
@@ -2382,52 +2611,92 @@ ACT['bill-delete'] = async el => {
 
 // ---------------------------------------------------------------------------
 // Lists: types, merchants (clean-up), rules (edit), accounts (add, a figure)
+// On a phone every list is stacked rows: never a sideways table.
 // ---------------------------------------------------------------------------
 
+const MATCH_WORDS = { contains: 'contains', startswith: 'starts with', exact: 'exactly' };
+/** Words written for the code, said plainly on the page. */
+function plainWords(s) {
+    return String(s || '').replace(/\s*\(ticket \d+\)/gi, '').replace(/the operator has not placed/gi, 'you have not placed yet').replace(/the operator/gi, 'you');
+}
 const listState = { search: '', filter: 'all' };
 async function viewLists(tab) {
-    const tabs = [['merchants', 'Merchants'], ['rules', 'Rules'], ['accounts', 'Accounts'], ['rates', 'Rates'], ['types', 'Types']];
-    const head = `${booksNav('lists')}<div class="page-head"><div><h1>Lists</h1><p>What the rules and labels are made of. Every change here lands in Changes, with Undo.</p></div></div>
-        <div class="chips" style="margin-bottom:16px">${tabs.map(([k, l]) => `<a class="chip" href="#/books/lists/${k}" aria-pressed="${k === tab}">${l}</a>`).join('')}</div>`;
-    const search = placeholder => `<label class="field" style="max-width:360px"><span class="sr-only">Search</span><input type="search" id="ls-search" value="${esc(listState.search)}" placeholder="${placeholder}"></label>`;
+    const tabs = [['merchants', 'Merchants', 'coins'], ['rules', 'Rules', 'sliders-horizontal'], ['accounts', 'Accounts', 'bank'], ['rates', 'Rates', 'arrows-left-right'], ['types', 'Types', 'list-bullets']];
+    const head = `${booksNav('lists')}<div class="page-head"><div><span class="eyebrow">Books</span><h1>Lists</h1><p>What the rules and labels are made of. Every change here lands in Changes, with Undo.</p></div></div>
+        <nav class="seg sl-tabs" aria-label="Lists">${tabs.map(([k, l, ic]) => `<a href="#/books/lists/${k}"${k === tab ? ' aria-current="page"' : ''}>${icon(ic)}${l}</a>`).join('')}</nav>`;
+    const search = placeholder => `<label class="field sl-search"><span class="sr-only">Search</span><input type="search" id="ls-search" value="${esc(listState.search)}" placeholder="${placeholder}"></label>`;
     const r = await refs();
     const needle = listState.search.toLowerCase();
 
     if (tab === 'types') {
-        const block = kind => r.types.filter(t => t.kind === kind).map(t => `<tr><td><b>${esc(t.display_name || t.name)}</b></td><td class="small">${esc(t.covers)}</td>
-            <td class="small muted">${esc(t.not_for || '')}</td><td class="small">${esc(t.proposed_book || 'any book')}${t.default_one_off ? ' · one-off' : ''}</td></tr>`).join('');
-        return `${head}<section class="card"><div class="card-head"><h2>Types</h2><p>One list serves every book. The list is declared in fin’s code.</p></div>
-            <div class="table-wrap"><table class="t"><thead><tr><th>Type</th><th>Covers</th><th>Not for</th><th>Book</th></tr></thead><tbody>${block('spending')}</tbody></table></div></section>
-            <section class="card"><div class="card-head"><h2>Income kinds</h2></div><div class="table-wrap"><table class="t"><tbody>${block('income')}</tbody></table></div></section>`;
+        const income = await get('/api/types?kind=income').catch(() => []);
+        const row = t => `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b></td><td class="small">${esc(plainWords(t.covers))}</td>
+            <td class="small muted">${esc(plainWords(t.not_for || ''))}</td><td class="small">${t.kind === 'income' ? '' : `${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}</td>
+            <td class="sl-sub">${esc(plainWords(t.covers))}${t.kind === 'income' ? '' : ` · ${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}${t.not_for ? `<div>Not for: ${esc(plainWords(t.not_for))}</div>` : ''}</td></tr>`;
+        return `${head}<section class="card"><div class="section-header"><div><h2>Types</h2><p>One list serves every book. To add or rename a type, ask Claude in chat.</p></div></div>
+            <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Type</th><th>Covers</th><th>Not for</th><th>Usual book</th></tr></thead><tbody>${r.types.filter(t => t.kind === 'spending').map(row).join('')}</tbody></table></div>
+            ${income.length ? `<h3 class="sl-subhead">Income kinds</h3><div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Kind</th><th>Covers</th><th>Not for</th><th></th></tr></thead><tbody>${income.map(row).join('')}</tbody></table></div>`
+                : '<p class="card-foot">Income kinds: none set up yet.</p>'}</section>`;
     }
     if (tab === 'rates') {
         const saved = await get('/api/rates');
         const foreign = [...new Set(r.accounts.filter(a => a.currency && a.currency !== 'SGD').map(a => a.currency))];
-        const rows = saved.slice(0, 200).map(x => `<tr><td class="num">${esc(day(x.date))}</td><td>${esc(x.pair)}</td><td class="r num">${esc(x.rate)}</td><td class="small muted">${esc(x.source || '')}</td>
-            <td class="r"><button class="btn sm" data-act="rate" data-currency="${esc(String(x.pair).split('/')[0])}" data-date="${esc(x.date)}">Change</button></td></tr>`).join('');
-        return `${head}<section class="card"><div class="card-head"><div><h2>Rates</h2><p>S$ for one unit, by day. A balance in another currency joins the S$ totals at the rate for its day, or the latest saved before it.</p></div>
+        const rows = saved.slice(0, 200).map(x => `<tr><td class="num sl-name">${esc(day(x.date))}</td><td>${esc(x.pair)}</td><td class="r num sl-fig">${esc(x.rate)}</td><td class="small muted">${esc(x.source || '')}</td>
+            <td class="sl-sub">${esc(x.pair)}${x.source ? ' · ' + esc(x.source) : ''}</td>
+            <td class="r sl-end"><button class="btn sm" data-act="rate" data-currency="${esc(String(x.pair).split('/')[0])}" data-date="${esc(x.date)}">Change</button></td></tr>`).join('');
+        return `${head}<section class="card"><div class="section-header"><div><h2>Rates</h2><p>S$ for one unit, by day. A balance in another currency joins the S$ totals at the rate for its day, or the latest saved before it.</p></div>
             <div class="row">${(foreign.length ? foreign : ['INR']).map(c => `<button class="btn primary" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay())}">Fetch or enter a ${esc(c)} rate</button>`).join('')}</div></div>
-            <div class="table-wrap"><table class="t"><thead><tr><th>Day</th><th>Pair</th><th class="r">Rate</th><th>Where from</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No rate saved yet.</td></tr>'}</tbody></table></div>
-            ${saved.length > 200 ? `<p class="small muted">The newest 200 of ${saved.length}.</p>` : ''}</section>`;
+            <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Day</th><th>Pair</th><th class="r">Rate</th><th>Where from</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rate saved yet.</td></tr>'}</tbody></table></div>
+            ${saved.length > 200 ? `<p class="card-foot">The newest 200 of ${saved.length}.</p>` : ''}</section>`;
     }
     if (tab === 'accounts') {
-        const rows = r.accounts.map(a => `<tr><td><a href="#/books/account/${a.id}"><b>${esc(a.name)}</b></a></td><td>${esc(a.type)}</td><td>${esc(a.owner)}</td><td>${esc(a.currency)}</td>
-            <td class="small">${a.anchor ? `${a.anchor.source === 'supplied' ? 'your figure' : 'statement'} ${esc(day(a.anchor.date))}: <span class="num">${esc(money(a.anchor.amount_minor, a.currency))}</span>` : tag('nofig', 'no figure')}</td>
-            <td class="r">${a.takes_a_figure ? `<button class="btn sm" data-act="figure" data-account="${a.id}">Enter a figure</button> ` : ''}<button class="btn sm" data-act="account-edit" data-id="${a.id}">Edit</button></td></tr>`).join('');
-        return `${head}<section class="card"><div class="card-head"><h2>Accounts</h2><button class="btn primary" data-act="account-edit" data-id="">Add an account</button></div>
-            <div class="table-wrap"><table class="t"><thead><tr><th>Account</th><th>Kind</th><th>Whose</th><th>Currency</th><th>Latest balance held</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+        const sheet = await sheetFor(currentMonth()).catch(() => null);
+        const lineOf = new Map();
+        (sheet?.sections || []).forEach(s => s.lines.forEach(l => { if (!l.counted_in) lineOf.set(l.account_id, l); }));
+        const restsCell = a => {
+            const line = lineOf.get(a.id);
+            const enter = a.takes_a_figure ? `<button type="button" class="link sl-enter" data-act="figure" data-account="${a.id}">Enter a figure</button>` : '';
+            if (!a.anchor) {
+                return a.takes_a_figure ? tag('nofig', 'no figure: enter one', { act: 'figure', data: { account: a.id }, title: 'Enter a figure' })
+                    : tag('nofig', 'no statement yet: import one', { href: '#/books/import', title: 'Import a statement' });
+            }
+            const date = day(a.anchor.date);
+            if (a.anchor.source === 'supplied') {
+                const age = daysBetween(a.anchor.date, todayIso());
+                const stale = age > STALE_DAYS;
+                return `your figure ${esc(date)}, <span class="${stale ? 'sl-old' : ''}">${plural(age, 'day')} old</span> ${stale ? tag('stale', 'stale: enter a newer one', { act: 'figure', data: { account: a.id }, title: 'Enter a newer figure' }) : enter}`;
+            }
+            const check = line && line.check && line.rests_on?.source !== 'supplied' ? checkMarker(line) : '';
+            return `statement ${esc(date)} ${check} ${enter}`;
+        };
+        const rows = r.accounts.map(a => `<tr><td class="sl-name"><a href="#/books/account/${a.id}"><b>${esc(a.name)}</b></a>${accountMark(a.id)}</td><td>${esc(a.type)}</td><td>${esc(a.owner)}</td><td>${esc(a.currency)}</td>
+            <td class="small sl-rests">${restsCell(a)}</td>
+            <td class="r num sl-fig">${a.anchor ? `<span class="${a.anchor.amount_minor < 0 ? 'neg' : ''}">${esc(money(a.anchor.amount_minor, a.currency))}</span>` : ''}</td>
+            <td class="sl-sub">${esc(a.type)} · ${restsCell(a)}</td>
+            <td class="r sl-end"><button class="btn sm" data-act="account-edit" data-id="${a.id}">Edit</button></td></tr>`).join('');
+        return `${head}<section class="card"><div class="section-header"><h2>Accounts</h2><button class="btn primary" data-act="account-edit" data-id="">${icon('plus')}Add an account</button></div>
+            <div class="table-wrap"><table class="t sl-stack sl-accounts"><thead><tr><th>Account</th><th>Kind</th><th>Whose</th><th>Currency</th><th>What its balance rests on</th><th class="r">Latest balance held</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+            <p class="card-foot">Stale and missing figures say so, and open their fix. Owed balances are negative.</p></section>`;
     }
     if (tab === 'rules') {
         const rules = await get('/api/rules');
         const shown = rules.filter(x => !needle || `${x.pattern} ${x.service_name}`.toLowerCase().includes(needle));
         ACT.__rules = new Map(rules.map(x => [x.id, x]));
-        const rows = shown.slice(0, 200).map(x => `<tr class="clickable" data-act="rule" data-id="${x.id}"><td class="num"><b>${esc(x.pattern)}</b></td><td class="small">${esc(x.match_type)}</td>
-            <td>${esc(x.service_name || '')}</td><td class="small">${esc(x.book_override || x.book || '')}${x.type_override_id || x.type_name ? ' · ' + esc(x.type_override_id ? r.typeById.get(x.type_override_id)?.name : x.type_name) : ''}${x.book_override || x.type_override_id ? ' ' + tag('yours', 'overrides') : ''}</td>
-            <td class="small num">${x.min_amount !== null || x.max_amount !== null ? `${x.min_amount ?? '…'} to ${x.max_amount ?? '…'}` : ''}</td></tr>`).join('');
-        return `${head}<section class="card"><div class="card-head">${search('Search patterns or merchants')}
-            <div class="row"><button class="btn" data-act="rerun-rules">Re-run every rule</button><button class="btn primary" data-act="rule" data-id="">Add a rule</button></div></div>
-            <p class="small muted">${shown.length} of ${rules.length} rules${shown.length > 200 ? ' · the first 200 shown' : ''}. A rule gives a row its merchant, and with it a book and type.</p>
-            <div class="table-wrap"><table class="t"><thead><tr><th>Pattern</th><th>Match</th><th>Merchant</th><th>Sets</th><th>Amount range</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+        const sets = x => {
+            const book = esc(x.book_override || x.book || '');
+            const type = x.type_override_id || x.type_name ? esc(x.type_override_id ? r.typeById.get(x.type_override_id)?.display_name || r.typeById.get(x.type_override_id)?.name : x.display_type || x.type_name) : '';
+            const range = x.min_amount !== null || x.max_amount !== null
+                ? `only ${x.min_amount !== null ? esc(money(toMinor(x.min_amount), 'SGD')) : 'any amount'} to ${x.max_amount !== null ? esc(money(toMinor(x.max_amount), 'SGD')) : 'any amount'}` : '';
+            return [book, type, range].filter(Boolean).join(' · ') + (x.book_override || x.type_override_id ? ' ' + tag('yours', 'overrides') : '');
+        };
+        const rows = shown.slice(0, 200).map(x => `<tr class="clickable" data-act="rule" data-id="${x.id}"><td class="sl-name"><b class="mono-ish">${esc(x.pattern)}</b></td><td class="small">${esc(MATCH_WORDS[x.match_type] || x.match_type)}</td>
+            <td>${esc(x.service_name || '')}</td><td class="small">${sets(x)}</td>
+            <td class="r num sl-fig">${x.rows_labelled ?? ''}<span class="sl-phone-word"> ${x.rows_labelled === 1 ? 'row' : 'rows'}</span></td>
+            <td class="sl-sub">${esc(MATCH_WORDS[x.match_type] || x.match_type)} · gives ${esc(x.service_name || '')}${sets(x) ? ' · ' + sets(x) : ''}</td></tr>`).join('');
+        return `${head}<section class="card"><div class="section-header">${search('Search patterns or merchants')}
+            <div class="row"><button class="btn" data-act="rerun-rules">${icon('arrows-clockwise')}Re-run every rule</button><button class="btn primary" data-act="rule" data-id="">${icon('plus')}Add a rule</button></div></div>
+            <p class="card-foot sl-lead">${shown.length} of ${rules.length} rules${shown.length > 200 ? ' · the first 200 shown' : ''}. A rule gives a row its merchant, and with it a book and type.</p>
+            <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Pattern</th><th>Match</th><th>Merchant</th><th>Sets</th><th class="r">Rows it labelled</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rule matches.</td></tr>'}</tbody></table></div></section>`;
     }
     // merchants
     const services = await servicesList();
@@ -2436,21 +2705,24 @@ async function viewLists(tab) {
     ACT.__services = new Map(services.map(s => [s.id, s]));
     const renaming = listState.renaming;
     const nameCell = s => renaming
-        ? `<td><input type="text" class="rename-input" data-rename="${s.id}" data-orig="${esc(s.name)}" value="${esc(listState.renames[s.id] ?? s.name)}" aria-label="New name for ${esc(s.name)}"></td>`
-        : `<td><b>${esc(s.name)}</b></td>`;
+        ? `<td class="sl-name sl-wide"><input type="text" class="rename-input" data-rename="${s.id}" data-orig="${esc(s.name)}" value="${esc(listState.renames[s.id] ?? s.name)}" aria-label="New name for ${esc(s.name)}"></td>`
+        : `<td class="sl-name"><b>${esc(s.name)}</b></td>`;
+    const typeCell = s => s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type', { act: 'merchant', data: { id: s.id }, title: 'Give it a type' });
+    const marks = s => `${s.review_each_time ? tag('notchecked', 'mixed') : ''} ${s.exclude_from_expense_views ? tag('yours', 'hidden') : ''} ${s.is_one_off ? tag('yours', 'one-off') : ''}`.trim();
     const rows = shown.slice(0, 200).map(s => `<tr${renaming ? '' : ` class="clickable" data-act="merchant" data-id="${s.id}"`}>${nameCell(s)}<td>${esc(s.book || '')}</td>
-        <td>${s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type')}</td><td class="r num">${s.txn_count}</td><td class="r num">${s.rule_count}</td>
-        <td>${s.review_each_time ? tag('notchecked', 'mixed') : ''} ${s.exclude_from_expense_views ? tag('yours', 'hidden') : ''} ${s.is_one_off ? tag('yours', 'one-off') : ''}</td></tr>`).join('');
+        <td>${typeCell(s)}</td><td class="r num${renaming ? '' : ' sl-fig'}">${s.txn_count}<span class="sl-phone-word"> ${s.txn_count === 1 ? 'row' : 'rows'}</span></td><td class="r num">${s.rule_count}</td>
+        <td>${marks(s)}</td>
+        ${renaming ? '' : `<td class="sl-sub">${esc(s.book || 'no book')} · ${typeCell(s)} · ${plural(s.rule_count, 'rule')} ${marks(s)}</td>`}</tr>`).join('');
     const chip = (k, l, n) => `<button class="chip" data-act="list-filter" data-f="${k}" aria-pressed="${listState.filter === k}">${l} <span class="n">${n}</span></button>`;
     const pending = Object.keys(listState.renames).length;
-    return `${head}<section class="card"><div class="card-head">${search('Search merchants')}
+    return `${head}<section class="card"><div class="section-header">${search('Search merchants')}
             <div class="row">${renaming
                 ? `<button class="btn" data-act="rename-mode" data-on="0">Stop renaming</button><button class="btn primary" data-act="rename-save" id="rename-save"${pending ? '' : ' disabled'}>${pending ? `Save ${plural(pending, 'rename')}` : 'Save renames'}</button>`
-                : '<button class="btn" data-act="rename-mode" data-on="1">Rename several</button>'}</div></div>
-        ${renaming ? '<p class="small muted">Type the new names, then save them together: one change in Changes, with Undo. Rules and rows keep pointing at the same merchant.</p>' : ''}
-        <div class="chips" style="margin-bottom:12px">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('mixed', 'Mixed', services.filter(filters.mixed).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
-        <div class="table-wrap"><table class="t"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty">None.</td></tr>'}</tbody></table></div>
-        ${shown.length > 200 ? `<p class="small muted">The first 200 of ${shown.length}; search to narrow.</p>` : ''}</section>`;
+                : `<button class="btn" data-act="rename-mode" data-on="1">${icon('pencil-simple')}Rename several</button><button class="btn primary" data-act="merchant-add">${icon('plus')}Add a merchant</button>`}</div></div>
+        ${renaming ? '<p class="card-foot sl-lead">Type the new names, then save them together: one change in Changes, with Undo. Rules and rows keep pointing at the same merchant.</p>' : ''}
+        <div class="chips sl-chips">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('mixed', 'Mixed', services.filter(filters.mixed).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
+        <div class="table-wrap"><table class="t sl-stack${renaming ? ' sl-renaming' : ''}"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty sl-name">None.</td></tr>'}</tbody></table></div>
+        ${shown.length > 200 ? `<p class="card-foot">The first 200 of ${shown.length}; search to narrow.</p>` : ''}</section>`;
 }
 ACT['list-filter'] = el => { listState.filter = el.dataset.f; rerender(); };
 listState.renaming = false;
@@ -2476,26 +2748,44 @@ ACT['rename-save'] = async () => {
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'ls-search') { listState.search = e.target.value.trim(); rerender(); } });
 document.addEventListener('search', e => { if (e.target.id === 'ls-search') { listState.search = e.target.value.trim(); rerender(); } }, true);
 
+function merchantFields(r, s) {
+    return `<label class="field"><span>Name</span><input type="text" id="mc-name" value="${esc(s?.name || '')}"></label>
+        <div class="fields two"><label class="field"><span>Book</span><select id="mc-book">${bookOptions(r.books, s?.book, s ? '—' : 'As the type says')}</select></label>
+            <label class="field"><span>Type</span><select id="mc-type">${typeOptions(r.types, s?.type_id, { blank: 'No type' })}</select></label></div>
+        <label class="field"><span>Note</span><textarea id="mc-notes" rows="2" placeholder="Anything worth remembering about it">${esc(s?.notes || '')}</textarea></label>
+        <label class="check"><input type="checkbox" id="mc-mixed"${s?.review_each_time ? ' checked' : ''}> Mixed merchant: look at its rows each time</label>
+        <label class="check"><input type="checkbox" id="mc-hidden"${s?.exclude_from_expense_views ? ' checked' : ''}> Hide from spending lists (never from a sum)</label>`;
+}
+ACT['merchant-add'] = async () => {
+    const r = await refs();
+    openSheet('Add a merchant', `<div class="fields">${merchantFields(r, null)}</div>
+        <p class="small muted">A merchant takes rows through its rules: add a rule for it next, from Rules.</p>`,
+    { eyebrow: 'Merchants', foot: '<button class="btn primary" data-act="merchant-create">Add the merchant</button>' });
+};
+ACT['merchant-create'] = async () => {
+    const name = $('#mc-name').value.trim();
+    if (!name) { toast('Give it a name', { bad: true }); return; }
+    const body = { name, book: $('#mc-book').value || null, type_id: $('#mc-type').value ? Number($('#mc-type').value) : null, notes: $('#mc-notes').value.trim() || null,
+        review_each_time: $('#mc-mixed').checked ? 1 : 0, exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0 };
+    const r = await act('POST', '/api/services', body, 'Merchant added');
+    if (r) { closeSheet(); rerender(); }
+};
 ACT.merchant = async el => {
     const r = await refs();
     const s = ACT.__services.get(Number(el.dataset.id));
     const others = [...ACT.__services.values()].filter(x => x.id !== s.id);
-    openSheet(esc(s.name), `<div class="fields">
-        <label class="field"><span>Name</span><input type="text" id="mc-name" value="${esc(s.name)}"></label>
-        <div class="fields two"><label class="field"><span>Book</span><select id="mc-book">${bookOptions(r.books, s.book, '—')}</select></label>
-            <label class="field"><span>Type</span><select id="mc-type">${typeOptions(r.types, s.type_id, { blank: 'No type' })}</select></label></div>
-        <label class="check"><input type="checkbox" id="mc-mixed"${s.review_each_time ? ' checked' : ''}> Mixed merchant: look at its rows each time</label>
-        <label class="check"><input type="checkbox" id="mc-hidden"${s.exclude_from_expense_views ? ' checked' : ''}> Hide from spending lists (never from a sum)</label>
+    openSheet(esc(s.name), `<div class="fields">${merchantFields(r, s)}
         <label class="check"><input type="checkbox" id="mc-oneoff"${s.is_one_off ? ' checked' : ''}> One-off</label>
         <p class="small muted">${plural(s.txn_count, 'row')} · ${plural(s.rule_count, 'rule')}${(s.rules || []).length ? ': ' + s.rules.map(x => esc(x.pattern)).join(', ') : ''}. A change of book or type is written to the rows that take their label from it.</p></div>
         <button class="btn primary block" data-act="merchant-save" data-id="${s.id}">Save</button>
         <hr class="rule"><h3>Clean up</h3>
-        <div class="fields two"><label class="field"><span>Merge into</span><select id="mc-target"><option value="">Choose a merchant</option>${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>
-            <button class="btn" style="align-self:end" data-act="merchant-merge" data-id="${s.id}">Merge</button></div>
-        <button class="btn danger" data-act="merchant-delete" data-id="${s.id}">Delete this merchant</button>`);
+        <div class="sl-merge"><label class="field"><span>Merge into</span><select id="mc-target"><option value="">Choose a merchant</option>${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>
+            <button class="btn" data-act="merchant-merge" data-id="${s.id}">Merge</button></div>
+        <button class="btn danger" data-act="merchant-delete" data-id="${s.id}">${icon('trash')}Delete this merchant</button>`, { eyebrow: 'Merchant' });
 };
 ACT['merchant-save'] = async el => {
     const body = { name: $('#mc-name').value.trim(), book: $('#mc-book').value || null, type_id: $('#mc-type').value ? Number($('#mc-type').value) : null,
+        notes: $('#mc-notes').value.trim() || null,
         review_each_time: $('#mc-mixed').checked ? 1 : 0, exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0, is_one_off: $('#mc-oneoff').checked ? 1 : 0 };
     const r = await act('PUT', `/api/services/${el.dataset.id}`, body, 'Merchant saved');
     if (r) { closeSheet(); rerender(); }
@@ -2515,16 +2805,17 @@ ACT['merchant-delete'] = async el => {
 ACT.rule = async el => {
     const [r, services] = await Promise.all([refs(), servicesList()]);
     const x = el.dataset.id ? ACT.__rules.get(Number(el.dataset.id)) : null;
-    openSheet(x ? `Rule: ${esc(x.pattern)}` : 'Add a rule', `<div class="fields">
+    openSheet(x ? esc(x.pattern) : 'Add a rule', `<div class="fields">
         <div class="fields two"><label class="field"><span>Pattern</span><input type="text" id="rl-pattern" value="${esc(x?.pattern || '')}"></label>
-            <label class="field"><span>Match</span><select id="rl-match">${['contains', 'startswith', 'exact'].map(m => `<option value="${m}"${(x?.match_type || 'contains') === m ? ' selected' : ''}>${m === 'startswith' ? 'starts with' : m}</option>`).join('')}</select></label></div>
+            <label class="field"><span>Match</span><select id="rl-match">${['contains', 'startswith', 'exact'].map(m => `<option value="${m}"${(x?.match_type || 'contains') === m ? ' selected' : ''}>${MATCH_WORDS[m]}</option>`).join('')}</select></label></div>
         <label class="field"><span>Merchant</span><select id="rl-svc"><option value="">Choose</option>${services.map(s => `<option value="${s.id}"${s.id === x?.service_id ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
         <div class="fields two"><label class="field"><span>Book, in place of the merchant’s</span><select id="rl-book">${bookOptions(r.books, x?.book_override, 'The merchant’s')}</select></label>
             <label class="field"><span>Type, in place of the merchant’s</span><select id="rl-type">${typeOptions(r.types, x?.type_override_id, { blank: 'The merchant’s' })}</select></label></div>
-        <div class="fields two"><label class="field"><span>Only from (amount)</span><input type="text" inputmode="decimal" id="rl-min" value="${x?.min_amount ?? ''}"></label>
-            <label class="field"><span>Only up to (amount)</span><input type="text" inputmode="decimal" id="rl-max" value="${x?.max_amount ?? ''}"></label></div></div>
-        <div class="row"><button class="btn primary" data-act="rule-save" data-id="${x ? x.id : ''}">Save</button>${x ? `<button class="btn danger" data-act="rule-delete" data-id="${x.id}">Delete</button>` : ''}</div>
-        <p class="small muted">Rows already labelled by hand keep their labels. Re-run every rule to apply a change to the rows the rules labelled.</p>`);
+        <div class="fields two"><label class="field"><span>Only from (S$)</span><input type="text" inputmode="decimal" id="rl-min" value="${x?.min_amount ?? ''}"></label>
+            <label class="field"><span>Only up to (S$)</span><input type="text" inputmode="decimal" id="rl-max" value="${x?.max_amount ?? ''}"></label></div></div>
+        ${x ? `<p class="small muted">It labels ${plural(x.rows_labelled ?? 0, 'row')} now.</p>` : ''}
+        <p class="small muted">Rows already labelled by hand keep their labels. Re-run every rule to apply a change to the rows the rules labelled.</p>`,
+    { eyebrow: x ? 'Rule' : 'Rules', foot: `${x ? `<button class="btn danger" data-act="rule-delete" data-id="${x.id}">${icon('trash')}Delete</button>` : ''}<button class="btn primary" data-act="rule-save" data-id="${x ? x.id : ''}">Save</button>` });
 };
 ACT['rule-save'] = async el => {
     const v = id => $('#' + id).value.trim();
@@ -2548,16 +2839,22 @@ ACT['rerun-rules'] = async () => {
 ACT['account-edit'] = async el => {
     const r = await refs();
     const a = el.dataset.id ? r.accountById.get(Number(el.dataset.id)) : null;
-    const opt = (list, v) => list.map(x => `<option value="${esc(x.name)}"${x.name === v ? ' selected' : ''}>${esc(x.name)} · ${esc(x.description)}</option>`).join('');
+    // P8.4: the choice shows the short word; what it means sits under it.
+    const opt = (list, v) => list.map(x => `<option value="${esc(x.name)}"${x.name === v ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
+    const meaning = (list, v) => esc(list.find(x => x.name === v)?.description || '');
     openSheet(a ? esc(a.name) : 'Add an account', `<div class="fields">
         <label class="field"><span>Name</span><input type="text" id="ac-name" value="${esc(a?.name || '')}"></label>
-        ${a ? '' : `<label class="field"><span>Kind</span><select id="ac-kind">${opt(r.kinds.kinds, 'bank')}</select></label>
-        <label class="field"><span>Whose</span><select id="ac-owner">${opt(r.kinds.owners, 'Household')}</select></label>
+        ${a ? '' : `<label class="field"><span>Kind</span><select id="ac-kind" data-meaning="ac-kind-hint">${opt(r.kinds.kinds, 'bank')}</select><span class="hint" id="ac-kind-hint">${meaning(r.kinds.kinds, 'bank')}</span></label>
+        <label class="field"><span>Whose</span><select id="ac-owner" data-meaning="ac-owner-hint">${opt(r.kinds.owners, 'Household')}</select><span class="hint" id="ac-owner-hint">${meaning(r.kinds.owners, 'Household')}</span></label>
         <label class="field"><span>Currency</span><select id="ac-cur">${['SGD', 'INR', 'USD'].map(c => `<option>${c}</option>`).join('')}</select></label>`}
         <label class="field"><span>Last four digits</span><input type="text" inputmode="numeric" maxlength="4" id="ac-last4" value="${esc(a?.last_four || '')}"></label>
         ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}</div>
-        <button class="btn primary block" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>
-        ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`);
+        ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`,
+    { eyebrow: a ? 'Account' : 'Accounts', foot: `<button class="btn primary" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>` });
+    $$('#sheets [data-meaning]').forEach(sel => sel.addEventListener('change', () => {
+        const list = sel.id === 'ac-kind' ? r.kinds.kinds : r.kinds.owners;
+        $('#' + sel.dataset.meaning).textContent = list.find(x => x.name === sel.value)?.description || '';
+    }));
 };
 ACT['account-save'] = async el => {
     const name = $('#ac-name').value.trim();

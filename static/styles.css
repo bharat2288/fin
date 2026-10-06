@@ -1202,7 +1202,129 @@ table.t.coverage th.target { color: var(--accent-ink); }
 /* == PLACE: spending-lists == */
 /* ========================================================================== */
 
+/* --- Spending: folio's filter bar. Labelled groups; the finer filters fold behind "Filters" on a phone --- */
+.sp-filterbar { display: grid; gap: 14px; }
+.sp-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 20px; }
+.sp-group, .sp-types { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sp-label { font-size: 12px; font-weight: var(--font-medium); color: var(--text-tertiary); }
+.sp-period-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sp-month select { width: auto; min-width: 170px; }
+.sp-more { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 20px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+.sp-fields { display: grid; grid-template-columns: minmax(200px, 1.2fr) minmax(220px, 1.6fr) minmax(180px, 1fr) auto; gap: 12px 16px; align-items: end; flex: 1 1 auto; min-width: 0; }
+.sp-types .chips { gap: 6px; }
+.sp-types .chip svg { width: 11px; height: 11px; opacity: 0.8; }
+.sp-add select { width: auto; min-width: 150px; }
+.sp-checks { display: flex; flex-direction: column; gap: 0; }
+.sp-checks .check { min-height: 30px; font-size: 13px; }
+.sp-clear { font-size: 13px; margin-left: auto; }
+.sp-fold-row { display: none; }
+.sp-fold-row .chip svg, .sp-fold-row .btn svg { width: 12px; height: 12px; }
+.sp-fold-row .btn .count { margin-left: 2px; }
+.sp-sheet .sp-fields { grid-template-columns: minmax(0, 1fr); }
+.sp-sheet .sp-checks .check { min-height: var(--tap); }
+.sp-sheet .sp-add select { width: 100%; }
+
+/* an empty month says why (P1.3); an empty book is one line (P1.4) */
+.sl-empty-month { align-items: center !important; margin-top: 16px; background: var(--bg-surface); }
+.sl-empty-month > svg { color: var(--accent-ink); margin-top: 0; }
+.sl-empty-month .grow, .sl-missed .grow { flex: 1 1 auto; min-width: 0; }
+.sl-empty-month + .card { margin-top: 16px; }
+.sl-folded { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; border-style: dashed; border-color: var(--border-emphasis); box-shadow: none;
+    background: var(--hatch), var(--bg-surface); }
+.sl-folded p { flex: 1 1 260px; color: var(--text-secondary); font-size: 13px; }
+
+/* the book tiles: money out is the figure, refunds beside it (P1.2) */
+.sl-tile-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; min-height: 22px; }
+.sl-tile-head .outside-tag { font-size: 10px; padding: 1px 8px 1px 8px; }
+.sl-back-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 6px; }
+.sl-back-line .delta-chip { font-size: 12px; }
+.sl-short { display: flex; gap: 6px; align-items: flex-start; color: var(--semantic-warning); margin-top: 4px; }
+.sl-short svg { margin-top: 2px; }
+.sl-chart { margin-top: 4px; }
+.sl-chart-note { margin: 8px 0 12px; }
+.sl-chart-note .link { font-size: inherit; }
+.sl-back { color: var(--semantic-success); font-weight: var(--font-semibold); }
+.sl-refund { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px 1px 6px; border-radius: 999px; vertical-align: middle;
+    background: color-mix(in srgb, var(--semantic-success) 12%, var(--bg-surface)); color: var(--semantic-success); font-size: 11.5px; font-weight: var(--font-bold); }
+.sl-refund svg { width: 12px; height: 12px; }
+table.t td.sl-back { color: var(--semantic-success); }
+
+/* --- Bills: grouped by book, each its own monthly line; missed first (P5) --- */
+table.t tr.sl-book td { padding-top: 12px; padding-bottom: 10px; font-size: 11px; color: var(--text-primary); background: var(--bg-raised); }
+table.t tr.sl-book td.r { text-align: right; }
+table.t tr.sl-sub-head td { padding-top: 10px; font-size: 10px; color: var(--text-tertiary); background: color-mix(in srgb, var(--bg-raised) 30%, var(--bg-surface)); }
+.sl-state { margin-top: 4px; }
+tr.sl-inactive td { color: var(--text-tertiary); }
+.sl-missed { margin-bottom: 4px; }
+.sl-missed b { color: var(--semantic-warning); }
+.sl-missed-acts { margin-top: 10px; }
+.sl-readonly { min-height: 38px; display: flex; align-items: center; padding: 8px 12px; border: 1px dashed var(--border-default); border-radius: var(--radius-md);
+    color: var(--text-secondary); font-size: 13.5px; }
+
+/* --- Lists: folio's segmented tabs, the search with its glass, scope chips --- */
+.sl-tabs { margin: 0 0 16px; }
+.sl-search { flex: 1 1 260px; max-width: 380px; }
+.sl-lead { margin: 0 0 12px; }
+.sl-chips { margin-bottom: 12px; }
+.sl-subhead { margin: 20px 0 10px; }
+.sl-rests .tag { margin-left: 4px; }
+.sl-enter { font-size: 12.5px; margin-left: 6px; }
+.sl-old { color: var(--semantic-warning); font-weight: var(--font-semibold); }
+.sl-merge { display: flex; gap: 8px; align-items: flex-end; }
+.sl-merge .field { flex: 1 1 auto; }
+.mono-ish { letter-spacing: 0.01em; }
 .rename-input { min-width: 180px; width: 100%; }
+
+/* a list's phone line lives in its own cell, hidden on the desk */
+table.sl-stack td.sl-sub { display: none; }
+.sl-phone-word { display: none; }
+
+@media (max-width: 1100px) {
+    .sp-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+    /* P2.1: the period, book and view stay; the rest folds behind Filters, active ones shown as chips */
+    .sp-filterbar { gap: 10px; }
+    .sp-row { gap: 10px; }
+    .sp-group, .sp-period { width: 100%; }
+    .sp-period-row { flex-wrap: nowrap; }
+    .sp-month { flex: 1 1 auto; min-width: 0; }
+    .sp-month select { min-width: 0; width: 100%; }
+    .sp-period-row .seg { flex: 0 0 auto; display: inline-flex; }
+    .sp-more { display: none; }
+    .sp-fold-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .sp-label { font-size: 11px; }
+    .sl-tile-head .outside-tag { display: none; }
+    .sl-folded .link { min-height: var(--tap); }
+
+    /* P5.1, P10.1: every list is stacked rows on a phone, never a sideways table */
+    .table-wrap:has(table.sl-stack) { overflow-x: visible; }
+    table.sl-stack thead { display: none; }
+    table.sl-stack, table.sl-stack tbody { display: block; }
+    table.sl-stack tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 2px; align-items: center;
+        padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); min-height: var(--tap); }
+    table.sl-stack tbody tr:last-child { border-bottom: 0; }
+    table.sl-stack td { display: none; padding: 0; border: 0; }
+    table.sl-stack td.sl-name { display: block; grid-column: 1; grid-row: 1; min-width: 0; overflow-wrap: anywhere; }
+    table.sl-stack td.sl-fig { display: block; grid-column: 2; grid-row: 1; text-align: right; white-space: nowrap; font-weight: var(--font-semibold); color: var(--text-primary); }
+    table.sl-stack td.sl-sub { display: block; grid-column: 1 / -1; font-size: 12.5px; color: var(--text-tertiary); overflow-wrap: anywhere; }
+    table.sl-stack tr:has(> td.sl-end) td.sl-sub { grid-column: 1; }
+    table.sl-stack td.sl-end { display: block; grid-column: 2; grid-row: 2; justify-self: end; }
+    table.sl-stack td.sl-wide { grid-column: 1 / -1; }
+    table.sl-stack td.empty { grid-column: 1 / -1; text-align: center; }
+    table.sl-stack tr.section { grid-template-columns: auto minmax(0, 1fr); padding: 10px 12px 8px; background: var(--bg-raised); }
+    table.sl-stack tr.sl-sub-head { background: color-mix(in srgb, var(--bg-raised) 30%, var(--bg-surface)); }
+    table.sl-stack tr.section td { background: none; padding: 0; }
+    table.sl-stack tr.section td.sl-fig { font-size: 10px; font-weight: var(--font-bold); white-space: normal; }
+    table.sl-stack .sl-state { display: none; }
+    table.sl-stack td.sl-name .small { display: none; }
+    table.sl-stack td.sl-name a { min-height: 0; }
+    .sl-phone-word { display: inline; font-weight: var(--font-regular); color: var(--text-tertiary); font-size: 12px; }
+    table.sl-stack td.sl-sub .tag { margin-left: 2px; white-space: normal; text-align: left; }
+    .sl-search { max-width: none; }
+    .sl-merge { flex-direction: column; align-items: stretch; }
+    table.sl-rows td.r:has(.sl-refund) { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+}
 
 /* ========================================================================== */
 /* == PLACE: changes == */

@@ -38,7 +38,7 @@ import review
 import screens
 import suggest
 import tie
-from db import get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
+from db import first_rule, get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
 
 
 @contextmanager
@@ -3425,6 +3425,7 @@ def api_rules():
              LEFT JOIN types tp ON ty.parent_id = tp.id
             ORDER BY COALESCE(tp.name, ty.name), ty.name, mr.priority DESC, mr.pattern
         """).fetchall()
+        labelled = _rows_labelled_by_rule(conn)
     return jsonify([{
         "id": r["id"],
         "pattern": r["pattern"],
@@ -3442,7 +3443,24 @@ def api_rules():
         "type_name": r["type_name"],
         "parent_type": r["parent_type"],
         "display_type": format_type_display(r["parent_type"], r["type_name"]),
+        "rows_labelled": labelled.get(r["id"], 0),
     } for r in rows])
+
+
+def _rows_labelled_by_rule(conn) -> dict[int, int]:
+    """How many rows each rule labels now: every row whose label came from
+    the rules (not by hand), counted against the rule that wins for it, as
+    a re-run would find it. Transfers and card payments are not counted."""
+    counts: dict[int, int] = {}
+    for tx in conn.execute(
+        "SELECT description, amount_minor FROM transactions "
+        "WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment') "
+        "AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')"
+    ):
+        rule = first_rule(tx["description"] or "", conn, tx["amount_minor"])
+        if rule is not None:
+            counts[rule["id"]] = counts.get(rule["id"], 0) + 1
+    return counts
 
 
 @app.route("/api/rules", methods=["POST"])
