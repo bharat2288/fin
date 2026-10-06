@@ -2936,7 +2936,7 @@ function coverageHTML(c) {
     const label = m => monthName(m, { short: true }).replace(/ (\d{2})(\d{2})$/, ' ’$2');
     const old = i => i < c.months.length - 3 ? ' cov-old' : '';
     const head = c.months.map((m, i) => `<th class="${m === target ? 'target' : ''}${old(i)}">${esc(label(m))}</th>`).join('');
-    const rows = c.accounts.map(a => `<tr><td><a href="#/books/account/${a.id}">${esc(a.short_name)}</a> <span class="small muted">${a.type === 'bank' ? 'bank' : 'card'}</span></td>${c.months.map((m, i) => {
+    const rows = c.accounts.map(a => `<tr><td><a href="#/books/account/${a.id}">${esc(window.__accountById?.get(a.id)?.name || a.short_name)}</a> <span class="small muted">${a.type === 'bank' ? 'bank' : 'card'}</span></td>${c.months.map((m, i) => {
         const cell = c.matrix[a.id]?.[m];
         const cls = `${m === target ? ' target' : ''}${old(i)}`;
         if (cell && cell.imported) return `<td class="cov-ok${cls}" title="statement held${cell.date ? ', imported ' + esc(day(cell.date)) : ''}">${icon('check-circle')}<span class="sr-only">held</span></td>`;
