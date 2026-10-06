@@ -349,6 +349,19 @@ def test_an_accounts_tie_lines_draw_each_statement_as_a_sum(book, conn):
     assert book.get("/api/accounts/9999/ties").status_code == 404
 
 
+def test_a_tie_line_keeps_money_in_and_out_apart_and_names_its_rows(book, conn):
+    bring_in(book, BANK, [("2026-09-05", "SAMPLE SHOP", 5000), ("2026-09-09", "SAMPLE REFUND", -1500)],
+             opening=70050, closing=66550, closing_date="2026-09-30")
+    account = conn.execute("SELECT id FROM accounts WHERE name = ?", (BANK,)).fetchone()[0]
+    newest = book.get(f"/api/accounts/{account}/ties").get_json()["ties"][0]
+    assert (newest["in_minor"], newest["out_minor"]) == (1500, 5000)
+    assert newest["opening_minor"] + newest["in_minor"] - newest["out_minor"] == newest["closing_minor"]
+    held = {r[0] for r in conn.execute(
+        "SELECT t.id FROM transactions t JOIN statements s ON t.statement_id = s.id "
+        "WHERE s.account_id = ? AND t.date LIKE '2026-09-%'", (account,))}
+    assert set(newest["row_ids"]) == held and len(held) == 2
+
+
 # --- the queue's mixed-merchant rows ---------------------------------------------
 
 
@@ -394,3 +407,18 @@ def test_look_mixed_never_lists_a_row_the_queue_lists_elsewhere(book, conn):
     untyped = {r["id"] for r in book.get("/api/transactions?types=__untyped__").get_json()["transactions"]}
     review = {r["id"] for r in book.get("/api/transactions?flow=review").get_json()["transactions"]}
     assert rows[0]["id"] in untyped and rows[1]["id"] in review
+
+
+def test_between_two_of_your_figures_the_tie_line_shows_what_the_rows_moved(client, conn):
+    make_account(client, "Sample Cash Account", "bank")
+    account = conn.execute("SELECT id FROM accounts WHERE name = 'Sample Cash Account'").fetchone()[0]
+    assert client.post("/api/anchors", json={"account_id": account, "amount": "1000.00", "date": "2026-08-01"}).status_code == 200
+    resp = client.post("/api/anchors", json={"account_id": account, "amount": "900.00", "date": "2026-08-31"})
+    assert resp.status_code == 200, resp.get_json()
+    bring_in(client, "Sample Cash Account", [("2026-08-05", "SAMPLE SHOP", 20000), ("2026-08-09", "SAMPLE REFUND", -5000)])
+    later, first = client.get(f"/api/accounts/{account}/ties").get_json()["ties"]
+    assert first["status"] == later["status"] == "your figure"
+    assert (later["opening_minor"], later["in_minor"], later["out_minor"]) == (100000, 5000, 20000)
+    # 1,000.00 + 50.00 - 200.00 = 850.00 from the rows; the figure says 900.00.
+    assert later["moved_minor"] == 5000
+    assert len(later["row_ids"]) == 2 and first["row_ids"] == []

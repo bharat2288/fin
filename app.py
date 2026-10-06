@@ -294,8 +294,9 @@ def _label_for(conn, description: str, amount_minor: int) -> dict:
 
 def _tie_line(conn, stmt, figures: dict) -> dict:
     """The tie line of a parsed statement as the import preview shows it:
-    opening, what the rows add up to, closing and the difference, each in
-    whole minor units and as text, and whether it ties."""
+    opening, what the rows add up to (and money in and out apart), closing
+    and the difference, each in whole minor units and as text, and whether
+    it ties."""
     account = stmt.accounts[0] if stmt.accounts else "Unknown"
     try:
         currency = _account_currency(conn, account, stmt.currency)
@@ -313,7 +314,42 @@ def _tie_line(conn, stmt, figures: dict) -> dict:
         "rows_sum": anchors.format_amount(figures["rows_minor"], currency),
         "closing": anchors.format_amount(figures["closing_minor"], currency),
         "difference": anchors.format_amount(abs(figures["difference_minor"]), currency),
+        # The rows kept apart, each a positive amount: money in and money out.
+        "in_minor": -sum(t.amount_minor for t in stmt.transactions if t.amount_minor < 0),
+        "out_minor": sum(t.amount_minor for t in stmt.transactions if t.amount_minor > 0),
     }
+
+
+def _statement_results(conn, statement_lines: dict, errors: list, groups: list) -> list:
+    """Each statement of an upload and what it came to: a statement that ties,
+    one refused for being off, and an account's rows from a source that
+    states no balance (not checked). Kept on the import (Past imports)."""
+    from ingest import find_account
+
+    def account_id(name: str):
+        try:
+            return find_account(conn, name)
+        except Exception:
+            return None
+
+    out = []
+    for name, lines in statement_lines.items():
+        for line in lines:
+            out.append({"account": mask_card_number(name), "account_id": account_id(name),
+                        "date": line.get("closing_date"), "status": line["status"],
+                        "difference_minor": line.get("difference_minor"), "currency": line.get("currency")})
+    for e in errors:
+        line = e.get("tie")
+        if line:
+            out.append({"account": line["account"], "account_id": account_id(line["account"]),
+                        "date": line.get("closing_date"), "status": "off",
+                        "difference_minor": line.get("difference_minor"), "currency": line.get("currency")})
+    for g in groups:
+        if g["tie"] != "ties" and g["total"]:
+            out.append({"account": g["account"], "account_id": account_id(g["account"]),
+                        "date": None, "status": "not_checked", "difference_minor": None,
+                        "currency": g.get("currency")})
+    return out
 
 
 def _record_refused(conn, stmt, line: dict) -> None:
@@ -2695,13 +2731,17 @@ def api_import_upload():
 
     # Save preview to batch_imports and fetch services list in one connection
     with get_db() as conn:
+        # What each statement in the files came to, kept with the import so
+        # Past imports can say it: ties, off by (refused) or not checked.
+        results = _statement_results(conn, statement_lines, errors, groups)
         conn.execute(
-            "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines) VALUES (?, ?, 'preview', ?, ?)",
+            "INSERT INTO batch_imports (filenames, accounts, status, total_lines, categorized_lines, result_json) VALUES (?, ?, 'preview', ?, ?, ?)",
             (
                 json.dumps(filenames),
                 json.dumps(list(all_groups.keys())),
                 total,
                 typed,
+                json.dumps({"statements": results}),
             ),
         )
         conn.commit()
@@ -3132,6 +3172,16 @@ def api_import_confirm():
                 "anchors_written": anchors_written,
                 "rows_refiled": rows_refiled,
             }
+            # The statements' results the upload kept stay with the import.
+            held = conn.execute(
+                "SELECT result_json FROM batch_imports WHERE id = ?", (import_id,)
+            ).fetchone()
+            try:
+                kept = json.loads(held["result_json"]) if held and held["result_json"] else {}
+            except ValueError:
+                kept = {}
+            if isinstance(kept, dict) and "statements" in kept:
+                result_summary["statements"] = kept["statements"]
             conn.execute(
                 "UPDATE batch_imports SET status = 'committed', result_json = ? WHERE id = ?",
                 (json.dumps(result_summary), import_id),
@@ -3175,25 +3225,46 @@ def api_import_confirm():
 @app.route("/api/import/history")
 def api_import_history():
     """List past imports."""
+    from ingest import find_account
     with get_db() as conn:
         rows = conn.execute(
             "SELECT * FROM batch_imports ORDER BY created_at DESC"
         ).fetchall()
+        found = {}
 
-    result = []
+        def account_of(entry: dict):
+            # An account the import itself created was not there at upload.
+            if entry.get("account_id") is None and entry.get("account"):
+                if entry["account"] not in found:
+                    found[entry["account"]] = find_account(conn, entry["account"])
+                return {**entry, "account_id": found[entry["account"]]}
+            return entry
+
+        results = {}
+        for r in rows:
+            kept = json.loads(r["result_json"]) if r["result_json"] else None
+            if isinstance(kept, dict) and isinstance(kept.get("statements"), list):
+                kept = {**kept, "statements": [account_of(e) for e in kept["statements"]]}
+            results[r["id"]] = kept
+
+    shown = []
     for r in rows:
         accounts_raw = json.loads(r["accounts"]) if r["accounts"] else []
-        result.append({
+        result = results[r["id"]]
+        shown.append({
             "id": r["id"],
             "filenames": json.loads(r["filenames"]) if r["filenames"] else [],
             "accounts": [mask_card_number(a) for a in accounts_raw],
             "status": r["status"],
             "total_lines": r["total_lines"],
             "categorized_lines": r["categorized_lines"],
-            "result": json.loads(r["result_json"]) if r["result_json"] else None,
+            "result": result,
+            # Each statement's result (ties, off, not_checked), or None for
+            # an import made before fin kept them.
+            "statements": result.get("statements") if isinstance(result, dict) else None,
             "created_at": r["created_at"],
         })
-    return jsonify(result)
+    return jsonify(shown)
 
 
 # ---------------------------------------------------------------------------
