@@ -383,7 +383,7 @@ def _get_rules(conn: sqlite3.Connection) -> list[dict]:
     global _rules_cache
     if _rules_cache is None:
         rows = conn.execute(
-            "SELECT mr.pattern, mr.match_type, "
+            "SELECT mr.id, mr.pattern, mr.match_type, "
             "       mr.priority, mr.min_amount_minor, mr.max_amount_minor, "
             "       mr.service_id, mr.book_override, mr.type_override_id, "
             "       s.book, s.type_id, s.review_each_time "
@@ -434,46 +434,52 @@ def match_merchant(
     value is empty when no rule matches. Book and type are the merchant's
     defaults unless the rule overrides them.
     """
-    desc_upper = description.upper()
-    rules = _get_rules(conn)
+    rule = first_rule(description, conn, amount_minor)
+    if rule is None:
+        return dict(NO_MATCH)
+    book, type_id, cat_source = rule_label(rule)
+    return {
+        "book": book,
+        "type_id": type_id,
+        "service_id": rule["service_id"],
+        "cat_source": cat_source,
+        "review_each_time": bool(rule["review_each_time"]),
+    }
 
-    for rule in rules:
+
+def first_rule(
+    description: str,
+    conn: sqlite3.Connection,
+    amount_minor: int | None = None,
+) -> dict | None:
+    """The rule that labels a description, the first in match order
+    (priority, then the longest pattern), or None when no rule knows it.
+    Its "id" is the merchant_rules row."""
+    desc_upper = description.upper()
+    for rule in _get_rules(conn):
         pattern = rule["pattern"].upper()
         match_type = rule["match_type"]
-
-        # Check pattern match
-        matched = False
-        if match_type == "exact" and desc_upper == pattern:
-            matched = True
-        elif match_type == "startswith" and desc_upper.startswith(pattern):
-            matched = True
-        elif match_type == "contains" and pattern in desc_upper:
-            matched = True
-
+        if match_type == "exact":
+            matched = desc_upper == pattern
+        elif match_type == "startswith":
+            matched = desc_upper.startswith(pattern)
+        elif match_type == "contains":
+            matched = pattern in desc_upper
+        else:
+            matched = False
         if not matched:
             continue
-
-        # Check amount conditions (if set on the rule)
+        # Amount conditions (if set on the rule); with no amount given, an
+        # amount-conditional rule never matches.
         if amount_minor is not None:
             if rule["min_amount_minor"] is not None and amount_minor < rule["min_amount_minor"]:
                 continue
             if rule["max_amount_minor"] is not None and amount_minor > rule["max_amount_minor"]:
                 continue
-        else:
-            # No amount provided — skip amount-conditional rules
-            if rule["min_amount_minor"] is not None or rule["max_amount_minor"] is not None:
-                continue
-
-        book, type_id, cat_source = rule_label(rule)
-        return {
-            "book": book,
-            "type_id": type_id,
-            "service_id": rule["service_id"],
-            "cat_source": cat_source,
-            "review_each_time": bool(rule["review_each_time"]),
-        }
-
-    return dict(NO_MATCH)
+        elif rule["min_amount_minor"] is not None or rule["max_amount_minor"] is not None:
+            continue
+        return rule
+    return None
 
 
 if __name__ == "__main__":
