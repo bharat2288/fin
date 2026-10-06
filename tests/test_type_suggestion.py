@@ -320,7 +320,7 @@ def test_prepare_writes_only_merchant_strings_that_pass_the_gate_and_sends_nothi
     expected = ["HARBOUR KITE SHOP", "LANTERN NOODLE HOUSE", "MOSSY BOOKS"]
     body = resp.get_json()
     assert (body["count"], body["merchants"]) == (3, expected)
-    assert Path(body["file"]) == strings_file()
+    assert "file" not in body  # the path is never returned
     lines = [
         line for line in strings_file().read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.startswith("#")
@@ -1166,3 +1166,49 @@ def test_g8_the_thresholds_are_read_from_one_place(client, conn, statement, key,
     dialog = page[start:page.index("async function startTypeSuggestions")]
     assert "suggestion.route === 'prefill'" in dialog and "suggestion.route === 'top3'" in dialog
     assert not re.search(r"probability\s*[<>]=?|[<>]=?\s*0?\.\d", dialog)
+
+
+# ---------------------------------------------------------------------------
+# The list read in the app (the hosted fin, where the file cannot be opened)
+# ---------------------------------------------------------------------------
+
+def test_send_with_ticks_sends_only_the_ticked_names_fin_prepared(
+    client, conn, statement, key, model
+):
+    for name in ("HARBOUR KITE SHOP", "LANTERN NOODLE HOUSE", "MOSSY BOOKS"):
+        row(conn, statement, name)
+    model.answer("LANTERN NOODLE HOUSE", "Dining", 0.95)
+    model.answer("MOSSY BOOKS", "Shopping", 0.95)
+    assert client.post("/api/suggestions/prepare").status_code == 200
+
+    resp = client.post("/api/suggestions/send", json={
+        "merchants": ["LANTERN NOODLE HOUSE", "MOSSY BOOKS", "SAMPLE PERSON"],
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    asked = sorted(body["state"]["merchant"] for body in model.requests)
+    # The unticked name is not sent, and a ticked name fin never prepared is
+    # not sent either.
+    assert asked == ["LANTERN NOODLE HOUSE", "MOSSY BOOKS"]
+
+
+def test_send_with_nothing_ticked_sends_nothing(client, conn, statement, key, model):
+    row(conn, statement, "LANTERN NOODLE HOUSE")
+    assert client.post("/api/suggestions/prepare").status_code == 200
+
+    resp = client.post("/api/suggestions/send", json={"merchants": []})
+
+    assert resp.status_code == 200
+    assert model.requests == []
+
+
+def test_send_refuses_ticks_that_are_not_a_list_of_names(
+    client, conn, statement, key, model
+):
+    row(conn, statement, "LANTERN NOODLE HOUSE")
+    assert client.post("/api/suggestions/prepare").status_code == 200
+
+    for body in ({"merchants": "LANTERN NOODLE HOUSE"}, {"merchants": [1]}, ["x"]):
+        resp = client.post("/api/suggestions/send", json=body)
+        assert resp.status_code == 400
+    assert model.requests == []

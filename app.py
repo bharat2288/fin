@@ -2163,13 +2163,20 @@ def api_suggestions_prepare():
     path = _suggestion_strings_path()
     if merchants:
         path.write_text(suggest.FILE_HEADER + "\n".join(merchants) + "\n", encoding="utf-8")
-    return jsonify({"count": len(merchants), "merchants": merchants, "file": str(path)})
+    # The list itself is the operator's to read, in the app or in the file;
+    # the file's path is not returned (hosted, it would name the volume).
+    return jsonify({"count": len(merchants), "merchants": merchants})
 
 
 @app.route("/api/suggestions/send", methods=["POST"])
 def api_suggestions_send():
     """Step two: one request per line the operator left in the file, each
-    answer stored in full. The first failed call stops the batch."""
+    answer stored in full. The first failed call stops the batch.
+
+    An optional JSON body `{"merchants": [...]}` is the operator's ticks in
+    the app's list (the hosted fin, where the file cannot be opened): only
+    names both still in the file and ticked are sent. A name fin did not
+    prepare is never sent, whatever is ticked."""
     api_key = suggest.key()
     if api_key is None:
         return _suggestions_off()
@@ -2187,6 +2194,12 @@ def api_suggestions_send():
         line.strip() for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.startswith("#")
     }
+    data = request.get_json(silent=True)
+    if data is not None:
+        ticked = data.get("merchants") if isinstance(data, dict) else None
+        if not isinstance(ticked, list) or not all(isinstance(m, str) for m in ticked):
+            return jsonify({"error": "merchants must be a list of names"}), 400
+        left_in_file &= {m.strip() for m in ticked}
 
     sent = 0
     stopped = None

@@ -1502,18 +1502,31 @@ async function startTypeSuggestions() {
             showToast('No new merchant names to ask about.', 'info');
             return;
         }
+        // The list is read and struck here, in the app: untick any name that
+        // is a person's or that should not be sent. Only ticked names go.
+        const items = prepared.merchants.map((m, i) =>
+            `<label class="suggest-pick"><input type="checkbox" class="suggest-pick-box" ` +
+            `data-index="${i}" checked> ${escapeHtml(m)}</label>`
+        ).join('');
         const send = await showConfirmDialog(
             'Read the list before anything is sent',
-            `<strong>${prepared.count}</strong> merchant names were written to<br>` +
-            `<code>${escapeHtml(prepared.file)}</code><br><br>` +
-            `Nothing has been sent. Open the file, delete any line that is a person's name ` +
-            `or that you do not want sent, and save it. Each remaining line is then sent on ` +
-            `its own, with the type list and nothing else.`,
-            { okLabel: 'I have read it: send', cancelLabel: 'Not now' }
+            `Nothing has been sent. Each ticked name below is sent on its own, with the ` +
+            `type list and nothing else. Untick any that is a person's name or that you ` +
+            `do not want sent.<div class="suggest-pick-list">${items}</div>`,
+            { okLabel: 'Send the ticked names', cancelLabel: 'Not now' }
         );
         if (!send) return;
+        const ticked = [...document.querySelectorAll('.suggest-pick-box')]
+            .filter(box => box.checked)
+            .map(box => prepared.merchants[Number(box.dataset.index)]);
+        if (!ticked.length) {
+            showToast('Nothing ticked, so nothing was sent.', 'info');
+            return;
+        }
 
-        const result = await apiFetch('/api/suggestions/send', { method: 'POST' });
+        const result = await apiFetch('/api/suggestions/send', {
+            method: 'POST', body: { merchants: ticked },
+        });
         if (!result) return;
         const parts = [`${result.sent} merchant names answered`];
         if (result.stopped) parts.push(`Stopped: ${result.stopped}. ${result.remaining} not sent`);
