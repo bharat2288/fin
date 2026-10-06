@@ -3803,6 +3803,89 @@ def api_review_label(tx_id: int):
     })
 
 
+# How many of the latest labels a transfer's guess looks back over, how many
+# must agree before fin offers one, and what share of them.
+REVIEW_GUESS_LOOK_BACK = 10
+REVIEW_GUESS_AT_LEAST = 2
+REVIEW_GUESS_SHARE = 0.6
+
+
+def _label_as_choice(row) -> tuple | None:
+    """A row labelled by hand, read back as the review choice that would
+    label it the same way: (choice, the label's body). None when no choice
+    writes what the row holds."""
+    flow_name, kind, type_name = row["flow_type"], row["other_kind"], row["type_name"]
+    if flow_name == "expense":
+        if type_name == review.GIFT_GIVEN_TYPE:
+            return "gift", {}
+        if row["type_id"] is None:
+            return None
+        return "spending", {"type_id": row["type_id"], **({"book": row["book"]} if row["book"] else {})}
+    if flow_name == "income":
+        if type_name == review.GIFT_RECEIVED_KIND:
+            return "gift", {}
+        return ("income", {"income_kind_id": row["type_id"]}) if row["type_id"] is not None else None
+    if row["other_side_id"] is None:
+        return None
+    for choice in review.CHOICES:
+        if choice.flow == flow_name and choice.asks in (review.ASKS_ACCOUNT, review.ASKS_PERSON) and kind in choice.kinds:
+            return choice.name, {"account_id": row["other_side_id"]}
+    return None
+
+
+@app.route("/api/review/<int:tx_id>/suggestion")
+def api_review_suggestion(tx_id: int):
+    """fin's guess for a waiting transfer: how the latest rows with the same
+    text, going the same way, were labelled by hand. Offered only when at
+    least REVIEW_GUESS_AT_LEAST of them agree and they are at least
+    REVIEW_GUESS_SHARE of those looked at. Read-only; it asks nobody.
+
+    Returns guess: null, or {choice, body (what /label takes), type, book,
+    other_side, agree, of, probability}."""
+    with get_db() as conn:
+        tx = conn.execute(
+            "SELECT id, description, amount_minor FROM transactions WHERE id = ?", (tx_id,)
+        ).fetchone()
+        if tx is None:
+            return jsonify({"error": "no such row"}), 404
+        rows = conn.execute(
+            "SELECT t.flow_type, t.other_side_id, t.type_id, t.book, a.type AS other_kind, "
+            "a.name AS other_name, ty.name AS type_name, p.name AS parent_name "
+            "FROM transactions t LEFT JOIN accounts a ON a.id = t.other_side_id "
+            "LEFT JOIN types ty ON ty.id = t.type_id LEFT JOIN types p ON p.id = ty.parent_id "
+            "WHERE t.id != ? AND t.flow_type_manual = 1 AND t.flow_type != ? "
+            "AND UPPER(TRIM(t.description)) = UPPER(TRIM(?)) AND (t.amount_minor < 0) = (? < 0) "
+            "ORDER BY t.date DESC, t.id DESC LIMIT ?",
+            (tx_id, flow.REVIEW, tx["description"], tx["amount_minor"], REVIEW_GUESS_LOOK_BACK),
+        ).fetchall()
+    tally: dict = {}
+    for r in rows:
+        read = _label_as_choice(r)
+        if read is None:
+            continue
+        key = (read[0], json.dumps(read[1], sort_keys=True))
+        if key not in tally:
+            tally[key] = {"count": 0, "row": r, "choice": read[0], "body": read[1]}
+        tally[key]["count"] += 1
+    if not rows or not tally:
+        return jsonify({"guess": None})
+    top = max(tally.values(), key=lambda t: t["count"])
+    share = top["count"] / len(rows)
+    if top["count"] < REVIEW_GUESS_AT_LEAST or share < REVIEW_GUESS_SHARE:
+        return jsonify({"guess": None})
+    r = top["row"]
+    return jsonify({"guess": {
+        "choice": top["choice"],
+        "body": {"choice": top["choice"], **top["body"]},
+        "type": format_type_display(r["parent_name"], r["type_name"]) if r["type_name"] else None,
+        "book": r["book"],
+        "other_side": mask_card_number(r["other_name"]) if r["other_name"] else None,
+        "agree": top["count"],
+        "of": len(rows),
+        "probability": round(share, 2),
+    }})
+
+
 @app.route("/api/pair-matching", methods=["POST"])
 def api_pair_matching():
     """Pair the moves between household accounts, on demand: the same match
