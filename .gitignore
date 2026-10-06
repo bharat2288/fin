@@ -75,8 +75,12 @@ specs/
 # Financial records — invoices, contracts, receipts (bank details; never push)
 business/
 
-# Backups the conversion runner writes beside the database (financial data)
+# Backups the conversion runner writes beside the database (financial data),
+# and the -wal/-shm SQLite leaves beside a copy (fin.db.pre-import-….bak-shm)
 *.bak
+*.bak*
+*.db*
+*.sqlite*
 
 # The nightly backup's status, written beside the book
 backup-status.json
