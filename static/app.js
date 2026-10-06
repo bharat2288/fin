@@ -2641,8 +2641,8 @@ async function viewLists(tab) {
     if (tab === 'rates') {
         const saved = await get('/api/rates');
         const foreign = [...new Set(r.accounts.filter(a => a.currency && a.currency !== 'SGD').map(a => a.currency))];
-        const rows = saved.slice(0, 200).map(x => `<tr><td class="num sl-name">${esc(day(x.date))}</td><td>${esc(x.pair)}</td><td class="r num sl-fig">${esc(x.rate)}</td><td class="small muted">${esc(x.source || '')}</td>
-            <td class="sl-sub">${esc(x.pair)}${x.source ? ' · ' + esc(x.source) : ''}</td>
+        const rows = saved.slice(0, 200).map(x => `<tr><td class="num sl-name">${esc(day(x.date))}</td><td>${esc(x.pair)}</td><td class="r num sl-fig">${esc(x.rate)}</td><td class="small muted">${esc(plainWords(x.source))}</td>
+            <td class="sl-sub">${esc(x.pair)}${x.source ? ' · ' + esc(plainWords(x.source)) : ''}</td>
             <td class="r sl-end"><button class="btn sm" data-act="rate" data-currency="${esc(String(x.pair).split('/')[0])}" data-date="${esc(x.date)}">Change</button></td></tr>`).join('');
         return `${head}<section class="card"><div class="section-header"><div><h2>Rates</h2><p>S$ for one unit, by day. A balance in another currency joins the S$ totals at the rate for its day, or the latest saved before it.</p></div>
             <div class="row">${(foreign.length ? foreign : ['INR']).map(c => `<button class="btn primary" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay())}">Fetch or enter a ${esc(c)} rate</button>`).join('')}</div></div>
