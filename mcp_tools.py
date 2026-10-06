@@ -14,6 +14,10 @@ Rulings this module carries:
   than MANY_ROWS rows runs only when the call says how many it expects:
   without that, or with a different count, it is put back and the count is
   returned, for Claude to tell the operator and ask.
+- The "Claude may write" switch (chat_writes.py; 01's Off switches): with it
+  off, every write tool refuses with a fixed message before anything runs,
+  and reads still work. turn_off_writes turns it off, and works when it is
+  already off; no tool turns it on: only the operator, in fin's app.
 - No tool imports a statement, changes or deletes an imported row, edits an
   account other than adding a company or a person, sends merchants to the
   type-suggestion service, runs a conversion or touches subscriptions.
@@ -31,6 +35,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import access_gate
+import chat_writes
 import db
 import history
 
@@ -368,7 +373,23 @@ _WRITES = [
     ),
 ]
 
-TOOLS = _READS + _WRITES
+# --- the off switch (01's Off switches): off only, never on ------------------
+
+_SWITCHES = [
+    Tool(
+        "turn_off_writes",
+        "Turn off Claude's writes to fin: every write tool then refuses, and reads still work. "
+        "Use it when the operator asks, or when something looks wrong. Only the operator can "
+        "turn writes back on, in fin's app; no tool does.",
+        _schema(),
+        True,
+        lambda a: ("PUT", "/api/chat-writes", {"enabled": False}),
+    ),
+]
+
+TOOLS = _READS + _WRITES + _SWITCHES
+# The tools the switch stops: every write but the switch itself.
+_STOPPED_WHEN_OFF = frozenset(t.name for t in _WRITES)
 BY_NAME = {t.name: t for t in TOOLS}
 
 
@@ -439,6 +460,10 @@ def call(name: str, args: dict | None, actor: str) -> dict:
     tool = BY_NAME.get(name)
     if tool is None:
         return {"ok": False, "error": f"no tool named {name!r}"}
+    # The operator's switch, read on every call: off (or unreadable) refuses
+    # every write before anything runs.
+    if name in _STOPPED_WHEN_OFF and not chat_writes.enabled():
+        return {"ok": False, "error": chat_writes.WRITES_OFF}
     try:
         args = _checked(tool, args or {})
         expected = args.pop("expected_count", None)

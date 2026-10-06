@@ -25,6 +25,7 @@ import backup
 import balance_sheet
 import book_type
 import card_balance
+import chat_writes
 import db
 import flow
 import history
@@ -591,6 +592,45 @@ def api_history_undo(entry_id: int):
 
 
 _RULE_CACHE_TABLES = frozenset({"merchant_rules", "services"})
+
+
+# ---------------------------------------------------------------------------
+# The "Claude may write" switch (chat_writes.py)
+# ---------------------------------------------------------------------------
+
+CHAT_WRITES_NOT_BOOLEAN = "enabled must be true or false"
+CHAT_WRITES_ON_ONLY_IN_APP = "Claude's writes can be turned back on only in fin's app."
+CHAT_WRITES_NOT_SAVED = "The switch could not be saved; it is unchanged."
+
+
+@app.route("/api/chat-writes", methods=["GET"])
+def api_chat_writes():
+    """Whether Claude may write: {enabled, changed_at, changed_by}, and
+    unreadable: true when the switch's file could not be read (then off)."""
+    return jsonify(chat_writes.read())
+
+
+@app.route("/api/chat-writes", methods=["PUT"])
+def api_chat_writes_set():
+    """Turn Claude's writes on or off: {"enabled": true|false}, a JSON
+    boolean. A chat client (or the upload credential, which writes as one)
+    may turn them off, never on (fin-surfaces 01, Off switches); the gate
+    keeps chat logins off app routes, and this route refuses it as well."""
+    data = request.get_json(silent=True)
+    on = data.get("enabled") if isinstance(data, dict) else None
+    if not isinstance(on, bool):
+        return jsonify({"error": CHAT_WRITES_NOT_BOOLEAN}), 400
+    # Read raw, not through _caller (which reads anything unknown as the
+    # app): only a request the front door stamped as the app turns it on.
+    if on and request.environ.get(access_gate.VIA_ENVIRON_KEY, history.VIA_APP) != history.VIA_APP:
+        return jsonify({"error": CHAT_WRITES_ON_ONLY_IN_APP}), 403
+    _via, actor = _caller()
+    try:
+        state = chat_writes.write(on, actor)
+    except OSError:
+        app.logger.warning("the chat-writes switch could not be saved")
+        return jsonify({"error": CHAT_WRITES_NOT_SAVED}), 500
+    return jsonify(state)
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
     "fin.db-journal",
     "fin.db.pre-movements-20261005.bak",
     "fin.db.pre-flows-20261005-2.bak",
+    "chat-writes.json",
 ])
 def test_a_database_and_what_it_leaves_beside_it_are_ignored(name):
     if subprocess.run(["git", "-C", str(ROOT), "rev-parse"], capture_output=True).returncode:

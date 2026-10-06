@@ -433,6 +433,52 @@ function initTabs() {
             document.getElementById('masters-menu').classList.remove('open');
         });
     });
+
+    initChatWritesSwitch();
+}
+
+// ============================================================
+// "CLAUDE MAY WRITE" SWITCH (fin-surfaces 01, Off switches)
+// ============================================================
+// The chat can turn it off, never on; here the operator turns it either
+// way, asked first. The box always shows the server's answer.
+
+async function loadChatWrites() {
+    const box = document.getElementById('chat-writes-toggle');
+    if (!box) return;
+    const state = await apiFetch('/api/chat-writes');
+    box.checked = !!(state && state.enabled);
+    box.disabled = !state;
+    document.getElementById('chat-writes-switch').title = state && state.unreadable
+        ? "The switch could not be read, so Claude's writes are off. Turn it on to save it again."
+        : 'Whether Claude may change fin through its chat tools. Reads always work.';
+}
+
+function initChatWritesSwitch() {
+    const label = document.getElementById('chat-writes-switch');
+    const box = document.getElementById('chat-writes-toggle');
+    if (!label || !box) return;
+    // Clicks here keep the menu open.
+    label.addEventListener('click', (e) => e.stopPropagation());
+    box.addEventListener('change', async () => {
+        const wanted = box.checked;
+        box.checked = !wanted;  // unchanged until the server says so
+        const ok = await showConfirmDialog(
+            wanted ? 'Let Claude write?' : "Turn off Claude's writes?",
+            wanted
+                ? 'Claude may then change fin through its chat tools: labels, notes, figures, rules, merchants and rates. Every change is in Recent changes and can be undone.<br><br>Only you can turn this on; the chat cannot.'
+                : "Every write Claude tries will be refused. Claude can still read fin.<br><br>Only you can turn it back on, here.",
+            {okLabel: wanted ? 'Turn on' : 'Turn off', cancelLabel: 'Cancel'}
+        );
+        if (!ok) return;
+        box.disabled = true;
+        const state = await apiFetch('/api/chat-writes', {method: 'PUT', body: {enabled: wanted}});
+        if (state) {
+            showToast(state.enabled ? 'Claude may write.' : "Claude's writes are off.", 'success');
+        }
+        await loadChatWrites();
+    });
+    loadChatWrites();
 }
 
 // Centralized tab switching — called by main tabs, icon buttons, and masters items

@@ -42,6 +42,12 @@
                     <button class="masters-item" data-tab="services-master">Services</button>
                     <button class="masters-item" data-tab="rules">Rules</button>
                     <button class="masters-item" data-tab="accounts">Accounts</button>
+                    <div class="masters-divider"></div>
+                    <!-- fin-surfaces 01, Off switches: the chat can turn this off, never on -->
+                    <label class="masters-switch" id="chat-writes-switch" title="Whether Claude may change fin through its chat tools. Reads always work.">
+                        <input type="checkbox" id="chat-writes-toggle" disabled>
+                        <span>Claude may write</span>
+                    </label>
                 </div>
             </div>
         </div>
