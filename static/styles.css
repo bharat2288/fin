@@ -656,6 +656,9 @@ li.empty { list-style: none; margin-top: 8px; }
     .btn, .btn.sm, .chip, .seg > button, .seg > a, .check, .subnav a { min-height: var(--tap); }
     .seg { display: flex; }
     .seg > * { flex: 1 1 auto; padding-inline: var(--space-2); }
+    /* Five places in a row (Books, Lists): five equal columns, the icon over its word, never a ragged second row. */
+    .subnav, .sl-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); width: 100%; }
+    .subnav > a, .sl-tabs > a { flex-direction: column; gap: 3px; padding: 6px 2px; font-size: 12px; line-height: 1.15; text-align: center; white-space: normal; }
     input[type="text"], input[type="search"], input[type="number"], input[type="date"], input[type="url"], select, textarea { min-height: var(--tap); font-size: 16px; }
     .link { display: inline-flex; align-items: center; min-height: var(--tap); }
     .desk-only { display: none !important; }
@@ -816,7 +819,7 @@ li.empty { list-style: none; margin-top: 8px; }
 .home-tile.is-movement { background: var(--hatch), var(--bg-surface); outline: 1.5px dashed var(--border-emphasis); outline-offset: -7px; border-radius: 0; }
 .home-tile__eyebrow { font-size: var(--text-xs); font-weight: var(--font-bold); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
 .home-tile__label { font-weight: var(--font-semibold); color: var(--text-primary); }
-.home-tile__fig { margin-top: 4px; font-family: var(--font-display); font-size: var(--text-2xl); font-weight: var(--font-bold); letter-spacing: -0.02em; line-height: 1.1; color: var(--text-primary); }
+.home-tile__fig { margin-top: 4px; font-family: var(--font-base); font-size: var(--text-xl); font-weight: var(--font-bold); letter-spacing: -0.01em; line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--text-primary); }
 .home-vs { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-sm); font-weight: var(--font-semibold); color: var(--text-secondary); }
 .home-vs svg { width: 14px; height: 14px; flex: none; }
 .home-tile__body { font-size: 12.5px; color: var(--text-tertiary); }
