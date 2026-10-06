@@ -3,52 +3,85 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#f5ede4">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#f5ede4" id="theme-color">
     <title>fin</title>
+    <!-- The theme before first paint: light, dark, or the device's (fin-theme). -->
+    <script>
+    (function () {
+        var c = 'system';
+        try { c = localStorage.getItem('fin-theme') || 'system'; } catch (e) {}
+        if (c !== 'light' && c !== 'dark') c = 'system';
+        var dark = c === 'dark' || (c === 'system' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+        var r = document.documentElement;
+        r.setAttribute('data-theme', dark ? 'dark' : 'light');
+        r.setAttribute('data-theme-choice', c);
+        var m = document.getElementById('theme-color'); if (m) m.setAttribute('content', dark ? '#17130f' : '#f5ede4');
+    })();
+    </script>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <header class="topbar">
-        <a class="brand" href="#/" aria-label="fin, home">
-            <span class="brand-mark" aria-hidden="true">f</span>
-            <span class="brand-name">fin</span>
-        </a>
-        <nav class="places" aria-label="Places">
-            <a class="place" href="#/" data-place="home">Home</a>
-            <a class="place" href="#/queue" data-place="queue">Queue <span class="count" data-count="queue"></span></a>
-            <a class="place" href="#/books" data-place="books">Books</a>
-            <a class="place" href="#/changes" data-place="changes">Changes <span class="count claude" data-count="claude"></span></a>
-        </nav>
-        <div class="topbar-end">
-            <a class="write-pill" id="write-pill" href="#/changes" title="Whether Claude may write to fin from chat">
-                <span class="dot" aria-hidden="true"></span><span>Claude may write: <b data-write-state>…</b></span>
+    <!-- Icons: Phosphor Regular v2.1.1 (MIT), as folio carries them; house, sun,
+         moon and monitor are from Phosphor upstream, same version. -->
+    <div class="app-shell">
+        <header class="topbar">
+            <a class="brand-lockup" href="#/" aria-label="fin, home">
+                <span class="brand-mark" aria-hidden="true"><span class="brand-circle brand-circle--a"></span><span class="brand-circle brand-circle--b"></span></span>
+                <span class="brand-name">fin</span>
             </a>
-        </div>
-    </header>
+            <nav class="places" aria-label="Places">
+                <a class="place" href="#/" data-place="home"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-house"/></svg>Home</a>
+                <a class="place" href="#/queue" data-place="queue"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-list-bullets"/></svg>Queue <span class="count" data-count="queue"></span></a>
+                <a class="place" href="#/books" data-place="books"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-scales"/></svg>Books</a>
+                <a class="place" href="#/changes" data-place="changes"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-arrow-counter-clockwise"/></svg>Changes <span class="count claude" data-count="claude"></span></a>
+            </nav>
+            <div class="topbar-end">
+                <a class="write-pill" id="write-pill" href="#/changes" title="Whether Claude may write to fin from chat">
+                    <span class="dot" aria-hidden="true"></span><span><span class="write-word">Claude may write:</span><span class="write-short">Claude:</span> <b data-write-state>…</b></span>
+                </a>
+                <div class="theme" id="theme">
+                    <button type="button" class="theme-btn" id="theme-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="theme-menu" aria-label="Theme: Match my device">
+                        <svg class="ic-light" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-sun"/></svg>
+                        <svg class="ic-dark" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-moon"/></svg>
+                        <svg class="ic-system" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-monitor"/></svg>
+                    </button>
+                    <div class="menu" id="theme-menu" role="menu" aria-label="Theme" hidden>
+                        <button type="button" role="menuitemradio" data-theme-choice="light" aria-checked="false" tabindex="-1"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-sun"/></svg>Light</button>
+                        <button type="button" role="menuitemradio" data-theme-choice="dark" aria-checked="false" tabindex="-1"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-moon"/></svg>Dark</button>
+                        <button type="button" role="menuitemradio" data-theme-choice="system" aria-checked="false" tabindex="-1"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-monitor"/></svg>Match my device</button>
+                    </div>
+                </div>
+            </div>
+        </header>
 
-    <main id="view" tabindex="-1">
-        <div class="loading">Loading…</div>
-    </main>
+        <div id="banners"></div>
+
+        <main id="view" tabindex="-1">
+            <div class="loading">Loading…</div>
+        </main>
+    </div>
 
     <nav class="tabbar" aria-label="Places">
-        <a href="#/" data-place="home">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/></svg>
-            Home
-        </a>
-        <a href="#/queue" data-place="queue">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-            Queue <span class="count" data-count="queue"></span>
-        </a>
-        <a href="#/books" data-place="books">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 4h6a2 2 0 012 2v14a2 2 0 00-2-2H4z"/><path d="M20 4h-6a2 2 0 00-2 2v14a2 2 0 012-2h6z"/></svg>
-            Books
-        </a>
-        <a href="#/changes" data-place="changes">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 12a9 9 0 109-9"/><path d="M3 4v5h5"/><path d="M12 7v5l3 3"/></svg>
-            Changes <span class="count claude" data-count="claude"></span>
-        </a>
+        <a href="#/" data-place="home"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-house"/></svg>Home</a>
+        <a href="#/queue" data-place="queue"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-list-bullets"/></svg>Queue<span class="count" data-count="queue"></span></a>
+        <a href="#/books" data-place="books"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-scales"/></svg>Books</a>
+        <a href="#/changes" data-place="changes"><svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><use href="#ph-arrow-counter-clockwise"/></svg>Changes<span class="count claude" data-count="claude"></span></a>
     </nav>
+
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+        <symbol id="ph-house" viewBox="0 0 256 256"><path d="M219.31,108.68l-80-80a16,16,0,0,0-22.62,0l-80,80A15.87,15.87,0,0,0,32,120v96a8,8,0,0,0,8,8h64a8,8,0,0,0,8-8V160h32v56a8,8,0,0,0,8,8h64a8,8,0,0,0,8-8V120A15.87,15.87,0,0,0,219.31,108.68ZM208,208H160V152a8,8,0,0,0-8-8H104a8,8,0,0,0-8,8v56H48V120l80-80,80,80Z"/></symbol>
+        <symbol id="ph-list-bullets" viewBox="0 0 256 256"><path d="M80,64a8,8,0,0,1,8-8H216a8,8,0,0,1,0,16H88A8,8,0,0,1,80,64Zm136,56H88a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Zm0,64H88a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16ZM44,52A12,12,0,1,0,56,64,12,12,0,0,0,44,52Zm0,64a12,12,0,1,0,12,12A12,12,0,0,0,44,116Zm0,64a12,12,0,1,0,12,12A12,12,0,0,0,44,180Z"/></symbol>
+        <symbol id="ph-scales" viewBox="0 0 256 256"><path d="M239.43,133l-32-80h0a8,8,0,0,0-9.16-4.84L136,62V40a8,8,0,0,0-16,0V65.58L54.26,80.19A8,8,0,0,0,48.57,85h0v.06L16.57,165a7.92,7.92,0,0,0-.57,3c0,23.31,24.54,32,40,32s40-8.69,40-32a7.92,7.92,0,0,0-.57-3L66.92,93.77,120,82V208H104a8,8,0,0,0,0,16h48a8,8,0,0,0,0-16H136V78.42L187,67.1,160.57,133a7.92,7.92,0,0,0-.57,3c0,23.31,24.54,32,40,32s40-8.69,40-32A7.92,7.92,0,0,0,239.43,133ZM56,184c-7.53,0-22.76-3.61-23.93-14.64L56,109.54l23.93,59.82C78.76,180.39,63.53,184,56,184Zm144-32c-7.53,0-22.76-3.61-23.93-14.64L200,77.54l23.93,59.82C222.76,148.39,207.53,152,200,152Z"/></symbol>
+        <symbol id="ph-arrow-counter-clockwise" viewBox="0 0 256 256"><path d="M224,128a96,96,0,0,1-94.71,96H128A95.38,95.38,0,0,1,62.1,197.8a8,8,0,0,1,11-11.63A80,80,0,1,0,71.43,71.39a3.07,3.07,0,0,1-.26.25L44.59,96H72a8,8,0,0,1,0,16H24a8,8,0,0,1-8-8V56a8,8,0,0,1,16,0V85.8L60.25,60A96,96,0,0,1,224,128Z"/></symbol>
+        <symbol id="ph-sun" viewBox="0 0 256 256"><path d="M120,40V16a8,8,0,0,1,16,0V40a8,8,0,0,1-16,0Zm72,88a64,64,0,1,1-64-64A64.07,64.07,0,0,1,192,128Zm-16,0a48,48,0,1,0-48,48A48.05,48.05,0,0,0,176,128ZM58.34,69.66A8,8,0,0,0,69.66,58.34l-16-16A8,8,0,0,0,42.34,53.66Zm0,116.68-16,16a8,8,0,0,0,11.32,11.32l16-16a8,8,0,0,0-11.32-11.32ZM192,72a8,8,0,0,0,5.66-2.34l16-16a8,8,0,0,0-11.32-11.32l-16,16A8,8,0,0,0,192,72Zm5.66,114.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32-11.32ZM48,128a8,8,0,0,0-8-8H16a8,8,0,0,0,0,16H40A8,8,0,0,0,48,128Zm80,80a8,8,0,0,0-8,8v24a8,8,0,0,0,16,0V216A8,8,0,0,0,128,208Zm112-88H216a8,8,0,0,0,0,16h24a8,8,0,0,0,0-16Z"/></symbol>
+        <symbol id="ph-moon" viewBox="0 0 256 256"><path d="M233.54,142.23a8,8,0,0,0-8-2,88.08,88.08,0,0,1-109.8-109.8,8,8,0,0,0-10-10,104.84,104.84,0,0,0-52.91,37A104,104,0,0,0,136,224a103.09,103.09,0,0,0,62.52-20.88,104.84,104.84,0,0,0,37-52.91A8,8,0,0,0,233.54,142.23ZM188.9,190.34A88,88,0,0,1,65.66,67.11a89,89,0,0,1,31.4-26A106,106,0,0,0,96,56,104.11,104.11,0,0,0,200,160a106,106,0,0,0,14.92-1.06A89,89,0,0,1,188.9,190.34Z"/></symbol>
+        <symbol id="ph-monitor" viewBox="0 0 256 256"><path d="M208,40H48A24,24,0,0,0,24,64V176a24,24,0,0,0,24,24H208a24,24,0,0,0,24-24V64A24,24,0,0,0,208,40Zm8,136a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V64a8,8,0,0,1,8-8H208a8,8,0,0,1,8,8Zm-48,48a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,224Z"/></symbol>
+    </svg>
 
     <div id="sheets"></div>
     <div class="toasts" id="toasts" aria-live="polite"></div>

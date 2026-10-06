@@ -24,6 +24,58 @@ const BILL_GRACE_DAYS = 7;
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+// Icons: Phosphor Regular v2.1.1 (MIT), each the inside of a 256x256 <svg>, filled
+// in currentColor. Copied from folio's static/js/kit/icons.js; those marked
+// upstream are Phosphor's own (same version), which folio's set lacks.
+const ICONS = Object.freeze({
+    'list-bullets': '<path d="M80,64a8,8,0,0,1,8-8H216a8,8,0,0,1,0,16H88A8,8,0,0,1,80,64Zm136,56H88a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Zm0,64H88a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16ZM44,52A12,12,0,1,0,56,64,12,12,0,0,0,44,52Zm0,64a12,12,0,1,0,12,12A12,12,0,0,0,44,116Zm0,64a12,12,0,1,0,12,12A12,12,0,0,0,44,180Z"/>',
+    'scales': '<path d="M239.43,133l-32-80h0a8,8,0,0,0-9.16-4.84L136,62V40a8,8,0,0,0-16,0V65.58L54.26,80.19A8,8,0,0,0,48.57,85h0v.06L16.57,165a7.92,7.92,0,0,0-.57,3c0,23.31,24.54,32,40,32s40-8.69,40-32a7.92,7.92,0,0,0-.57-3L66.92,93.77,120,82V208H104a8,8,0,0,0,0,16h48a8,8,0,0,0,0-16H136V78.42L187,67.1,160.57,133a7.92,7.92,0,0,0-.57,3c0,23.31,24.54,32,40,32s40-8.69,40-32A7.92,7.92,0,0,0,239.43,133ZM56,184c-7.53,0-22.76-3.61-23.93-14.64L56,109.54l23.93,59.82C78.76,180.39,63.53,184,56,184Zm144-32c-7.53,0-22.76-3.61-23.93-14.64L200,77.54l23.93,59.82C222.76,148.39,207.53,152,200,152Z"/>',
+    'arrow-counter-clockwise': '<path d="M224,128a96,96,0,0,1-94.71,96H128A95.38,95.38,0,0,1,62.1,197.8a8,8,0,0,1,11-11.63A80,80,0,1,0,71.43,71.39a3.07,3.07,0,0,1-.26.25L44.59,96H72a8,8,0,0,1,0,16H24a8,8,0,0,1-8-8V56a8,8,0,0,1,16,0V85.8L60.25,60A96,96,0,0,1,224,128Z"/>',
+    'check-circle': '<path d="M173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"/>',
+    'prohibit': '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm88,104a87.56,87.56,0,0,1-20.41,56.28L71.72,60.4A88,88,0,0,1,216,128ZM40,128A87.56,87.56,0,0,1,60.41,71.72L184.28,195.6A88,88,0,0,1,40,128Z"/>',
+    'warning': '<path d="M236.8,188.09,149.35,36.22h0a24.76,24.76,0,0,0-42.7,0L19.2,188.09a23.51,23.51,0,0,0,0,23.72A24.35,24.35,0,0,0,40.55,224h174.9a24.35,24.35,0,0,0,21.33-12.19A23.51,23.51,0,0,0,236.8,188.09ZM222.93,203.8a8.5,8.5,0,0,1-7.48,4.2H40.55a8.5,8.5,0,0,1-7.48-4.2,7.59,7.59,0,0,1,0-7.72L120.52,44.21a8.75,8.75,0,0,1,15,0l87.45,151.87A7.59,7.59,0,0,1,222.93,203.8ZM120,144V104a8,8,0,0,1,16,0v40a8,8,0,0,1-16,0Zm20,36a12,12,0,1,1-12-12A12,12,0,0,1,140,180Z"/>',
+    'warning-circle': '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm-8-80V80a8,8,0,0,1,16,0v56a8,8,0,0,1-16,0Zm20,36a12,12,0,1,1-12-12A12,12,0,0,1,140,172Z"/>',
+    'info': '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm16-40a8,8,0,0,1-8,8,16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40A8,8,0,0,1,144,176ZM112,84a12,12,0,1,1,12,12A12,12,0,0,1,112,84Z"/>',
+    'x': '<path d="M205.66,194.34a8,8,0,0,1-11.32,11.32L128,139.31,61.66,205.66a8,8,0,0,1-11.32-11.32L116.69,128,50.34,61.66A8,8,0,0,1,61.66,50.34L128,116.69l66.34-66.35a8,8,0,0,1,11.32,11.32L139.31,128Z"/>',
+    'user-circle': '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24ZM74.08,197.5a64,64,0,0,1,107.84,0,87.83,87.83,0,0,1-107.84,0ZM96,120a32,32,0,1,1,32,32A32,32,0,0,1,96,120Zm97.76,66.41a79.66,79.66,0,0,0-36.06-28.75,48,48,0,1,0-59.4,0,79.66,79.66,0,0,0-36.06,28.75,88,88,0,1,1,131.52,0Z"/>',
+    'magnifying-glass': '<path d="M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z"/>',
+    'funnel': '<path d="M230.6,49.53A15.81,15.81,0,0,0,216,40H40A16,16,0,0,0,28.19,66.76l.08.09L96,139.17V216a16,16,0,0,0,24.87,13.32l32-21.34A16,16,0,0,0,160,194.66V139.17l67.74-72.32.08-.09A15.8,15.8,0,0,0,230.6,49.53ZM40,56h0Zm106.18,74.58A8,8,0,0,0,144,136v58.66L112,216V136a8,8,0,0,0-2.16-5.47L40,56H216Z"/>',
+    'sliders-horizontal': '<path d="M40,88H73a32,32,0,0,0,62,0h81a8,8,0,0,0,0-16H135a32,32,0,0,0-62,0H40a8,8,0,0,0,0,16Zm64-24A16,16,0,1,1,88,80,16,16,0,0,1,104,64ZM216,168H199a32,32,0,0,0-62,0H40a8,8,0,0,0,0,16h97a32,32,0,0,0,62,0h17a8,8,0,0,0,0-16Zm-48,24a16,16,0,1,1,16-16A16,16,0,0,1,168,192Z"/>',
+    'caret-right': '<path d="M181.66,133.66l-80,80a8,8,0,0,1-11.32-11.32L164.69,128,90.34,53.66a8,8,0,0,1,11.32-11.32l80,80A8,8,0,0,1,181.66,133.66Z"/>',
+    'caret-down': '<path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"/>',
+    'arrow-circle-down': '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm37.66-85.66a8,8,0,0,1,0,11.32l-32,32a8,8,0,0,1-11.32,0l-32-32a8,8,0,0,1,11.32-11.32L120,148.69V88a8,8,0,0,1,16,0v60.69l18.34-18.35A8,8,0,0,1,165.66,130.34Z"/>',
+    'arrow-circle-up': '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm37.66-101.66a8,8,0,0,1-11.32,11.32L136,107.31V168a8,8,0,0,1-16,0V107.31l-18.34,18.35a8,8,0,0,1-11.32-11.32l32-32a8,8,0,0,1,11.32,0Z"/>',
+    'pencil-simple': '<path d="M227.31,73.37,182.63,28.68a16,16,0,0,0-22.63,0L36.69,152A15.86,15.86,0,0,0,32,163.31V208a16,16,0,0,0,16,16H92.69A15.86,15.86,0,0,0,104,219.31L227.31,96a16,16,0,0,0,0-22.63ZM92.69,208H48V163.31l88-88L180.69,120ZM192,108.68,147.31,64l24-24L216,84.68Z"/>',
+    'receipt': '<path d="M72,104a8,8,0,0,1,8-8h96a8,8,0,0,1,0,16H80A8,8,0,0,1,72,104Zm8,40h96a8,8,0,0,0,0-16H80a8,8,0,0,0,0,16ZM232,56V208a8,8,0,0,1-11.58,7.15L192,200.94l-28.42,14.21a8,8,0,0,1-7.16,0L128,200.94,99.58,215.15a8,8,0,0,1-7.16,0L64,200.94,35.58,215.15A8,8,0,0,1,24,208V56A16,16,0,0,1,40,40H216A16,16,0,0,1,232,56Zm-16,0H40V195.06l20.42-10.22a8,8,0,0,1,7.16,0L96,199.06l28.42-14.22a8,8,0,0,1,7.16,0L160,199.06l28.42-14.22a8,8,0,0,1,7.16,0L216,195.06Z"/>',
+    'bank': '<path d="M24,104H48v64H32a8,8,0,0,0,0,16H224a8,8,0,0,0,0-16H208V104h24a8,8,0,0,0,4.19-14.81l-104-64a8,8,0,0,0-8.38,0l-104,64A8,8,0,0,0,24,104Zm40,0H96v64H64Zm80,0v64H112V104Zm48,64H160V104h32ZM128,41.39,203.74,88H52.26ZM248,208a8,8,0,0,1-8,8H16a8,8,0,0,1,0-16H240A8,8,0,0,1,248,208Z"/>',
+    'wallet': '<path d="M216,64H56a8,8,0,0,1,0-16H192a8,8,0,0,0,0-16H56A24,24,0,0,0,32,56V184a24,24,0,0,0,24,24H216a16,16,0,0,0,16-16V80A16,16,0,0,0,216,64Zm0,128H56a8,8,0,0,1-8-8V78.63A23.84,23.84,0,0,0,56,80H216Zm-48-60a12,12,0,1,1,12,12A12,12,0,0,1,168,132Z"/>',
+    'coins': '<path d="M184,89.57V84c0-25.08-37.83-44-88-44S8,58.92,8,84v40c0,20.89,26.25,37.49,64,42.46V172c0,25.08,37.83,44,88,44s88-18.92,88-44V132C248,111.3,222.58,94.68,184,89.57ZM232,132c0,13.22-30.79,28-72,28-3.73,0-7.43-.13-11.08-.37C170.49,151.77,184,139,184,124V105.74C213.87,110.19,232,122.27,232,132ZM72,150.25V126.46A183.74,183.74,0,0,0,96,128a183.74,183.74,0,0,0,24-1.54v23.79A163,163,0,0,1,96,152,163,163,0,0,1,72,150.25Zm96-40.32V124c0,8.39-12.41,17.4-32,22.87V123.5C148.91,120.37,159.84,115.71,168,109.93ZM96,56c41.21,0,72,14.78,72,28s-30.79,28-72,28S24,97.22,24,84,54.79,56,96,56ZM24,124V109.93c8.16,5.78,19.09,10.44,32,13.57v23.37C36.41,141.4,24,132.39,24,124Zm64,48v-4.17c2.63.1,5.29.17,8,.17,3.88,0,7.67-.13,11.39-.35A121.92,121.92,0,0,0,120,171.41v23.46C100.41,189.4,88,180.39,88,172Zm48,26.25V174.4a179.48,179.48,0,0,0,24,1.6,183.74,183.74,0,0,0,24-1.54v23.79a165.45,165.45,0,0,1-48,0Zm64-3.38V171.5c12.91-3.13,23.84-7.79,32-13.57V172C232,180.39,219.59,189.4,200,194.87Z"/>',
+    'calendar-blank': '<path d="M208,32H184V24a8,8,0,0,0-16,0v8H88V24a8,8,0,0,0-16,0v8H48A16,16,0,0,0,32,48V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V48A16,16,0,0,0,208,32ZM72,48v8a8,8,0,0,0,16,0V48h80v8a8,8,0,0,0,16,0V48h24V80H48V48ZM208,208H48V96H208V208Z"/>',
+    'arrows-left-right': '<path d="M213.66,181.66l-32,32a8,8,0,0,1-11.32-11.32L188.69,184H48a8,8,0,0,1,0-16H188.69l-18.35-18.34a8,8,0,0,1,11.32-11.32l32,32A8,8,0,0,1,213.66,181.66Zm-139.32-64a8,8,0,0,0,11.32-11.32L67.31,88H208a8,8,0,0,0,0-16H67.31L85.66,53.66A8,8,0,0,0,74.34,42.34l-32,32a8,8,0,0,0,0,11.32Z"/>',
+    'chart-pie-slice': '<path d="M100,116.43a8,8,0,0,0,4-6.93v-72A8,8,0,0,0,93.34,30,104.06,104.06,0,0,0,25.73,147a8,8,0,0,0,4.52,5.81,7.86,7.86,0,0,0,3.35.74,8,8,0,0,0,4-1.07ZM88,49.62v55.26L40.12,132.51C40,131,40,129.48,40,128A88.12,88.12,0,0,1,88,49.62ZM128,24a8,8,0,0,0-8,8v91.82L41.19,169.73a8,8,0,0,0-2.87,11A104,104,0,1,0,128,24Zm0,192a88.47,88.47,0,0,1-71.49-36.68l75.52-44a8,8,0,0,0,4-6.92V40.36A88,88,0,0,1,128,216Z"/>',
+    'arrow-square-out': '<path d="M224,104a8,8,0,0,1-16,0V59.32l-66.33,66.34a8,8,0,0,1-11.32-11.32L196.68,48H152a8,8,0,0,1,0-16h64a8,8,0,0,1,8,8Zm-40,24a8,8,0,0,0-8,8v72H48V80h72a8,8,0,0,0,0-16H48A16,16,0,0,0,32,80V208a16,16,0,0,0,16,16H176a16,16,0,0,0,16-16V136A8,8,0,0,0,184,128Z"/>',
+    'house': '<path d="M219.31,108.68l-80-80a16,16,0,0,0-22.62,0l-80,80A15.87,15.87,0,0,0,32,120v96a8,8,0,0,0,8,8h64a8,8,0,0,0,8-8V160h32v56a8,8,0,0,0,8,8h64a8,8,0,0,0,8-8V120A15.87,15.87,0,0,0,219.31,108.68ZM208,208H160V152a8,8,0,0,0-8-8H104a8,8,0,0,0-8,8v56H48V120l80-80,80,80Z"/>',   // upstream
+    'upload-simple': '<path d="M224,144v64a8,8,0,0,1-8,8H40a8,8,0,0,1-8-8V144a8,8,0,0,1,16,0v56H208V144a8,8,0,0,1,16,0ZM93.66,77.66,120,51.31V144a8,8,0,0,0,16,0V51.31l26.34,26.35a8,8,0,0,0,11.32-11.32l-40-40a8,8,0,0,0-11.32,0l-40,40A8,8,0,0,0,93.66,77.66Z"/>',   // upstream
+    'circle-dashed': '<path d="M96.26,37.05A8,8,0,0,1,102,27.29a104.11,104.11,0,0,1,52,0,8,8,0,0,1-2,15.75,8.15,8.15,0,0,1-2-.26,88.09,88.09,0,0,0-44,0A8,8,0,0,1,96.26,37.05ZM53.79,55.14a104.05,104.05,0,0,0-26,45,8,8,0,0,0,15.42,4.27,88,88,0,0,1,22-38.09A8,8,0,0,0,53.79,55.14ZM43.21,151.55a8,8,0,1,0-15.42,4.28,104.12,104.12,0,0,0,26,45,8,8,0,0,0,11.41-11.22A88.14,88.14,0,0,1,43.21,151.55ZM150,213.22a88,88,0,0,1-44,0,8,8,0,1,0-4,15.49,104.11,104.11,0,0,0,52,0,8,8,0,0,0-4-15.49ZM222.65,146a8,8,0,0,0-9.85,5.58,87.91,87.91,0,0,1-22,38.08,8,8,0,1,0,11.42,11.21,104,104,0,0,0,26-45A8,8,0,0,0,222.65,146Zm-9.86-41.54a8,8,0,0,0,15.42-4.28,104,104,0,0,0-26-45,8,8,0,1,0-11.41,11.22A88,88,0,0,1,212.79,104.45Z"/>',   // upstream
+    'hourglass': '<path d="M200,75.64V40a16,16,0,0,0-16-16H72A16,16,0,0,0,56,40V76a16.07,16.07,0,0,0,6.4,12.8L114.67,128,62.4,167.2A16.07,16.07,0,0,0,56,180v36a16,16,0,0,0,16,16H184a16,16,0,0,0,16-16V180.36a16.09,16.09,0,0,0-6.35-12.77L141.27,128l52.38-39.6A16.05,16.05,0,0,0,200,75.64ZM184,216H72V180l56-42,56,42.35Zm0-140.36L128,118,72,76V40H184Z"/>',   // upstream
+    'sun': '<path d="M120,40V16a8,8,0,0,1,16,0V40a8,8,0,0,1-16,0Zm72,88a64,64,0,1,1-64-64A64.07,64.07,0,0,1,192,128Zm-16,0a48,48,0,1,0-48,48A48.05,48.05,0,0,0,176,128ZM58.34,69.66A8,8,0,0,0,69.66,58.34l-16-16A8,8,0,0,0,42.34,53.66Zm0,116.68-16,16a8,8,0,0,0,11.32,11.32l16-16a8,8,0,0,0-11.32-11.32ZM192,72a8,8,0,0,0,5.66-2.34l16-16a8,8,0,0,0-11.32-11.32l-16,16A8,8,0,0,0,192,72Zm5.66,114.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32-11.32ZM48,128a8,8,0,0,0-8-8H16a8,8,0,0,0,0,16H40A8,8,0,0,0,48,128Zm80,80a8,8,0,0,0-8,8v24a8,8,0,0,0,16,0V216A8,8,0,0,0,128,208Zm112-88H216a8,8,0,0,0,0,16h24a8,8,0,0,0,0-16Z"/>',   // upstream
+    'moon': '<path d="M233.54,142.23a8,8,0,0,0-8-2,88.08,88.08,0,0,1-109.8-109.8,8,8,0,0,0-10-10,104.84,104.84,0,0,0-52.91,37A104,104,0,0,0,136,224a103.09,103.09,0,0,0,62.52-20.88,104.84,104.84,0,0,0,37-52.91A8,8,0,0,0,233.54,142.23ZM188.9,190.34A88,88,0,0,1,65.66,67.11a89,89,0,0,1,31.4-26A106,106,0,0,0,96,56,104.11,104.11,0,0,0,200,160a106,106,0,0,0,14.92-1.06A89,89,0,0,1,188.9,190.34Z"/>',   // upstream
+    'monitor': '<path d="M208,40H48A24,24,0,0,0,24,64V176a24,24,0,0,0,24,24H208a24,24,0,0,0,24-24V64A24,24,0,0,0,208,40Zm8,136a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V64a8,8,0,0,1,8-8H208a8,8,0,0,1,8,8Zm-48,48a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,224Z"/>',   // upstream
+    'clock': '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm64-88a8,8,0,0,1-8,8H128a8,8,0,0,1-8-8V72a8,8,0,0,1,16,0v48h48A8,8,0,0,1,192,128Z"/>',   // upstream
+    'chat': '<path d="M216,48H40A16,16,0,0,0,24,64V224a15.84,15.84,0,0,0,9.25,14.5A16.05,16.05,0,0,0,40,240a15.89,15.89,0,0,0,10.25-3.78l.09-.07L83,208H216a16,16,0,0,0,16-16V64A16,16,0,0,0,216,48ZM40,224h0ZM216,192H80a8,8,0,0,0-5.23,1.95L40,224V64H216Z"/>',   // upstream
+    'plus': '<path d="M224,128a8,8,0,0,1-8,8H136v80a8,8,0,0,1-16,0V136H40a8,8,0,0,1,0-16h80V40a8,8,0,0,1,16,0v80h80A8,8,0,0,1,224,128Z"/>',   // upstream
+    'trash': '<path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z"/>',   // upstream
+    'gear': '<path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm88-29.84q.06-2.16,0-4.32l14.92-18.64a8,8,0,0,0,1.48-7.06,107.21,107.21,0,0,0-10.88-26.25,8,8,0,0,0-6-3.93l-23.72-2.64q-1.48-1.56-3-3L186,40.54a8,8,0,0,0-3.94-6,107.71,107.71,0,0,0-26.25-10.87,8,8,0,0,0-7.06,1.49L130.16,40Q128,40,125.84,40L107.2,25.11a8,8,0,0,0-7.06-1.48A107.6,107.6,0,0,0,73.89,34.51a8,8,0,0,0-3.93,6L67.32,64.27q-1.56,1.49-3,3L40.54,70a8,8,0,0,0-6,3.94,107.71,107.71,0,0,0-10.87,26.25,8,8,0,0,0,1.49,7.06L40,125.84Q40,128,40,130.16L25.11,148.8a8,8,0,0,0-1.48,7.06,107.21,107.21,0,0,0,10.88,26.25,8,8,0,0,0,6,3.93l23.72,2.64q1.49,1.56,3,3L70,215.46a8,8,0,0,0,3.94,6,107.71,107.71,0,0,0,26.25,10.87,8,8,0,0,0,7.06-1.49L125.84,216q2.16.06,4.32,0l18.64,14.92a8,8,0,0,0,7.06,1.48,107.21,107.21,0,0,0,26.25-10.88,8,8,0,0,0,3.93-6l2.64-23.72q1.56-1.48,3-3L215.46,186a8,8,0,0,0,6-3.94,107.71,107.71,0,0,0,10.87-26.25,8,8,0,0,0-1.49-7.06Zm-16.1-6.5a73.93,73.93,0,0,1,0,8.68,8,8,0,0,0,1.74,5.48l14.19,17.73a91.57,91.57,0,0,1-6.23,15L187,173.11a8,8,0,0,0-5.1,2.64,74.11,74.11,0,0,1-6.14,6.14,8,8,0,0,0-2.64,5.1l-2.51,22.58a91.32,91.32,0,0,1-15,6.23l-17.74-14.19a8,8,0,0,0-5-1.75h-.48a73.93,73.93,0,0,1-8.68,0,8,8,0,0,0-5.48,1.74L100.45,215.8a91.57,91.57,0,0,1-15-6.23L82.89,187a8,8,0,0,0-2.64-5.1,74.11,74.11,0,0,1-6.14-6.14,8,8,0,0,0-5.1-2.64L46.43,170.6a91.32,91.32,0,0,1-6.23-15l14.19-17.74a8,8,0,0,0,1.74-5.48,73.93,73.93,0,0,1,0-8.68,8,8,0,0,0-1.74-5.48L40.2,100.45a91.57,91.57,0,0,1,6.23-15L69,82.89a8,8,0,0,0,5.1-2.64,74.11,74.11,0,0,1,6.14-6.14A8,8,0,0,0,82.89,69L85.4,46.43a91.32,91.32,0,0,1,15-6.23l17.74,14.19a8,8,0,0,0,5.48,1.74,73.93,73.93,0,0,1,8.68,0,8,8,0,0,0,5.48-1.74L155.55,40.2a91.57,91.57,0,0,1,15,6.23L173.11,69a8,8,0,0,0,2.64,5.1,74.11,74.11,0,0,1,6.14,6.14,8,8,0,0,0,5.1,2.64l22.58,2.51a91.32,91.32,0,0,1,6.23,15l-14.19,17.74A8,8,0,0,0,199.87,123.66Z"/>',   // upstream
+    'arrows-clockwise': '<path d="M224,48V96a8,8,0,0,1-8,8H168a8,8,0,0,1,0-16h28.69L182.06,73.37a79.56,79.56,0,0,0-56.13-23.43h-.45A79.52,79.52,0,0,0,69.59,72.71,8,8,0,0,1,58.41,61.27a96,96,0,0,1,135,.79L208,76.69V48a8,8,0,0,1,16,0ZM186.41,183.29a80,80,0,0,1-112.47-.66L59.31,168H88a8,8,0,0,0,0-16H40a8,8,0,0,0-8,8v48a8,8,0,0,0,16,0V179.31l14.63,14.63A95.43,95.43,0,0,0,130,222.06h.53a95.36,95.36,0,0,0,67.07-27.33,8,8,0,0,0-11.18-11.44Z"/>',   // upstream
+    'asterisk': '<path d="M214.86,180.12a8,8,0,0,1-11,2.74L136,142.13V216a8,8,0,0,1-16,0V142.13L52.12,182.86a8,8,0,1,1-8.23-13.72L112.45,128,43.89,86.86a8,8,0,1,1,8.23-13.72L120,113.87V40a8,8,0,0,1,16,0v73.87l67.88-40.73a8,8,0,1,1,8.23,13.72L143.55,128l68.56,41.14A8,8,0,0,1,214.86,180.12Z"/>',   // upstream
+});
+/** An inline icon by name, sized by its class or 1em. */
+function icon(name, cls = '') {
+    const inner = ICONS[name];
+    if (!inner) return '';
+    return `<svg class="ph${cls ? ' ' + cls : ''}" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true" focusable="false">${inner}</svg>`;
+}
+
 // ---------------------------------------------------------------------------
 // State kept per viewer (a convenience only; never a figure)
 // ---------------------------------------------------------------------------
@@ -109,11 +161,18 @@ function toMinor(amount, cur = 'SGD') {
     if (amount === null || amount === undefined) return null;
     return Math.round(Number(amount) * 10 ** digitsOf(cur));
 }
-/** A row's amount as the lists show it: money out plain, money in marked. */
+/** Money in or money out, as folio's kind pill: a tinted square with an
+ *  arrow, then the word. Never colour alone. */
+function dirTag(lane) {
+    return lane === 'in'
+        ? `<span class="dir in" title="money in"><span class="dir__icon">${icon('arrow-circle-down')}</span>in</span>`
+        : `<span class="dir out" title="money out"><span class="dir__icon">${icon('arrow-circle-up')}</span>out</span>`;
+}
+/** A row's amount as the lists show it: money out and money in each marked. */
 function rowAmount(minor, cur) {
     if (minor === null || minor === undefined) return '—';
-    if (minor < 0) return `<span class="dir in" title="money in">↙ IN</span> <span class="num">${esc(money(-minor, cur))}</span>`;
-    return `<span class="dir out" title="money out">↗ OUT</span> <span class="num">${esc(money(minor, cur))}</span>`;
+    if (minor < 0) return `${dirTag('in')} <span class="num">${esc(money(-minor, cur))}</span>`;
+    return `${dirTag('out')} <span class="num">${esc(money(minor, cur))}</span>`;
 }
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const LONG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -238,12 +297,13 @@ async function servicesList() { return get('/api/services'); }
 
 function toast(message, { bad = false, undo = null, ms = 6000 } = {}) {
     const box = document.createElement('div');
-    box.className = 'toast' + (bad ? ' bad' : '');
+    box.className = 'toast' + (bad ? ' bad' : ' ok');
     box.setAttribute('role', bad ? 'alert' : 'status');
-    box.innerHTML = `<span>${esc(message)}</span>`;
+    box.innerHTML = `${icon(bad ? 'warning-circle' : 'check-circle')}<span>${esc(message)}</span>`;
     if (undo) {
         const b = document.createElement('button');
-        b.className = 'btn sm';
+        b.type = 'button';
+        b.className = 'link';
         b.textContent = 'Undo';
         b.onclick = async () => { box.remove(); await undoEntry(undo); };
         box.appendChild(b);
@@ -253,14 +313,18 @@ function toast(message, { bad = false, undo = null, ms = 6000 } = {}) {
 }
 
 let sheetCloser = null;
-function openSheet(title, body, { sub = '' } = {}) {
+/** A sheet: a right drawer on the desk, a bottom sheet on a phone (folio's
+ *  kit drawer). eyebrow sits over the title; center makes a short confirm;
+ *  foot is a row of buttons kept in view under the body. */
+function openSheet(title, body, { sub = '', eyebrow = '', center = false, foot = '' } = {}) {
     closeSheet();
     const root = $('#sheets');
     root.innerHTML = `<div class="scrim" data-act="scrim">
-        <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
-            <div class="sheet-head"><div><h2 id="sheet-title">${title}</h2>${sub ? `<p class="muted small">${sub}</p>` : ''}</div>
-            <button class="close" data-act="close-sheet" aria-label="Close">×</button></div>
+        <section class="sheet${center ? ' sheet--center' : ''}" role="dialog" aria-modal="true" aria-labelledby="sheet-title" tabindex="-1">
+            <div class="sheet-head"><div>${eyebrow ? `<span class="eyebrow">${eyebrow}</span>` : ''}<h2 id="sheet-title">${title}</h2>${sub ? `<p class="muted small">${sub}</p>` : ''}</div>
+            <button type="button" class="close" data-act="close-sheet" aria-label="Close">${icon('x')}</button></div>
             <div class="sheet-body stack">${body}</div>
+            ${foot ? `<div class="sheet-foot">${foot}</div>` : ''}
         </section></div>`;
     const sheet = $('.sheet', root);
     const keys = e => { if (e.key === 'Escape') closeSheet(); };
@@ -280,12 +344,14 @@ function sheetBody() { return $('#sheets .sheet-body'); }
 // ---------------------------------------------------------------------------
 
 function tag(kind, text, { href = null, act = null, data = {}, title = '' } = {}) {
-    const icons = { ties: '✓', off: '≠', notchecked: '○', stale: '⧗', nofig: '!', yours: '†', unexplained: '?', refused: '⊘', claude: '✳', you: '', asked: '✓', aside: '–' };
-    const ic = icons[kind] ? `<span class="ic" aria-hidden="true">${icons[kind]}</span>` : '';
+    const icons = { ties: 'check-circle', off: 'prohibit', refused: 'prohibit', unexplained: 'warning-circle', stale: 'clock', nofig: 'warning',
+        notchecked: 'circle-dashed', aside: 'circle-dashed', asked: 'chat', you: 'user-circle' };
+    const glyphs = { claude: '✳', yours: '†' };
+    const ic = icons[kind] ? icon(icons[kind]) : glyphs[kind] ? `<span class="ic" aria-hidden="true">${glyphs[kind]}</span>` : '';
     const attrs = Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
     const t = title ? ` title="${esc(title)}"` : '';
     if (href) return `<a class="tag ${kind}" href="${href}"${t}>${ic}${esc(text)}</a>`;
-    if (act) return `<button type="button" class="tag ${kind}" data-act="${act}"${attrs}${t} style="cursor:pointer">${ic}${esc(text)}</button>`;
+    if (act) return `<button type="button" class="tag ${kind}" data-act="${act}"${attrs}${t}>${ic}${esc(text)}</button>`;
     return `<span class="tag ${kind}"${t}>${ic}${esc(text)}</span>`;
 }
 
@@ -347,6 +413,81 @@ function lineNeedsLook(line, refusedByAccount) {
 }
 
 // ---------------------------------------------------------------------------
+// The theme: light, dark, or match my device. The choice is kept per viewer
+// (fin-theme); index.html applies it before first paint, this keeps it right.
+// ---------------------------------------------------------------------------
+
+const THEME_MQ = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+const THEME_WORDS = { light: 'Light', dark: 'Dark', system: 'Match my device' };
+function themeChoice() {
+    let c = 'system';
+    try { c = localStorage.getItem('fin-theme') || 'system'; } catch (_) { /* no storage: the device decides */ }
+    return THEME_WORDS[c] ? c : 'system';
+}
+function applyTheme(choice) {
+    const dark = choice === 'dark' || (choice === 'system' && !!THEME_MQ && THEME_MQ.matches);
+    const r = document.documentElement;
+    const was = r.dataset.theme;
+    r.dataset.theme = dark ? 'dark' : 'light';
+    r.dataset.themeChoice = choice;
+    document.getElementById('theme-color')?.setAttribute('content', dark ? '#17130f' : '#f5ede4');
+    const btn = $('#theme-btn');
+    if (btn) btn.setAttribute('aria-label', `Theme: ${THEME_WORDS[choice]}`);
+    $$('#theme-menu [data-theme-choice]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.themeChoice === choice)));
+    if (was && was !== r.dataset.theme) document.dispatchEvent(new CustomEvent('fin:theme'));   // charts redraw on this
+}
+function setTheme(choice) {
+    try { localStorage.setItem('fin-theme', choice); } catch (_) { /* kept for this page only */ }
+    applyTheme(choice);
+}
+if (THEME_MQ) {
+    const follow = () => { if (themeChoice() === 'system') applyTheme('system'); };
+    if (THEME_MQ.addEventListener) THEME_MQ.addEventListener('change', follow); else if (THEME_MQ.addListener) THEME_MQ.addListener(follow);
+}
+function themeMenu(open, { focus = true } = {}) {
+    const btn = $('#theme-btn'), menu = $('#theme-menu');
+    if (!btn || !menu) return;
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+    if (open) {
+        const items = $$('[role="menuitemradio"]', menu);
+        (items.find(b => b.getAttribute('aria-checked') === 'true') || items[0]).focus();
+    } else if (focus) btn.focus();
+}
+document.addEventListener('DOMContentLoaded', () => {
+    applyTheme(themeChoice());
+    const btn = $('#theme-btn'), menu = $('#theme-menu');
+    if (!btn || !menu) return;
+    btn.addEventListener('click', () => themeMenu(menu.hidden));
+    menu.addEventListener('click', e => {
+        const b = e.target.closest('[data-theme-choice]');
+        if (!b) return;
+        setTheme(b.dataset.themeChoice);
+        themeMenu(false);
+    });
+    menu.addEventListener('keydown', e => {
+        const items = $$('[role="menuitemradio"]', menu);
+        const i = items.indexOf(document.activeElement);
+        if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+        else if (e.key === 'Home') { e.preventDefault(); items[0].focus(); }
+        else if (e.key === 'End') { e.preventDefault(); items[items.length - 1].focus(); }
+        else if (e.key === 'Escape') { e.preventDefault(); themeMenu(false); }
+        else if (e.key === 'Tab') themeMenu(false, { focus: false });
+    });
+    document.addEventListener('click', e => { if (!menu.hidden && !e.target.closest('#theme')) themeMenu(false, { focus: false }); });
+});
+
+/** Chart colours, read from the tokens when drawing (both themes). */
+function chartTokens() {
+    const st = getComputedStyle(document.documentElement), v = n => st.getPropertyValue(n).trim();
+    return { ink: v('--text-tertiary'), grid: v('--border-subtle'), base: v('--border-emphasis'), mono: v('--font-mono'), surface: v('--bg-surface'),
+        current: v('--text-primary'), books: [v('--chart-1'), v('--chart-6'), v('--chart-2'), v('--chart-3')], kin: v('--k-in'), kout: v('--k-out') };
+}
+// A theme change redraws whatever is drawn from the tokens: the charts.
+document.addEventListener('fin:theme', () => { if (typeof charts !== 'undefined' && charts.length) rerender(); });
+
+// ---------------------------------------------------------------------------
 // The frame: places, counts, the "Claude may write" pill
 // ---------------------------------------------------------------------------
 
@@ -392,7 +533,7 @@ async function render() {
         if (afterNextRender) { const next = afterNextRender; afterNextRender = null; setTimeout(next, 60); }
     } catch (err) {
         if (token !== renderToken) return;
-        view.innerHTML = `<div class="card"><p class="notice bad">${esc(err.message || 'fin could not show this page')}</p></div>`;
+        view.innerHTML = `<div class="notice bad">${icon('warning-circle')}<span>${esc(err.message || 'fin could not show this page')}</span></div>`;
         console.warn(err);
     }
     refreshFrame();
@@ -422,10 +563,10 @@ ACT['close-sheet'] = () => closeSheet();
 ACT.scrim = () => closeSheet();
 
 function booksNav(current) {
-    const items = [['sheet', '#/books', 'Balance sheet'], ['spending', '#/books/spending', 'Spending'], ['bills', '#/books/bills', 'Bills'],
-        ['lists', '#/books/lists', 'Lists'], ['import', '#/books/import', 'Import']];
-    return `<nav class="subnav" aria-label="Books">${items.map(([k, href, label]) =>
-        `<a href="${href}"${k === current ? ' aria-current="page"' : ''}>${label}</a>`).join('')}</nav>`;
+    const items = [['sheet', '#/books', 'Balance sheet', 'scales'], ['spending', '#/books/spending', 'Spending', 'chart-pie-slice'],
+        ['bills', '#/books/bills', 'Bills', 'receipt'], ['lists', '#/books/lists', 'Lists', 'list-bullets'], ['import', '#/books/import', 'Import', 'upload-simple']];
+    return `<nav class="seg subnav" aria-label="Books">${items.map(([k, href, label, ic]) =>
+        `<a href="${href}"${k === current ? ' aria-current="page"' : ''}>${icon(ic)}${label}</a>`).join('')}</nav>`;
 }
 function monthPicker() {
     return `<label class="field" style="min-width:190px"><span>As at the end of</span>
@@ -584,15 +725,15 @@ async function loadQueue() {
 function itemHTML(item) {
     const amount = item.kind === 'nofig' ? '' : item.kind === 'stale'
         ? `<span class="num">${esc(money(item.shown, item.currency))}</span>`
-        : item.lane === 'in' ? `<span class="dir in">↙ IN</span> <span class="num">${esc(money(item.amount, item.currency))}</span>`
-            : item.lane === 'out' ? `<span class="dir out">↗ OUT</span> <span class="num">${esc(money(item.amount, item.currency))}</span>`
+        : item.lane === 'in' ? `${dirTag('in')} <span class="num">${esc(money(item.amount, item.currency))}</span>`
+            : item.lane === 'out' ? `${dirTag('out')} <span class="num">${esc(money(item.amount, item.currency))}</span>`
                 : '';
     const marker = { refused: tag('refused', 'refused'), aside: tag('aside', 'refused · set aside'), off: tag('off', 'off by'),
         stale: tag('stale', 'stale'), nofig: tag('nofig', 'no figure'), mixed: tag('notchecked', 'mixed merchant'),
         bill: tag('stale', 'missed bill'), untyped: tag('nofig', 'no type'), transfer: '' }[item.kind] || '';
     const actions = (item.actions || []).map(a => a.href
-        ? `<a class="btn sm${a.primary ? ' primary' : ''}" href="${a.href}">${esc(a.label)}</a>`
-        : `<button type="button" class="btn sm${a.primary ? ' primary' : ''}" data-act="${a.act}"${Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(a.label)}</button>`).join('');
+        ? `<a class="btn sm${a.primary ? ' ink' : ''}" href="${a.href}">${esc(a.label)}</a>`
+        : `<button type="button" class="btn sm${a.primary ? ' ink' : ''}" data-act="${a.act}"${Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(a.label)}</button>`).join('');
     return `<article class="item ${item.kind}">
         <div><div class="what">${esc(item.title)} ${marker}${item.row ? rowMark(item.row.id) : item.line ? accountMark(item.line.account_id) : ''}</div><div class="meta">${esc(item.meta || '')}</div>${item.holds ? `<div class="holds">${esc(item.holds)}</div>` : ''}</div>
         <div class="amt">${amount}</div>
@@ -634,7 +775,10 @@ const REST_LABELS = {
 function restsOnHTML(sheet) {
     const { parts, whole, leftOut } = restsOnParts(sheet);
     const keys = Object.keys(parts).filter(k => parts[k][1]);
-    const bar = keys.map(k => `<span class="sw-${k}" style="width:${(parts[k][0] / (whole || 1)) * 100}%" title="${esc(REST_LABELS[k])}"></span>`).join('');
+    const bar = keys.map(k => {
+        const share = parts[k][0] / (whole || 1);
+        return `<span class="sw-${k}" style="--seg:${(share * 1000).toFixed(1)}" title="${esc(REST_LABELS[k])}: ${pct(parts[k][0], whole)}">${share >= 0.08 ? `<b>${pct(parts[k][0], whole)}</b>` : ''}</span>`;
+    }).join('');
     const legend = keys.map(k => `<a href="#/books" data-act="needs-look-link" data-key="${k}"><span class="sw sw-${k}"></span><span><b>${pct(parts[k][0], whole)}</b> ${esc(REST_LABELS[k])} · ${parts[k][1]}</span></a>`).join('');
     const stale = parts.stale[0];
     const words = stale
@@ -671,7 +815,7 @@ async function viewHome() {
         if (mc && mc.available && mc.unexplained_minor !== null && mc.unexplained_minor !== undefined) {
             chips.push(mc.unexplained_minor === 0
                 ? tag('ties', `${monthName(prev, { short: true })} adds up`, { href: '#/books' + '', title: 'The month check' })
-                : `<a class="tag unexplained" href="#/books" data-act="go-month-check" data-month="${prev}"><span class="ic">?</span>${esc(money(mc.unexplained_minor, 'SGD'))} unexplained in ${esc(monthName(prev, { short: true }))}</a>`);
+                : `<a class="tag unexplained" href="#/books" data-act="go-month-check" data-month="${prev}">${icon('warning-circle')}${esc(money(mc.unexplained_minor, 'SGD'))} unexplained in ${esc(monthName(prev, { short: true }))}</a>`);
         }
     }
     now.left_out.forEach(l => {
@@ -686,7 +830,7 @@ async function viewHome() {
         ${restsOnHTML(now)}</section>`;
 
     const lane = (key, title, list, sum) => `<div class="lane">
-        <h3>${key === 'out' ? '<span class="dir out">↗ OUT</span>' : key === 'in' ? '<span class="dir in">↙ IN</span>' : ''} ${title}
+        <h3>${key === 'out' ? dirTag('out') : key === 'in' ? dirTag('in') : ''} ${title}
             <span class="lane-sum">${plural(list.length, 'item')}${sum ? ` · transfers ${esc(sum)}` : ''}</span></h3>
         ${list.length ? list.slice(0, 3).map(itemHTML).join('') : '<p class="muted small">Nothing waits here.</p>'}
         ${list.length > 3 ? `<a class="link small" href="#/queue">${list.length - 3} more in the queue</a>` : ''}</div>`;
@@ -766,7 +910,7 @@ const queueOpen = { out: 12, in: 12, books: 12 };
 async function viewQueue() {
     const q = await loadQueue();
     const lane = (key, title, list, note) => `<section class="card lane-card" id="lane-${key}">
-        <div class="card-head"><h2>${key === 'out' ? '<span class="dir out">↗ OUT</span> ' : key === 'in' ? '<span class="dir in">↙ IN</span> ' : ''}${title}</h2>
+        <div class="card-head"><h2>${key === 'out' ? dirTag('out') + ' ' : key === 'in' ? dirTag('in') + ' ' : ''}${title}</h2>
             <p>${plural(list.length, 'item')}${note ? ' · ' + esc(note) : ''}</p></div>
         ${list.length ? list.slice(0, queueOpen[key] || 999).map(itemHTML).join('') : '<p class="empty">Nothing waits here.</p>'}
         ${list.length > (queueOpen[key] || 999) ? `<button class="btn block" style="margin-top:10px" data-act="queue-more" data-lane="${key}">Show all ${list.length}</button>` : ''}
@@ -797,7 +941,7 @@ async function findRow(txId) {
 
 function rowHead(row) {
     const minor = toMinor(row.amount_sgd, row.currency);
-    return `<div class="notice"><div class="spread"><b>${esc(row.description)}</b>${rowAmount(minor, row.currency)}</div>
+    return `<div class="record-target"><div class="spread"><b>${esc(row.description)}</b>${rowAmount(minor, row.currency)}</div>
         <div class="small muted">${esc(day(row.date))} · ${esc(row.account_name || '')}${row.service_name ? ' · ' + esc(row.service_name) : ''}</div></div>`;
 }
 
@@ -1165,8 +1309,8 @@ function monthCheckHTML(sheet) {
         </tbody></table>`;
     const why = [];
     const rv = mc.review || {};
-    if (rv.out_count) why.push(`<tr><td><span class="dir out">↗ OUT</span> ${plural(rv.out_count, 'transfer')} waiting for a label</td><td class="r num">${esc(money(rv.out_minor, 'SGD'))}</td><td><a class="link" href="#/queue">Label them</a></td></tr>`);
-    if (rv.in_count) why.push(`<tr><td><span class="dir in">↙ IN</span> ${plural(rv.in_count, 'transfer')} waiting for a label</td><td class="r num">${esc(money(rv.in_minor, 'SGD'))}</td><td><a class="link" href="#/queue">Label them</a></td></tr>`);
+    if (rv.out_count) why.push(`<tr><td>${dirTag('out')} ${plural(rv.out_count, 'transfer')} waiting for a label</td><td class="r num">${esc(money(rv.out_minor, 'SGD'))}</td><td><a class="link" href="#/queue">Label them</a></td></tr>`);
+    if (rv.in_count) why.push(`<tr><td>${dirTag('in')} ${plural(rv.in_count, 'transfer')} waiting for a label</td><td class="r num">${esc(money(rv.in_minor, 'SGD'))}</td><td><a class="link" href="#/queue">Label them</a></td></tr>`);
     (mc.not_tying || []).forEach(l => why.push(`<tr><td>${esc(l.name)}</td><td class="r">${l.status === 'off' ? tag('off', `off by ${money(Math.abs(l.difference_minor), l.currency)}`) : tag('notchecked', l.text)}</td><td><a class="link" href="#/books/account/${l.account_id}">See the tie line</a></td></tr>`));
     (mc.left_out || []).forEach(l => why.push(`<tr><td>${esc(l.name)} is left out of both sides</td><td class="r small">${esc(l.why)}</td><td><button class="link" data-act="figure">Enter a figure</button></td></tr>`));
     const whyTable = `<h3 style="margin:18px 0 6px">${unexplained === 0 ? 'Still worth a look' : 'Why it does not add up'}</h3>
@@ -1436,21 +1580,24 @@ document.addEventListener('search', e => { if (e.target.id === 'sp-search') setS
 function drawSpendingCharts(perBook, months) {
     charts.splice(0).forEach(c => c.destroy());
     if (typeof Chart === 'undefined') return;
-    const ink = getComputedStyle(document.documentElement).getPropertyValue('--text-tertiary').trim() || '#6e5f48';
+    const tk = chartTokens();
     perBook.forEach((b, i) => {
         const canvas = document.getElementById(`chart-${b.book}`);
         if (!canvas) return;
         const sums = months.map(m => b.year.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD')
             .reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0) / 100);
-        const fill = i === 0 ? '#8a7a62' : '#c9a774';
+        const fill = tk.books[i % tk.books.length];
         charts.push(new Chart(canvas, {
             type: 'bar',
             data: { labels: months.map(m => MONTHS[Number(m.slice(5)) - 1]), datasets: [{ label: `${b.book}, S$ rows only`, data: sums,
-                backgroundColor: months.map(m => m === S.month ? '#2c2418' : fill), borderRadius: 3 }] },
+                backgroundColor: months.map(m => m === S.month ? tk.current : fill), borderRadius: 4, barPercentage: 0.64, categoryPercentage: 1 }] },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false,
                 plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => money(Math.round(c.raw * 100), 'SGD') } } },
-                scales: { x: { grid: { display: false }, ticks: { color: ink } }, y: { ticks: { color: ink, callback: v => `S$ ${v >= 1000 ? (v / 1000) + 'k' : v}` }, grid: { color: 'rgba(0,0,0,0.05)' } } },
+                scales: {
+                    x: { grid: { display: false }, border: { color: tk.base }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 } } },
+                    y: { border: { display: false }, grid: { color: tk.grid, lineWidth: 1 }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 }, callback: v => `S$ ${v >= 1000 ? (v / 1000) + 'k' : v}` } },
+                },
                 onClick: (_e, els) => { if (els.length) { S.month = months[els[0].index]; store.set('month', S.month); rerender(); } },
             },
         }));
@@ -2161,9 +2308,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const status = await res.json();
         if (!status.warning) return;
         const banner = document.createElement('div');
-        banner.className = 'backup-warning';
+        banner.className = 'banner backup-warning';
         banner.setAttribute('role', 'status');
-        banner.textContent = `Backups: ${status.warning}` + (status.last_success_at ? ` (last success ${status.last_success_at})` : '');
-        document.querySelector('.topbar')?.after(banner);
+        banner.innerHTML = `${icon('warning-circle')}<span class="banner__message"><b>Backups:</b> ${esc(status.warning)}${status.last_success_at ? ` (last success ${esc(status.last_success_at)})` : ''}</span>`;
+        $('#banners')?.appendChild(banner);
     } catch (_) { /* no banner if the status cannot be read */ }
 });
