@@ -435,7 +435,11 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
         "actual": _shown(actual),
         "unexplained_minor": unexplained,
         "unexplained": _shown(unexplained),
-        "left_out": [{"name": e["name"], "why": e["why"]} for e in left_out],
+        "left_out": [{"account_id": e["account_id"], "name": e["name"], "why": e["why"]} for e in left_out],
+        # How many accounts are in the check (in net worth at both ends): the
+        # page says "adds up for the N accounts in the check" when some are
+        # left out, and a plain tick only when none is.
+        "in_check_count": len(in_check),
         "note": (
             "Left out of both sides of the check: "
             + "; ".join(f"{e['name']} ({e['why']})" for e in left_out)

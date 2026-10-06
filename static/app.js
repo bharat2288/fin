@@ -361,7 +361,7 @@ function restsOn(line, { short = false } = {}) {
     if (line.counted_in) return `<span class="muted">${esc(line.balance)}</span>`;
     if (!r) {
         if (line.since_label) return `<span class="muted">worked out from rows ${esc(line.since_label)}</span>`;
-        return tag('nofig', 'no figure', fixFor(line));
+        return '<span class="muted">nothing to rest on yet</span>';     // the "no figure" marker sits where the amount would
     }
     const date = day(r.date, { year: !short && !r.date.startsWith(S.month.slice(0, 4)) });
     if (r.source === 'supplied') {
@@ -398,10 +398,12 @@ function checkMarker(line) {
     return tag('notchecked', `not checked ${why}`.trim(), { href, title: 'See why' });
 }
 function tickOf(line) {
-    if (line.check?.status === 'ties') return '<span class="tick ties" title="ties">✓</span>';
-    if (line.check?.status === 'off') return '<span class="tick off" title="off">≠</span>';
-    if (line.check?.status === 'not_checked') return '<span class="tick notchecked" title="not checked">○</span>';
-    if (line.rests_on?.source === 'supplied') return '<span class="tick yours" title="your figure">†</span>';
+    const t = (cls, ic, title) => `<span class="tick ${cls}" title="${title}" role="img" aria-label="${title}">${ic}</span>`;
+    if (line.check?.status === 'ties') return t('ties', icon('check-circle'), 'ties');
+    if (line.check?.status === 'off') return t('off', icon('prohibit'), 'off by');
+    if (line.check?.status === 'not_checked') return t('notchecked', icon('circle-dashed'), 'not checked');
+    if (line.rests_on?.source === 'supplied') return t('yours', icon('user-circle'), 'your figure');
+    if (line.made_of || line.since_label) return t('rows', '=', 'worked out from rows');
     return '';
 }
 function lineNeedsLook(line, refusedByAccount) {
@@ -1676,6 +1678,38 @@ ACT['figure-save'] = async () => {
 // Books: the balance sheet, as at a month's end, and its month check
 // ---------------------------------------------------------------------------
 
+/** Dates written in words, never as codes: "2026-08-31" becomes "31 Aug"
+ *  (with the year when it is not the as-at month's). */
+function dateWords(text) {
+    return String(text ?? '').replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g,
+        iso => day(iso, { year: iso.slice(0, 4) !== S.month.slice(0, 4) }));
+}
+/** A saved rate in words: "1 INR = S$ 0.01528, rate saved 30 Sep". */
+function rateWords(rate) {
+    if (!rate) return '';
+    const unit = (rate.pair || '').split('/')[0] || '';
+    return `1 ${unit} = S$ ${rate.rate}, rate saved ${dateWords(rate.date)}`;
+}
+/** A company's or person's balance as a short sum, the zero parts dropped:
+ *  "opening S$ 15,000.00 + paid for it S$ 1,830.99 (23 rows) = S$ 16,830.99". */
+function madeOfSum(line) {
+    const m = line.made_of;
+    if (!m) return '';
+    const person = line.kind === 'person';
+    const parts = [];
+    if (m.opening_minor) parts.push(['', 'opening', m.opening_minor]);
+    if (m.paid_for_minor) parts.push(['+', person ? 'lent' : 'paid for it', m.paid_for_minor]);
+    if (m.capital_minor) parts.push(['+', 'capital', m.capital_minor]);
+    if (m.paid_back_minor) parts.push(['−', 'paid back', m.paid_back_minor]);
+    if (!parts.length) return 'no money moved yet';
+    if (parts.length === 1 && parts[0][0] === '') {
+        return person ? `lent ${money(m.opening_minor)}, nothing paid back` : `opening ${money(m.opening_minor)}, nothing moved since`;
+    }
+    const onlyPaidFor = parts.filter(p => p[1] !== 'opening').length === 1 && m.paid_for_minor;
+    const text = parts.map(([op, label, minor], i) => `${i || op ? op + ' ' : ''}${label} ${money(minor)}${onlyPaidFor && op === '+' && line.rows_since ? ` (${plural(line.rows_since, 'row')})` : ''}`).join(' ');
+    return `${text} = ${money(line.balance_minor)}`;
+}
+
 const CHECK_ORDER = { off: 0, not_checked: 1, none: 2, ties: 3 };
 function sortKey(line, key) {
     if (key === 'rests') return line.rests_on ? -line.rests_on.age_days : -99999;     // oldest first
@@ -1684,22 +1718,35 @@ function sortKey(line, key) {
     return 0;
 }
 
-function marginNote(line, refused, asAt) {
+function marginNote(line, refused, asAt, { rate = true } = {}) {
     const notes = [];
     if (lacksRate(line)) notes.push(tag('nofig', `no ${line.currency} rate`, fixFor(line, asAt)));
-    if (line.since) notes.push(`rolled forward: ${esc(line.since)}`);
-    if (line.since_label && line.rows_since) notes.push(`${plural(line.rows_since, 'row')} ${esc(line.since_label)}`);
-    if (line.made_of) notes.push(esc(line.made_of.text));
-    if (line.rate) notes.push(esc(line.rate.text));
-    if (line.left_out && line.balance !== 'no figure') notes.push(`left out: ${esc(line.left_out)}`);
+    if (line.made_of) notes.push(esc(madeOfSum(line)));
+    else {
+        if (line.since) notes.push(`rolled forward: ${esc(line.since)}`);
+        if (line.since_label && line.rows_since) notes.push(`${plural(line.rows_since, 'row')} ${esc(line.since_label)}`);
+    }
+    if (line.rate && rate) notes.push(esc(rateWords(line.rate)));
+    if (line.left_out && line.balance !== 'no figure') notes.push(`left out: ${esc(dateWords(line.left_out))}`);
     if (line.note) notes.push(esc(line.note));
     if (line.archived) notes.push('archived');
     if (refused) notes.push(`${tag(refused.set_aside ? 'aside' : 'refused', `${day(refused.statement_date, { year: false })} statement refused`, { act: 'refused-sum', data: { id: refused.id } })}`);
     return notes.join(' · ');
 }
+/** The figure a line holds, or the one marker saying why it has none. */
+function lineFigure(line, asAt) {
+    if (line.in_total) return `<span class="num">${esc(money(line.value_minor, 'SGD'))}</span>`;
+    if (line.counted_in) return '<span class="muted">counted above</span>';
+    return tag('nofig', line.balance === 'no figure' ? 'no figure' : lacksRate(line) ? 'no rate' : 'left out', fixFor(line, asAt));
+}
+/** The key to the tick column, said once under the sheet. */
+function tickKey() {
+    const k = (cls, ic, words) => `<span><span class="tick ${cls}" aria-hidden="true">${ic}</span>${words}</span>`;
+    return `<p class="tick-key"><b>Tick marks</b>${k('ties', icon('check-circle'), 'ties to its statement')}${k('off', icon('prohibit'), 'off by: the rows do not add up to the statement')}${k('notchecked', icon('circle-dashed'), 'not checked: nothing to check against')}${k('yours', icon('user-circle'), 'your figure: no check, its age is printed')}${k('rows', '=', 'worked out from rows')}</p>`;
+}
 
 async function viewSheet() {
-    const [sheet, q, r] = await Promise.all([sheetFor(S.month), loadQueue(), refs()]);
+    const [sheet, q] = await Promise.all([sheetFor(S.month), loadQueue(), refs()]);
     const refusedBy = q.refusedBy;
     const allLines = sheet.sections.flatMap(s => s.lines);
     const needCount = allLines.filter(l => lineNeedsLook(l, refusedBy)).length;
@@ -1710,62 +1757,71 @@ async function viewSheet() {
     };
     const shown = line => !S.needsLook || lineNeedsLook(line, refusedBy);
     const sortBtn = (key, label) => `<button data-act="sheet-sort" data-key="${key}"${S.sheetSort.key === key ? ` data-dir="${S.sheetSort.dir}"` : ''}>${label}</button>`;
+    const owedNote = section => section.owed ? ' <span class="sec-note">negative: what we owe</span>' : '';
 
     const table = sheet.sections.map(section => {
         const lines = sorted(section.lines.filter(shown));
         if (!lines.length && S.needsLook) return '';
         const rows = lines.map(line => `<tr>
-            <td><a href="#/books/account/${line.account_id}">${esc(line.name)}</a>${accountMark(line.account_id)}</td>
+            <td class="acct-name"><a href="#/books/account/${line.account_id}">${esc(line.name)}</a>${accountMark(line.account_id)}</td>
             <td class="r num">${line.currency !== 'SGD' && line.balance_minor !== null ? esc(money(line.balance_minor, line.currency)) : ''}</td>
-            <td class="r num">${line.in_total ? esc(money(line.value_minor, 'SGD')) : line.counted_in ? '<span class="muted">counted above</span>' : tag('nofig', line.balance === 'no figure' ? 'no figure' : lacksRate(line) ? 'no rate' : 'left out', fixFor(line, sheet.as_at))}</td>
-            <td class="tick">${tickOf(line)}</td>
-            <td>${restsOn(line)}</td>
+            <td class="r">${lineFigure(line, sheet.as_at)}</td>
+            <td class="tick-cell">${tickOf(line)}</td>
+            <td class="rests">${restsOn(line)}</td>
             <td>${checkMarker(line)}</td>
             <td class="margin-note">${marginNote(line, refusedBy.get(line.account_id), sheet.as_at)}</td></tr>`).join('');
-        return `<tr class="section"><td colspan="7">${esc(section.heading)}${section.owed ? ' <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:500">negative: what we owe</span>' : ''}</td></tr>${rows}
-            ${S.needsLook ? '' : `<tr class="total"><td>${section.owed ? 'Total owed' : 'Total'}</td><td></td><td class="r num">${esc(money(section.total_minor, 'SGD'))}</td><td colspan="4" class="small muted">${section.left_out.length ? `left out: ${section.left_out.map(l => esc(l.name)).join(', ')}` : ''}</td></tr>`}`;
+        return `<tr class="section"><td colspan="7">${esc(section.heading)}${owedNote(section)}</td></tr>${rows}
+            ${S.needsLook ? '' : `<tr class="total"><td>${section.owed ? 'Total owed' : 'Total'}</td><td></td><td class="r num">${esc(money(section.total_minor, 'SGD'))}</td><td colspan="4" class="sec-left">${section.left_out.length ? `left out: ${section.left_out.map(l => esc(l.name)).join(', ')}` : ''}</td></tr>`}`;
     }).join('');
 
+    // The phone: one line card per account; "no figure" said once, where the amount would be.
     const cards = sheet.sections.map(section => {
         const lines = sorted(section.lines.filter(shown));
         if (!lines.length && S.needsLook) return '';
-        return `<h3 class="eyebrow" style="margin-top:16px">${esc(section.heading)}</h3>${lines.map(line => `<div class="line-card">
-            <div class="spread"><span><a href="#/books/account/${line.account_id}"><b>${esc(line.name)}</b></a>${accountMark(line.account_id)}</span>
-            <span class="num"><b>${line.in_total ? esc(money(line.value_minor, 'SGD')) : line.counted_in ? '' : tag('nofig', line.balance === 'no figure' ? 'no figure' : lacksRate(line) ? 'no rate' : 'left out', fixFor(line, sheet.as_at))}</b></span></div>
-            ${line.currency !== 'SGD' && line.balance_minor !== null ? `<div class="small num">${esc(money(line.balance_minor, line.currency))}</div>` : ''}
-            <div class="small">${restsOn(line, { short: true })}</div>
-            <div class="row small" style="margin-top:4px">${checkMarker(line)}</div>
-            <div class="margin-note">${marginNote(line, refusedBy.get(line.account_id), sheet.as_at)}</div></div>`).join('')}
-            ${S.needsLook ? '' : `<div class="spread small" style="padding:8px 0"><b>${section.owed ? 'Total owed' : 'Total'}</b><b class="num">${esc(money(section.total_minor, 'SGD'))}</b></div>`}`;
+        return `<div class="line-group"><h3 class="line-group__head">${esc(section.heading)}${owedNote(section)}</h3>${lines.map(line => {
+            const foreign = line.currency !== 'SGD' && line.balance_minor !== null;
+            const note = marginNote(line, refusedBy.get(line.account_id), sheet.as_at, { rate: !foreign });
+            return `<div class="line-card">
+            <div class="line-card__head"><span class="line-card__name"><a href="#/books/account/${line.account_id}">${esc(line.name)}</a>${accountMark(line.account_id)}</span>
+                <span class="line-card__fig">${line.counted_in ? '' : lineFigure(line, sheet.as_at)}</span></div>
+            ${foreign ? `<div class="line-card__sub"><span class="num">${esc(money(line.balance_minor, line.currency))}</span> <span class="muted">at ${esc(rateWords(line.rate))}</span></div>` : ''}
+            <div class="line-card__sub">${tickOf(line)}<span>${restsOn(line, { short: true })}</span></div>
+            <div class="line-card__tags">${checkMarker(line)}</div>
+            ${note ? `<div class="margin-note">${note}</div>` : ''}</div>`;
+        }).join('')}
+            ${S.needsLook ? '' : `<div class="line-total"><b>${section.owed ? 'Total owed' : 'Total'}</b><b class="num">${esc(money(section.total_minor, 'SGD'))}</b></div>`}</div>`;
     }).join('');
 
+    const cc = sheet.currency_change;
     afterRender(() => drawBridge(sheet));
     return `${booksNav('sheet')}
-    <div class="page-head"><div><span class="eyebrow">Balance sheet</span><h1>As at ${esc(day(sheet.as_at))}${S.month === currentMonth() ? ' <span class="muted small">(this month so far)</span>' : ''}</h1>
+    <div class="page-head"><div><span class="eyebrow">Books · Balance sheet</span><h1>As at ${esc(day(sheet.as_at))}${S.month === currentMonth() ? ' <span class="muted">this month so far</span>' : ''}</h1>
         <p>Every balance names what it rests on. What is owed is negative, under a heading that says owed. Amounts in S$; other currencies at the saved rate.</p></div>
         ${monthPicker()}</div>
-    <section class="card">
-        <div class="spread"><div><span class="eyebrow">Net worth</span><div class="hero-figure num" style="font-size:44px">${heroFigure(sheet.net_worth_minor, 'SGD')}</div></div>
-            <div class="row"><button class="btn" data-act="figure">Enter a figure</button><a class="btn" href="#/queue">Queue · ${q.count}</a></div></div>
-        ${sheet.note ? `<p class="small">${tag('nofig', 'left out')} ${esc(sheet.note)}</p>` : ''}
+    <section class="hero-card sheet-hero">
+        <div class="hero-card__head"><div><span class="eyebrow">Net worth</span><div class="hero-figure">${heroFigure(sheet.net_worth_minor, 'SGD')}</div></div>
+            <div class="row"><button class="btn" data-act="figure">${icon('pencil-simple')}Enter a figure</button><a class="btn" href="#/queue">${icon('list-bullets')}Queue <span class="count">${q.count || ''}</span></a></div></div>
+        ${sheet.note ? `<div class="chip-row left-out-row"><span class="delta-chip delta-chip--warn">${icon('warning')}${plural(sheet.left_out.length, 'line')} left out</span><span class="small">${esc(dateWords(sheet.note).replace(/^Left out of the total: /, ''))}</span></div>` : ''}
         ${restsOnHTML(sheet)}
     </section>
-    <section class="card">
-        <div class="spread" style="margin-bottom:10px"><h2>What we have and what we owe</h2>
+    <section class="card sheet-card">
+        <div class="section-header"><h2>What we have and what we owe</h2>
             <div class="row"><div class="seg" role="group" aria-label="Which lines">
                 <button data-act="needs-look" data-on="0" aria-pressed="${!S.needsLook}">All lines</button>
-                <button data-act="needs-look" data-on="1" aria-pressed="${S.needsLook}">Needs a look · ${needCount}</button></div>
-                <label class="field phone-only" style="min-width:160px"><select data-change="sheet-sort-select" aria-label="Sort">
+                <button data-act="needs-look" data-on="1" aria-pressed="${S.needsLook}">${icon('warning')}Needs a look · ${needCount}</button></div>
+                <label class="field phone-only sheet-sort"><select data-change="sheet-sort-select" aria-label="Sort">
                     <option value="">Sheet order</option><option value="rests"${S.sheetSort.key === 'rests' ? ' selected' : ''}>Rests on: oldest first</option>
                     <option value="check"${S.sheetSort.key === 'check' ? ' selected' : ''}>Check: worst first</option></select></label></div></div>
-        <div class="table-wrap sheet-table"><table class="t">
-            <thead><tr><th style="min-width:170px">Account</th><th class="r">In its currency</th><th class="r">${sortBtn('value', 'In S$')}</th><th></th><th>${sortBtn('rests', 'Rests on')}</th><th>${sortBtn('check', 'Check')}</th><th>Margin note</th></tr></thead>
+        <div class="table-shell sheet-table"><table class="t">
+            <thead><tr><th style="min-width:170px">Account</th><th class="r">In its currency</th><th class="r">${sortBtn('value', 'In S$')}</th><th class="tick-cell"><span class="sr-only">Tick</span></th><th>${sortBtn('rests', 'Rests on')}</th><th>${sortBtn('check', 'Check')}</th><th>Margin note</th></tr></thead>
             <tbody>${table || '<tr><td colspan="7" class="empty">Nothing needs a look.</td></tr>'}</tbody>
             ${S.needsLook ? '' : `<tfoot><tr class="total"><td>Net worth</td><td></td><td class="r num">${esc(money(sheet.net_worth_minor, 'SGD'))}</td><td colspan="4"></td></tr></tfoot>`}</table></div>
-        <div class="sheet-lines">${cards || '<p class="empty">Nothing needs a look.</p>'}</div>
-        ${sheet.currency_change && sheet.currency_change.minor ? `<p class="small" style="margin-top:12px">Currency change since ${esc(day(sheet.currency_change.from))}: <b class="num">${esc(money(sheet.currency_change.minor, 'SGD', { signed: true }))}</b></p>` : ''}
-        ${sheet.currency_change && sheet.currency_change.minor === null && sheet.currency_change.note ? `<p class="small" style="margin-top:12px">${tag('nofig', 'currency change not worked out')} ${esc(sheet.currency_change.note)}
-            ${[...new Set((sheet.currency_change.lines || []).map(l => l.currency).filter(Boolean))].map(c => `<button class="btn sm" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay(sheet.as_at))}">${esc(c)} rate</button>`).join(' ')}</p>` : ''}
+        <div class="sheet-lines">${cards || '<p class="card-empty">Nothing needs a look.</p>'}
+            ${S.needsLook ? '' : `<div class="line-total line-total--worth"><b>Net worth</b><b class="num">${esc(money(sheet.net_worth_minor, 'SGD'))}</b></div>`}</div>
+        ${tickKey()}
+        ${cc && cc.minor ? `<p class="card-foot">Currency change since ${esc(day(cc.from))}: <b class="num">${esc(money(cc.minor, 'SGD', { signed: true }))}</b></p>` : ''}
+        ${cc && cc.minor === null && cc.note ? `<p class="card-foot">${tag('nofig', 'currency change not worked out')} ${esc(dateWords(cc.note))}
+            ${[...new Set((cc.lines || []).map(l => l.currency).filter(Boolean))].map(c => `<button class="btn sm" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay(sheet.as_at))}">${esc(c)} rate</button>`).join(' ')}</p>` : ''}
     </section>
     ${monthCheckHTML(sheet)}`;
 }
@@ -1779,92 +1835,180 @@ ACT['sheet-sort'] = el => {
 };
 ACT['sheet-sort-select'] = el => { S.sheetSort = { key: el.value || null, dir: 'asc' }; rerender(); };
 
+/** Nothing moved in the month: no income, spending, currency change or money
+ *  moved to accounts left out. */
+function monthStill(mc) {
+    return !mc.income_minor && !mc.spending_minor && !mc.currency_change_minor && !mc.outside_minor;
+}
+/** Why the month check does not add up, or what is still worth a look: one
+ *  row per account, its marker under its name, How much holding money only. */
+function monthReasons(mc) {
+    const rows = [];
+    const rv = mc.review || {};
+    const label = { href: '#/queue', text: 'Label them' };
+    if (rv.out_count) rows.push({ what: `${dirTag('out')} ${plural(rv.out_count, 'transfer')} waiting for a label`, how: money(rv.out_minor, 'SGD'), fix: label });
+    if (rv.in_count) rows.push({ what: `${dirTag('in')} ${plural(rv.in_count, 'transfer')} waiting for a label`, how: money(rv.in_minor, 'SGD'), fix: label });
+    const byName = new Map();
+    (mc.not_tying || []).forEach(l => {
+        const marker = l.status === 'off'
+            ? tag('off', `off by ${money(Math.abs(l.difference_minor), l.currency)}`)
+            : tag('notchecked', dateWords(l.text).replace(/^not checked \((.*)\)$/, 'not checked: $1').replace(/ to check against$/, ''));
+        byName.set(l.name, { what: `<b>${esc(l.name)}</b>`, marker, how: null, fix: { href: `#/books/account/${l.account_id}`, text: 'See the tie line' } });
+    });
+    (mc.left_out || []).forEach(l => {
+        const acct = l.account_id ? window.__accountById?.get(l.account_id) : null;
+        const why = l.why === 'no figure' ? 'no figure' : /^no balance on /.test(l.why) ? `no figure on ${dateWords(l.why.replace(/^no balance on /, ''))}` : dateWords(l.why);
+        const fix = acct && acct.takes_a_figure ? { act: 'figure', account: acct.id, text: 'Enter a figure' }
+            : acct ? { href: '#/books/import', text: 'Import a statement' } : { act: 'figure', text: 'Enter a figure' };
+        byName.set(l.name, { what: `<b>${esc(l.name)}</b>`, marker: tag('nofig', `${why}, left out of both sides`), how: null, fix });
+    });
+    rows.push(...byName.values());
+    const fixHTML = f => f.href ? `<a class="link" href="${f.href}">${f.text}</a>`
+        : `<button class="link" data-act="${f.act}"${f.account ? ` data-account="${f.account}"` : ''}>${f.text}</button>`;
+    return rows.map(r => `<tr><td><div class="reason-what">${r.what}</div>${r.marker ? `<div class="reason-mark">${r.marker}</div>` : ''}</td>
+        <td class="r num reason-how">${r.how ? esc(r.how) : '<span class="muted" aria-label="no sum of money">—</span>'}</td><td class="reason-fix">${fixHTML(r.fix)}</td></tr>`).join('');
+}
+
 function monthCheckHTML(sheet) {
     const mc = sheet.month_check;
     if (!mc) return '';
-    const head = `<div class="card-head"><div><span class="eyebrow">Month check · ${esc(monthName(sheet.month))}</span>
+    const head = `<div class="section-header"><div><p class="eyebrow">Month check · ${esc(monthName(sheet.month))}</p>
         <h2>Do the month’s rows account for the change in net worth?</h2></div></div>`;
     if (!mc.available || mc.unexplained_minor === null || mc.unexplained_minor === undefined) {
-        return `<section class="card" id="month-check">${head}<p>${esc(mc.why || 'Not worked out for this month.')}</p></section>`;
+        return `<section class="card month-check" id="month-check">${head}<p class="card-empty">${esc(dateWords(mc.why) || 'Not worked out for this month.')}</p></section>`;
     }
     const line = (op, label, minor, cls = '') => `<tr class="${cls}"><td class="op">${op}</td><td>${label}</td><td class="r">${esc(money(minor, 'SGD'))}</td></tr>`;
     const signOp = m => (m < 0 ? '−' : '+');
     const unexplained = mc.unexplained_minor;
+    const leftOut = (mc.left_out || []).length;
+    const inCheck = mc.in_check_count;
     const sum = `<table class="sum"><tbody>
-        ${line('', `Net worth at ${esc(day(mc.from))} <span class="muted small">(the accounts in the check)</span>`, mc.opening_minor)}
+        ${line('', `Net worth at ${esc(dateWords(mc.from))} <span class="muted small">(${inCheck != null ? plural(inCheck, 'account') : 'the accounts'} in the check)</span>`, mc.opening_minor)}
         ${line('+', 'income', mc.income_minor)}
         ${line('−', `household spending${mc.interest_minor ? `, with ${esc(money(mc.interest_minor, 'SGD'))} loan interest` : ''}`, mc.spending_minor)}
         ${line(signOp(mc.currency_change_minor), 'currency change', Math.abs(mc.currency_change_minor))}
         ${mc.outside_minor ? line(signOp(mc.outside_minor), 'money moved to or from accounts left out', Math.abs(mc.outside_minor)) : ''}
-        ${line('=', `what it should be at ${esc(day(mc.to))}`, mc.expected_minor, 'eq')}
+        ${line('=', `what it should be at ${esc(dateWords(mc.to))}`, mc.expected_minor, 'eq')}
         ${line('', 'what it is', mc.actual_minor)}
-        <tr class="gap${unexplained === 0 ? ' zero' : ''}"><td class="op">${unexplained === 0 ? '✓' : '?'}</td><td>${unexplained === 0 ? 'it adds up' : 'unexplained'}</td><td class="r">${esc(money(unexplained, 'SGD'))}</td></tr>
         </tbody></table>`;
-    const why = [];
-    const rv = mc.review || {};
-    if (rv.out_count) why.push(`<tr><td>${dirTag('out')} ${plural(rv.out_count, 'transfer')} waiting for a label</td><td class="r num">${esc(money(rv.out_minor, 'SGD'))}</td><td><a class="link" href="#/queue">Label them</a></td></tr>`);
-    if (rv.in_count) why.push(`<tr><td>${dirTag('in')} ${plural(rv.in_count, 'transfer')} waiting for a label</td><td class="r num">${esc(money(rv.in_minor, 'SGD'))}</td><td><a class="link" href="#/queue">Label them</a></td></tr>`);
-    (mc.not_tying || []).forEach(l => why.push(`<tr><td>${esc(l.name)}</td><td class="r">${l.status === 'off' ? tag('off', `off by ${money(Math.abs(l.difference_minor), l.currency)}`) : tag('notchecked', l.text)}</td><td><a class="link" href="#/books/account/${l.account_id}">See the tie line</a></td></tr>`));
-    (mc.left_out || []).forEach(l => why.push(`<tr><td>${esc(l.name)} is left out of both sides</td><td class="r small">${esc(l.why)}</td><td><button class="link" data-act="figure">Enter a figure</button></td></tr>`));
-    const whyTable = `<h3 style="margin:18px 0 6px">${unexplained === 0 ? 'Still worth a look' : 'Why it does not add up'}</h3>
-        ${why.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Where to look</th><th class="r">How much</th><th>Fix</th></tr></thead><tbody>${why.join('')}</tbody></table></div>`
-            : `<p class="small muted">${unexplained === 0 ? 'Nothing: every row is labelled and every line ties.' : 'Nothing waits and every line ties: a row may be missing or mislabelled, or a figure moved.'}</p>`}`;
-    return `<section class="card" id="month-check">${head}
-        <div class="grid-2"><div>${sum}${mc.note ? `<p class="small muted" style="margin-top:8px">${esc(mc.note)}</p>` : ''}</div>
-        <div class="desk-only"><span class="eyebrow">The bridge</span><svg class="bridge" id="bridge" viewBox="0 0 520 240" role="img" aria-label="The month check as a bridge"></svg></div></div>
+    // A green tick only when nothing is left out; otherwise say for how many it adds up.
+    const result = unexplained !== 0
+        ? `<span class="delta-chip delta-chip--down mc-chip">${icon('warning-circle')}${esc(money(unexplained, 'SGD'))} unexplained</span>`
+        : leftOut
+            ? `<div class="mc-partial"><span class="mc-partial__op" aria-hidden="true">=</span><div><b>Adds up for the ${inCheck != null ? plural(inCheck, 'account') : 'accounts'} in the check.</b>
+                <span>${plural(leftOut, 'account is', 'accounts are')} left out, so part of ${esc(monthName(sheet.month).split(' ')[0])} is not checked. ${leftOut === 1 ? 'It is' : 'They are'} listed below.</span></div></div>`
+            : `<span class="delta-chip delta-chip--up mc-chip">${icon('check-circle')}it adds up · ${esc(money(0, 'SGD'))}</span>`;
+    const still = monthStill(mc);
+    const right = still
+        ? `<div class="bridge-still"><p class="card-empty">${S.month === currentMonth() || sheet.month === currentMonth() ? 'Nothing has moved yet this month.' : `Nothing moved in ${esc(monthName(sheet.month))}.`}</p></div>`
+        : `<div class="desk-only bridge-box"><p class="eyebrow">The bridge</p><svg class="bridge" id="bridge" viewBox="0 0 600 270" role="img" aria-label="The month check as a bridge"></svg><p class="card-foot bridge-note" id="bridge-note"></p></div>`;
+    const reasons = monthReasons(mc);
+    const whyTable = `<div class="mc-reasons"><h3>${unexplained === 0 ? 'Still worth a look' : 'Why it does not add up'}</h3>
+        ${reasons ? `<div class="table-shell"><table class="t reasons"><thead><tr><th>Where to look</th><th class="r">How much</th><th>Fix</th></tr></thead><tbody>${reasons}</tbody></table></div>`
+            : `<p class="card-empty">${unexplained === 0 ? 'Nothing: every row is labelled and every line ties.' : 'Nothing waits and every line ties: a row may be missing or mislabelled, or a figure moved.'}</p>`}</div>`;
+    return `<section class="card month-check" id="month-check">${head}
+        <div class="mc-grid"><div>${sum}<div class="mc-result">${result}</div></div>${right}</div>
         ${whyTable}</section>`;
 }
 
-/** The month check as a bridge: from the opening figure, each step up or
- *  down, to what it should be, beside what it is. Desk only. */
+/** The month check as a bridge (desk only): the start and the end totals as
+ *  bars on a labelled axis that says where it starts, each step floating
+ *  from where the last ended, and the unexplained gap as its own hatched step. */
 function drawBridge(sheet) {
     const svg = $('#bridge');
     const mc = sheet.month_check;
     if (!svg || !mc || !mc.available || mc.unexplained_minor === null) return;
     const steps = [
-        ['Start', mc.opening_minor, 'base'], ['Income', mc.income_minor, 'step'], ['Spending', -mc.spending_minor, 'step'],
-        ['Currency', mc.currency_change_minor, 'step'],
+        [day(mc.from, { year: false }), mc.opening_minor, 'base'], ['Income', mc.income_minor, 'in'], ['Spending', -mc.spending_minor, 'out'],
+        ['Currency', mc.currency_change_minor, 'move'],
     ];
-    if (mc.outside_minor) steps.push(['Outside', mc.outside_minor, 'step']);
-    steps.push(['Should be', mc.expected_minor, 'base'], ['Is', mc.actual_minor, 'actual']);
+    if (mc.outside_minor) steps.push(['Outside', mc.outside_minor, 'move']);
+    steps.push(['Should be', mc.expected_minor, 'base']);
+    if (mc.unexplained_minor) steps.push(['Unexplained', mc.unexplained_minor, 'gap']);
+    steps.push(['Is', mc.actual_minor, 'actual']);
     let running = 0;
-    const bars = steps.map(([label, v, kind]) => {
-        if (kind === 'step') { const from = running; running += v; return { label, from, to: running, v, kind }; }
-        if (kind === 'base' && label === 'Start') running = v;
-        return { label, from: 0, to: v, v, kind };
+    const bars = steps.map(([label, v, kind], i) => {
+        if (kind === 'base' || kind === 'actual') { running = v; return { label, from: null, to: v, v, kind }; }
+        const from = running; running += v;
+        return { label, from, to: running, v, kind };
     });
-    const values = bars.flatMap(b => [b.from, b.to]);
-    let lo = Math.min(...values), hi = Math.max(...values);
-    // A bridge from zero would flatten the steps: start just below the lowest top.
-    const tops = bars.filter(b => b.kind !== 'step').map(b => b.to);
-    const floor = Math.min(...tops, ...bars.filter(b => b.kind === 'step').flatMap(b => [b.from, b.to]));
-    lo = floor - (hi - floor) * 0.25;
-    if (hi === lo) hi = lo + 1;
-    const W = 520, H = 240, top = 18, bottom = 196, n = bars.length, bw = W / n;
+    const ends = bars.flatMap(b => b.from === null ? [b.to] : [b.from, b.to]);
+    const max = Math.max(...ends), min = Math.min(...ends);
+    const span = Math.max(max - min, Math.abs(max) * 0.01, 100);
+    const raw = span / 4;
+    const mag = 10 ** Math.floor(Math.log10(raw));
+    const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+    let lo = Math.floor((min - span * 0.15) / step) * step;
+    if (min >= 0 && lo < 0) lo = 0;
+    const hi = Math.ceil((max + span * 0.05) / step) * step;
+    const W = 600, H = 270, left = 58, right = 8, top = 22, bottom = 222;
+    const n = bars.length, bw = (W - left - right) / n;
     const y = v => bottom - ((v - lo) / (hi - lo)) * (bottom - top);
-    const colour = b => b.kind === 'actual' ? 'var(--text-primary)' : b.kind === 'base' ? 'var(--border-emphasis)' : b.v >= 0 ? 'var(--ok)' : 'var(--terra)';
-    let out = '';
-    bars.forEach((b, i) => {
-        const x = i * bw + bw * 0.18, w = bw * 0.64;
-        const from = b.kind === 'step' ? b.from : lo;
-        const y1 = y(Math.max(from, b.to)), y2 = y(Math.min(from, b.to));
-        out += `<rect x="${x}" y="${y1}" width="${w}" height="${Math.max(2, y2 - y1)}" rx="3" fill="${colour(b)}"/>`;
-        out += `<text x="${x + w / 2}" y="${bottom + 16}" text-anchor="middle">${esc(b.label)}</text>`;
-        const shown = b.kind === 'step' ? money(b.v, 'SGD', { signed: true }) : money(b.v, 'SGD');
-        out += `<text x="${x + w / 2}" y="${bottom + 32}" text-anchor="middle" style="font-size:10.5px">${esc(shown.replace('S$ ', ''))}</text>`;
-    });
-    const gap = mc.unexplained_minor;
-    if (gap) {
-        const xs = (n - 2) * bw + bw * 0.5, xe = (n - 1) * bw + bw * 0.5;
-        out += `<line x1="${xs}" x2="${xe}" y1="${y(mc.expected_minor)}" y2="${y(mc.expected_minor)}" stroke="var(--bad)" stroke-dasharray="4 3"/>`;
-        out += `<text x="${(xs + xe) / 2}" y="${Math.min(y(mc.expected_minor), y(mc.actual_minor)) - 6}" text-anchor="middle" style="fill:var(--bad);font-weight:700">? ${esc(money(gap, 'SGD'))}</text>`;
+    const axisWord = v => {
+        const s = v / 100;
+        return Math.abs(s) >= 1e6 ? `${+(s / 1e6).toFixed(2)}M` : Math.abs(s) >= 1e3 ? `${+(s / 1e3).toFixed(1)}k` : `${s}`;
+    };
+    let out = `<defs><pattern id="bridge-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" class="b-hatch-bg"/><line x1="0" y1="0" x2="0" y2="6" class="b-hatch-line"/></pattern></defs>`;
+    for (let v = lo; v <= hi + 1; v += step) {
+        out += `<line class="b-grid" x1="${left}" x2="${W - right}" y1="${y(v)}" y2="${y(v)}"/><text class="b-axis" x="${left - 8}" y="${y(v) + 3.5}" text-anchor="end">${esc(axisWord(v))}</text>`;
     }
+    out += `<line class="b-base" x1="${left}" x2="${W - right}" y1="${bottom}" y2="${bottom}"/>`;
+    bars.forEach((b, i) => {
+        const x = left + i * bw + bw * 0.16, w = bw * 0.68;
+        const from = b.from === null ? lo : b.from;
+        const y1 = y(Math.max(from, b.to)), y2 = y(Math.min(from, b.to));
+        out += `<rect class="b-${b.kind}" x="${x.toFixed(1)}" y="${y1.toFixed(1)}" width="${w.toFixed(1)}" height="${Math.max(2, y2 - y1).toFixed(1)}" rx="3"/>`;
+        out += `<text class="b-label" x="${x + w / 2}" y="${bottom + 16}" text-anchor="middle">${esc(b.label)}</text>`;
+        const shown = b.from !== null ? money(b.v, 'SGD', { signed: true }) : money(b.v, 'SGD');
+        out += `<text class="b-fig${b.kind === 'gap' ? ' b-fig--gap' : ''}" x="${x + w / 2}" y="${y1 - 6}" text-anchor="middle">${esc(shown.replace('S$ ', ''))}</text>`;
+    });
     svg.innerHTML = out;
+    const note = $('#bridge-note');
+    if (note) note.textContent = lo === 0 ? 'The axis starts at zero; each step is drawn to scale. Figures in S$.' : `The axis starts at ${money(lo, 'SGD')}, not at zero; each step is drawn to scale. Figures in S$.`;
 }
 
 // ---------------------------------------------------------------------------
 // One account's page: its balance, its tie line, its figures and rows
 // ---------------------------------------------------------------------------
+
+const KIND_WORDS = { bank: 'Bank account', card: 'Card', loan: 'Loan', holding: 'Holding', company: 'Company', person: 'Person' };
+/** What a row is labelled, as an account's rows show it. */
+function acctRowLabel(row) {
+    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted">transfer</span>', payment: '<span class="muted">card payment</span>', movement: `<span class="muted">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted">income</span>' }[row.flow_type];
+    return flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
+}
+/** One of an account's rows: money in and money out in two plain columns. */
+function acctRowTr(row) {
+    const minor = toMinor(row.amount_sgd, row.currency);
+    const cur = row.currency || 'SGD';
+    const inCell = minor !== null && minor < 0 ? esc(money(-minor, cur)) : '';
+    const outCell = minor !== null && minor >= 0 ? esc(money(minor, cur)) : '';
+    return `<tr class="clickable" data-act="row" data-tx="${row.id}">
+        <td class="num row-date">${esc(day(row.date, { year: false }))}</td>
+        <td class="row-desc">${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${row.book && row.book !== 'Household' ? ` <span class="small muted">· ${esc(row.book)}</span>` : ''}</td>
+        <td class="row-label">${acctRowLabel(row)}</td>
+        <td class="r num row-in">${inCell}</td><td class="r num row-out">${outCell}</td></tr>`;
+}
+/** A tie line's check as its one pill. */
+function tieTag(t, cur) {
+    if (t.status === 'ties') return tag('ties', 'ties');
+    if (t.status === 'off') return tag('off', `off by ${money(Math.abs(t.difference_minor), cur)}`);
+    if (t.status === 'your figure') return tag('yours', 'your figure');
+    return tag('notchecked', 'not checked: no earlier balance');
+}
+/** Between two of your figures: the earlier figure, the rows in between (in
+ *  and out apart), against the later figure, and what moved with no row. */
+function betweenFigures(t, cur) {
+    const made = t.opening_minor + (t.in_minor || 0) - (t.out_minor || 0);
+    return `<table class="sum"><tbody>
+        <tr><td class="op"></td><td>your figure ${esc(day(t.opening_date))}</td><td class="r">${esc(money(t.opening_minor, cur))}</td></tr>
+        <tr><td class="op">+</td><td>money in${t.rows ? '' : ' <span class="muted small">(no rows in between)</span>'}</td><td class="r">${esc(money(t.in_minor || 0, cur))}</td></tr>
+        <tr><td class="op">−</td><td>money out${t.rows ? ` <span class="muted small">(${plural(t.rows, 'row')} in between)</span>` : ''}</td><td class="r">${esc(money(t.out_minor || 0, cur))}</td></tr>
+        <tr class="eq"><td class="op">=</td><td>what the rows make it</td><td class="r">${esc(money(made, cur))}</td></tr>
+        <tr><td class="op"></td><td>your figure ${esc(day(t.date))}</td><td class="r">${esc(money(t.closing_minor, cur))}</td></tr>
+        <tr class="moved"><td class="op">?</td><td><b>moved with no row</b></td><td class="r">${esc(money(t.moved_minor ?? (t.closing_minor - made), cur, { signed: true }))}</td></tr>
+        </tbody></table>`;
+}
 
 const accountPage = { page: 1 };
 async function viewAccount(id) {
@@ -1877,60 +2021,121 @@ async function viewAccount(id) {
     const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}`);
     const line = sheet.sections.flatMap(s => s.lines).find(l => l.account_id === id);
     const cur = acct.currency || 'SGD';
+    const asAtShort = day(sheet.as_at, { year: false });
 
-    let tieLine = '<p class="muted">No balance yet: nothing to rest on.</p>';
+    // The balance as a sum, in tiles: what it rests on, the rows since, the balance.
+    let tiles = '';
     if (line && line.rests_on && line.balance_minor !== null) {
         const anchor = anchorsList.find(a => a.date === line.rests_on.date);
         const base = anchor ? anchor.amount_minor : null;
         const change = base !== null ? line.balance_minor - base : null;
-        tieLine = `<table class="sum"><tbody>
-            <tr><td class="op"></td><td>${line.rests_on.source === 'supplied' ? 'your figure' : 'statement'} ${esc(day(line.rests_on.date))}</td><td class="r">${esc(money(base, cur))}</td></tr>
-            ${change !== null ? `<tr><td class="op">${change < 0 ? '−' : '+'}</td><td>${esc(line.since || 'nothing since')}</td><td class="r">${esc(money(Math.abs(change), cur))}</td></tr>` : ''}
-            <tr class="eq"><td class="op">=</td><td>balance at ${esc(day(sheet.as_at))}</td><td class="r">${esc(money(line.balance_minor, cur))}</td></tr>
-            ${cur !== 'SGD' && line.value_minor !== null ? `<tr><td class="op"></td><td class="small muted">${esc(line.rate?.text || '')}</td><td class="r">${esc(money(line.value_minor, 'SGD'))}</td></tr>` : ''}
-            </tbody></table>`;
+        tiles = `<div class="stat-tiles acct-tiles">
+            <div class="stat-tile"><span class="stat-tile__label">${line.rests_on.source === 'supplied' ? 'Your figure' : 'Statement'} ${esc(day(line.rests_on.date, { year: false }))}</span><span class="stat-tile__figure">${esc(money(base, cur))}</span></div>
+            ${change !== null ? `<div class="stat-tile"><span class="stat-tile__label">${change < 0 ? '−' : '+'} rows since</span><span class="stat-tile__figure">${esc(money(Math.abs(change), cur))}</span><span class="stat-tile__sub">${esc(line.since || 'nothing since')}</span></div>` : ''}
+            <div class="stat-tile"><span class="stat-tile__label">= Balance ${esc(asAtShort)}</span><span class="stat-tile__figure">${esc(money(line.balance_minor, cur))}</span></div>
+            ${cur !== 'SGD' && line.value_minor !== null ? `<div class="stat-tile"><span class="stat-tile__label">In S$</span><span class="stat-tile__figure">${esc(money(line.value_minor, 'SGD'))}</span><span class="stat-tile__sub">${esc(rateWords(line.rate))}</span></div>` : ''}
+            </div>`;
     } else if (line && line.made_of) {
-        tieLine = `<p>${esc(line.made_of.text)}</p><p class="num"><b>${esc(money(line.balance_minor, cur))}</b></p>`;
+        tiles = `<p class="acct-made">${esc(madeOfSum(line))}</p>`;
+    }
+    // One marker, never the symbol and the pill both.
+    const marker = !line ? '' : line.check ? checkMarker(line) : line.rests_on?.source === 'supplied' ? tag('yours', 'your figure') : `<span class="muted small">${line.made_of ? 'worked out from rows' : 'no check possible'}</span>`;
+    const hero = `<section class="hero-card acct-hero">
+        <div class="hero-card__head"><div><span class="eyebrow">Balance at ${esc(day(sheet.as_at))}</span>
+            <div class="hero-figure">${line && line.balance_minor !== null ? heroFigure(line.balance_minor, cur) : ''}</div></div>
+            <div class="acct-hero__mark">${line && line.balance_minor === null ? lineFigure(line, sheet.as_at) : marker}</div></div>
+        <p class="small acct-rests">${line && line.balance_minor !== null ? `Rests on: ${restsOn(line)}` : 'Nothing to rest on yet.'}</p>
+        ${tiles}${line && line.made_of && tiles.indexOf('acct-made') < 0 ? `<p class="acct-made">${esc(madeOfSum(line))}</p>` : ''}</section>`;
+
+    // Tie lines: each statement a row, money in and money out apart; on an
+    // account that rests on your figures, what moved between them instead.
+    const onFigures = ties.ties.length > 0 && ties.ties.every(t => t.status === 'your figure');
+    let tieCard;
+    if (onFigures) {
+        const pairs = ties.ties.filter(t => t.opening_minor !== null && t.opening_minor !== undefined);
+        // One figure alone has nothing to set it against: no card.
+        tieCard = pairs.length ? `<section class="card"><div class="section-header"><h2>Between your figures</h2>${tag('yours', 'your figure')}</div>
+            ${pairs.map(t => betweenFigures(t, cur)).join('<hr class="rule">')}
+            <p class="card-foot">Nothing checks a figure you enter; this only shows what moved between them.</p></section>` : '';
+    } else {
+        const dash = '<span class="muted">—</span>';
+        const tieRows = ties.ties.map(t => {
+            const worked = t.opening_minor !== null && t.opening_minor !== undefined;
+            const made = worked ? t.opening_minor + (t.in_minor || 0) - (t.out_minor || 0) : null;
+            const title = t.status === 'your figure' ? 'Your figure' : 'Statement';
+            const sub = worked ? plural(t.rows, 'row') : t.status === 'your figure' ? 'the fact' : 'first statement held';
+            return `<tr>
+                <td data-label="${title}"><b>${title === 'Statement' ? '' : 'Your figure '}${esc(day(t.date))}</b><div class="small muted">${esc(sub)}</div></td>
+                <td class="r num" data-label="Opening">${worked ? esc(money(t.opening_minor, cur)) : '<span class="muted">none</span>'}</td>
+                <td class="r num" data-label="+ money in">${worked ? esc(money(t.in_minor || 0, cur)) : dash}</td>
+                <td class="r num" data-label="− money out">${worked ? esc(money(t.out_minor || 0, cur)) : dash}</td>
+                <td class="r num" data-label="= works out to">${worked ? `<b>${esc(money(made, cur))}</b>` : dash}</td>
+                <td class="r num" data-label="${t.status === 'your figure' ? 'You entered' : 'Statement says'}">${esc(money(t.closing_minor, cur))}</td>
+                <td class="tie-check" data-label="Check">${tieTag(t, cur)}</td></tr>`;
+        }).join('');
+        tieCard = `<section class="card ties-card"><div class="section-header"><h2>Tie lines</h2><span class="section-header__aside">each statement drawn as a sum</span></div>
+            ${tieRows ? `<div class="table-shell"><table class="t cells ties-table"><thead><tr><th>Statement</th><th class="r">Opening</th><th class="r">+ money in</th><th class="r">− money out</th><th class="r">= works out to</th><th class="r">Statement says</th><th>Check</th></tr></thead><tbody>${tieRows}</tbody></table></div>`
+                : '<p class="card-empty">No balances held.</p>'}</section>`;
     }
 
-    const tieRows = ties.ties.map(t => {
-        if (t.status === 'ties' || t.status === 'off') {
-            const made = t.opening_minor + t.rows_minor;
-            return `<li style="margin-bottom:12px"><div class="spread"><b>Statement ${esc(day(t.date))}</b>${t.status === 'ties' ? tag('ties', 'ties') : tag('off', `off by ${money(Math.abs(t.difference_minor), cur)}`)}</div>
-                <div class="small num wrap">${esc(money(t.opening_minor, cur))} on ${esc(day(t.opening_date, { year: false }))} ${t.rows_minor < 0 ? '−' : '+'} ${plural(t.rows, 'row')} ${esc(money(Math.abs(t.rows_minor), cur))} = ${esc(money(made, cur))}${t.status === 'ties' ? '' : `, but it states ${esc(money(t.closing_minor, cur))}`}</div></li>`;
-        }
-        if (t.status === 'your figure') return `<li style="margin-bottom:12px"><div class="spread"><b>Your figure ${esc(day(t.date))}</b>${tag('yours', 'your figure')}</div><div class="small num">${esc(money(t.closing_minor, cur))} · the fact; nothing checks it</div></li>`;
-        return `<li style="margin-bottom:12px"><div class="spread"><b>Statement ${esc(day(t.date))}</b>${tag('notchecked', 'not checked: no earlier balance')}</div><div class="small num">${esc(money(t.closing_minor, cur))}</div></li>`;
-    }).join('');
-
-    const refusedHTML = refused.refused.map(f => `<div class="item refused" style="margin-top:8px"><div><div class="what">${esc(day(f.statement_date))} statement ${tag(f.set_aside ? 'aside' : 'refused', f.set_aside ? 'refused · set aside' : 'refused')}</div>
-        <div class="meta">${esc(money(f.opening_minor, f.currency))} ${f.rows_minor < 0 ? '−' : '+'} ${plural(f.rows, 'row')} ${esc(money(Math.abs(f.rows_minor), f.currency))} = ${esc(money(f.opening_minor + f.rows_minor, f.currency))}, but it states ${esc(money(f.closing_minor, f.currency))}: off by ${esc(money(Math.abs(f.difference_minor), f.currency))}</div>
+    const refusedHTML = refused.refused.map(f => `<div class="item refused acct-refused"><div><div class="what">${icon('prohibit')} ${esc(day(f.statement_date))} statement ${tag(f.set_aside ? 'aside' : 'refused', f.set_aside ? 'refused · set aside' : 'refused')}</div>
+        <div class="meta num wrap">${esc(money(f.opening_minor, f.currency))} ${f.rows_minor < 0 ? '−' : '+'} ${plural(f.rows, 'row')} ${esc(money(Math.abs(f.rows_minor), f.currency))} = ${esc(money(f.opening_minor + f.rows_minor, f.currency))}, but it states ${esc(money(f.closing_minor, f.currency))}: <b class="neg">off by ${esc(money(Math.abs(f.difference_minor), f.currency))}</b></div>
         <div class="holds">None of its rows is in the books.</div></div><div></div>
         <div class="act">${f.set_aside ? `<button class="btn sm" data-act="aside" data-id="${f.id}" data-aside="0">Bring it back</button>` : `<button class="btn sm" data-act="aside" data-id="${f.id}" data-aside="1">Known, leave it</button>`}<a class="btn sm" href="#/books/import">Import a fixed file</a></div></div>`).join('');
 
-    const figures = anchorsList.filter(a => a.source === 'supplied').map(a => `<tr><td>${esc(day(a.date))}</td><td class="r num">${esc(money(a.amount_minor, cur))}</td><td class="small">${esc(a.note || '')}</td>
-        <td class="r"><button class="btn sm" data-act="figure-fix" data-id="${a.id}" data-date="${a.date}" data-amount="${a.amount_minor}">Correct</button> <button class="btn sm danger" data-act="figure-delete" data-id="${a.id}">Delete</button></td></tr>`).join('');
+    const supplied = anchorsList.filter(a => a.source === 'supplied');
+    const figures = supplied.map(a => `<li class="fig-row"><span class="fig-row__date">${esc(day(a.date))}</span><span class="fig-row__amt num">${esc(money(a.amount_minor, cur))}</span>
+        <span class="fig-row__note">${esc(a.note || '')}</span>
+        <span class="fig-row__acts"><button class="btn sm" data-act="figure-fix" data-id="${a.id}" data-date="${a.date}" data-amount="${a.amount_minor}">Correct</button><button class="quiet-word" data-act="figure-delete" data-id="${a.id}" data-date="${a.date}" data-amount="${a.amount_minor}" data-cur="${esc(cur)}">Delete</button></span></li>`).join('');
 
-    const rowList = rows.transactions.map(row => rowTr(row, { account: false })).join('');
+    // Rows under the statement (or figure) they tie into, each heading with its money in and out.
+    const tieOf = new Map();
+    ties.ties.forEach(t => (t.row_ids || []).forEach(rid => tieOf.set(rid, t)));
+    const newest = ties.ties[0];
+    const oldestFirst = [...ties.ties].reverse();
+    const groupOf = row => {
+        const t = tieOf.get(row.id);
+        if (t) return { key: t.date, t };
+        if (newest && row.date > newest.date) return { key: 'since', since: newest };
+        // A row no tie line counts: under the balance just after it when it
+        // falls in that balance's month (a first statement), else on its own.
+        const upto = oldestFirst.find(x => x.date >= row.date);
+        return upto && daysBetween(row.date, upto.date) <= 31 ? { key: upto.date, t: upto, loose: true } : { key: 'none' };
+    };
+    let lastKey = null;
+    const rowList = rows.transactions.map(row => {
+        const g = groupOf(row);
+        let headRow = '';
+        if (g.key !== lastKey) {
+            lastKey = g.key;
+            let words;
+            if (g.key === 'since') words = `Since the ${g.since.status === 'your figure' ? 'figure' : 'statement'} of ${esc(day(g.since.date))}`;
+            else if (g.key === 'none') words = 'Not in a tie line <span class="sec-note">· before the balances held</span>';
+            else {
+                const t = g.t;
+                const kind = t.status === 'your figure' ? 'Up to your figure' : 'Statement';
+                const facts = !g.loose && t.opening_minor !== null && t.opening_minor !== undefined
+                    ? ` <span class="sec-note">· ${plural(t.rows, 'row')} · in ${esc(money(t.in_minor || 0, cur))} · out ${esc(money(t.out_minor || 0, cur))}</span>` : '';
+                words = `${kind} ${esc(day(t.date))}${facts} ${tieTag(t, cur)}`;
+            }
+            headRow = `<tr class="section"><td colspan="5">${words}</td></tr>`;
+        }
+        return headRow + acctRowTr(row);
+    }).join('');
     ACT.__rows = new Map(rows.transactions.map(x => [x.id, x]));
+
     return `${booksNav('sheet')}
-    <div class="page-head"><div><a class="link small" href="#/books">← Balance sheet</a><h1>${esc(acct.name)}${accountMark(id)}</h1>
+    <div class="page-head"><div><a class="link small back-link" href="#/books">← Balance sheet</a><span class="eyebrow">Books · ${esc(KIND_WORDS[acct.type] || acct.type)}</span><h1>${esc(acct.name)}${accountMark(id)}</h1>
         <p>${esc(acct.type)} · ${esc(acct.owner)} · kept in ${esc(cur)}${acct.status === 'archived' ? ' · archived' : ''}</p></div>
-        <div class="row">${acct.takes_a_figure ? `<button class="btn primary" data-act="figure" data-account="${id}">Enter a figure</button>` : ''}${monthPicker()}</div></div>
-    <div class="grid-2">
-        <section class="card"><div class="card-head"><h2>Balance</h2>${line ? `<span>${tickOf(line)} ${checkMarker(line)}</span>` : ''}</div>
-            <div class="hero-figure num" style="font-size:40px">${line && line.balance_minor !== null ? heroFigure(line.balance_minor, cur) : tag('nofig', 'no figure')}</div>
-            <p class="small">Rests on: ${line ? restsOn(line) : '—'}</p><hr class="rule">${tieLine}</section>
-        <section class="card"><div class="card-head"><h2>Tie lines</h2><p>each statement drawn as a sum</p></div>
-            ${tieRows ? `<ul style="list-style:none;padding:0;margin:0">${tieRows}</ul>` : '<p class="muted">No balances held.</p>'}
-            ${refusedHTML ? `<h3 style="margin-top:12px">Refused at upload</h3>${refusedHTML}` : ''}</section>
-    </div>
-    ${figures ? `<section class="card"><div class="card-head"><h2>Your figures</h2></div><div class="table-wrap"><table class="t"><tbody>${figures}</tbody></table></div></section>` : ''}
-    <section class="card"><div class="card-head"><h2>Rows</h2><p>${plural(rows.total, 'row')} · tap a row for its note, one-off and history</p></div>
-        <div class="table-wrap"><table class="t rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Amount</th></tr></thead><tbody>${rowList || '<tr><td colspan="4" class="empty">No rows.</td></tr>'}</tbody></table></div>
+        <div class="row page-head__end">${acct.takes_a_figure ? `<button class="btn primary" data-act="figure" data-account="${id}">${icon('pencil-simple')}Enter a figure</button>` : ''}${monthPicker()}</div></div>
+    <div class="acct-top${tieCard ? '' : ' acct-top--one'}">${hero}${tieCard}</div>
+    ${refusedHTML ? `<section class="card"><div class="section-header"><h2>Refused at upload</h2><span class="section-header__aside">a statement that does not tie is kept out whole</span></div>${refusedHTML}</section>` : ''}
+    ${figures ? `<section class="card"><div class="section-header"><h2>Your figures</h2><span class="section-header__aside">${plural(supplied.length, 'figure')} · each the fact</span></div><ul class="fig-list">${figures}</ul></section>` : ''}
+    <section class="card"><div class="section-header"><h2>Rows</h2><span class="section-header__aside">${plural(rows.total, 'row')} · tap a row for its note, one-off and history</span></div>
+        <div class="table-shell"><table class="t rows acct-rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Money in</th><th class="r">Money out</th></tr></thead><tbody>${rowList || '<tr><td colspan="5" class="empty">No rows.</td></tr>'}</tbody></table></div>
         ${pager(rows, 'account-page')}</section>`;
 }
-ACT['account-page'] = el => { accountPage.page = Number(el.dataset.page); rerender(); };
+ACT['account-page'] = el => { accountPage.page = Number(el.dataset.page); rerender(); window.scrollTo(0, 0); };
 function pager(list, actName) {
     if (!list.pages || list.pages <= 1) return '';
     return `<div class="pager"><span class="small muted">page ${list.page} of ${list.pages}</span>
@@ -1953,10 +2158,16 @@ ACT['figure-fix'] = async el => {
     const r = await act('PUT', `/api/anchors/${el.dataset.id}`, { amount: amount.replace(/[, ]/g, ''), date: el.dataset.date }, 'Figure corrected');
     if (r) rerender();
 };
-ACT['figure-delete'] = async el => {
-    if (!confirm('Delete this figure? You can undo it from Changes.')) return;
+// Delete is a quiet word on the page; red only here, in its confirm.
+ACT['figure-delete'] = el => {
+    openSheet('Delete this figure?', `<div class="record-target"><b>${esc(day(el.dataset.date))}</b> · <span class="num">${esc(money(Number(el.dataset.amount), el.dataset.cur || 'SGD'))}</span></div>
+        <p>The balance goes back to resting on the figure or statement before it. You can undo this from Changes.</p>`,
+    { eyebrow: 'Your figure', center: true,
+      foot: `<button class="btn" data-act="close-sheet">Keep it</button><button class="btn danger" data-act="figure-delete-yes" data-id="${esc(el.dataset.id)}">${icon('trash')}Delete the figure</button>` });
+};
+ACT['figure-delete-yes'] = async el => {
     const r = await act('DELETE', `/api/anchors/${el.dataset.id}`, undefined, 'Figure deleted');
-    if (r) rerender();
+    if (r) { closeSheet(); rerender(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -2364,44 +2575,80 @@ ACT['account-save'] = async el => {
 // Import: three results, each drawn as a sum; a drop strip on the desk
 // ---------------------------------------------------------------------------
 
-const importState = { preview: null, done: null, busy: false };
+const importState = { preview: null, done: null, busy: false, showEmpty: false };
 async function viewImport() {
     const [past, coverage] = await Promise.all([get('/api/import/history').catch(() => []), get('/api/statements/coverage?months=6').catch(() => null)]);
     const p = importState.preview;
     afterRender(wireDrop);
     return `${booksNav('import')}
-    <div class="page-head"><div><h1>Import</h1><p>Statements go through one tie check: opening balance and the rows must come to the closing balance, exactly. One that does not tie is refused whole.</p></div></div>
-    <section class="card">
-        <div class="drop desk-only" id="drop">Drop statement files here, or <label class="link" for="imp-files" style="cursor:pointer">choose them</label>.</div>
-        <div class="phone-only"><label class="btn primary block" for="imp-files">Choose statement files</label></div>
+    <div class="page-head"><div><span class="eyebrow">Books · Import</span><h1>Import</h1><p>Statements go through one tie check: opening balance and the rows must come to the closing balance, exactly. One that does not tie is refused whole.</p></div></div>
+    <section class="card import-drop">
+        <div class="drop desk-only" id="drop"><span class="drop__icon">${icon('upload-simple')}</span><b>Drop statement files here</b>
+            <span>or <label class="link" for="imp-files">choose them</label>. Each goes through the same tie check.</span></div>
+        <div class="phone-only"><label class="btn primary block" for="imp-files">${icon('upload-simple')}Choose statement files</label></div>
         <input type="file" id="imp-files" multiple hidden data-change="import-files">
         ${importState.busy ? '<p class="loading">Reading…</p>' : ''}
     </section>
     ${p ? importPreviewHTML(p) : ''}
-    ${importState.done ? `<section class="card"><p class="notice">${esc(importState.done)}</p></section>` : ''}
+    ${importState.done ? `<div class="notice ok import-done">${icon('check-circle')}<span>${esc(importState.done)}</span></div>` : ''}
     ${coverage ? coverageHTML(coverage) : ''}
-    <section class="card"><div class="card-head"><h2>Past imports</h2></div>
-        <div class="table-wrap"><table class="t"><thead><tr><th>When</th><th>Accounts</th><th class="r">Rows</th><th>State</th></tr></thead><tbody>
-        ${past.map(b => `<tr><td>${esc(when(b.created_at))}</td><td class="small">${b.accounts.map(esc).join(', ')}</td><td class="r num">${b.total_lines}</td><td>${esc(b.status)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">None yet.</td></tr>'}
-        </tbody></table></div></section>`;
+    ${pastImportsHTML(past)}`;
 }
+ACT['choose-files'] = () => $('#imp-files')?.click();
+
+/** What one past import did, in plain words. */
+function pastState(b) {
+    if (b.status === 'committed') return `<span class="tag done">${icon('check-circle')}imported</span>`;
+    if (b.status === 'failed') return tag('off', 'did not import');
+    const st = b.statements || [];
+    if (st.length && st.every(s => s.status === 'off')) return tag('refused', 'refused');
+    return tag('notchecked', 'looked at, not imported');
+}
+/** Each statement's marker on a past import, linked to its account's tie line. */
+function pastResult(b) {
+    const st = b.statements;
+    if (!st) return '<span class="muted small">not kept</span>';
+    if (!st.length) return '<span class="muted small">no statement</span>';
+    const several = new Set(st.map(s => s.account)).size > 1;
+    return `<div class="past-result">${st.map(s => {
+        const who = several ? `${s.account.replace(/ \S*\d{4}$/, '')} ` : '';
+        const date = s.date ? ` ${day(s.date, { year: false })}` : '';
+        const text = s.status === 'ties' ? `${who}ties${date}` : s.status === 'off' ? `${who}off by ${money(Math.abs(s.difference_minor || 0), s.currency || 'SGD')}${date}` : `${who}not checked`;
+        const kind = s.status === 'ties' ? 'ties' : s.status === 'off' ? 'off' : 'notchecked';
+        return tag(kind, text, s.account_id ? { href: `#/books/account/${s.account_id}`, title: 'See the tie line' } : {});
+    }).join('')}</div>`;
+}
+function pastImportsHTML(past) {
+    const empty = past.filter(b => !b.total_lines && !(b.accounts || []).length && !(b.statements || []).length);
+    const listed = importState.showEmpty ? past : past.filter(b => !empty.includes(b));
+    const rows = listed.map(b => `<tr><td data-label="When">${esc(when(b.created_at))}</td><td data-label="Accounts">${b.accounts.length ? b.accounts.map(esc).join(', ') : '<span class="muted">none read</span>'}</td>
+        <td class="r num" data-label="Rows">${b.total_lines}</td><td data-label="What happened">${pastState(b)}</td><td data-label="Result">${pastResult(b)}</td></tr>`).join('');
+    return `<section class="card"><div class="section-header"><h2>Past imports</h2><span class="section-header__aside">${plural(past.length - empty.length, 'import')}</span></div>
+        <div class="table-shell"><table class="t cells past-table"><thead><tr><th>When</th><th>Accounts</th><th class="r">Rows</th><th>What happened</th><th>Result</th></tr></thead><tbody>
+        ${rows || '<tr><td colspan="5" class="empty">None yet.</td></tr>'}</tbody></table></div>
+        ${empty.length ? `<p class="card-foot">${importState.showEmpty ? `${plural(empty.length, 'empty look')} with no file read ${empty.length === 1 ? 'is' : 'are'} shown.` : `${plural(empty.length, 'empty look')} with no file read ${empty.length === 1 ? 'is' : 'are'} hidden.`}
+            <button class="link" data-act="past-empty">${importState.showEmpty ? 'Hide them' : 'Show them'}</button></p>` : ''}</section>`;
+}
+ACT['past-empty'] = () => { importState.showEmpty = !importState.showEmpty; rerender(); };
+
 /** Which statements are held: each bank and card account against the last six
  *  months, the last closed month marked as the one to have. */
 function coverageHTML(c) {
     const { target_month: target, covered, total } = c.summary;
     const missing = total - covered;
     const label = m => monthName(m, { short: true }).replace(/ (\d{2})(\d{2})$/, ' ’$2');
-    const head = c.months.map(m => `<th${m === target ? ' class="target"' : ''}>${esc(label(m))}</th>`).join('');
-    const rows = c.accounts.map(a => `<tr><td><a href="#/books/account/${a.id}">${esc(a.short_name)}</a> <span class="small muted">${a.type === 'bank' ? 'bank' : 'card'}</span></td>${c.months.map(m => {
+    const old = i => i < c.months.length - 3 ? ' cov-old' : '';
+    const head = c.months.map((m, i) => `<th class="${m === target ? 'target' : ''}${old(i)}">${esc(label(m))}</th>`).join('');
+    const rows = c.accounts.map(a => `<tr><td><a href="#/books/account/${a.id}">${esc(a.short_name)}</a> <span class="small muted">${a.type === 'bank' ? 'bank' : 'card'}</span></td>${c.months.map((m, i) => {
         const cell = c.matrix[a.id]?.[m];
-        const cls = m === target ? ' target' : '';
-        return cell && cell.imported
-            ? `<td class="ok${cls}" title="statement held${cell.date ? ', imported ' + esc(day(cell.date)) : ''}">✓</td>`
-            : `<td class="missing${cls}" title="no statement for ${esc(monthName(m))}">○</td>`;
+        const cls = `${m === target ? ' target' : ''}${old(i)}`;
+        if (cell && cell.imported) return `<td class="cov-ok${cls}" title="statement held${cell.date ? ', imported ' + esc(day(cell.date)) : ''}">${icon('check-circle')}<span class="sr-only">held</span></td>`;
+        if (m === target) return `<td class="cov-missing${cls}">${tag('nofig', 'missing', { act: 'choose-files', title: `No statement for ${monthName(m)}: import one` })}</td>`;
+        return `<td class="cov-none${cls}" title="no statement for ${esc(monthName(m))}">${icon('circle-dashed')}<span class="sr-only">none</span></td>`;
     }).join('')}</tr>`).join('');
-    return `<section class="card"><div class="card-head"><div><h2>Statements held</h2>
-        <p>${missing ? `${covered} of ${total} accounts have a statement for ${esc(monthName(target))}: <b style="color:var(--warn)">${missing} missing</b>` : `All ${total} accounts have a statement for ${esc(monthName(target))}.`}</p></div></div>
-        <div class="table-wrap"><table class="t coverage"><thead><tr><th>Account</th>${head}</tr></thead><tbody>${rows || `<tr><td colspan="${c.months.length + 1}" class="empty">No bank or card account yet.</td></tr>`}</tbody></table></div></section>`;
+    return `<section class="card"><div class="section-header"><div><h2>Statements held</h2>
+        <p>${missing ? `${covered} of ${total} accounts have a statement for ${esc(monthName(target))}: <b class="warn-word">${missing} missing</b>` : `All ${total} accounts have a statement for ${esc(monthName(target))}.`}</p></div></div>
+        <div class="table-shell"><table class="t coverage"><thead><tr><th>Account</th>${head}</tr></thead><tbody>${rows || `<tr><td colspan="${c.months.length + 1}" class="empty">No bank or card account yet.</td></tr>`}</tbody></table></div></section>`;
 }
 function wireDrop() {
     const zone = $('#drop');
@@ -2422,15 +2669,25 @@ async function uploadFiles(files) {
     importState.preview = r.data;
     rerender();
 }
-function tieSum(t, cur, { refused = false } = {}) {
-    const made = t.opening_minor + t.rows_minor;
+/** The same six lines for every statement: opening, money out, money in,
+ *  what the rows make it, the closing it states, and the result. */
+function stmtSum(s, cur) {
+    const known = s.opening !== null && s.opening !== undefined;
+    const m = v => esc(money(v, cur));
+    const none = '<span class="muted">none in the file</span>';
+    const rowsWord = n => n === null || n === undefined ? '' : n ? `, ${plural(n, 'row')}` : ', none';
+    const result = s.status === 'ties'
+        ? `<tr class="gap zero"><td class="op">${icon('check-circle')}</td><td>difference</td><td class="r">${m(0)}</td></tr>`
+        : s.status === 'off'
+            ? `<tr class="gap"><td class="op">≠</td><td>off by</td><td class="r">${m(Math.abs(s.difference))}</td></tr>`
+            : `<tr class="gap unchecked"><td class="op">${icon('circle-dashed')}</td><td>not checked</td><td class="r">no balance</td></tr>`;
     return `<table class="sum small"><tbody>
-        <tr><td class="op"></td><td>opening ${t.opening_date ? esc(day(t.opening_date, { year: false })) : ''}</td><td class="r">${esc(money(t.opening_minor, cur))}</td></tr>
-        <tr><td class="op">${t.rows_minor < 0 ? '−' : '+'}</td><td>${plural(t.rows, 'row')}</td><td class="r">${esc(money(Math.abs(t.rows_minor), cur))}</td></tr>
-        <tr class="eq"><td class="op">=</td><td>${refused ? 'what the rows make it' : 'closing'}</td><td class="r">${esc(money(made, cur))}</td></tr>
-        ${refused ? `<tr><td class="op"></td><td>closing it states</td><td class="r">${esc(money(t.closing_minor, cur))}</td></tr>
-            <tr class="gap"><td class="op">≠</td><td>off by</td><td class="r">${esc(money(Math.abs(t.difference_minor), cur))}</td></tr>` : ''}
-        </tbody></table>`;
+        <tr><td class="op"></td><td>opening${s.opening_date ? ' ' + esc(day(s.opening_date, { year: false })) : ''}</td><td class="r">${known ? m(s.opening) : none}</td></tr>
+        <tr><td class="op">−</td><td>money out${rowsWord(s.outCount)}</td><td class="r">${m(s.out)}</td></tr>
+        <tr><td class="op">+</td><td>money in${rowsWord(s.inCount)}</td><td class="r">${m(s.in)}</td></tr>
+        <tr class="eq"><td class="op">=</td><td>what the rows make it</td><td class="r">${known ? m(s.opening + s.in - s.out) : '<span class="muted">cannot say</span>'}</td></tr>
+        <tr><td class="op"></td><td>closing it states</td><td class="r">${known ? m(s.closing) : none}</td></tr>
+        ${result}</tbody></table>`;
 }
 function importPreviewHTML(p) {
     const ties = p.groups.filter(g => g.tie === 'ties');
@@ -2438,23 +2695,41 @@ function importPreviewHTML(p) {
     const refused = p.errors.filter(e => e.tie);
     const unread = p.errors.filter(e => !e.tie);
     const rows = p.groups.reduce((a, g) => a + g.transactions.length, 0);
-    const card = (cls, title, n, body) => `<section class="card result"><h3>${title}</h3><div class="big">${n}</div>${body}</section>`;
-    const tiesBody = ties.map(g => g.statements.map(t => `<div style="margin-top:10px"><b>${esc(g.account)}</b> ${tag('ties', 'ties')}<div class="small muted">statement ${esc(day(t.closing_date))}</div>${tieSum(t, g.currency)}</div>`).join('')).join('') || '<p class="small muted">None.</p>';
-    const refusedBody = refused.map(e => `<div style="margin-top:10px"><b>${esc(e.tie.account)}</b> ${tag('refused', 'refused')}<div class="small muted">statement ${esc(day(e.tie.closing_date))}: none of its rows will be imported</div>${tieSum(e.tie, e.tie.currency, { refused: true })}</div>`).join('') || '<p class="small muted">None.</p>';
-    const uncheckedBody = unchecked.map(g => `<div style="margin-top:10px"><b>${esc(g.account)}</b> ${tag('notchecked', 'not checked')}
-        <div class="small muted">it states no balance: ${plural(g.total, 'row')} come in unchecked</div>
-        <table class="sum small"><tbody><tr><td class="op"></td><td>${plural(g.total, 'row')}, money out</td><td class="r">${esc(money(g.transactions.filter(t => t.amount_sgd > 0).reduce((a, t) => a + toMinor(t.amount_sgd, g.currency), 0), g.currency))}</td></tr>
-        <tr><td class="op"></td><td>money in</td><td class="r">${esc(money(g.transactions.filter(t => t.amount_sgd < 0).reduce((a, t) => a - toMinor(t.amount_sgd, g.currency), 0), g.currency))}</td></tr>
-        <tr class="eq"><td class="op">?</td><td>no stated balance to check against</td><td class="r"></td></tr></tbody></table></div>`).join('') || '<p class="small muted">None.</p>';
-    const groupsHTML = p.groups.filter(g => g.transactions.length).map(g => `<details class="card"><summary><b>${esc(g.account)}</b> · ${plural(g.transactions.length, 'row')} · ${g.typed} with a type, ${g.untyped} without</summary>
-        <div class="table-wrap" style="margin-top:10px"><table class="t rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Amount</th></tr></thead><tbody>
-        ${g.transactions.map(t => `<tr><td class="num">${esc(day(t.date, { year: false }))}</td><td>${esc(t.description)}</td><td class="small">${t.type_name ? esc(t.type_name) : t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.flow_type !== 'expense' ? esc(t.flow_type) : tag('nofig', 'no type')}</td>
-            <td class="r">${rowAmount(toMinor(t.amount_sgd, g.currency), g.currency)}</td></tr>`).join('')}</tbody></table></div></details>`).join('');
-    return `<div class="results">${card('ties', `${tag('ties', 'Ties')}`, ties.length, tiesBody)}${card('off', `${tag('off', 'Off by')}`, refused.length, refusedBody)}${card('notchecked', `${tag('notchecked', 'Not checked')}`, unchecked.length, uncheckedBody)}</div>
-        ${unread.length ? `<section class="card"><p class="notice bad">${unread.map(e => `${esc(e.file)}: ${esc(e.error)}`).join('<br>')}</p></section>` : ''}
-        ${rows ? `<section class="card"><div class="spread"><p>${plural(rows, 'row')} ready. A refused statement stays in the queue until a file that ties is imported.</p>
-            <div class="row"><button class="btn" data-act="import-clear">Start again</button><button class="btn primary" data-act="import-confirm">Import ${plural(rows, 'row')}</button></div></div></section>${groupsHTML}`
-            : `<section class="card"><p>Nothing to import.</p><button class="btn" data-act="import-clear">Start again</button></section>`}`;
+    const count = (list, test) => list.filter(test).length;
+    const card = (kind, pill, n, body) => `<section class="card result result--${kind}"><div class="result__head">${pill}<span class="result__n">${n}</span></div>${body}</section>`;
+    const stmtBlock = (account, sub, sum) => `<div class="result-stmt"><div class="result-stmt__name">${esc(account)}</div><div class="small muted">${sub}</div>${sum}</div>`;
+    const noneYet = '<p class="small muted result-none">None.</p>';
+    const tiesBody = ties.flatMap(g => g.statements.map((t, i) => {
+        const mine = g.transactions.filter(x => x.statement === i);
+        return stmtBlock(g.account, `statement ${esc(day(t.closing_date))}`, stmtSum({
+            status: 'ties', opening: t.opening_minor, opening_date: t.opening_date, closing: t.closing_minor,
+            in: t.in_minor ?? 0, out: t.out_minor ?? 0, inCount: count(mine, x => x.amount_sgd < 0), outCount: count(mine, x => x.amount_sgd > 0),
+        }, g.currency));
+    })).join('') || noneYet;
+    const refusedBody = refused.map(e => stmtBlock(e.tie.account, `statement ${esc(day(e.tie.closing_date))}: none of its rows will be imported`, stmtSum({
+        status: 'off', opening: e.tie.opening_minor, opening_date: e.tie.opening_date, closing: e.tie.closing_minor, difference: e.tie.difference_minor,
+        in: e.tie.in_minor ?? 0, out: e.tie.out_minor ?? 0,
+    }, e.tie.currency))).join('') || noneYet;
+    const uncheckedBody = unchecked.map(g => {
+        const out = g.transactions.filter(t => t.amount_sgd > 0), inn = g.transactions.filter(t => t.amount_sgd < 0);
+        return stmtBlock(g.account, `it states no balance: ${plural(g.total, 'row')} come in unchecked`, stmtSum({
+            status: 'not_checked', opening: null,
+            out: out.reduce((a, t) => a + toMinor(t.amount_sgd, g.currency), 0), outCount: out.length,
+            in: inn.reduce((a, t) => a - toMinor(t.amount_sgd, g.currency), 0), inCount: inn.length,
+        }, g.currency));
+    }).join('') || noneYet;
+    const groupsHTML = p.groups.filter(g => g.transactions.length).map(g => `<details class="card import-group"><summary><b>${esc(g.account)}</b> · ${plural(g.transactions.length, 'row')} · ${g.typed} with a type, ${g.untyped} without</summary>
+        <div class="table-shell" style="margin-top:10px"><table class="t rows acct-rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Money in</th><th class="r">Money out</th></tr></thead><tbody>
+        ${g.transactions.map(t => {
+            const minor = toMinor(t.amount_sgd, g.currency);
+            return `<tr><td class="num row-date">${esc(day(t.date, { year: false }))}</td><td class="row-desc">${esc(t.description)}</td><td class="row-label">${t.type_name ? esc(t.type_name) : t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.flow_type !== 'expense' ? `<span class="muted">${esc(t.flow_type)}</span>` : tag('nofig', 'no type')}</td>
+            <td class="r num row-in">${minor < 0 ? esc(money(-minor, g.currency)) : ''}</td><td class="r num row-out">${minor >= 0 ? esc(money(minor, g.currency)) : ''}</td></tr>`;
+        }).join('')}</tbody></table></div></details>`).join('');
+    return `<div class="results">${card('ties', tag('ties', 'Ties'), ties.reduce((a, g) => a + g.statements.length, 0), tiesBody)}${card('off', tag('off', 'Off by'), refused.length, refusedBody)}${card('notchecked', tag('notchecked', 'Not checked'), unchecked.length, uncheckedBody)}</div>
+        ${unread.length ? `<div class="notice bad import-unread">${icon('warning-circle')}<span>${unread.map(e => `${esc(e.file)}: ${esc(e.error)}`).join('<br>')}</span></div>` : ''}
+        ${rows ? `<section class="card import-bar"><p>${plural(rows, 'row')} ready. A refused statement stays in the queue until a file that ties is imported.</p>
+            <div class="row"><button class="btn" data-act="import-clear">Start again</button><button class="btn primary" data-act="import-confirm">Import ${plural(rows, 'row')}</button></div></section>${groupsHTML}`
+            : `<section class="card import-bar"><p>Nothing to import.</p><div class="row"><button class="btn" data-act="import-clear">Start again</button></div></section>`}`;
 }
 ACT['import-clear'] = () => { importState.preview = null; importState.done = null; rerender(); };
 ACT['import-confirm'] = async el => {
@@ -2749,15 +3024,16 @@ ACT['row-oneoff'] = async el => {
 
 ACT.rate = el => openRate(el.dataset.currency || 'INR', el.dataset.date || rateDay());
 function openRate(currency, date) {
-    openSheet(`${esc(currency)} rate`, `<p>A balance in ${esc(currency)} joins the S$ totals at the rate saved for its day, or the latest saved before it. With none, it is left out.</p>
+    openSheet(`${esc(currency)} rate`, `<p class="small">A balance in ${esc(currency)} joins the S$ totals at the rate saved for its day, or the latest saved before it. With none, it is left out.</p>
         <div class="fields two"><label class="field"><span>Currency</span><select id="rt-cur">${['INR', 'USD', 'EUR', 'GBP', 'AUD'].map(c => `<option${c === currency ? ' selected' : ''}>${c}</option>`).join('')}</select></label>
             <label class="field"><span>For the day</span><input type="date" id="rt-date" value="${esc(date)}" max="${todayIso()}"></label></div>
-        <button class="btn primary block" data-act="rate-fetch">Fetch the reference rate</button>
-        <p class="small muted">The European Central Bank's rate for that day; a weekend or holiday takes the business day before, and the saved rate says so. A rate already saved for the day is kept.</p>
-        <hr class="rule">
-        <label class="field"><span>Or enter it: S$ for 1 <b id="rt-unit">${esc(currency)}</b></span><input type="text" inputmode="decimal" id="rt-rate" placeholder="for example 0.0153"></label>
-        <button class="btn block" data-act="rate-enter">Save this rate for the day</button>
-        <p class="small muted">An entered rate takes the place of any saved for that day. Every S$ figure is worked out on read, so the months that use it follow.</p>`);
+        <div class="rate-way"><h3>${icon('arrows-clockwise')}Fetch the reference rate</h3>
+            <p class="hint">The European Central Bank's rate for that day; a weekend or holiday takes the business day before, and the saved rate says so. A rate already saved for the day is kept.</p>
+            <button class="btn primary block" data-act="rate-fetch">Fetch the reference rate</button></div>
+        <div class="rate-way"><h3>${icon('pencil-simple')}Or enter it</h3>
+            <label class="field"><span>S$ for 1 <b id="rt-unit">${esc(currency)}</b></span><input type="text" inputmode="decimal" id="rt-rate" placeholder="for example 0.0153"></label>
+            <p class="hint">An entered rate takes the place of any saved for that day. Every S$ figure is worked out on read, so the months that use it follow.</p>
+            <button class="btn block" data-act="rate-enter">Save this rate for the day</button></div>`, { eyebrow: 'Books · Rates', sub: `for ${esc(dateWords(date))}` });
     $('#rt-cur').addEventListener('change', () => { $('#rt-unit').textContent = $('#rt-cur').value; });
 }
 ACT['rate-fetch'] = async () => {
@@ -2765,7 +3041,7 @@ ACT['rate-fetch'] = async () => {
     const r = await act('POST', '/api/rates/fetch', body, 'Rate saved');
     if (r) {
         const held = r.data.rate || {};
-        toast(r.data.created ? `Saved: 1 ${body.currency} = S$ ${held.rate} (${held.date})` : `Already saved for ${held.date}: 1 ${body.currency} = S$ ${held.rate}`);
+        toast(r.data.created ? `Saved: 1 ${body.currency} = S$ ${held.rate} (${day(held.date)})` : `Already saved for ${day(held.date)}: 1 ${body.currency} = S$ ${held.rate}`);
         closeSheet(); rerender();
     }
 };

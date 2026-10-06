@@ -413,6 +413,13 @@ def test_with_no_saved_rate_the_rupee_account_is_left_out_of_both_sides_and_said
     (left,) = shown["left_out"]
     assert left["name"] == RUPEE and "no saved INR/SGD rate" in left["why"]
     assert RUPEE in shown["note"]
+    # Which account it is, for its fix, and how many stay in the check.
+    rupee_id = next(a["id"] for a in client.get("/api/accounts").get_json() if a["name"] == RUPEE)
+    assert left["account_id"] == rupee_id
+    in_sheet = [l for s in sheet(client)["sections"] for l in s["lines"]]
+    # Only the bank is in the check: the rupee account, with no rate, is in
+    # net worth at neither end.
+    assert shown["in_check_count"] == len([l for l in in_sheet if l["in_total"]]) == 1
 
 
 def test_a_rupee_account_with_no_balance_at_the_start_is_left_out_of_both_sides(client):
