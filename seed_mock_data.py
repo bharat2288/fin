@@ -15,7 +15,25 @@ import sys
 from datetime import date, timedelta
 
 import book_type
-from db import DB_PATH, get_connection, init_db, match_merchant
+from db import current_db_path, get_connection, init_db, match_merchant
+
+# The six months the book covers end here. The repo's demo book keeps this
+# end so its output stays the same; the public sample (demo_serve.py) ends
+# at the last whole month instead, so its screens read as current.
+DEFAULT_END_MONTH = (2026, 3)
+# Set by build() for the steps below.
+MONTHS: list[tuple[int, int]] = []
+
+
+def six_months_ending(end: tuple[int, int]) -> list[tuple[int, int]]:
+    """The six (year, month) pairs ending at `end`, oldest first."""
+    year, month = end
+    index = year * 12 + (month - 1)
+    return [(i // 12, i % 12 + 1) for i in range(index - 5, index + 1)]
+
+
+def _month_start(year_month: tuple[int, int]) -> str:
+    return f"{year_month[0]:04d}-{year_month[1]:02d}-01"
 
 # ---------------------------------------------------------------------------
 # Mock accounts — fictional card numbers, real bank names
@@ -168,11 +186,8 @@ def create_accounts(conn):
 
 
 def create_statements(conn, account_ids: dict[str, int]):
-    """Create per-month statement records for 6 months (Oct 2025 – Mar 2026)."""
-    months = [
-        "2025-10-01", "2025-11-01", "2025-12-01",
-        "2026-01-01", "2026-02-01", "2026-03-01",
-    ]
+    """Create per-month statement records for the six months."""
+    months = [_month_start(m) for m in MONTHS]
     for short_name, acct_id in account_ids.items():
         if short_name == "DBS-Biz-Bank":
             # Business account: only recent 3 months
@@ -244,10 +259,7 @@ def create_transactions(conn, account_ids: dict):
     biz_account = account_ids.get("DBS-Biz-Bank")
 
     # Months to generate
-    months = [
-        (2025, 10), (2025, 11), (2025, 12),
-        (2026, 1), (2026, 2), (2026, 3),
-    ]
+    months = MONTHS
 
     total_inserted = 0
     random.seed(42)  # Reproducible mock data
@@ -388,10 +400,10 @@ def create_subscriptions(conn, account_ids: dict):
 
         # Set renewal date to near-future (within 30 days) for demo effect
         days_offset = random.randint(1, 30)
-        renewal = (date(2026, 3, 16) + timedelta(days=days_offset)).isoformat()
+        renewal = (date(*MONTHS[-1], 16) + timedelta(days=days_offset)).isoformat()
 
         # Last paid: recent past
-        last_paid = (date(2026, 3, 16) - timedelta(days=random.randint(1, 28))).isoformat()
+        last_paid = (date(*MONTHS[-1], 16) - timedelta(days=random.randint(1, 28))).isoformat()
 
         acct_id = random.choice(cc_accounts)
 
@@ -409,22 +421,25 @@ def create_subscriptions(conn, account_ids: dict):
 
 def create_batch_imports(conn):
     """Create 2 mock batch import records for import history."""
+    first, third = MONTHS[0], MONTHS[2]
+    first_name, third_name = _month_start(first)[:7], _month_start(third)[:7]
+    first_after, third_after = _month_start(MONTHS[1]), _month_start(MONTHS[3])
     conn.execute(
         "INSERT INTO batch_imports (filenames, accounts, status, total_lines, "
         "categorized_lines, created_at) VALUES (?, ?, 'committed', 156, 148, ?)",
         (
-            '["DBS-Visa-4521_2025-10.csv", "Citi-Rewards-7293_2025-10.csv"]',
+            f'["DBS-Visa-4521_{first_name}.csv", "Citi-Rewards-7293_{first_name}.csv"]',
             '["DBS Visa Platinum 4521", "Citi Rewards Card 7293"]',
-            "2025-11-02 10:30:00",
+            f"{first_after[:8]}02 10:30:00",
         ),
     )
     conn.execute(
         "INSERT INTO batch_imports (filenames, accounts, status, total_lines, "
         "categorized_lines, created_at) VALUES (?, ?, 'committed', 203, 195, ?)",
         (
-            '["DBS-Visa-4521_2025-12.csv", "UOB-One-3156_2025-12.csv", "DBS-Savings-8834_2025-12.csv"]',
+            f'["DBS-Visa-4521_{third_name}.csv", "UOB-One-3156_{third_name}.csv", "DBS-Savings-8834_{third_name}.csv"]',
             '["DBS Visa Platinum 4521", "UOB One Card 3156", "DBS Savings Account 8834"]',
-            "2026-01-03 09:15:00",
+            f"{third_after[:8]}03 09:15:00",
         ),
     )
     conn.commit()
@@ -467,12 +482,32 @@ def print_summary(conn):
 
 def main():
     # Safety check — never overwrite an existing database
-    if DB_PATH.exists():
-        print(f"Error: {DB_PATH} already exists.")
+    book = current_db_path()
+    if book.exists():
+        print(f"Error: {book} already exists.")
         print("Delete it first if you want to re-seed:")
-        print(f"  rm {DB_PATH}")
+        print(f"  rm {book}")
         sys.exit(1)
 
+    build()
+
+
+def build(end: tuple[int, int] = DEFAULT_END_MONTH, *, quiet: bool = False) -> None:
+    """Write the mock book into the current book (db.current_db_path()),
+    covering the six months that end at `end`. The caller checks the book
+    is new."""
+    MONTHS[:] = six_months_ending(end)
+    if quiet:
+        import contextlib
+        import io
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            _build()
+    else:
+        _build()
+
+
+def _build() -> None:
     print("Creating mock database for fin...\n")
 
     # Step 1: Initialize schema + seed the type list + default merchant rules

@@ -89,3 +89,6 @@ chat-writes.json
 
 # Merchant names waiting for the operator to read before a type suggestion is sent
 suggestion-strings.txt
+
+# The public sample's local data folder (DEMO_LOCAL): sign-ups and visitors' books
+demo-data/

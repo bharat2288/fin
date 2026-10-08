@@ -2474,7 +2474,7 @@ def _build_filters(args, hide: bool = True) -> tuple[str, list]:
 
 def _suggestion_strings_path():
     """The file of strings waiting to be read, beside the database."""
-    return db.DB_PATH.parent / suggest.STRINGS_FILE
+    return db.current_db_path().parent / suggest.STRINGS_FILE
 
 
 def _suggestions_off():
@@ -4551,11 +4551,12 @@ def api_fx_rate():
 def api_backups_status():
     """Last attempt, last success, last error; the warning the app shell shows
     when backups are not configured (hosted only: never in local-dev) or none
-    succeeded in 36 hours."""
+    succeeded in 36 hours. The public sample (demo_serve.py) has no book of
+    its own to back up, so it is read as local-dev: no warning."""
     return jsonify(backup.backup_status(
         db.DB_PATH,
         configured=app.config["BACKUP_STORE"] is not None,
-        local_dev=bool(app.config.get("LOCAL_DEV")),
+        local_dev=bool(app.config.get("LOCAL_DEV")) or bool(app.config.get("DEMO")),
     ))
 
 

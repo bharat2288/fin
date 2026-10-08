@@ -29,6 +29,9 @@ access_gate.py      ← Cloudflare Access JWT check on every request (copied fro
 backup.py           ← Nightly backup to the object store, the seed step (copied from folio)
 mcp_server.py       ← /mcp; registers mcp_tools.TOOLS and calls them as the chat-gate client
 railway.json        ← Railway start command (python serve.py); deploy is by hand only
+demo_serve.py       ← The public sample (fin-demo): its own service, refuses every FIN_* setting, one made-up book per visitor
+demo_gate.py        ← The sample's sign-in by emailed code, session cookie, sign-ups and visitors' books (folio carries a copy)
+demo_signups.py     ← The sample's collected emails as CSV
 specs/              ← Project specs (design, status, pipeline, decisions)
 ```
 
@@ -38,6 +41,7 @@ specs/              ← Project specs (design, status, pipeline, decisions)
 python app.py                    # Start server (port 8450)
 python seed_mock_data.py         # Generate demo DB (refuses if fin.db exists)
 FIN_LOCAL_DEV=1 python serve.py  # The hosted process on loopback, gate off (port 8000)
+DEMO_LOCAL=1 DEMO_SECRET=<32+ chars> python demo_serve.py  # The public sample on loopback; codes print to the log
 ```
 
 ## Specs
