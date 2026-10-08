@@ -461,8 +461,9 @@ after {settings.idle_days} days without use. Please do not type real financial d
 
 
 def sample_bar(settings: DemoSettings, email: str) -> bytes:
-    """The strip at the foot of the app's own page: what this is, Reset, Sign out."""
-    return f"""<div id="demo-bar" style="position:fixed;left:0;right:0;bottom:0;z-index:2147483000;display:flex;
+    """The strip at the top of the app's own page, in the page's flow (so it
+    covers none of the app's fixed bars): what this is, Reset, Sign out."""
+    return f"""<div id="demo-bar" style="display:flex;
 gap:12px;align-items:center;justify-content:center;flex-wrap:wrap;padding:6px 16px;font:13px/1.4 system-ui,sans-serif;
 background:#1d1d1b;color:#ecebe7">
 <span>{html.escape(settings.app_name)} sample · made-up figures · {html.escape(email)}</span>
@@ -470,12 +471,12 @@ background:#1d1d1b;color:#ecebe7">
 <button style="font:inherit;background:none;border:1px solid #6b6a66;color:inherit;border-radius:6px;padding:2px 10px;cursor:pointer">Reset sample</button></form>
 <form method="post" action="{SIGN_OUT_PATH}" style="margin:0">
 <button style="font:inherit;background:none;border:0;color:inherit;text-decoration:underline;cursor:pointer">Sign out</button></form>
-</div><div style="height:36px"></div>""".encode("utf-8")
+</div>""".encode("utf-8")
 
 
 def _with_bar(send, bar: bytes):
-    """Wraps `send`: an HTML answer is held whole and gets the bar before
-    </body>, with its length corrected; anything else passes as it is."""
+    """Wraps `send`: an HTML answer is held whole and gets the bar just inside
+    <body>, with its length corrected; anything else passes as it is."""
     held: dict = {}
 
     async def wrapped(message):
@@ -495,8 +496,10 @@ def _with_bar(send, bar: bytes):
             if message.get("more_body"):
                 return
             body = held["body"]
-            index = body.lower().rfind(b"</body>")
-            body = body[:index] + bar + body[index:] if index >= 0 else body + bar
+            lower = body.lower()
+            opening = lower.find(b"<body")
+            index = lower.find(b">", opening) + 1 if opening >= 0 else 0
+            body = body[:index] + bar + body[index:]
             start = held.pop("start")
             headers = [(k, v) for k, v in start.get("headers", []) if k.lower() != b"content-length"]
             headers.append((b"content-length", str(len(body)).encode()))

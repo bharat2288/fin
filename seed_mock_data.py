@@ -10,6 +10,7 @@ Usage:
 Safety: refuses to run if fin.db already exists.
 """
 
+import calendar
 import random
 import sys
 from datetime import date, timedelta
@@ -419,6 +420,42 @@ def create_subscriptions(conn, account_ids: dict):
     conn.commit()
 
 
+# Each account's balance the day before the first month, in minor units:
+# cash positive, owed negative.
+OPENING_BALANCES = {
+    "DBS-Savings-8834": 6_240_000,
+    "UOB-Savings-6602": 3_815_000,
+    "DBS-Visa-4521": -184_250,
+    "Citi-Rewards-7293": -96_830,
+    "UOB-One-3156": -142_010,
+}
+
+
+def create_anchors(conn, account_ids: dict[str, int]):
+    """A balance for each account the day before the first month and at the
+    end of every month, each the one before less that month's rows, so the
+    books tie and Home has a net worth to show. Entered as the operator's
+    own figures (supplied): the mock statements state no balance."""
+    import anchors
+
+    for short_name, acct_id in account_ids.items():
+        balance = OPENING_BALANCES.get(short_name)
+        if balance is None:
+            continue
+        first = date(*MONTHS[0], 1)
+        anchors.record(conn, acct_id, (first - timedelta(days=1)).isoformat(), balance, anchors.SUPPLIED, "opening balance")
+        for year, month in MONTHS:
+            last = date(year, month, calendar.monthrange(year, month)[1])
+            moved = conn.execute(
+                "SELECT COALESCE(SUM(t.amount_minor), 0) FROM transactions t JOIN statements s ON s.id = t.statement_id "
+                "WHERE s.account_id = ? AND t.date BETWEEN ? AND ?",
+                (acct_id, f"{year:04d}-{month:02d}-01", last.isoformat()),
+            ).fetchone()[0]
+            balance -= moved  # positive amount_minor = money out
+            anchors.record(conn, acct_id, last.isoformat(), balance, anchors.SUPPLIED, "month-end balance")
+    conn.commit()
+
+
 def create_batch_imports(conn):
     """Create 2 mock batch import records for import history."""
     first, third = MONTHS[0], MONTHS[2]
@@ -537,7 +574,11 @@ def _build() -> None:
     print("Creating subscriptions...")
     create_subscriptions(conn, account_ids)
 
-    # Step 6: Create import history
+    # Step 6: Month-end balances
+    print("Creating balances...")
+    create_anchors(conn, account_ids)
+
+    # Step 7: Create import history
     print("Creating import history...")
     create_batch_imports(conn)
 
