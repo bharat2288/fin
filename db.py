@@ -2,6 +2,8 @@
 
 import os
 import sqlite3
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import book_type
@@ -20,6 +22,27 @@ def configured_db_path(environ=os.environ) -> Path:
 
 
 DB_PATH = configured_db_path()
+
+# The public sample (demo_serve.py) serves one book per visitor from one
+# process: it names the request's book here for the length of the request.
+# Unset, which is always so outside the sample, the book is DB_PATH.
+_request_book: ContextVar[Path | None] = ContextVar("fin_request_book", default=None)
+
+
+def current_db_path() -> Path:
+    """The book this request works on: the sample visitor's, else DB_PATH."""
+    return _request_book.get() or DB_PATH
+
+
+@contextmanager
+def using_book(path):
+    """Work on `path` instead of DB_PATH inside the block (the sample only)."""
+    token = _request_book.set(Path(path))
+    try:
+        yield
+    finally:
+        _request_book.reset(token)
+
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 # Initial merchant rules based on known data: (pattern, label, match_type).
@@ -287,12 +310,12 @@ def _refuse_unconverted(conn: sqlite3.Connection) -> None:
     backup, and never happen here.
     """
     if _needs_converting(conn):
-        raise DatabaseNotConverted(refusal(conn, DB_PATH))
+        raise DatabaseNotConverted(refusal(conn, current_db_path()))
 
 
 def get_connection() -> sqlite3.Connection:
     """Get a database connection with row factory."""
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(current_db_path()))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -368,20 +391,20 @@ def init_db() -> None:
 
 # --- Rule engine cache ---
 # In-memory cache of merchant rules, invalidated on any rule CRUD.
-# Single-process Flask app, so module-level state is safe.
-_rules_cache: list[dict] | None = None
+# Single-process Flask app, so module-level state is safe. Keyed by book,
+# since the public sample serves several; an invalidation clears every book's.
+_rules_cache: dict[Path, list[dict]] = {}
 
 
 def invalidate_rules_cache() -> None:
     """Clear the cached rules. Call after any merchant_rules INSERT/UPDATE/DELETE."""
-    global _rules_cache
-    _rules_cache = None
+    _rules_cache.clear()
 
 
 def _get_rules(conn: sqlite3.Connection) -> list[dict]:
     """Return cached rules list, loading from DB on first call or after invalidation."""
-    global _rules_cache
-    if _rules_cache is None:
+    book = current_db_path()
+    if book not in _rules_cache:
         rows = conn.execute(
             "SELECT mr.id, mr.pattern, mr.match_type, "
             "       mr.priority, mr.min_amount_minor, mr.max_amount_minor, "
@@ -391,8 +414,8 @@ def _get_rules(conn: sqlite3.Connection) -> list[dict]:
             "JOIN services s ON mr.service_id = s.id "
             "ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC"
         ).fetchall()
-        _rules_cache = [dict(r) for r in rows]
-    return _rules_cache
+        _rules_cache[book] = [dict(r) for r in rows]
+    return _rules_cache[book]
 
 
 def rule_label(rule) -> tuple[str | None, int | None, str]:

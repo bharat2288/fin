@@ -30,7 +30,7 @@ WRITES_OFF = "Claude's writes are turned off in fin. Turn them back on in fin's 
 
 
 def state_path(db_path=None) -> Path:
-    return Path(db_path if db_path is not None else db.DB_PATH).parent / STATE_FILE
+    return Path(db_path if db_path is not None else db.current_db_path()).parent / STATE_FILE
 
 
 def read(db_path=None) -> dict:
