@@ -400,6 +400,7 @@ h1{font-size:22px;margin:0 0 4px}p{margin:0 0 16px}.muted{color:var(--muted);fon
 label{display:block;font-size:14px;margin-bottom:6px}
 input{width:100%;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
 button{margin-top:14px;width:100%;font:inherit;font-weight:600;padding:10px;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
+button.quiet{background:none;color:var(--accent);border:1px solid currentColor;font-weight:500}
 .error{border:1px solid var(--danger);color:var(--danger);border-radius:8px;padding:8px 12px;font-size:14px}
 a{color:var(--accent)}footer{margin-top:16px;text-align:center}
 """
@@ -442,6 +443,9 @@ def code_page(settings: DemoSettings, email: str, *, error: str = "") -> bytes:
 <label for="code">Code</label>
 <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" required autofocus>
 <button type="submit">Open the sample</button></form>
+<p class="muted">No mail after a minute? Look in Spam or Junk (Proton and Outlook often put it there), then send another.</p>
+<form method="post" action="{SIGN_IN_PATH}"><input type="hidden" name="email" value="{safe}">
+<button type="submit" class="quiet">Send another code</button></form>
 <footer class="muted"><a href="{SIGN_IN_PATH}">Use another email</a></footer></div>""",
     )
 

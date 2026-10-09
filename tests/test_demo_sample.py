@@ -295,3 +295,19 @@ def test_the_sample_shows_no_backup_warning(sample):
             return (await a.get("/api/backups/status")).json()
 
     assert not _run(go()).get("warning")
+
+
+def test_the_code_page_says_where_to_look_and_sends_another(sample):
+    gate, clock = sample
+
+    async def go():
+        async with await _client(gate) as client:
+            first = await client.post("/demo/sign-in", data={"email": "v@example.com"})
+            clock.now += demo_gate.CODE_RESEND_SECONDS + 1
+            again = await client.post("/demo/sign-in", data={"email": "v@example.com"})
+            return first, again
+
+    first, again = _run(go())
+    assert "Spam" in first.text and "Send another code" in first.text
+    assert again.status_code == 200
+    assert len([m for m in gate._settings.sender.sent if m["to"] == "v@example.com"]) == 2
