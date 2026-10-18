@@ -1753,8 +1753,15 @@ function sureRowBook(g, x) {
     return eachPrefill(x)?.book || sureBook(g);
 }
 function sureRowHint(x) { return sureRowBooks.has(x.id) ? '' : eachPrefill(x)?.hint || ''; }
-/** Ready to save: a book, and under Check each row a book on every row. */
-function sureReady(g) { return !!sureBook(g) && (!sureEach(g) || g.items.every(i => sureRowBook(g, i.row))); }
+/** The rows a line's detail draws, oldest first: the first few until
+ *  "Show N more rows". Under Check each row only these are checked on save;
+ *  the rest wait in the Queue's Check each row step. */
+function sureRows(g) {
+    const rows = g.items.map(i => i.row);
+    return sureAll.has(g.key) ? rows : rows.slice(0, SURE_ROWS);
+}
+/** Ready to save: a book, and under Check each row a book on every row drawn. */
+function sureReady(g) { return !!sureBook(g) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
 
 /** The merchant a line's save makes: resolve's name from its first row's
  *  text, or the merchant fin already holds by that name (the save reuses it). */
@@ -1821,8 +1828,7 @@ function sureSay(g) {
  *  else… at the right; the sentence for that setting; its rows (oldest
  *  first), with a book picker per row under Check each row. */
 function sureDetailHTML(g, at) {
-    const each = sureEach(g), rows = g.items.map(i => i.row);
-    const shown = sureAll.has(g.key) ? rows : rows.slice(0, SURE_ROWS);
+    const each = sureEach(g), rows = g.items.map(i => i.row), shown = sureRows(g);
     const pick = x => {
         const when = esc(day(x.date)), hint = sureRowHint(x);
         return `<td class="sl-rbk"><select class="sel" data-change="sure-row-book" data-key="${esc(g.key)}" data-tx="${x.id}" aria-label="Book for the ${when} row"${queueBusy ? ' disabled' : ''}>${bookOptions(queueModel.r.books, sureRowBook(g, x), 'Choose book')}</select>${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</td>`;
@@ -1952,7 +1958,8 @@ ACT['sure-open'] = el => {
     if (!g || !tr || !box) return;
     const open = el.getAttribute('aria-expanded') !== 'true';
     if (open) sureShown.add(g.key); else sureShown.delete(g.key);
-    if (open && !box.cells[0].innerHTML) box.cells[0].innerHTML = sureDetailHTML(g, Number(tr.dataset.at));
+    // Drawn afresh: the usual book may have changed while it was folded.
+    if (open) box.cells[0].innerHTML = sureDetailHTML(g, Number(tr.dataset.at));
     toggleRowDetail(el);
     tr.classList.toggle('is-open', open);
     if (open) drawSureState();
@@ -1972,13 +1979,15 @@ ACT['sure-else'] = el => {
 };
 /** One group saved with today's guess save and the book shown. Rows an
  *  earlier save in the same press already labelled are left out; a group
- *  left with none is skipped. */
+ *  left with none is skipped. Under Check each row only the rows drawn are
+ *  checked with their books; the others wait. */
 async function saveSureGroup(g, labelled) {
     const rows = g.items.map(i => i.row).filter(x => !labelled.has(x.id));
     if (!rows.length) return { skipped: true };
     const each = sureEach(g);
+    const drawn = new Set(sureRows(g).map(x => x.id));
     const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { merchant: g.name, visible: true, book: sureBook(g), each }), rows,
-        { quiet: true, check: each ? x => sureRowBook(g, x) : null });
+        { quiet: true, check: each ? x => sureRowBook(g, x) : null, onScreen: each ? rows.filter(x => drawn.has(x.id)) : null });
     res.labelledIds.forEach(id => labelled.add(id));
     return res;
 }
@@ -1991,7 +2000,8 @@ ACT['sure-save'] = async el => {
     queueBusy = false;
     if (!res.skipped) {   // skipped: its rows already have a type
         if (res.ok) sureForget(g);
-        savedToast(g.name, g.type.name, book, res, g.items.map(i => i.row), { each });
+        // Under Check each row the rows not drawn are named as waiting.
+        savedToast(g.name, g.type.name, book, res, each ? sureRows(g) : g.items.map(i => i.row), { each });
     }
     rerender(); refreshFrame();
 };
@@ -2184,19 +2194,28 @@ function bookOptions(books, selected, blank = 'As the type says') {
 
 /** The merchant text a save suggests as its rule (and, title-cased, its name).
  *  It stops at a reference: any later word carrying a digit ("312-4567890",
- *  "#4471") or a long code. A first word of 4+ letters stands alone before a
- *  reference; a shorter one ("SP 1234") keeps the next word too. */
+ *  "#4471"), a reference glued on after "*" ("GRAB*A-R12345678"), or a long
+ *  code. Before a reference the first word stands alone when it is plainly
+ *  a name: 6+ letters ("INDIGOAIR"), or 4+ with a mark ("GRAB*", "BUS/MRT");
+ *  a short plain word ("SP 1234", "KOPI A-R123") keeps the next word too, so
+ *  its rule does not reach other merchants' rows ("SQ *KOPI CORNER"). */
 function suggestPattern(description) {
     let pattern = (description || '').toUpperCase();
     if (/\b(PAYNOW|FAST PAYMENT|TRANSFER|I-BANK|GIRO)\b/.test(pattern)) return '';
     pattern = pattern.replace(/\s+(SG|SGP|SIN|US|USA|GB|GBR|AU|AUS)\s*$/i, '').replace(/\s+\d{2}\/\d{2}$/, '');
+    const stands = word => {
+        const letters = (word.match(/[A-Z]/g) || []).length;
+        return letters >= 6 || (letters >= 4 && /[^A-Z]/.test(word));
+    };
     const parts = pattern.split(/\s+/);
+    const glued = parts[0].match(/^(\S*?\w\*)\S*\d/);
+    if (glued && stands(glued[1])) return glued[1];
     let cutoff = parts.length, ref = false;
     for (let i = 1; i < parts.length; i++) {
         ref = /\d/.test(parts[i]);
         if (ref || /^[A-Z0-9]{8,}$/.test(parts[i])) { cutoff = i; break; }
     }
-    const least = ref && (parts[0].match(/[A-Z]/g) || []).length >= 4 ? 1 : 2;
+    const least = ref && stands(parts[0]) ? 1 : 2;
     return parts.slice(0, Math.max(cutoff, least)).join(' ');
 }
 function titleCase(s) { return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); }
@@ -2356,9 +2375,10 @@ function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern
  *  about its past rows (cancelled: the question was closed, nothing was
  *  written). quiet: no toast and no redraw, for a caller that words its
  *  own (the sure card). check: taught as Check each row, the rows on screen
- *  (the group, or the row) are then checked with their books (check(row), or
- *  the merchant's): one bulk-label write; rows the rule reached beyond them wait. */
-async function saveResolve(body, group = [], { quiet = false, check = null } = {}) {
+ *  (onScreen, else the group, else the row) are then checked with their books
+ *  (check(row), or the merchant's): one bulk-label write; rows the rule
+ *  reached beyond them wait. */
+async function saveResolve(body, group = [], { quiet = false, check = null, onScreen = null } = {}) {
     const services = await servicesList();
     const svc = services.find(s => s.name.toLowerCase() === body.service_name.toLowerCase());
     if (svc) body.service_id = svc.id;
@@ -2399,11 +2419,11 @@ async function saveResolve(body, group = [], { quiet = false, check = null } = {
         labelledIds.add(x.id);
         done += 1;
     }
-    if (check && !error) {
-        const onScreen = (group.length ? group : [{ id: body.tx_id }]).filter(x => labelledIds.has(x.id));
+    const toCheck = (onScreen || (group.length ? group : [{ id: body.tx_id }])).filter(x => labelledIds.has(x.id));
+    if (check && !error && toCheck.length) {
         const typeId = r.data.type_id ?? body.type_id;
         const checked = await send('POST', '/api/transactions/bulk-label', {
-            rows: onScreen.map(x => ({ tx_id: x.id, type_id: typeId, book: check(x) || r.data.book })),
+            rows: toCheck.map(x => ({ tx_id: x.id, type_id: typeId, book: check(x) || r.data.book })),
         });
         if (checked.change) changes.push(checked.change);
         if (!checked.ok) error = checked.data.error || 'The rows here could not be checked';

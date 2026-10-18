@@ -107,6 +107,34 @@ def test_case_5_taught_as_check_each_row_on_the_sure_card(client, conn, statemen
     assert waiting(client) == []
 
 
+def test_a_line_of_more_rows_than_it_draws_checks_only_the_rows_drawn(client, conn, statement, milis_card):
+    """A line of seven rows draws five ("Show 2 more rows"). Its ✓ as Check
+    each row checks the five drawn with their books; the two never drawn
+    keep the rule's label and wait in the Check each row step."""
+    txs = [row(conn, statement if i % 2 else milis_card, f"SAMPLE*A-R{i:08d}", 12.0 + i, day=f"2026-09-0{i + 1}")
+           for i in range(7)]
+    drawn, unseen = txs[:5], txs[5:]
+
+    taught = client.post("/api/transactions/resolve", json=teach(conn, txs[0], "Sample*", "SAMPLE*", "Transport", "Household"))
+
+    assert taught.status_code == 200, taught.get_json()
+    assert set(taught.get_json()["backfilled_ids"]) >= set(txs[1:])
+    checked = client.post("/api/transactions/bulk-label", json={"rows": [
+        {"tx_id": tx, "book": "Moom" if tx == drawn[1] else "Household", "type_id": type_id(conn, "Transport")}
+        for tx in drawn
+    ]})
+
+    assert checked.status_code == 200, checked.get_json()
+    assert label(client, drawn[1]) == ("Moom", "Transport", "manual")
+    assert all(label(client, tx)[2] == "manual" and not shown(client, tx)["not_checked"] for tx in drawn)
+    assert all(label(client, tx) == ("Household", "Transport", "service_default") for tx in unseen)
+    assert waiting(client) == sorted(unseen)
+
+    undo(client, taught, checked)
+    assert all(shown(client, tx)["type_id"] is None for tx in txs)
+    assert waiting(client) == []
+
+
 def held_merchant(conn, statement) -> tuple[int, int, int, int]:
     """Sample Air, Every row the same, with one past row fin labelled; and
     two new rows the rule will reach: the one taught and one more."""

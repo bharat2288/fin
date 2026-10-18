@@ -23,7 +23,7 @@ SPECIMENS = [
     ("INDIGOAIR 312-4567890 MUMBAI", "INDIGOAIR"),
     ("NTUC FAIRPRICE 0123 SINGAPORE", "NTUC FAIRPRICE"),
     ("SQ *KOPI CORNER", None),
-    ("GRAB*A-R12345678", None),
+    ("GRAB*A-R12345678", "GRAB*"),     # a reference glued on after "*"
     ("7-ELEVEN BUGIS", None),
     ("SP 1234 TAMPINES", "SP 1234"),
     ("PAYNOW TO K TAN", ""),
@@ -59,7 +59,29 @@ def test_the_name_stops_too():
 
 def test_other_references_and_long_codes():
     got = [p for p, _ in _run(["STARBUCKS #4471 ORCHARD", "KOPI A-R123 BUGIS", "NTUC FAIRPRICE SINGAPORE",
-                               "SHOPEE 12345 SG", "GRAB 12/09"])]
+                               "SHOPEE 12345 SG", "GRAB 12/09", "BUS/MRT 278316423"])]
     # "#4471" and "A-R123" are references; a long word with no digit still
-    # stops as before, keeping two words; a short first word keeps two.
-    assert got == ["STARBUCKS", "KOPI", "NTUC FAIRPRICE", "SHOPEE", "GRAB"]
+    # stops as before, keeping two words; a short plain first word keeps two;
+    # a first word with a mark in it stands alone at four letters.
+    assert got == ["STARBUCKS", "KOPI A-R123", "NTUC FAIRPRICE", "SHOPEE", "GRAB", "BUS/MRT"]
+
+
+# A short plain first word ("KOPI", "CAFE") is too general to be a rule alone:
+# the rule matches as a plain substring, so it would reach other merchants.
+OTHER_MERCHANTS = ["SQ *KOPI CORNER", "YA KUN KOPI TOAST", "KOPITIAM BUGIS", "CAFE NERO 0042",
+                   "COMFORT TAXI 1234", "GRAB* SG"]
+
+
+@pytest.mark.parametrize("line", ["KOPI A-R123 BUGIS", "CAFE 12345 TAMPINES", "TAXI A-1234"])
+def test_a_short_plain_name_does_not_reach_other_merchants(line):
+    [(pattern, _)] = _run([line])
+    assert pattern and line.startswith(pattern)
+    assert [other for other in OTHER_MERCHANTS if pattern in other] == []
+
+
+def test_a_glued_reference_teaches_the_merchant_fin_already_holds():
+    """"GRAB*A-R..." rows and "GRAB* SG" all come under one rule, "GRAB*"."""
+    got = _run(["GRAB*A-R34567890", "GRAB*A-R23456789", "GRAB* SG", "SQ*A1"])
+    assert got[:3] == [["GRAB*", "Grab*"]] * 3
+    # Too short to stand alone: the line is kept whole, its own text.
+    assert got[3][0] == "SQ*A1"
