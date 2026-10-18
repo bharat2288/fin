@@ -97,6 +97,8 @@
     /* selection is ink, never camel: a chosen chip, segment, pick or place.
        Camel is for doing: the one save of a region. */
     --pick-bg: #2c2418; --pick-fg: #fdfaf6;
+    /* a picker's caret (select.sel), drawn in --text-secondary */
+    --caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath fill='%23685840' d='M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z'/%3E%3C/svg%3E");
 }
 @media (max-width: 720px) { :root { --t-page: 28px; --ctl: var(--tap); --ctl-sm: var(--tap); } }
 
@@ -131,6 +133,7 @@
         --scrim: rgba(0, 0, 0, 0.6);
         --highlight: rgba(255, 240, 220, 0.06);
         --pick-bg: #4a3e30; --pick-fg: #f2e8da;   /* on dark, a quiet raised fill */
+        --caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath fill='%23cdbca4' d='M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z'/%3E%3C/svg%3E");
     }
 }
 :root[data-theme="dark"] {
@@ -160,6 +163,7 @@
     --scrim: rgba(0, 0, 0, 0.6);
     --highlight: rgba(255, 240, 220, 0.06);
     --pick-bg: #4a3e30; --pick-fg: #f2e8da;
+    --caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath fill='%23cdbca4' d='M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z'/%3E%3C/svg%3E");
 }
 
 /* ---------- type and the page ---------- */
@@ -498,6 +502,51 @@ table.t tr.is-highlight > td { background: var(--accent-primary-subtle); }
 table.t tr.clickable { cursor: pointer; }
 table.t td.empty { padding: 24px; text-align: center; color: var(--text-tertiary); border: 0; background: none; }
 .table-tight td, .table-tight th { padding-top: 4px; padding-bottom: 4px; }
+/* kit (from folio): bandedTable. The tight table with a header band, built by
+   app.js bandedTable(): a caption, th scope="col" in caps on the band, money
+   right in tabular figures, rows under a hairline. */
+.bt { width: 100%; border-collapse: collapse; font-size: var(--t-ui); }
+.bt th { padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-bottom: 1px solid var(--border-default); text-align: left;
+    font-size: var(--t-cap); font-weight: var(--font-bold); letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-tertiary); white-space: nowrap; }
+.bt td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border-subtle); vertical-align: middle; color: var(--text-secondary); }
+.bt .r { text-align: right; }
+.bt td.num, .bt td.r { font-variant-numeric: tabular-nums; }
+.bt td.stext { font-family: var(--font-mono); font-size: var(--t-meta); overflow-wrap: anywhere; }
+.bt > tbody > tr:last-child > td { border-bottom: 0; }
+/* a section row (Money out, Money in) with folio's kind-pill square */
+.bt tr.sec > td { padding-top: 10px; padding-bottom: 6px; background: color-mix(in srgb, var(--bg-raised) 40%, var(--bg-surface));
+    font-size: var(--t-cap); font-weight: var(--font-bold); letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-secondary); }
+.bt tr.sec .dir { margin-right: 6px; vertical-align: -4px; }
+.bt tr.sec .dir__icon { width: 18px; height: 18px; border-radius: var(--radius-md); }
+.bt tr.sec .dir__icon svg { width: 11px; height: 11px; }
+/* a sub-table inside a row's detail: its own shell, tighter rows */
+.tshell { min-width: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-xl); background: var(--bg-surface); overflow: hidden; }
+.bt--in td { padding-top: 6px; padding-bottom: 6px; }
+
+/* kit (from folio): rowDetailToggle. A row's name opens its detail, the caret
+   inside the name button; app.js toggleRowDetail is folio's bindRowDetail. */
+.disc { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 24px; padding: 0; border: 0; background: none;
+    color: var(--text-primary); font: inherit; font-weight: var(--font-semibold); text-align: left; cursor: pointer; }
+.disc .caret { width: 12px; height: 12px; flex: none; color: var(--text-tertiary); transition: transform var(--duration-fast) var(--ease-default); }
+.disc[aria-expanded="true"] .caret { transform: rotate(90deg); }
+.disc .nm { min-width: 0; overflow-wrap: anywhere; }
+.disc:hover .nm { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--border-emphasis); }
+.disc--meta { min-height: 0; font-size: var(--t-meta); color: var(--text-secondary); }
+.disc--meta .caret { width: 10px; height: 10px; }
+
+/* a picker in a row: a boxed select at the row's control height; a quiet one
+   reads as text until hovered or focused; .need asks for a choice (the
+   warning border and tint, and nothing else on the row) */
+select.sel { width: 100%; min-width: 0; height: var(--ctl-sm); min-height: var(--ctl-sm); padding: 0 26px 0 10px; border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+    background: var(--bg-elevated) var(--caret) no-repeat right 8px center / 12px; box-shadow: none; color: var(--text-primary);
+    font-size: var(--t-ui); line-height: 1.2; -webkit-appearance: none; appearance: none; cursor: pointer; }
+select.sel:hover { border-color: var(--border-emphasis); }
+select.sel:focus { border-color: var(--accent-primary); box-shadow: 0 0 0 2px var(--accent-primary-subtle); }
+select.sel:disabled { opacity: 0.55; cursor: not-allowed; }
+select.sel--quiet { border-color: transparent; background-color: transparent; padding-left: 6px; }
+select.sel--quiet:hover, select.sel--quiet:focus { border-color: var(--border-default); background-color: var(--bg-elevated); }
+select.sel.need { border-color: var(--semantic-warning); background-color: var(--warn-subtle); }
+
 /* a card-list sum: operators in a column, a firmer rule before "=" */
 .sum { font-family: var(--font-num); font-variant-numeric: tabular-nums; width: 100%; border-collapse: collapse; font-size: var(--t-body); }
 .sum td { padding: 6px 0; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary); }
@@ -894,148 +943,136 @@ li.empty { list-style: none; margin-top: 8px; }
 /* == PLACE: queue == */
 /* ========================================================================== */
 
-/* The Queue (fin-surfaces 06): about 1040px wide, a plain head, a merchant
-   search, the "Jev is sure" card, step chips, then money out and money in side
-   by side, each holding only what needs thought in folding step sections, then
-   a strip of what else waits in Books. */
+/* The Queue (fin-surfaces 06, drawn to 08's v2 in 17): 1040px wide; a head
+   with the merchant search at its right; the "Jev is sure" card as folio's
+   banded table; step chips without colour (the one colour code here is out
+   and in); then money out and money in side by side, each side one grid
+   whose rows line up (what | amount | action); then a strip of what else
+   waits in Books. */
 .queue { max-width: var(--queue-maxw); margin-inline: auto; }
 .queue > * + * { margin-top: var(--space-4); }
+.queue [hidden] { display: none !important; }
+.queue .sub { font-size: var(--t-ui); color: var(--text-tertiary); }
+.queue .cap { font-size: var(--t-cap); font-weight: var(--font-bold); letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-tertiary); }
+.queue .hint { font-size: var(--t-meta); color: var(--accent-ink); }
+.queue .hint:empty { display: none; }
 .q-head { margin-bottom: 0; }
-.q-head p { margin-top: var(--space-1); font-size: var(--t-ui); }
-.q-tools { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
-.q-search { flex: 1 1 260px; }
+.q-head p { margin-top: var(--space-1); font-size: var(--t-ui); color: var(--text-tertiary); }
+.q-search { flex: 0 1 320px; }
+.q-search input { min-height: var(--ctl); font-size: var(--t-body); }
 .q-work > * + * { margin-top: var(--space-4); }
-.q-cols { align-items: start; }
-/* the Out / In toggle: a phone shows one side at a time; the desk shows both */
+.q-show { grid-column: 1 / -1; padding: var(--space-1) var(--space-4) var(--space-3); }
+.tag.each { background: var(--accent-primary-subtle); color: var(--accent-ink); }
+
+/* the "Jev is sure" card: a head (the title folds; its sub-line is the rows,
+   what needs a book, and the one sentence), then merchant · rows · amount ·
+   Jev's type · book · ✓, Money out and Money in as section rows. A line's
+   name opens its detail beneath it. */
+.sure-card { padding: 0; overflow: hidden; }
+.sure-head { display: flex; align-items: flex-start; gap: var(--space-3) var(--space-6); padding: var(--space-5) var(--space-5) var(--space-4); }
+.sure-head > div { flex: 1 1 auto; min-width: 0; }
+.sure-head h2 { font-family: var(--font-display); font-size: var(--t-card); font-weight: var(--font-bold); line-height: 1.2; }
+.sure-head .disc { font-weight: var(--font-bold); }
+.sure-head .disc .caret { width: 14px; height: 14px; }
+.sure-head .sub { margin: var(--space-1) 0 0 20px; max-width: 640px; }
+/* the card's own cells (not a detail's sub-table) start and end 20px in, kept light by :where */
+.sure-t > :where(thead, tbody) > tr > :where(th, td):first-child { padding-left: var(--space-5); }
+.sure-t > :where(thead, tbody) > tr > :where(th, td):last-child { padding-right: var(--space-5); }
+.sl > td { color: var(--text-primary); }
+.sl .tag { margin-left: var(--space-2); }
+.sl-a { font-weight: var(--font-semibold); }
+.sl-n .ph-w { display: none; }
+.sl-ty em { font-style: normal; font-size: var(--t-meta); color: var(--text-tertiary); }
+.sl-go { text-align: right; }
+.sl-hint { display: block; margin-top: 2px; line-height: 1.3; }
+.sl.is-open > td { border-bottom-color: transparent; background: color-mix(in srgb, var(--bg-raised) 30%, var(--bg-surface)); }
+.sure-t .sl-det > td { padding: 0; background: color-mix(in srgb, var(--bg-raised) 30%, var(--bg-surface)); }
+.sure-body > .q-show { padding-top: var(--space-3); border-top: 1px solid var(--border-subtle); }
+/* the detail (folio rowDetail): New rows and Something else…, one sentence, the rows */
+.det { display: grid; gap: var(--space-3); padding: var(--space-1) var(--space-5) var(--space-4) 40px; }
+.det__top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.det__set { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2) var(--space-3); }
+.det__say { max-width: 720px; font-size: var(--t-ui); color: var(--text-secondary); }
+.det .bt--in .sel { width: 128px; }
+.det .bt--in td .hint { display: block; margin-top: 2px; }
+.det__more { justify-self: start; }
+
+/* the step chips, and on a phone the Out / In toggle (one side at a time) */
+.q-steps { align-items: center; }
 .q-side { display: none; }
-.q-side .sure-dot { flex: none; }
 .q-side .n { font-weight: var(--font-bold); opacity: 0.7; font-variant-numeric: tabular-nums; }
-/* a step chip is its label and count, no colour: the one colour code here is out and in */
+.q-cols { align-items: start; }
+/* ruling D5: on the desk Money in's card stays in view while Money out scrolls */
+@media (min-width: 901px) {
+    .q-cols > #lane-in { position: sticky; top: var(--space-4); max-height: calc(100dvh - 2 * var(--space-4)); overflow-y: auto; }
+}
 
-/* a side: its head (a label, not a hero: the base font, bold), then a section
-   per step, each card a row under a hairline */
+/* a side: its head (a label, not a hero: the base font, bold), then a
+   section per step that folds */
 .q-lane { padding: 0; overflow: hidden; }
-.q-lane__h { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-1) var(--space-2); margin: 0; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border-subtle);
-    font-family: var(--font-base); font-size: var(--t-title); font-weight: var(--font-bold); }
-.q-lane__h .sure-dot { align-self: center; }
-.q-lane__h small { font-family: var(--font-base); font-size: var(--t-meta); font-weight: var(--font-medium); color: var(--text-tertiary); }
-.q-lane__empty { margin: 0; padding: var(--space-6) var(--space-4); text-align: center; font-size: var(--t-ui); color: var(--text-tertiary); }
-.q-sec__h { margin: 0; }
-.q-sec__fold { display: flex; align-items: center; gap: var(--space-2); width: 100%; padding: var(--space-3) var(--space-4) var(--space-2); border: 0; background: none; cursor: pointer; text-align: left;
-    font: inherit; font-size: var(--t-cap); font-weight: var(--font-bold); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); }
-.q-sec__fold:hover { color: var(--text-secondary); }
-.q-sec__n { font-weight: var(--font-semibold); }
-.q-sec__fold .caret { width: 13px; height: 13px; margin-left: auto; transform: rotate(90deg); transition: transform var(--duration-fast) var(--ease-default); }
-.q-sec__fold[aria-expanded="false"] .caret { transform: none; }
-.q-sec__body[hidden] { display: none; }
-.q-sec__body > .item { border: 0; border-top: 1px solid var(--border-subtle); border-radius: 0; padding: var(--space-3) var(--space-4); background: none; }
-.q-sec__body > .item:first-child, .q-sec__body > .suggest-entry + .item { border-top: 0; }
-.q-sec__body > .item + .item { margin-top: 0; }
-.q-sec__body > .suggest-entry { margin: 0 var(--space-4) var(--space-2); }
-.q-sec__body > .q-show { width: auto; margin: var(--space-1) var(--space-4) var(--space-3); }
-.q-sec + .q-sec { border-top: 1px solid var(--border-subtle); }
+.lane-h { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border-subtle); }
+.lane-h h2 { font-size: var(--t-title); font-weight: var(--font-bold); }
+.lane-h .sub { margin-left: auto; }
+.lane-empty { margin: 0; padding: var(--space-6) var(--space-4); text-align: center; font-size: var(--t-ui); color: var(--text-tertiary); }
+.step + .step { border-top: 1px solid var(--border-subtle); }
+.step-h { display: flex; align-items: center; gap: var(--space-2); margin: 0; padding: 0 var(--space-4) 0 0; }
+.step-h .fold { flex: 1 1 auto; display: flex; align-items: center; gap: var(--space-2); min-height: 40px; padding: var(--space-3) 0 var(--space-1) var(--space-4); border: 0; background: none;
+    text-align: left; cursor: pointer; font: inherit; font-size: var(--t-cap); font-weight: var(--font-bold); letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-tertiary); }
+.step-h .fold:hover { color: var(--text-secondary); }
+.step-h .fold .n { color: var(--text-secondary); }
+.step-h .fold .caret { width: 12px; height: 12px; margin-left: auto; transform: rotate(90deg); transition: transform var(--duration-fast) var(--ease-default); }
+.step-h .fold[aria-expanded="false"] .caret { transform: none; }
+.step-note { margin: 0; padding: 0 var(--space-4) var(--space-2); font-size: var(--t-meta); color: var(--text-tertiary); }
 
-/* Pick a type: Jev's three as pick buttons; a pick shows the book and Save */
-.q-picks, .q-pick-save, .q-each { grid-column: 1 / -1; min-width: 0; }
-.q-picks, .q-pick-save { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-.q-pick-save[hidden] { display: none; }
-.q-pick { min-height: var(--ctl-sm); padding: 0 var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-elevated);
+/* one row of a side: what | amount | action. The side is one grid and every
+   row a subgrid of it, so the amount and action columns are as wide as their
+   widest entry and line up down the whole side (folio attentionItem's action
+   column, flattened into rows). Extras span the row under it (.qi__more). */
+.lane-body { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; column-gap: var(--space-3); }
+.lane-body > *, .step > *, .step-b > *, .qi > .qi__more > :not(.ce) { grid-column: 1 / -1; }
+.step, .step-b, .qi, .qi__more, .ce { display: grid; grid-template-columns: subgrid; }
+.qi { grid-column: 1 / -1; row-gap: var(--space-2); align-items: center; padding: var(--space-3) var(--space-4); }
+.qi > .qi__w { grid-column: 1; min-width: 0; }
+.qi > .qi__amt { grid-column: 2; }
+.qi > .qi__act { grid-column: 3; }
+.qi + .qi { border-top: 1px solid var(--border-subtle); }
+.qi__t { font-weight: var(--font-semibold); color: var(--text-primary); overflow-wrap: anywhere; }
+.qi__m { margin-top: 2px; font-size: var(--t-meta); color: var(--text-tertiary); overflow-wrap: anywhere; }
+.qi__amt { text-align: right; font-weight: var(--font-semibold); color: var(--text-primary); }
+.qi__act { display: flex; justify-content: flex-end; gap: 6px; }
+.qi__more { grid-column: 1 / -1; min-width: 0; }
+/* fin's guess for a transfer: its box, then its Yes */
+.q-guess { display: grid; gap: var(--space-2); }
+.q-guess__act { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+/* Pick a type: Jev's three as toggles (ink when picked); a pick shows the
+   setting, the book and a sand Save */
+.picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+button.pick { min-height: var(--ctl-sm); padding: 0 10px; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-surface);
     color: var(--text-primary); font: inherit; font-size: var(--t-ui); cursor: pointer; }
-.q-pick em { margin-left: 2px; font-style: normal; color: var(--text-tertiary); }
-.q-pick:hover { border-color: var(--border-emphasis); }
-.q-pick[aria-pressed="true"] { border-color: var(--pick-bg); background: var(--pick-bg); color: var(--pick-fg); font-weight: var(--font-semibold); }
-.q-pick[aria-pressed="true"] em { color: inherit; opacity: 0.7; }
-.q-picks .link { margin-left: var(--space-1); font-size: var(--t-ui); }
-.q-pick-save select, .q-each select { width: auto; max-width: 160px; min-height: var(--ctl-sm); padding: var(--space-1) var(--space-2); font-size: var(--t-ui); }
-
-/* Check each row: one line per row not checked yet, on two rows: its date,
-   account and mark with the amount; then its type, book, hint and ✓ */
-.q-each { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-xl); background: var(--bg-raised); }
-.q-each .holds { margin: 0 0 2px; }
-.ce { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1) var(--space-3); align-items: center; padding: var(--space-2) var(--space-3); border-radius: var(--radius-lg);
-    background: var(--bg-surface); font-size: var(--t-ui); color: var(--text-secondary); }
-.ce-what { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0; overflow-wrap: anywhere; }
-.ce > .num { font-weight: var(--font-semibold); color: var(--text-primary); white-space: nowrap; }
-.ce-pick { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0; }
-.ce-pick .hint { flex: 1 1 120px; font-size: var(--t-meta); }
-.ce-pick .hint:empty { display: none; }
-.ce-pick .btn { margin-left: auto; }
+button.pick em { margin-left: 2px; font-style: normal; color: var(--text-tertiary); }
+button.pick:hover { border-color: var(--border-emphasis); }
+button.pick[aria-pressed="true"] { border-color: var(--pick-bg); background: var(--pick-bg); color: var(--pick-fg); font-weight: var(--font-semibold); }
+button.pick[aria-pressed="true"] em { color: inherit; opacity: 0.7; }
+.pick-save { display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--space-2); margin-top: var(--space-2); }
+.pick-save .sel { width: 150px; }
+.q-pick-hint { flex: 1 1 120px; }
+/* Check each row: the merchant is a row (open by default); under it one line
+   per row on the same three columns, no box: date · account, amount, ✓; then
+   a quiet type picker, the book picker and the hint */
+.ce { grid-column: 1 / -1; row-gap: 6px; align-items: center; padding: var(--space-2) 0 var(--space-2) calc(12px + 6px);   /* under the name, past its caret */
+    border-top: 1px dashed var(--border-subtle); }
+.qi__more > .ce:first-child { margin-top: 2px; }
+.ce__when { grid-column: 1; min-width: 0; font-size: var(--t-ui); color: var(--text-secondary); overflow-wrap: anywhere; }
+.ce__amt { grid-column: 2; text-align: right; font-size: var(--t-ui); font-weight: var(--font-semibold); color: var(--text-primary); }
+.ce__go { grid-column: 3; justify-self: end; }
+.ce__pick { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--space-2); min-width: 0; }
+.ce__pick .sel--quiet { width: 150px; margin-left: -6px; }
+.ce__pick .sel:not(.sel--quiet) { width: 128px; }
 
 /* also waiting, in Books: a dashed strip of counts, each a link */
 .q-also { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-bottom: 0; padding: var(--space-3) var(--space-4); border: 1px dashed var(--border-default);
     border-radius: var(--radius-xl); background: var(--bg-surface); font-size: var(--t-ui); color: var(--text-secondary); }
 .q-also .link { padding: 0; border: 0; background: none; font: inherit; font-weight: var(--font-semibold); }
-
-/* the "Jev is sure" card: a title row that folds, a note, one table row per
-   merchant (a dot for its side, the merchant its save makes with Jev's name
-   when it differs, Jev's type, a book picker, ✓), and under it the merchant's
-   rows when opened */
-.sure-card { padding: 0; overflow: hidden; }
-.sure-head { display: flex; align-items: center; gap: var(--space-2) var(--space-4); flex-wrap: wrap; padding: var(--space-4) var(--space-5); }
-.sure-head__title { flex: 1 1 260px; min-width: 0; }
-.sure-head h2 { margin: 0; font-family: var(--font-display); font-size: var(--t-card); }
-.sure-fold { display: inline-flex; align-items: center; gap: var(--space-2); padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.sure-fold .caret { width: 15px; height: 15px; flex: none; color: var(--text-tertiary); transform: rotate(90deg); transition: transform var(--duration-fast) var(--ease-default); }
-.sure-fold[aria-expanded="false"] .caret { transform: none; }
-.sure-head__meta { display: block; margin: var(--space-1) 0 0 calc(15px + var(--space-2)); font-size: var(--t-ui); color: var(--text-tertiary); }
-.sure-note { margin: 0; padding: var(--space-3) var(--space-5); border-top: 1px solid var(--border-subtle); background: var(--bg-elevated); font-size: var(--t-ui); color: var(--text-secondary); }
-.sure-table { width: 100%; border-collapse: collapse; }
-.sure-table td { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--border-subtle); vertical-align: middle; font-size: var(--t-ui); color: var(--text-secondary); }
-.sure-table td:first-child { width: 14px; padding-left: var(--space-5); }
-.sure-table td:last-child { padding-right: var(--space-5); text-align: right; }
-.sure-body > .q-show { width: calc(100% - 2 * var(--space-5)); margin: var(--space-1) var(--space-5) var(--space-4); }
-.sure-dot { display: inline-block; width: 9px; height: 9px; border-radius: 3px; background: var(--k); vertical-align: middle; }
-.sure-dot.out { --k: var(--k-out); }
-.sure-dot.in { --k: var(--k-in); }
-.sure-row__m { min-width: 0; overflow-wrap: anywhere; }
-.sure-row__name { font-weight: var(--font-semibold); color: var(--text-primary); }
-.sure-row__meta { display: block; color: var(--text-tertiary); font-size: var(--t-meta); }
-.sure-row__need { display: none; }
-.sure-row.need .sure-row__need { display: inline; }
-.sure-row.need { background: var(--warn-subtle); }
-.sure-row__type { color: var(--text-primary); white-space: nowrap; }
-.sure-row__pct { color: var(--text-tertiary); font-size: var(--t-meta); }
-.sure-row__book { width: 150px; }
-.sure-row__book select { min-height: var(--ctl-sm); padding: var(--space-1) var(--space-2); }
-.sure-row__hint { display: block; margin-top: var(--space-1); font-size: var(--t-meta); line-height: 1.3; text-align: left; }
-.sure-row__hint[hidden], .q-pick-hint[hidden] { display: none; }
-.q-pick-hint { flex: 1 1 120px; font-size: var(--t-meta); }
-.sure-row__go .btn svg { width: 15px; height: 15px; }
-/* Check each row on a line (fin-surfaces 13): the setting, the book labelled
-   "usual book", and the line's rows each with its own book picker */
-.sure-note b { color: var(--text-primary); font-weight: var(--font-semibold); }
-.sure-row__set { width: 178px; }
-.sure-row__set select { min-height: var(--ctl-sm); padding: var(--space-1) var(--space-2); font-size: var(--t-ui); }
-.sure-row__book label { display: grid; gap: 1px; }
-.usual-l { font-size: var(--t-cap); font-weight: var(--font-bold); letter-spacing: .05em; text-transform: uppercase; color: var(--text-tertiary); text-align: left; }
-.sure-row.is-each, .sure-row.is-each + .sure-rows { background: color-mix(in srgb, var(--accent-primary-subtle) 40%, transparent); }
-.sure-table .sure-rows__t td.sure-rows__bk, .sure-table .sure-rows__t.is-each td:nth-child(2) { white-space: nowrap; }
-.sure-rows__bk select { width: 130px; min-height: var(--ctl-sm); padding: var(--space-1) var(--space-2); font-size: var(--t-ui); }
-.sure-rows__bk .hint { display: block; margin-top: 2px; font-size: var(--t-meta); white-space: normal; }
-.usual-pick { display: grid; gap: 1px; }
-.sure-row__jev { font-size: var(--t-meta); color: var(--text-tertiary); overflow-wrap: anywhere; }
-.sure-row__links { display: flex; flex-wrap: wrap; gap: 0 var(--space-4); font-size: var(--t-meta); }
-.sure-rows[hidden] { display: none; }
-.sure-table .sure-rows > td { width: auto; padding: 0 var(--space-5) var(--space-3) calc(var(--space-5) + 14px + var(--space-3));   /* under the name */
-    border-top: 0; text-align: left; }
-table.t.sure-rows__t { border: 1px solid var(--border-default); border-collapse: separate; border-spacing: 0; border-radius: var(--radius-lg); overflow: hidden; background: var(--bg-surface); }
-.sure-table .sure-rows__t td, .sure-table .sure-rows__t td:first-child, .sure-table .sure-rows__t td:last-child {
-    width: auto; padding: var(--space-1) var(--space-3); border-top: 0; font-size: var(--t-ui); text-align: left; }
-.sure-table .sure-rows__t td:first-child { white-space: nowrap; }
-.sure-table .sure-rows__t td.r { text-align: right; white-space: nowrap; }
-.sure-table .sure-rows__t .sure-rows__text { width: 100%; font-family: var(--font-mono); font-size: var(--t-meta); overflow-wrap: anywhere; }
-
-/* a card: what it was, its date and account, the amount right; the guess, then the buttons */
-.q-card .what { line-height: 1.6; }
-.q-card .act { align-items: center; }
-.queue .item .act { align-items: center; }
-.queue .item .act .link { font-size: var(--t-ui); }
-.q-card .act .btn svg { width: 14px; height: 14px; }
-.q-guess, .q-more { grid-column: 1 / -1; min-width: 0; }
-.q-rows > summary { display: inline-flex; align-items: center; list-style: none; font-size: var(--t-ui); }
-.q-rows > summary::-webkit-details-marker { display: none; }
-.q-rows table { margin-top: var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); overflow: hidden; }
-.q-rows table.t td { font-size: var(--t-ui); }
 
 /* fin's guess: a camel-tinted box, the guess in bold, a small meter and how sure */
 .guess { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); padding: var(--space-3); border-radius: var(--radius-xl);
@@ -1071,56 +1108,82 @@ table.t.sure-rows__t { border: 1px solid var(--border-default); border-collapse:
 .fg-now b { font-weight: var(--font-bold); }
 
 @media (max-width: 720px) {
-    .q-sec__fold, .q-pick, .q-picks .link, .q-also .link { min-height: var(--tap); }
-    .q-pick-save select, .q-each select { min-height: var(--tap); max-width: none; }
-    .q-pick-save select { flex: 1 1 0; }
-    .q-pick-save .usual-pick { flex: 1 1 0; min-width: 0; }
-    .q-pick-save .usual-pick select { width: 100%; }
-    .ce-pick select { flex: 1 1 100px; }
-    .ce-pick .hint { flex: 1 1 0; order: 3; }
-    .ce-pick .btn { order: 4; }
-    .q-card .act .btn { flex: 1 1 auto; }
-    .q-card .act .link { min-height: var(--tap); }
-    .q-rows > summary { min-height: var(--tap); padding: 0; }
+    .q-also .link, .pick { min-height: var(--tap); }
+    .queue .disc, .queue .qi .link { min-height: var(--tap); }
+    .queue .disc--meta { margin-block: -12px; }   /* a 44px target that does not push its line apart */
+    .queue .qi .link { display: inline-flex; align-items: center; margin-block: -12px; }
+    .queue select.sel { font-size: var(--t-title); }   /* 16px: a phone does not zoom into it */
     .guess__act .btn { flex: 1 1 auto; min-height: var(--tap); }
     .choice.is-chosen .link, .scope-line .link { min-height: var(--tap); }
     .scope-pick input[type="text"] { margin-top: 4px; }
-    /* the sure card: each row stacks, the merchant then its type, book and ✓ */
-    .sure-head { padding: var(--space-3) var(--space-4); }
-    .sure-head .btn { flex: 1 1 auto; }
-    .sure-fold { min-height: var(--tap); }
-    .sure-note { padding: var(--space-3) var(--space-4); }
-    .sure-table, .sure-table tbody { display: block; }
-    .sure-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border-subtle); }
-    .sure-table td, .sure-table td:first-child, .sure-table td:last-child { width: auto; padding: 0; border: 0; }
-    .sure-row__m { flex: 1 1 calc(100% - 30px); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
-    .sure-row__name { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
-    .sure-row__jev { flex: 0 1 auto; min-width: 0; }
-    .sure-row__need { flex: none; }
-    .sure-row__meta, .sure-row__links { flex: 1 1 100%; min-width: 0; }
-    .sure-table .sure-row__type { flex: 1 1 0; min-width: 0; padding-left: calc(9px + var(--space-3)); white-space: normal; overflow-wrap: anywhere; }
-    .sure-table .sure-row__book { flex: 0 1 150px; min-width: 0; }
-    .sure-row__book select { width: 100%; min-height: var(--tap); }
-    .sure-table .sure-row__set { flex: 1 1 170px; min-width: 0; }
-    .sure-row__set select { width: 100%; min-height: var(--tap); }
-    /* a line's rows on a phone: date and amount, the account, then the text */
-    .sure-rows { display: block; padding: 0 var(--space-4) var(--space-3); }
-    .sure-table .sure-rows > td { display: block; padding: 0; }
-    .sure-rows__t, .sure-rows__t tbody { display: block; }
-    .sure-rows__t tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1) var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border-subtle); }
-    .sure-rows__t tr:last-child { border-bottom: 0; }
-    .sure-table .sure-rows__t td, .sure-table .sure-rows__t td:first-child, .sure-table .sure-rows__t td:last-child { padding: 0; border: 0; }
-    .sure-rows__t td:nth-child(1) { grid-row: 1; grid-column: 1; }
-    .sure-rows__t td:nth-child(2) { grid-row: 2; grid-column: 1; }
-    .sure-rows__t td:nth-child(3) { grid-row: 1; grid-column: 2; }
-    .sure-rows__t td:nth-child(4) { grid-column: 1 / -1; }
-    .sure-table .sure-rows__t td.sure-rows__bk, .sure-table .sure-rows__t.is-each td:nth-child(2) { white-space: normal; }
-    .sure-table .sure-rows__t td.sure-rows__bk { grid-column: 1 / -1; }
-    .sure-rows__bk select { width: 100%; min-height: var(--tap); }
-    /* the Out / In toggle: one side at a time, the choice kept */
+    .q-search { flex: 1 1 100%; }
+    /* the step chips: one strip that scrolls sideways, edge to edge (folio's console index) */
+    .q-steps { flex-wrap: nowrap; overflow-x: auto; margin-inline: calc(-1 * var(--space-4)); padding: 0 var(--space-4) 2px; scrollbar-width: none; }
+    .q-steps::-webkit-scrollbar { display: none; }
+    /* the sure card: one grid down the card, each line a subgrid of it, so
+       every book picker and ✓ line up: name | amount, type | rows, book | ✓ */
+    .sure-head { flex-wrap: wrap; padding: var(--space-4); }
+    .sure-head .sub { margin-left: 0; }
+    .sure-head > .btn { flex: 1 1 100%; }
+    .sure-t { display: block; }
+    .sure-t thead, .sure-t colgroup { display: none; }
+    .sure-t tbody { display: grid; grid-template-columns: minmax(0, 1fr) auto calc(var(--ctl) + var(--space-4)); }   /* the line's right padding rides on the last track */
+    .sure-t tr.sec, .sure-t tr.sl-det { grid-column: 1 / -1; display: block; }
+    .sure-t tr.sec > td, .sure-t tr.sl-det > td { display: block; }
+    .sure-t tr.sec > td { padding-left: var(--space-4); }
+    .sure-t tr.sl { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; gap: 2px var(--space-3); padding: 6px var(--space-4) var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+    .sure-t tr.sl.is-open { border-bottom-color: transparent; background: color-mix(in srgb, var(--bg-raised) 30%, var(--bg-surface)); }
+    .sure-t tr.sl > td { display: block; padding: 0; border: 0; background: none; }
+    .sure-t .sl-m { grid-column: 1; grid-row: 1; }
+    .sure-t .sl-a { grid-column: 2 / 4; grid-row: 1; align-self: start; line-height: var(--tap); }   /* level with the name, whose button is 44px */
+    .sure-t .sl-ty { grid-column: 1; grid-row: 2; padding-left: 18px; color: var(--text-secondary); font-size: var(--t-ui); }
+    .sure-t .sl-n { grid-column: 2 / 4; grid-row: 2; color: var(--text-tertiary); font-size: var(--t-ui); }
+    .sl-n .ph-w { display: inline; }
+    .sure-t .sl-bk { grid-column: 1 / 3; grid-row: 3; padding: 6px 0 0 18px; }
+    .sure-t .sl-go { grid-column: 3; grid-row: 3; padding-top: 6px; }
+    .sl .tag { margin: 0 0 0 18px; }
+    .det { padding: 0 var(--space-4) var(--space-4); }
+    .det__top, .det__set { display: grid; gap: var(--space-2); justify-items: start; }
+    .det__set { justify-items: stretch; width: 100%; }
+    .det__top > .btn.ghost { margin-left: calc(-1 * var(--space-2)); }
+    .each-seg { display: flex; width: 100%; }
+    .each-seg > button { flex: 1 1 0; padding: 0 6px; white-space: normal; line-height: 1.2; }
+    /* a sub-table on a phone: date | amount, then the account, the text and the book */
+    .bt--in thead { display: none; }
+    .bt--in, .bt--in tbody { display: block; }
+    .bt--in tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "d a" "c c" "x x" "b b"; gap: 2px var(--space-2); padding: 10px var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+    .bt--in tr:last-child { border-bottom: 0; }
+    .bt--in td { display: block; padding: 0; border: 0; }
+    .bt--in td:nth-child(1) { grid-area: d; color: var(--text-primary); }
+    .bt--in td:nth-child(2) { grid-area: c; }
+    .bt--in td:nth-child(3) { grid-area: x; }
+    .bt--in td:nth-child(4) { grid-area: a; font-weight: var(--font-semibold); color: var(--text-primary); }
+    .bt--in td:nth-child(5) { grid-area: b; padding-top: 6px; }
+    .det .bt--in .sel { width: 100%; }
+    /* the sides: an Out / In toggle, one side at a time (the choice kept);
+       each row stacks its amount beside its name and its action under it */
     .q-side { display: flex; width: 100%; }
     .q-side > button { flex: 1 1 0; }
     .q-cols[data-side="out"] > #lane-in, .q-cols[data-side="in"] > #lane-out { display: none; }
+    .step-h .fold { min-height: var(--tap); }
+    .lane-body, .step, .step-b, .qi__more { display: block; }
+    .qi, .ce { grid-template-columns: minmax(0, 1fr) auto; }
+    .qi > .qi__act { grid-column: 1 / -1; order: 2; justify-content: flex-start; }
+    .qi > .qi__more { order: 1; }
+    .ce { padding-left: 0; }
+    /* a Check each row merchant keeps its lines on one grid, so their pickers and ✓ line up */
+    .qi--each > .qi__more { display: grid; }
+    .qi--each > .qi__more, .qi--each .ce { grid-template-columns: subgrid; }
+    .ce__when { grid-column: 1; grid-row: 1; }
+    .ce__amt { grid-column: 2; grid-row: 1; }
+    .ce__pick { grid-column: 1; grid-row: 2; }
+    .ce__go { grid-column: 2; grid-row: 2; align-self: start; }
+    .ce__pick .sel, .ce__pick .sel:not(.sel--quiet) { flex: 1 1 0; width: auto; margin: 0; }
+    .ce__pick .sel--quiet { border-color: var(--border-subtle); }
+    .ce__pick .hint { flex-basis: 100%; }
+    .pick-save .seg { display: flex; width: 100%; }
+    .pick-save .sel { flex: 1 1 0; width: auto; }
+}
 }
 
 /* ========================================================================== */
