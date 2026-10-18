@@ -2285,7 +2285,12 @@ ACT['ww-save'] = async () => {
         const each = scope === 'service_default' && val('cw-set') === 'each';
         const body = resolveBody(row, typeId, { merchant: name, scope, pattern, book: val('cw-book'), visible: step.suggestionVisible,
             each: scope === 'service_default' && val('cw-set') ? each : undefined });
-        if (!each) { await saveResolve(body, group); return; }
+        if (!each) {
+            const res = await saveResolve(body, group);
+            // Only this row, for a merchant fin holds (saveResolve names it): its book may now vary.
+            if (res.resolved && scope === 'transaction' && body.service_id) askBookVaries(body.service_id);
+            return;
+        }
         // Check each row: the rows here are checked with the book shown, and
         // the toast's one Undo takes the whole save.
         const res = await saveResolve(body, group, { quiet: true, check: () => val('cw-book') || null });
@@ -3610,9 +3615,9 @@ async function viewMerchant(id) {
         return `${booksNav('lists')}<div class="page-head"><div><span class="eyebrow">Books · Lists · Merchants</span><h1>Merchant</h1></div></div>
             <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div>`;
     }
-    const [r, list, services] = await Promise.all([refs(),
+    const [r, list, services, varies] = await Promise.all([refs(),
         get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}`, { fresh: true }),
-        servicesList()]);
+        servicesList(), get(`/api/services/${id}/book-varies`, { fresh: true })]);
     ACT.__services = new Map(services.map(x => [x.id, x]));
     ACT.__mpRows = new Map(list.transactions.map(x => [x.id, x]));
     const each = !!s.review_each_time;
@@ -3633,6 +3638,8 @@ async function viewMerchant(id) {
     <div class="page-head"><div><span class="eyebrow"><a class="link" href="#/books/lists/merchants">Books · Lists · Merchants</a></span><h1>${esc(s.name)}</h1>
         <p>${span} · ${plural(s.rule_count, 'rule')}</p></div>
         <button type="button" class="btn" data-act="merchant" data-id="${s.id}">${icon('pencil-simple')}Edit the merchant</button></div>
+    ${varies.suggest ? `<p class="notice mp-ask">${icon('info')}<span>${esc(bookVariesWords(s.name, varies))}</span>
+        <span class="row">${bookVariesButtons(s.id, 'btn sm primary', 'btn sm')}</span></p>` : ''}
     <section class="card mp-head"><dl class="mp-facts">
         <dt>Type</dt><dd>${s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type')}</dd>
         <dt>${each ? 'Usual book' : 'Book'}</dt><dd>${esc(s.book || 'no book')}</dd>
@@ -3677,7 +3684,7 @@ ACT['mp-apply'] = async () => {
     if (!mpCanApply()) return;
     const ids = [...mp.ticks];
     const r = await mpLabel(ids.map(tx_id => ({ tx_id, book: mp.book })), `${mp.book} on ${plural(ids.length, 'row')} of ${name}`);
-    if (r) mp.ticks.clear();
+    if (r) { mp.ticks.clear(); askBookVaries(mp.id); }
 };
 ACT['mp-type'] = el => {
     const x = ACT.__mpRows.get(Number(el.dataset.tx));
@@ -3687,7 +3694,45 @@ ACT['mp-type'] = el => {
 ACT['mp-book'] = el => {
     const x = ACT.__mpRows.get(Number(el.dataset.tx));
     if (!x || !el.value) return;
-    mpLabel([{ tx_id: x.id, book: el.value }], `Set the book of the ${day(x.date)} row to ${el.value}.`);
+    mpLabel([{ tx_id: x.id, book: el.value }], `Set the book of the ${day(x.date)} row to ${el.value}.`)
+        .then(r => { if (r) askBookVaries(merchantPage.id); });
+};
+
+// fin suggests Check each row (fin-surfaces 14): once two rows of an Every
+// row the same merchant are hand-set to another book, fin asks, after the
+// change (a toast that stays until answered) and on the merchant page. Yes
+// runs the setting's offer (each-set); No is kept for good, and fin does not
+// ask again for that merchant. The server decides (book-varies).
+function bookVariesWords(name, v) {
+    return `${name}’s book varies: you’ve moved ${v.moved} of its rows to ${v.to_book || 'other books'}. Check each row from now on?`;
+}
+function bookVariesButtons(id, yes, no) {
+    return `<button type="button" class="${yes}" data-act="bv-yes" data-id="${id}" data-on="1">Yes, check each row</button>`
+        + `<button type="button" class="${no}" data-act="bv-no" data-id="${id}">No</button>`;
+}
+/** After a row's book changed: ask, if the server says to. */
+async function askBookVaries(id) {
+    let v, s;
+    try { [v, s] = await Promise.all([get(`/api/services/${id}/book-varies`, { fresh: true }), merchantById(id)]); } catch (_) { return; }
+    if (!v.suggest || !s) return;
+    $$(`#toasts .toast.ask[data-id="${id}"]`).forEach(t => t.remove());
+    const box = document.createElement('div');
+    box.className = 'toast ask';
+    box.dataset.id = id;
+    box.setAttribute('role', 'status');
+    box.innerHTML = `${icon('info')}<span>${esc(bookVariesWords(s.name, v))}</span><span class="acts">${bookVariesButtons(id, 'link', 'link')}</span>`;
+    $('#toasts').appendChild(box);
+}
+const dropBookVaries = id => $$(`#toasts .toast.ask[data-id="${id}"]`).forEach(t => t.remove());
+ACT['bv-yes'] = el => { dropBookVaries(el.dataset.id); ACT['each-set'](el); };
+ACT['bv-no'] = async el => {
+    const id = Number(el.dataset.id);
+    dropBookVaries(id);
+    const r = await send('POST', `/api/services/${id}/book-varies/decline`);
+    if (!r.ok) { toast(r.data.error || 'That did not work; fin will ask again', { bad: true }); return; }
+    const s = await merchantById(id);
+    toast(`fin won’t ask again for ${s ? s.name : 'this merchant'}. Its setting stays on its page.`);
+    if (location.hash === `#/books/merchant/${id}`) rerender();
 };
 
 ACT['merchant-add'] = async () => {
