@@ -422,7 +422,9 @@ button.tag { cursor: pointer; }
 
 /* ---------- forms: inputs sit in a well ---------- */
 label.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-label.field > span { font-size: 13px; font-weight: var(--font-medium); color: var(--text-secondary); }
+label.field > span, .field.each-set > span:first-child { font-size: 13px; font-weight: var(--font-medium); color: var(--text-secondary); }
+/* the Check each row setting: its two words, and what they mean under them */
+.field.each-set { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
 .hint { font-size: 12.5px; color: var(--text-tertiary); }
 input[type="text"], input[type="search"], input[type="number"], input[type="date"], input[type="url"], select, textarea {
     width: 100%; min-width: 0; min-height: 38px; padding: 8px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
@@ -893,7 +895,7 @@ li.empty { list-style: none; margin-top: 8px; }
 .q-step--transfer { --c: var(--chart-5); }
 .q-step--pick { --c: var(--chart-1); }
 .q-step--noguess { --c: var(--chart-6); }
-.q-step--mixed { --c: var(--chart-3); }
+.q-step--mixed { --c: var(--chart-3); }   /* Check each row */
 .q-step--bill { --c: var(--chart-4); }
 .q-steps .chip[aria-pressed="true"] .q-dot { box-shadow: 0 0 0 1.5px var(--bg-surface); }
 
@@ -931,14 +933,19 @@ li.empty { list-style: none; margin-top: 8px; }
 .q-picks .link { margin-left: 4px; font-size: 13px; }
 .q-pick-save select, .q-each select { width: auto; max-width: 160px; min-height: 32px; padding: 4px 10px; font-size: 12.5px; }
 
-/* Book each row: one line per row, its type and a book picker */
-.q-each { display: grid; gap: 4px; padding: 6px 10px; border-radius: var(--radius-xl); background: var(--bg-raised); }
+/* Check each row: one line per row not checked yet, on two rows: its date,
+   account and mark with the amount; then its type, book, hint and ✓ */
+.q-each { display: grid; gap: 6px; padding: 8px 10px; border-radius: var(--radius-xl); background: var(--bg-raised); }
 .q-each .holds { margin: 0 0 2px; }
-.q-each__row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; font-size: 12.5px; color: var(--text-secondary); }
-.q-each__what { display: grid; min-width: 0; overflow-wrap: anywhere; }
-.q-each__type { color: var(--text-tertiary); }
-.q-each__type .link { font-size: inherit; }
-.q-each__row .num { font-weight: var(--font-semibold); color: var(--text-primary); white-space: nowrap; }
+.ce { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 8px 10px; border-radius: var(--radius-lg);
+    background: var(--bg-surface); font-size: 12.5px; color: var(--text-secondary); }
+.ce-what { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; overflow-wrap: anywhere; }
+.ce > .num { font-weight: var(--font-semibold); color: var(--text-primary); white-space: nowrap; }
+.ce-pick { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.ce-pick .hint { flex: 1 1 120px; font-size: 12px; }
+.ce-pick .hint:empty { display: none; }
+.ce-pick .btn { margin-left: auto; padding: 5px; min-width: 32px; }
+.ce-pick .btn svg { width: 15px; height: 15px; }
 
 /* also waiting, in Books: a dashed strip of counts, each a link */
 .q-also { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 0; padding: 10px 16px; border: 1px dashed var(--border-default);
@@ -1040,8 +1047,9 @@ table.t.sure-rows__t { border: 1px solid var(--border-default); border-collapse:
     .q-sec__fold, .q-pick, .q-picks .link, .q-also .link { min-height: var(--tap); }
     .q-pick-save select, .q-each select { min-height: var(--tap); max-width: none; }
     .q-pick-save select { flex: 1 1 0; }
-    .q-each__row { grid-template-columns: minmax(0, 1fr) auto; }
-    .q-each__row select { grid-column: 1 / -1; }
+    .ce-pick select { flex: 1 1 100px; }
+    .ce-pick .hint { flex: 1 1 0; order: 3; }
+    .ce-pick .btn { min-width: var(--tap); min-height: var(--tap); order: 4; }
     .q-card .act .btn { flex: 1 1 auto; }
     .q-card .act .link { min-height: var(--tap); }
     .q-rows > summary { min-height: var(--tap); padding: 0; }
@@ -1612,4 +1620,53 @@ table.sl-stack td.sl-sub { display: none; }
     .suggest-entry .btn { min-height: var(--tap); }
     .suggest-pick, .suggest-pick-head .btn { min-height: var(--tap); }
     .suggest-pick-list { max-height: 50dvh; }
+}
+
+/* the merchant page (fin-surfaces 11): its facts and setting; the head is a
+   grid so a trend chart can take a second column later; then its rows, each
+   with a tick, a type and a book picker, and Set book for the ticked ones */
+.mp-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.mp-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; align-items: center; margin: 0; }
+.mp-facts dt { font-size: 11px; font-weight: var(--font-bold); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); }
+.mp-facts dd { margin: 0; min-width: 0; font-weight: var(--font-semibold); color: var(--text-primary); }
+.mp-facts dd .hint { display: block; margin-top: 6px; font-weight: var(--font-regular); }
+.page-head .eyebrow .link { color: inherit; text-decoration: none; }
+.bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 13px; color: var(--text-secondary); }
+.bulk select { width: 150px; }
+.bulk b { color: var(--text-primary); }
+.mp-note { margin: 0 0 12px; }
+.stext { font-family: "SF Mono", Monaco, Consolas, monospace; font-size: 11.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
+table.t.mrows td { padding: 7px 8px; }
+.mrows .tick { display: inline-grid; place-items: center; min-width: 24px; min-height: 24px; cursor: pointer; }
+.mrows select { width: 150px; min-height: 32px; padding: 4px 8px; font-size: 12.5px; }
+.mrows .bk { min-width: 150px; }
+table.t.mrows tr.is-ticked > td { background: var(--accent-primary-subtle); }
+
+@media (max-width: 720px) {
+    .mp-facts { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .mp-facts dd + dt { margin-top: 8px; }
+    .bulk select { flex: 1 1 140px; min-height: var(--tap); font-size: 16px; }
+    .bulk .btn { flex: 1 1 auto; }
+    /* each row a small grid: tick, date and account, amount; its text; its pickers */
+    .table-wrap:has(.mrows) { overflow-x: visible; }
+    .mrows thead { display: none; }
+    .mrows, .mrows tbody { display: block; }
+    .mrows tr { display: grid; grid-template-columns: var(--tap) minmax(0, 1fr) minmax(0, 1fr); gap: 4px 8px; align-items: center;
+        padding: 8px 10px 10px 4px; border-bottom: 1px solid var(--border-subtle); }
+    .mrows tr:last-child { border-bottom: 0; }
+    table.t.mrows td { padding: 0; border: 0; min-width: 0; }
+    .mrows td:nth-child(1) { grid-row: 1 / 3; }
+    .mrows td:nth-child(2) { grid-column: 2; }
+    .mrows td:nth-child(3) { grid-column: 2; grid-row: 2; font-size: 12.5px; }
+    .mrows td:nth-child(4) { grid-column: 3; grid-row: 1; text-align: right; }
+    .mrows td:nth-child(5) { grid-column: 2 / 4; }
+    .mrows td:nth-child(6) { grid-column: 2; }
+    .mrows td:nth-child(7) { grid-column: 3; }
+    .mrows td:nth-child(8) { grid-column: 2 / 4; }
+    .mrows td:nth-child(8):empty { display: none; }
+    .mrows tr.is-ticked { background: var(--accent-primary-subtle); }
+    table.t.mrows tr.is-ticked > td, table.t.mrows tbody tr:hover > td { background: none; }
+    .mrows .tick { width: var(--tap); height: var(--tap); }
+    .mrows select, .mrows .bk { width: 100%; min-width: 0; min-height: var(--tap); font-size: 16px; }
+    .pager .btn { min-height: var(--tap); }
 }
