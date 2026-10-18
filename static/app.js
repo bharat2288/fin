@@ -314,7 +314,7 @@ function toast(message, { bad = false, undo = null, ms = 6000 } = {}) {
     if (undo) {
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = 'link';
+        b.className = 'btn sm ghost';
         b.textContent = 'Undo';
         b.onclick = async () => { box.remove(); await (Array.isArray(undo) ? undoChanges(undo) : undoEntry(undo)); };
         box.appendChild(b);
@@ -3712,14 +3712,14 @@ ACT['each-page'] = el => {
     const to = `#/books/merchant/${el.dataset.id}`;
     if (location.hash !== to) location.hash = to;
 };
-function eachSegHTML(s) {
+function eachSegHTML(s, labelledBy) {
     const on = !!s.review_each_time;
-    const label = `${s.display_type || s.type_name || 'no type'} · ${s.book || 'no book'}`;
-    return `<div class="seg" role="group" aria-label="How new rows from ${esc(s.name)} arrive">
+    const type = s.display_type || s.type_name || 'no type';
+    return `<div class="seg" role="group" aria-labelledby="${labelledBy}">
             <button type="button" data-act="each-set" data-id="${s.id}" data-on="0" aria-pressed="${!on}">Every row the same</button>
             <button type="button" data-act="each-set" data-id="${s.id}" data-on="1" aria-pressed="${on}">Check each row</button></div>
-        <span class="hint">${on ? `Each new row arrives as ${esc(label)}, its usual book, marked not checked, and waits in the Queue.${s.rows_to_check ? ` ${plural(s.rows_to_check, 'row')} not checked yet.` : ''}`
-            : `Every new row is labelled ${esc(label)}, without asking.`}</span>`;
+        <span class="sub">${on ? `Each new row arrives as ${esc(type)} in its usual book, marked not checked, and waits in the Queue.`
+            : `Every new row is ${esc(type)} · ${esc(s.book || 'no book')}, without asking.`}</span>`;
 }
 async function merchantById(id) { return (await servicesList()).find(s => s.id === id) || null; }
 ACT['each-set'] = async el => {
@@ -3739,10 +3739,12 @@ ACT['each-set'] = async el => {
 /** The offer, once, as a merchant fin holds turns to Check each row: its
  *  past rows stay as they are (checked) or come to the Queue. act answers. */
 function openEachOffer(s, act) {
-    openSheet(`Check each row for ${esc(s.name)} from now on`, `<p>Also bring its ${plural(s.rows_to_check, 'past row')} to the Queue to check?</p>
-        <p class="small muted">Either way, each new row from ${esc(s.name)} will wait in the Queue, marked not checked.</p>`,
+    const n = plural(s.rows_to_check, 'past row');
+    openSheet(esc(s.name), `<p class="q">Also bring its ${n} to the Queue to check?</p>
+        <ul class="diff"><li>New rows: <s>Every row the same</s> → <b>Check each row</b></li></ul>
+        <p class="say">Either way, each new row from ${esc(s.name)} will wait in the Queue, marked not checked. Left where they are, the ${n} ${s.rows_to_check === 1 ? 'counts' : 'count'} as checked.</p>`,
     { eyebrow: 'Check each row', center: true,
-      foot: `<button type="button" class="btn primary" data-act="${act}" data-id="${s.id}" data-past="leave">Not now, only new rows</button><button type="button" class="btn" data-act="${act}" data-id="${s.id}" data-past="queue">Bring them too</button>` });
+      foot: `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="${act}" data-id="${s.id}" data-past="queue">Bring them too</button><button type="button" class="btn primary" data-act="${act}" data-id="${s.id}" data-past="leave">Not now, only new rows</button>` });
 }
 // Teaching a merchant fin holds as Check each row (fin-surfaces 13) asks the
 // offer before its save: the answer, or null when the sheet is closed
@@ -3785,8 +3787,8 @@ async function viewMerchant(id) {
     let s;
     try { s = await get(`/api/services/${id}`, { fresh: true }); } catch (err) {
         if (err.status !== 404) throw err;
-        return `${booksNav('lists')}<div class="page-head"><div><span class="eyebrow">Books · Lists · Merchants</span><h1>Merchant</h1></div></div>
-            <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div>`;
+        return `<div class="mp">${mpCrumbs()}<div class="page-head"><div><h1>Merchant</h1></div></div>
+            <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div></div>`;
     }
     const [r, list, services, varies] = await Promise.all([refs(),
         get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}`, { fresh: true }),
@@ -3794,41 +3796,52 @@ async function viewMerchant(id) {
     ACT.__services = new Map(services.map(x => [x.id, x]));
     ACT.__mpRows = new Map(list.transactions.map(x => [x.id, x]));
     const each = !!s.review_each_time;
-    const span = s.rows ? `${plural(s.rows, 'row')}, ${s.first_date === s.last_date ? esc(day(s.first_date)) : `${esc(day(s.first_date))} to ${esc(day(s.last_date))}`} · ${plural(s.accounts, 'account')}` : 'No rows yet';
+    const span = s.rows ? `${plural(s.rows, 'row')} · ${s.first_date === s.last_date ? esc(day(s.first_date)) : `${esc(day(s.first_date))} to ${esc(day(s.last_date))}`} · ${plural(s.accounts, 'account')}` : 'No rows yet';
     const off = mp.busy ? ' disabled' : '';
+    // A row says only what differs from its merchant: not checked, or hand-set.
+    // Money out is the page's default, so only money in carries its mark.
     const rows = list.transactions.map(x => {
-        const on = mp.ticks.has(x.id), when = esc(day(x.date));
-        const mark = x.not_checked ? tag('notchecked', 'not checked') : x.cat_source === 'manual' ? tag('', 'hand-set') : '';
-        return `<tr${on ? ' class="is-ticked"' : ''} data-tx="${x.id}"><td><label class="tick"><input type="checkbox" data-change="mp-tick" data-tx="${x.id}"${on ? ' checked' : ''} aria-label="Tick the ${when} row"></label></td>
-            <td class="num">${when}</td><td>${esc(x.account_name || '')}</td><td class="r">${rowAmount(toMinor(x.amount_sgd, x.currency), x.currency)}</td>
+        const on = mp.ticks.has(x.id), when = esc(day(x.date)), minor = toMinor(x.amount_sgd, x.currency);
+        const mark = x.not_checked ? tag('notchecked', 'not checked') : x.cat_source === 'manual' ? `<span class="handset">${icon('pencil-simple')}hand-set</span>` : '';
+        return `<tr${on ? ' class="is-ticked"' : ''} data-tx="${x.id}"><td class="k"><label class="tick"><input type="checkbox" data-change="mp-tick" data-tx="${x.id}"${on ? ' checked' : ''} aria-label="Tick the ${when} row"></label></td>
+            <td class="num dt">${when}</td><td class="ac">${esc(x.account_name || '')}</td>
             <td class="stext">${esc(x.description)}${rowMark(x.id)}</td>
-            <td><select data-change="mp-type" data-tx="${x.id}" aria-label="Type for the ${when} row"${off}>${typeOptions(r.types, x.type_id)}</select></td>
-            <td class="bk"><select data-change="mp-book" data-tx="${x.id}" aria-label="Book for the ${when} row"${off}>${bookOptions(r.books, x.book, 'Choose book')}</select></td>
-            <td>${mark}</td></tr>`;
+            <td class="r num am">${minor == null || minor < 0 ? rowAmount(minor, x.currency) : esc(money(minor, x.currency))}</td>
+            <td class="ty"><select class="sel sel--quiet" data-change="mp-type" data-tx="${x.id}" aria-label="Type for the ${when} row"${off}>${typeOptions(r.types, x.type_id)}</select></td>
+            <td class="bk"><select class="sel sel--quiet" data-change="mp-book" data-tx="${x.id}" aria-label="Book for the ${when} row"${off}>${bookOptions(r.books, x.book, 'Choose book')}</select></td>
+            <td class="st">${mark}</td></tr>`;
     }).join('');
     const notChecked = each ? s.rows_to_check : 0;
-    return `${booksNav('lists')}
-    <div class="page-head"><div><span class="eyebrow"><a class="link" href="#/books/lists/merchants">Books · Lists · Merchants</a></span><h1>${esc(s.name)}</h1>
+    return `<div class="mp">${mpCrumbs()}
+    <div class="page-head"><div><h1>${esc(s.name)}</h1>
         <p>${span} · ${plural(s.rule_count, 'rule')}</p></div>
-        <button type="button" class="btn" data-act="merchant" data-id="${s.id}">${icon('pencil-simple')}Edit the merchant</button></div>
-    ${varies.suggest ? `<p class="notice mp-ask">${icon('info')}<span>${esc(bookVariesWords(s.name, varies))}</span>
-        <span class="row">${bookVariesButtons(s.id, 'btn sm primary', 'btn sm')}</span></p>` : ''}
-    <section class="card mp-head"><dl class="mp-facts">
-        <dt>Type</dt><dd>${s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type')}</dd>
-        <dt>${each ? 'Usual book' : 'Book'}</dt><dd>${esc(s.book || 'no book')}</dd>
-        <dt>Setting</dt><dd>${eachSegHTML(s)}</dd></dl></section>
-    <section class="card"><div class="section-header"><div><h2>Rows</h2><p>${plural(s.rows, 'row')}${notChecked ? ` · ${notChecked} not checked` : ''}</p></div></div>
-        ${list.transactions.length ? `<div class="bulk"><span id="mp-ticked">${mpTickedWords()}</span>
-            <select data-change="mp-bulk-book" aria-label="Book for the ticked rows">${bookOptions(r.books, mp.book, 'Choose book')}</select>
-            <button type="button" class="btn primary" data-act="mp-apply" id="mp-apply"${mpCanApply() ? '' : ' disabled'}>Apply</button></div>
-        <p class="hint mp-note">Every change here is a hand-set label, and can be undone in Changes.</p>
-        <div class="table-wrap"><table class="t mrows"><thead><tr><th><span class="sr-only">Tick</span></th><th>Date</th><th>Account</th><th class="r">Amount</th><th>Statement text</th><th>Type</th><th>Book</th><th><span class="sr-only">Mark</span></th></tr></thead>
-            <tbody>${rows}</tbody></table></div>${pager(list, 'mp-page')}`
-        : '<p class="card-empty">No spending rows from this merchant yet.</p>'}</section>`;
+        <button type="button" class="btn" data-act="merchant" data-id="${s.id}">Edit the merchant</button></div>
+    ${varies.suggest ? `<div class="attn" role="status"><span class="attn__ic">${icon('info')}</span><p>${esc(bookVariesWords(s.name, varies))}</p>
+        <div class="attn__act">${bookVariesButtons(s.id)}</div></div>` : ''}
+    <section class="card mp-card" aria-label="${esc(s.name)}"><div class="mp-facts">
+        <div class="mp-fact"><span class="cap">Type</span><b>${s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type')}</b></div>
+        <div class="mp-fact"><span class="cap">${each ? 'Usual book' : 'Book'}</span><b>${esc(s.book || 'no book')}</b></div>
+        <div class="mp-fact"><span class="cap">Rows</span><b class="num">${s.rows || 0}</b>${notChecked ? `<span class="sub">${notChecked} not checked</span>` : ''}</div>
+        <div class="mp-fact mp-fact--set"><span class="cap" id="mp-nr">New rows</span>${eachSegHTML(s, 'mp-nr')}</div>
+    </div></section>
+    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>Newest first. Each change is a hand-set label, undone in Changes.</p></div>
+        ${list.transactions.length ? `<div class="bulk"><span class="bulk__n" id="mp-ticked">${mpTickedWords()}</span>
+            <select class="sel" data-change="mp-bulk-book" aria-label="Book for the ticked rows">${bookOptions(r.books, mp.book, 'Choose book')}</select>
+            <button type="button" class="btn sm primary" data-act="mp-apply" id="mp-apply"${mpCanApply() ? '' : ' disabled'}>Set book for ticked rows</button></div>` : ''}</div>
+        ${list.transactions.length ? `<table class="t mp-t"><caption class="sr-only">${esc(s.name)}’s rows</caption>
+            <colgroup><col class="c-k"><col class="c-d"><col class="c-ac"><col><col class="c-a"><col class="c-ty"><col class="c-bk"><col class="c-s"></colgroup>
+            <thead><tr><th scope="col" class="k"><span class="sr-only">Tick</span></th><th scope="col">Date</th><th scope="col">Account</th><th scope="col">Statement text</th><th scope="col" class="r">Amount</th><th scope="col">Type</th><th scope="col">Book</th><th scope="col"><span class="sr-only">State</span></th></tr></thead>
+            <tbody>${rows}</tbody></table>${pager(list, 'mp-page')}`
+        : '<p class="card-empty">No spending rows from this merchant yet.</p>'}</section></div>`;
+}
+/** Where the page sits: Books › Lists › Merchants (folio's crumbs). */
+function mpCrumbs() {
+    return `<nav class="crumbs" aria-label="Where"><a href="#/books">Books</a> › <a href="#/books/lists/merchants">Lists</a> › Merchants</nav>`;
 }
 function mpTickedWords() {
     const n = merchantPage.ticks.size;
-    return n ? `Set book for <b>${n} ticked</b>:` : 'Tick rows to set their book at once:';
+    return n ? `<b>${plural(n, 'row')} ticked</b><button type="button" class="btn sm ghost" data-act="mp-untick">Clear</button>`
+        : 'Tick rows to set their book together.';
 }
 const mpCanApply = () => !!(merchantPage.ticks.size && merchantPage.book && !merchantPage.busy);
 ACT['mp-page'] = el => { merchantPage.page = Number(el.dataset.page); rerender(); window.scrollTo(0, 0); };
@@ -3839,12 +3852,18 @@ ACT['mp-tick'] = el => {
     $('#mp-ticked').innerHTML = mpTickedWords();
     $('#mp-apply').disabled = !mpCanApply();
 };
+ACT['mp-untick'] = () => {
+    merchantPage.ticks.clear();
+    $$('#view .mp-t tr.is-ticked').forEach(tr => { tr.classList.remove('is-ticked'); tr.querySelector('input[type="checkbox"]').checked = false; });
+    $('#mp-ticked').innerHTML = mpTickedWords();
+    $('#mp-apply').disabled = !mpCanApply();
+};
 ACT['mp-bulk-book'] = el => { merchantPage.book = el.value; $('#mp-apply').disabled = !mpCanApply(); };
 /** One write at a time on the page: bulk label, then the toast and a redraw. */
 async function mpLabel(lines, words) {
     if (merchantPage.busy) { toast('One save at a time: wait for the one running to finish.'); return null; }
     merchantPage.busy = true;
-    $$('#view .mrows select, #mp-apply').forEach(b => { b.disabled = true; });
+    $$('#view .mp-t select, #mp-apply').forEach(b => { b.disabled = true; });
     const r = await send('POST', '/api/transactions/bulk-label', { rows: lines });
     merchantPage.busy = false;
     if (r.ok) toast(words, { undo: r.change });
@@ -3879,9 +3898,12 @@ ACT['mp-book'] = el => {
 function bookVariesWords(name, v) {
     return `${name}’s book varies: you’ve moved ${v.moved} of its rows to ${v.to_book || 'other books'}. Check each row from now on?`;
 }
-function bookVariesButtons(id, yes, no) {
-    return `<button type="button" class="${yes}" data-act="bv-yes" data-id="${id}" data-on="1">Yes, check each row</button>`
-        + `<button type="button" class="${no}" data-act="bv-no" data-id="${id}">No</button>`;
+/** The ask's two answers, as buttons in the toast and on the page alike:
+ *  sand Yes, ghost No (the toast puts No first, its Yes at the edge). */
+function bookVariesButtons(id, { noFirst = false } = {}) {
+    const yes = `<button type="button" class="btn sm subtle" data-act="bv-yes" data-id="${id}" data-on="1">Yes, check each row</button>`;
+    const no = `<button type="button" class="btn sm ghost" data-act="bv-no" data-id="${id}">No</button>`;
+    return noFirst ? no + yes : yes + no;
 }
 /** After a row's book changed: ask, if the server says to. */
 async function askBookVaries(id) {
@@ -3893,7 +3915,7 @@ async function askBookVaries(id) {
     box.className = 'toast ask';
     box.dataset.id = id;
     box.setAttribute('role', 'status');
-    box.innerHTML = `${icon('info')}<span>${esc(bookVariesWords(s.name, v))}</span><span class="acts">${bookVariesButtons(id, 'link', 'link')}</span>`;
+    box.innerHTML = `${icon('info')}<span>${esc(bookVariesWords(s.name, v))}</span><span class="acts">${bookVariesButtons(id, { noFirst: true })}</span>`;
     $('#toasts').appendChild(box);
 }
 const dropBookVaries = id => $$(`#toasts .toast.ask[data-id="${id}"]`).forEach(t => t.remove());
