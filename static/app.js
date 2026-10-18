@@ -1421,10 +1421,40 @@ function alsoLabelled(labelledIds, rows) {
     return ` ${plural(extra.length, 'more row')} took the same label${who}.`;
 }
 
+// Book prefill (fin-surfaces 10): a book picker starts at the operator's last
+// book for the merchant on that account, else a company's own account's
+// company, else the type's book; a short hint says which. One read for every
+// row the Queue shows, kept with the other reads until a write.
+async function loadPrefills(ids) {
+    const key = `book-prefill:${ids.join(',')}`;
+    if (!ids.length) return new Map();
+    if (!cache.has(key)) cache.set(key, fetch('/api/book-prefill', {
+        method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ tx_ids: ids }),
+    }).then(res => res.ok ? res.json() : {}).then(d => new Map(Object.entries(d.prefill || {}).map(([id, p]) => [Number(id), p])))
+        .catch(() => new Map()));
+    return cache.get(key);
+}
+/** Where a row's prefilled book came from; none when it is the type's. */
+function prefillHint(p) {
+    if (p.reason === 'last') return `${p.book} last time on ${p.account}`;
+    if (p.reason === 'account') return `${p.book}’s own ${p.account_kind === 'card' ? 'card' : 'account'}`;
+    return '';
+}
+/** One picker for several rows: {book, hint} when every row's prefill is the
+ *  same book from history or its account; else null, and the type's book stands. */
+function sharedPrefill(rows, prefills) {
+    const got = rows.map(x => prefills.get(x.id));
+    if (!got.length || got.some(p => !p || !p.book || p.reason === 'type' || p.book !== got[0].book)) return null;
+    return { book: got[0].book, hint: [...new Set(got.map(prefillHint))].slice(0, 2).join('; ') };
+}
+function prefillHintHTML(prefill, book, cls) {
+    return prefill?.hint ? `<span class="hint ${cls}"${book === prefill.book ? '' : ' hidden'}>${esc(prefill.hint)}</span>` : '';
+}
+
 function pickSaveHTML(card, books) {
     const pick = pickState.get(card.key);
     if (!pick) return '';
-    return `<select data-change="pick-book" data-key="${esc(card.key)}" aria-label="Book for ${esc(card.merchant)}">${bookOptions(books, pick.book, 'Choose book')}</select>
+    return `<select data-change="pick-book" data-key="${esc(card.key)}" aria-label="Book for ${esc(card.merchant)}">${bookOptions(books, pick.book, 'Choose book')}</select>${prefillHintHTML(card.prefill, pick.book, 'q-pick-hint')}
         <button type="button" class="btn sm primary" data-act="pick-save" data-key="${esc(card.key)}"${pick.book && !queueBusy ? '' : ' disabled'}>Save</button>`;
 }
 function pickCardHTML(card, books) {
@@ -1441,7 +1471,7 @@ ACT['pick-type'] = el => {
     const card = laneCardByKey.get(el.dataset.key);
     if (!card || queueBusy) return;
     const typeId = Number(el.dataset.type);
-    pickState.set(card.key, { typeId, book: queueModel.r.typeById.get(typeId)?.proposed_book || '' });
+    pickState.set(card.key, { typeId, book: card.prefill?.book || queueModel.r.typeById.get(typeId)?.proposed_book || '' });
     const box = laneCardEl(card.key);
     $$('.q-pick', box).forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.type) === typeId)));
     const save = $('.q-pick-save', box);
@@ -1452,6 +1482,8 @@ ACT['pick-book'] = el => {
     const pick = pickState.get(el.dataset.key);
     if (!pick) return;
     pick.book = el.value;
+    const hint = $('.q-pick-hint', laneCardEl(el.dataset.key));
+    if (hint) hint.hidden = pick.book !== laneCardByKey.get(el.dataset.key)?.prefill?.book;
     const go = $('[data-act="pick-save"]', laneCardEl(el.dataset.key));
     if (go) go.disabled = queueBusy || !pick.book;
 };
@@ -1586,8 +1618,8 @@ function sureGroups(q, guesses, r, services) {
     });
     return groups;
 }
-/** The book a group would be saved with: the one picked, else its type's. */
-function sureBook(g) { return sureBooks.has(g.key) ? sureBooks.get(g.key) : (g.proposed || ''); }
+/** The book a group would be saved with: the one picked, else its prefill, else its type's. */
+function sureBook(g) { return sureBooks.has(g.key) ? sureBooks.get(g.key) : (g.prefill?.book || g.proposed || ''); }
 /** The title row's words and its button, from what is ready now. */
 function sureHead() {
     const ready = sureList.filter(sureBook).length;
@@ -1618,7 +1650,7 @@ function sureRowHTML(g, books, at) {
             <span class="sure-row__meta">${esc(plural(n, 'row'))} · <span class="num">${esc(sumByCurrency(g.items))}</span>${asks}</span>
             <span class="sure-row__links"><button type="button" class="link" data-act="sure-rows" data-key="${esc(g.key)}" aria-expanded="${open}" aria-controls="sure-rows-${at}">${sureRowsWords(n, open)}</button><button type="button" class="link" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></span></td>
         <td class="sure-row__type">${esc(g.type.name)} <span class="sure-row__pct">${Math.round(g.type.probability * 100)}%</span></td>
-        <td class="sure-row__book"><select data-change="sure-book" data-key="${esc(g.key)}" aria-label="Book for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select></td>
+        <td class="sure-row__book"><select data-change="sure-book" data-key="${esc(g.key)}" aria-label="Book for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(g.prefill, book, 'sure-row__hint')}</td>
         <td class="sure-row__go"><button type="button" class="btn sm subtle" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${book && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>
         <tr class="sure-rows" id="sure-rows-${at}"${open ? '' : ' hidden'}><td colspan="5">${open ? sureRowsHTML(g) : ''}</td></tr>`;
 }
@@ -1650,6 +1682,8 @@ function drawSureState() {
         const ready = !!sureBook(g);
         tr.classList.toggle('need', !ready);
         $('select', tr).disabled = queueBusy;
+        const hint = $('.sure-row__hint', tr);
+        if (hint) hint.hidden = sureBook(g) !== g.prefill.book;
         $('[data-act="sure-save"]', tr).disabled = queueBusy || !ready;
     });
     const h = sureHead();
@@ -1814,7 +1848,13 @@ async function viewQueue() {
     const sureIds = new Set(sure.flatMap(g => g.items.map(i => i.row.id)));
     const left = lane => q.lanes[lane].filter(i => !(i.kind === 'untyped' && sureIds.has(i.row.id)));
     const cards = { out: laneCards('out', left('out'), guesses), in: laneCards('in', left('in'), guesses) };
-    queueModel = { r, ask, sure, cards };
+    // One prefill read for every row a book picker shows: the sure card, Pick
+    // a type and the rows each checked on their own (queueModel.prefills).
+    const lines = [...cards.out, ...cards.in].filter(c => c.step === 'pick' || c.step === 'mixed');
+    const prefills = await loadPrefills([...sureIds, ...lines.flatMap(c => c.rows.map(x => x.id))]);
+    sure.forEach(g => { g.prefill = sharedPrefill(g.items.map(i => i.row), prefills); });
+    lines.forEach(c => { if (c.step === 'pick') c.prefill = sharedPrefill(c.rows, prefills); });
+    queueModel = { r, ask, sure, cards, prefills };
     const todo = sure.length + cards.out.length + cards.in.length;
     const rows = sure.reduce((n, g) => n + g.items.length, 0) + [...cards.out, ...cards.in].reduce((n, c) => n + c.rows.length, 0);
     // A redraw while the search has focus keeps it, and where the caret was.
