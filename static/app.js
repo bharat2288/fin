@@ -2071,16 +2071,22 @@ function bookOptions(books, selected, blank = 'As the type says') {
     return `<option value="">${esc(blank)}</option>` + books.map(b => `<option value="${esc(b.name)}"${b.name === selected ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
 }
 
+/** The merchant text a save suggests as its rule (and, title-cased, its name).
+ *  It stops at a reference: any later word carrying a digit ("312-4567890",
+ *  "#4471") or a long code. A first word of 4+ letters stands alone before a
+ *  reference; a shorter one ("SP 1234") keeps the next word too. */
 function suggestPattern(description) {
     let pattern = (description || '').toUpperCase();
     if (/\b(PAYNOW|FAST PAYMENT|TRANSFER|I-BANK|GIRO)\b/.test(pattern)) return '';
     pattern = pattern.replace(/\s+(SG|SGP|SIN|US|USA|GB|GBR|AU|AUS)\s*$/i, '').replace(/\s+\d{2}\/\d{2}$/, '');
     const parts = pattern.split(/\s+/);
-    let cutoff = parts.length;
+    let cutoff = parts.length, ref = false;
     for (let i = 1; i < parts.length; i++) {
-        if (/^[A-Z0-9]{8,}$/.test(parts[i]) || /^\d+$/.test(parts[i])) { cutoff = i; break; }
+        ref = /\d/.test(parts[i]);
+        if (ref || /^[A-Z0-9]{8,}$/.test(parts[i])) { cutoff = i; break; }
     }
-    return parts.slice(0, Math.max(cutoff, 2)).join(' ');
+    const least = ref && (parts[0].match(/[A-Z]/g) || []).length >= 4 ? 1 : 2;
+    return parts.slice(0, Math.max(cutoff, least)).join(' ');
 }
 function titleCase(s) { return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); }
 
