@@ -85,7 +85,7 @@
     --claude: var(--accent-pop); --claude-subtle: var(--accent-pop-subtle);
     --ok: var(--semantic-success); --warn: var(--semantic-warning); --bad: var(--semantic-error);
     --plain: var(--text-secondary); --text-disabled: var(--text-muted);
-    --tap: 44px; --gutter: 16px; --maxw: 1560px;
+    --tap: 44px; --gutter: 16px; --maxw: 1560px; --queue-maxw: 1040px;
 }
 
 /* ---------- tokens: dark, "the same room, at night" ----------
@@ -872,27 +872,74 @@ li.empty { list-style: none; margin-top: 8px; }
 /* == PLACE: queue == */
 /* ========================================================================== */
 
-/* The Queue: an Ops-style hero (folio .console-hero), then money out and money
-   in side by side, each column ending at its last card (Q1.1) and split under
-   what its rows hold out of the books (Q1.2), then figures and statements. */
+/* The Queue (fin-surfaces 06): about 1040px wide, a plain head, a merchant
+   search, the "Jev is sure" card, step chips, then money out and money in side
+   by side, each holding only what needs thought in folding step sections, then
+   a strip of what else waits in Books. */
+.queue { max-width: var(--queue-maxw); margin-inline: auto; }
 .queue > * + * { margin-top: 16px; }
-.q-hero .q-hero__line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 14px; margin: 8px 0 6px; font-family: var(--font-base); }
-.q-hero__count { font-family: var(--font-base); font-size: clamp(44px, 9vw, 72px); font-weight: var(--font-bold); letter-spacing: -0.035em; line-height: 1; }
-.q-hero__words { font-family: var(--font-display); font-size: clamp(22px, 3.4vw, 30px); font-weight: var(--font-bold); letter-spacing: -0.02em; line-height: 1.15; }
-.q-hero__sub { color: var(--text-secondary); max-width: 640px; }
-.q-empty { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--border-default); border-radius: var(--radius-xl);
-    color: var(--text-secondary); font-size: 13.5px; }
-.q-empty svg { width: 18px; height: 18px; color: var(--semantic-success); }
-/* the jump chips: solid needs you, dashed is context */
-.q-jump { cursor: pointer; }
-.q-jump .num { color: var(--text-primary); }
-.q-jump.k-out svg, .q-jump.k-in svg { color: var(--k); }
-.q-jump.delta-chip--warn .num { color: inherit; }
-.q-jump--context { background: transparent; border: 1px dashed var(--border-emphasis); }
+.q-head { margin-bottom: 0; }
+.q-head p { margin-top: 4px; font-size: 13px; }
+.q-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.q-search { flex: 1 1 260px; }
+.q-work > * + * { margin-top: 14px; }
 .q-cols { align-items: start; }
-.lane-card .section-header h2 { display: flex; align-items: center; gap: 10px; }
-.lane-card .section-header p { margin-top: 2px; }
-.lane-card > .item + .item { margin-top: 10px; }
+/* a step's colour: its dot on a chip and on its section's heading */
+.q-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--c); }
+.q-step--transfer { --c: var(--chart-5); }
+.q-step--pick { --c: var(--chart-1); }
+.q-step--noguess { --c: var(--chart-6); }
+.q-step--mixed { --c: var(--chart-3); }
+.q-step--bill { --c: var(--chart-4); }
+.q-steps .chip[aria-pressed="true"] .q-dot { box-shadow: 0 0 0 1.5px var(--bg-surface); }
+
+/* a side: its head, then a section per step, each card a row under a hairline */
+.q-lane { padding: 0; overflow: hidden; }
+.q-lane__h { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border-subtle);
+    font-family: var(--font-display); font-size: var(--text-lg); }
+.q-lane__h .sure-dot { align-self: center; }
+.q-lane__h small { font-family: var(--font-base); font-size: 12px; font-weight: var(--font-medium); color: var(--text-tertiary); }
+.q-lane__empty { margin: 0; padding: 22px 16px; text-align: center; font-size: 13px; color: var(--text-tertiary); }
+.q-sec__h { margin: 0; }
+.q-sec__fold { display: flex; align-items: center; gap: 8px; width: 100%; padding: 12px 16px 6px; border: 0; background: none; cursor: pointer; text-align: left;
+    font: inherit; font-size: 11px; font-weight: var(--font-bold); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); }
+.q-sec__fold:hover { color: var(--text-secondary); }
+.q-sec__n { font-weight: var(--font-semibold); }
+.q-sec__fold .caret { width: 13px; height: 13px; margin-left: auto; transform: rotate(90deg); transition: transform var(--duration-fast) var(--ease-default); }
+.q-sec__fold[aria-expanded="false"] .caret { transform: none; }
+.q-sec__body[hidden] { display: none; }
+.q-sec__body > .item { border: 0; border-top: 1px solid var(--border-subtle); border-radius: 0; padding: 10px 16px; background: none; }
+.q-sec__body > .item:first-child, .q-sec__body > .suggest-entry + .item { border-top: 0; }
+.q-sec__body > .item + .item { margin-top: 0; }
+.q-sec__body > .suggest-entry { margin: 2px 16px 8px; }
+.q-sec__body > .q-show { width: auto; margin: 4px 16px 12px; }
+.q-sec + .q-sec { border-top: 1px solid var(--border-subtle); }
+
+/* Pick a type: Jev's three as pick buttons; a pick shows the book and Save */
+.q-picks, .q-pick-save, .q-each { grid-column: 1 / -1; min-width: 0; }
+.q-picks, .q-pick-save { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.q-pick-save[hidden] { display: none; }
+.q-pick { min-height: 30px; padding: 3px 9px; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-elevated);
+    color: var(--text-primary); font: inherit; font-size: 12.5px; cursor: pointer; }
+.q-pick em { margin-left: 2px; font-style: normal; color: var(--text-tertiary); }
+.q-pick:hover { border-color: var(--border-emphasis); }
+.q-pick[aria-pressed="true"] { border-color: var(--accent-primary); background: var(--accent-primary-subtle); color: var(--accent-ink); font-weight: var(--font-semibold); }
+.q-picks .link { margin-left: 4px; font-size: 13px; }
+.q-pick-save select, .q-each select { width: auto; max-width: 160px; min-height: 32px; padding: 4px 10px; font-size: 12.5px; }
+
+/* Book each row: one line per row, its type and a book picker */
+.q-each { display: grid; gap: 4px; padding: 6px 10px; border-radius: var(--radius-xl); background: var(--bg-raised); }
+.q-each .holds { margin: 0 0 2px; }
+.q-each__row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; font-size: 12.5px; color: var(--text-secondary); }
+.q-each__what { display: grid; min-width: 0; overflow-wrap: anywhere; }
+.q-each__type { color: var(--text-tertiary); }
+.q-each__type .link { font-size: inherit; }
+.q-each__row .num { font-weight: var(--font-semibold); color: var(--text-primary); white-space: nowrap; }
+
+/* also waiting, in Books: a dashed strip of counts, each a link */
+.q-also { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 0; padding: 10px 16px; border: 1px dashed var(--border-default);
+    border-radius: var(--radius-xl); background: var(--bg-surface); font-size: 13px; color: var(--text-secondary); }
+.q-also .link { padding: 0; border: 0; background: none; font: inherit; font-weight: var(--font-semibold); }
 
 /* the "Jev is sure" card: a title row that folds, a note, one table row per
    merchant (a dot for its side, the merchant, Jev's type, a book picker, ✓) */
@@ -923,15 +970,6 @@ li.empty { list-style: none; margin-top: 8px; }
 .sure-row__book { width: 150px; }
 .sure-row__book select { min-height: 32px; padding: 5px 10px; }
 .sure-row__go .btn svg { width: 15px; height: 15px; }
-
-/* a group under its own heading: what it holds out, its count, its sum */
-.q-group + .q-group { margin-top: 22px; }
-.q-group__head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin: 0 0 10px; padding: 0 2px 8px;
-    border-bottom: 1px solid var(--border-subtle); font-size: 13px; font-weight: var(--font-semibold); color: var(--text-secondary); }
-.q-group__head .num { font-weight: var(--font-bold); color: var(--text-primary); }
-.q-group__n { color: var(--text-tertiary); font-weight: var(--font-semibold); }
-.q-group .item + .item { margin-top: 10px; }
-.q-show { margin-top: 10px; }
 
 /* a card: what it was, its date and account, the amount right; the guess, then the buttons */
 .q-card .what { line-height: 1.6; }
@@ -979,8 +1017,11 @@ li.empty { list-style: none; margin-top: 8px; }
 .fg-now b { font-weight: var(--font-bold); }
 
 @media (max-width: 720px) {
-    .q-hero .chip-row { gap: 8px; }
-    .q-jump { min-height: var(--tap); }
+    .q-sec__fold, .q-pick, .q-picks .link, .q-also .link { min-height: var(--tap); }
+    .q-pick-save select, .q-each select { min-height: var(--tap); max-width: none; }
+    .q-pick-save select { flex: 1 1 0; }
+    .q-each__row { grid-template-columns: minmax(0, 1fr) auto; }
+    .q-each__row select { grid-column: 1 / -1; }
     .q-card .act .btn { flex: 1 1 auto; }
     .q-card .act .link { min-height: var(--tap); }
     .q-rows > summary { min-height: var(--tap); padding: 0; }

@@ -742,27 +742,6 @@ async function loadQueue() {
     return p;
 }
 
-function itemHTML(item) {
-    const amount = item.kind === 'nofig' ? '' : item.kind === 'stale'
-        ? `<span class="num">${esc(money(item.shown, item.currency))}</span>`
-        : item.lane === 'in' ? `${dirTag('in')} <span class="num">${esc(money(item.amount, item.currency))}</span>`
-            : item.lane === 'out' ? `${dirTag('out')} <span class="num">${esc(money(item.amount, item.currency))}</span>`
-                : '';
-    const offBy = item.refused ? tag('off', `off by ${money(Math.abs(item.refused.difference_minor), item.refused.currency)}`,
-        { act: 'refused-sum', data: { id: item.refused.id }, title: 'See the tie line' }) : '';
-    const marker = { refused: tag('refused', 'refused') + ' ' + offBy, aside: tag('aside', 'refused · set aside') + ' ' + offBy, off: tag('off', 'off by'),
-        stale: tag('stale', 'stale'), nofig: tag('nofig', 'no figure'), mixed: tag('notchecked', 'mixed merchant'),
-        bill: tag('stale', 'missed bill'), untyped: tag('nofig', 'no type'), transfer: '' }[item.kind] || '';
-    const cls = a => a.link ? 'link' : `btn sm${a.primary ? ' ink' : ''}`;
-    const actions = (item.actions || []).map(a => a.href
-        ? `<a class="${cls(a)}" href="${a.href}">${esc(a.label)}</a>`
-        : `<button type="button" class="${cls(a)}" data-act="${a.act}"${Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(a.label)}</button>`).join('');
-    return `<article class="item ${item.kind}">
-        <div><div class="what">${esc(item.title)} ${marker}${item.row ? rowMark(item.row.id) : item.line ? accountMark(item.line.account_id) : ''}</div><div class="meta">${esc(item.meta || '')}</div>${item.holds ? `<div class="holds">${esc(item.holds)}${item.holdsTag ? ' ' + item.holdsTag : ''}</div>` : ''}</div>
-        <div class="amt">${amount}</div>
-        <div class="act">${actions}</div></article>`;
-}
-
 // ---------------------------------------------------------------------------
 // Home
 // ---------------------------------------------------------------------------
@@ -1146,18 +1125,19 @@ ACT['needs-look-link'] = () => { S.needsLook = true; location.hash = '#/books'; 
 // ---------------------------------------------------------------------------
 
 // The Queue's cards: rows with no type from one merchant share a card (Q1.3),
-// each lane is split under what its rows hold out of the books (Q1.2), and
-// fin's guess sits on the card with a one-tap "Yes" (Q2.1, Q2.2).
+// and each lane holds only what needs thought, in working order (fin-surfaces
+// 06): a step is a section that folds, with its count.
 const queueOpen = {};
 const QUEUE_PAGE = 6;
 const queueGroups = new Map();     // a card's key -> its rows, for "This was… (all 4)"
 const transferGuesses = new Map(); // a waiting transfer's id -> fin's guess for it
-const LANE_GROUPS = {
-    out: [['transfer', 'Held out of spending until you say what it was'], ['untyped', 'In spending as “No type”'],
-        ['mixed', 'Mixed merchants: is the type right?'], ['bill', 'Bills with no payment seen']],
-    in: [['transfer', 'Held out of income until you say what it was'], ['untyped', 'Refunds with no type'],
-        ['mixed', 'Mixed merchants: is the type right?']],
-};
+const QUEUE_STEPS = [
+    { k: 'transfer', label: 'Transfer?' },
+    { k: 'pick', label: 'Pick a type' },
+    { k: 'noguess', label: 'No guess' },
+    { k: 'mixed', label: 'Book each row' },
+    { k: 'bill', label: 'Missed bill' },
+];
 
 /** Amounts added up, each currency apart: "S$ 12,200.00 · ₹ 4,000.00". */
 function sumByCurrency(list, amountOf = i => i.amount) {
@@ -1321,8 +1301,22 @@ function groupKeyOf(row) {
     return '';
 }
 
-/** One card in a money lane: a transfer, a merchant's rows with no type, a
- *  mixed merchant's row or a missed bill. */
+/** Several rows' dates and accounts, in one line: "3 Mar to 9 Apr 2026 · DBS". */
+function rowsMeta(rows) {
+    const n = rows.length;
+    const dates = rows.map(x => x.date).sort();
+    const accounts = new Set(rows.map(x => x.account_name));
+    return `${dates[0] === dates[n - 1] ? day(dates[0]) : `${day(dates[0])} to ${day(dates[n - 1])}`} · ${accounts.size === 1 ? rows[0].account_name : plural(accounts.size, 'account')}`;
+}
+function seeRowsHTML(rows) {
+    const n = rows.length;
+    return n > 1 ? `<details class="q-rows"><summary class="link">See the ${n} rows</summary>
+        <table class="t table-tight"><tbody>${rows.map(x => `<tr><td>${esc(day(x.date))}</td><td>${esc(x.account_name || '')}</td>
+            <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td></tr>`).join('')}</tbody></table></details>` : '';
+}
+
+/** One card in a money lane: a transfer, a merchant's rows with no type and
+ *  no guess, or a missed bill (Pick a type and Book each row draw their own). */
 async function queueCardHTML(card) {
     const n = card.rows.length;
     if (n) queueGroups.set(card.key, card.rows);
@@ -1333,20 +1327,13 @@ async function queueCardHTML(card) {
     const amount = `${dirTag(card.lane)} <span class="num">${esc(sumByCurrency([card], c => c.amount))}</span>`;
     const marker = { untyped: tag('nofig', 'no type'), mixed: tag('notchecked', 'mixed merchant'), bill: tag('stale', 'missed bill') }[card.kind] || '';
     const count = n > 1 ? ` <span class="tag yours">${n} rows</span>` : '';
-    let meta = card.meta;
-    if (n > 1) {
-        const dates = card.rows.map(x => x.date).sort();
-        const accounts = new Set(card.rows.map(x => x.account_name));
-        meta = `${dates[0] === dates[n - 1] ? day(dates[0]) : `${day(dates[0])} to ${day(dates[n - 1])}`} · ${accounts.size === 1 ? card.rows[0].account_name : plural(accounts.size, 'account')}`;
-    }
+    const meta = n > 1 ? rowsMeta(card.rows) : card.meta;
     const data = a => Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('') + (card.rows.length ? ` data-group="${esc(card.key)}"` : '');
     const all = n > 1 ? ` (all ${n})` : '';
     const own = (card.actions || []).map(a => a.href
         ? `<a class="btn sm${a.primary ? ' ink' : ''}" href="${a.href}">${esc(a.label)}</a>`
         : `<button type="button" class="btn sm${a.primary && !guess.actions ? ' ink' : ''}" data-act="${a.act}"${data(a)}>${esc(guess.actions && /^This was/.test(a.label) ? 'Something else' : a.label + (/^This was/.test(a.label) ? all : ''))}</button>`).join('');
-    const seeRows = n > 1 ? `<details class="q-rows"><summary class="link">See the ${n} rows</summary>
-        <table class="t table-tight"><tbody>${card.rows.map(x => `<tr><td>${esc(day(x.date))}</td><td>${esc(x.account_name || '')}</td>
-            <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td></tr>`).join('')}</tbody></table></details>` : '';
+    const seeRows = seeRowsHTML(card.rows);
     return `<article class="item q-card ${card.kind}">
         <div><div class="what">${esc(card.title)} ${marker}${count}${row ? rowMark(row.id) : ''}</div><div class="meta">${esc(meta || '')}</div>${card.holds && card.kind === 'mixed' ? `<div class="holds">${esc(card.holds)}</div>` : ''}</div>
         <div class="amt">${amount}</div>
@@ -1355,24 +1342,166 @@ async function queueCardHTML(card) {
         ${seeRows ? `<div class="q-more">${seeRows}</div>` : ''}</article>`;
 }
 
-async function laneHTML(key, title, list) {
-    const groups = await Promise.all(LANE_GROUPS[key].map(async ([kind, heading]) => {
-        const items = list.filter(i => i.kind === kind);
-        if (!items.length) return '';
-        const cards = merchantCards(items);
-        const open = queueOpen[`${key}-${kind}`] || QUEUE_PAGE;
-        const shown = await Promise.all(cards.slice(0, open).map(queueCardHTML));
-        const more = cards.length - open;
-        const ask = kind === 'untyped' && (await suggestionsOn()) ? suggestEntryHTML() : '';
-        return `<div class="q-group">
-            <h3 class="q-group__head"><span>${esc(heading)} <span class="q-group__n">· ${items.length}</span></span><span class="num">${esc(sumByCurrency(items))}</span></h3>
-            ${ask}${shown.join('')}
-            ${more > 0 ? `<button class="btn block q-show" data-act="queue-more" data-lane="${key}-${kind}">Show ${more} more</button>` : ''}</div>`;
-    }));
-    return `<section class="card card--lift lane-card" id="lane-${key}">
-        <div class="section-header"><h2>${dirTag(key)} ${title}</h2><span class="section-header__aside"><b>${list.length}</b> ${list.length === 1 ? 'item' : 'items'}</span></div>
-        ${list.length ? groups.join('') : '<p class="card-empty">Nothing waits here.</p>'}</section>`;
+/** A lane's items as the cards it draws, each under its step: a waiting
+ *  transfer; Jev's three guesses for a merchant (one card per merchant
+ *  string, as the guesses read groups them); rows with no guess (one card
+ *  per merchant text, as before); a mixed merchant's rows (one card per
+ *  merchant) and a missed bill. `find` is the merchant text the search reads. */
+function laneCards(lane, items, guesses) {
+    const cards = [];
+    const picks = new Map(), mixed = new Map(), noGuess = [];
+    const group = (map, name, make, i) => {
+        let card = map.get(name);
+        if (!card) { card = { ...make, lane, merchant: name, title: name, find: name, items: [], rows: [] }; map.set(name, card); cards.push(card); }
+        card.items.push(i);
+        card.rows.push(i.row);
+    };
+    items.forEach(i => {
+        if (i.kind === 'transfer') cards.push({ ...i, step: 'transfer', rows: [i.row], find: i.title });
+        else if (i.kind === 'bill') cards.push({ ...i, step: 'bill', rows: [], find: i.sub.service_name || i.sub.match_pattern || '' });
+        else if (i.kind === 'mixed') group(mixed, i.row.service_name || i.row.description || '', { key: `each-${i.row.id}`, kind: 'mixed', step: 'mixed' }, i);
+        else if (i.kind === 'untyped') {
+            const g = guesses.get(i.row.id);
+            if (g && g.route === 'top3' && g.types && g.types.length) group(picks, g.merchant, { key: `pick-${i.row.id}`, kind: 'untyped', step: 'pick', guess: g }, i);
+            else noGuess.push(i);
+        }
+    });
+    merchantCards(noGuess).forEach(c => cards.push({ ...c, step: 'noguess', find: c.title }));
+    return cards;
 }
+/** A card the lanes drew, found by its key (drawn in place, so focus stays). */
+function laneCardEl(key) { return $$('#q-work article[data-key]').find(a => a.dataset.key === key); }
+function cardHead(card, marker) {
+    const n = card.rows.length;
+    return `<div><div class="what">${esc(card.title)} ${marker}${n > 1 ? ` <span class="tag yours">${n} rows</span>` : ''}${card.step === 'pick' ? rowMark(card.rows[0].id) : ''}</div>
+        <div class="meta">${esc(n > 1 ? rowsMeta(card.rows) : card.items[0].meta)}</div></div>
+        <div class="amt">${dirTag(card.lane)} <span class="num">${esc(sumByCurrency(card.items))}</span></div>`;
+}
+
+// Pick a type: Jev's three guesses as pick buttons, none chosen; a pick shows
+// a book picker prefilled with the type's book, and Save is the sure card's save.
+const pickState = new Map();   // a card's key -> {typeId, book} once a type is picked
+let laneBusy = false;          // a lane card's save is running: its buttons wait
+
+function pickSaveHTML(card, books) {
+    const pick = pickState.get(card.key);
+    if (!pick) return '';
+    return `<select data-change="pick-book" data-key="${esc(card.key)}" aria-label="Book for ${esc(card.merchant)}">${bookOptions(books, pick.book, 'Choose book')}</select>
+        <button type="button" class="btn sm primary" data-act="pick-save" data-key="${esc(card.key)}"${pick.book ? '' : ' disabled'}>Save</button>`;
+}
+function pickCardHTML(card, books) {
+    queueGroups.set(card.key, card.rows);
+    const pick = pickState.get(card.key);
+    const types = card.guess.types.map(t => `<button type="button" class="q-pick" data-act="pick-type" data-key="${esc(card.key)}" data-type="${t.type_id}" aria-pressed="${pick ? pick.typeId === t.type_id : false}">${esc(t.name)} <em>${Math.round(t.probability * 100)}%</em></button>`).join('');
+    return `<article class="item q-card pick" data-key="${esc(card.key)}">${cardHead(card, tag('nofig', 'no type'))}
+        <div class="q-picks" role="group" aria-label="Jev’s guesses for ${esc(card.merchant)}">${types}
+            <button type="button" class="link" data-act="resolve" data-tx="${card.rows[0].id}" data-group="${esc(card.key)}">Another type…</button></div>
+        <div class="q-pick-save"${pick ? '' : ' hidden'}>${pickSaveHTML(card, books)}</div>
+        ${card.rows.length > 1 ? `<div class="q-more">${seeRowsHTML(card.rows)}</div>` : ''}</article>`;
+}
+ACT['pick-type'] = el => {
+    const card = laneCardByKey.get(el.dataset.key);
+    if (!card || laneBusy) return;
+    const typeId = Number(el.dataset.type);
+    pickState.set(card.key, { typeId, book: queueModel.r.typeById.get(typeId)?.proposed_book || '' });
+    const box = laneCardEl(card.key);
+    $$('.q-pick', box).forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.type) === typeId)));
+    const save = $('.q-pick-save', box);
+    save.innerHTML = pickSaveHTML(card, queueModel.r.books);
+    save.hidden = false;
+};
+ACT['pick-book'] = el => {
+    const pick = pickState.get(el.dataset.key);
+    if (!pick) return;
+    pick.book = el.value;
+    const go = $('[data-act="pick-save"]', laneCardEl(el.dataset.key));
+    if (go) go.disabled = laneBusy || !pick.book;
+};
+ACT['pick-save'] = async el => {
+    const card = laneCardByKey.get(el.dataset.key), pick = pickState.get(el.dataset.key);
+    if (laneBusy || !card || !pick || !pick.book) return;
+    const type = card.guess.types.find(t => t.type_id === pick.typeId);
+    laneBusy = true;
+    $$('button, select', laneCardEl(card.key)).forEach(b => { b.disabled = true; });
+    const res = await saveResolve(resolveBody(card.rows[0], type.type_id, { visible: true, book: pick.book }), card.rows, { quiet: true });
+    laneBusy = false;
+    if (res.ok) pickState.delete(card.key);
+    savedToast(card.merchant, type.name, pick.book, res);
+    rerender(); refreshFrame();
+};
+
+// Book each row: a mixed merchant's rows on one card, one line per row with
+// its type and a book picker; Save writes the type shown and the book picked
+// onto each row in turn (today's per-row write), and one Undo covers them all.
+const eachBooks = new Map();   // a row's id -> the book picked for it on its line
+function eachBook(row) { return eachBooks.has(row.id) ? eachBooks.get(row.id) : (row.book || ''); }
+function eachCardHTML(card, books) {
+    const n = card.rows.length;
+    const lines = card.rows.map(x => `<div class="q-each__row">
+        <div class="q-each__what"><span>${esc(day(x.date))} · ${esc(x.account_name || '')}${rowMark(x.id)}</span>
+            <span class="q-each__type">${esc(x.display_type || 'no type')} · <button type="button" class="link" data-act="resolve" data-tx="${x.id}" data-kind="mixed">Another type</button></span></div>
+        <span class="num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</span>
+        <select data-change="each-book" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Book for the ${esc(day(x.date))} row">${bookOptions(books, eachBook(x), 'Choose book')}</select></div>`).join('');
+    return `<article class="item q-card mixed" data-key="${esc(card.key)}">${cardHead(card, tag('notchecked', 'mixed merchant'))}
+        <div class="q-each"><p class="holds">It sells more than one kind of thing: check each row’s type and pick its book.</p>${lines}</div>
+        <div class="act"><button type="button" class="btn sm primary" data-act="each-save" data-key="${esc(card.key)}"${card.rows.every(eachBook) ? '' : ' disabled'}>Save ${n > 1 ? `${n} rows` : 'the row'}</button></div></article>`;
+}
+ACT['each-book'] = el => {
+    eachBooks.set(Number(el.dataset.tx), el.value);
+    const card = laneCardByKey.get(el.dataset.key);
+    const go = $('[data-act="each-save"]', laneCardEl(el.dataset.key));
+    if (card && go) go.disabled = laneBusy || !card.rows.every(eachBook);
+};
+ACT['each-save'] = async el => {
+    const card = laneCardByKey.get(el.dataset.key);
+    if (laneBusy || !card || !card.rows.every(eachBook)) return;
+    laneBusy = true;
+    $$('button, select', laneCardEl(card.key)).forEach(b => { b.disabled = true; });
+    const changes = [];
+    let saved = 0, error = null;
+    for (const x of card.rows) {
+        const r = await send('PUT', `/api/transactions/${x.id}`, { type_id: x.type_id, book: eachBook(x) });
+        if (!r.ok) { error = r.data.error || 'That did not work'; break; }
+        if (r.change) changes.push(r.change);
+        eachBooks.delete(x.id);
+        saved += 1;
+    }
+    laneBusy = false;
+    if (error) toast(`Saved ${saved} of ${plural(card.rows.length, 'row')} of ${card.merchant}; then: ${error}`, { bad: true, undo: changes, ms: 9000 });
+    else toast(`Saved ${plural(saved, 'row')} of ${card.merchant}.`, { undo: changes });
+    rerender(); refreshFrame();
+};
+
+/** One side: its head, then a section that folds for each step with cards. */
+async function laneHTML(lane, list, { books, ask, empty }) {
+    const folded = new Set(store.get('queueFolded', []));
+    const rows = list.reduce((n, c) => n + c.rows.length, 0);
+    const sections = await Promise.all(QUEUE_STEPS.map(async s => {
+        const cards = list.filter(c => c.step === s.k);
+        if (!cards.length) return '';
+        const key = `${lane}-${s.k}`, open = !folded.has(key);
+        const limit = queueOpen[key] || QUEUE_PAGE;
+        const drawn = await Promise.all(cards.slice(0, limit).map(c =>
+            c.step === 'pick' ? pickCardHTML(c, books) : c.step === 'mixed' ? eachCardHTML(c, books) : queueCardHTML(c)));
+        const more = cards.length - limit;
+        return `<section class="q-sec q-step--${s.k}">
+            <h3 class="q-sec__h"><button type="button" class="q-sec__fold" data-act="q-fold" data-sec="${key}" aria-expanded="${open}" aria-controls="q-sec-${key}"><span class="q-dot" aria-hidden="true"></span>${esc(s.label)} <span class="q-sec__n">· ${cards.length}</span>${icon('caret-right', 'caret')}</button></h3>
+            <div class="q-sec__body" id="q-sec-${key}"${open ? '' : ' hidden'}>${s.k === 'noguess' && ask ? suggestEntryHTML() : ''}${drawn.join('')}
+                ${more > 0 ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="${key}">Show ${more} more</button>` : ''}</div></section>`;
+    }));
+    return `<section class="card card--lift q-lane" id="lane-${lane}">
+        <h2 class="q-lane__h"><span class="sure-dot ${lane}" aria-hidden="true"></span>${lane === 'out' ? 'Money out' : 'Money in'} <small>${list.length} to do · ${plural(rows, 'row')}</small></h2>
+        ${list.length ? sections.join('') : `<p class="q-lane__empty">${esc(empty)}</p>`}</section>`;
+}
+ACT['q-fold'] = el => {
+    const open = el.getAttribute('aria-expanded') !== 'true';
+    const folded = new Set(store.get('queueFolded', []));
+    if (open) folded.delete(el.dataset.sec); else folded.add(el.dataset.sec);
+    store.set('queueFolded', [...folded]);
+    el.setAttribute('aria-expanded', String(open));
+    const body = document.getElementById(el.getAttribute('aria-controls'));
+    if (body) body.hidden = !open;
+};
 
 // The "Jev is sure" card (fin-surfaces 05): one row per merchant group whose
 // stored guess is sure, across both sides, each saved with today's guess save
@@ -1487,12 +1616,17 @@ ACT['sure-save'] = async el => {
     sureBusy = true; drawSureState();
     const res = await saveSureGroup(g, new Set());
     sureBusy = false;
-    if (res.skipped) { /* its rows already have a type */ } else if (res.ok) {
-        sureBooks.delete(g.key);
-        toast(`Saved ${g.merchant} as ${g.type.name} · ${book}, now and from now on.`, { undo: res.changes });
-    } else toast(res.error, { bad: true, undo: res.changes, ms: 9000 });
+    if (!res.skipped) {   // skipped: its rows already have a type
+        if (res.ok) sureBooks.delete(g.key);
+        savedToast(g.merchant, g.type.name, book, res);
+    }
     rerender(); refreshFrame();
 };
+/** One merchant's save said: the sure card's ✓ and Pick a type's Save. */
+function savedToast(merchant, typeName, book, res) {
+    if (res.ok) toast(`Saved ${merchant} as ${typeName} · ${book}, now and from now on.`, { undo: res.changes });
+    else toast(res.error, { bad: true, undo: res.changes, ms: 9000 });
+}
 ACT['sure-all'] = async () => {
     const ready = sureList.filter(sureBook);
     if (sureBusy || !ready.length) return;
@@ -1514,43 +1648,85 @@ ACT['sure-all'] = async () => {
     rerender(); refreshFrame();
 };
 
-async function viewQueue() {
-    const [q, guesses, r] = await Promise.all([loadQueue(), loadGuesses(), refs()]);
+let queueSearch = '';          // the merchant search: kept while the page is open, never stored
+let queueModel = null;         // what the Queue read, so a chip, a search or "Show more" redraws in place
+const laneCardByKey = new Map();
+let workToken = 0;
+
+/** The part of the Queue a search or a step chip redraws: the sure card,
+ *  the chips and both sides, each showing what the search and chip leave. */
+async function workHTML() {
+    const { r, ask, sure, cards } = queueModel;
+    const needle = queueSearch.trim().toLowerCase();
+    const hit = text => !needle || String(text || '').toLowerCase().includes(needle);
+    sureList = sure.filter(g => hit(g.merchant));
     queueGroups.clear();
-    // The sure groups sit in their card, so they leave the lanes below.
-    sureList = sureGroups(q, guesses, r);
-    const sureIds = new Set(sureList.flatMap(g => g.items.map(i => i.row.id)));
-    const lanes = { out: q.lanes.out, in: q.lanes.in };
-    if (sureIds.size) ['out', 'in'].forEach(k => { lanes[k] = lanes[k].filter(i => !(i.kind === 'untyped' && sureIds.has(i.row.id))); });
-    const [out, inn] = await Promise.all([laneHTML('out', 'Money out', lanes.out), laneHTML('in', 'Money in', lanes.in)]);
-    const booksOpen = queueOpen.books || 12;
-    const books = `<section class="card card--lift lane-card" id="lane-books">
-        <div class="section-header"><div><h2>Figures and statements</h2><p>What the balances rest on</p></div><span class="section-header__aside"><b>${q.lanes.books.length}</b> ${q.lanes.books.length === 1 ? 'item' : 'items'}</span></div>
-        ${q.lanes.books.length ? q.lanes.books.slice(0, booksOpen).map(itemHTML).join('') : '<p class="card-empty">Nothing waits here.</p>'}
-        ${q.lanes.books.length > booksOpen ? `<button class="btn block q-show" data-act="queue-more" data-lane="books">Show all ${q.lanes.books.length}</button>` : ''}</section>`;
-    const aside = q.lanes.aside.length ? `<section class="card lane-card" id="lane-aside"><div class="section-header"><div><h2>Set aside</h2>
-        <p>Known, left as they are. Still marked refused on their accounts.</p></div><span class="section-header__aside"><b>${q.lanes.aside.length}</b> ${q.lanes.aside.length === 1 ? 'statement' : 'statements'}</span></div>${q.lanes.aside.map(itemHTML).join('')}</section>` : '';
-    const chip = (to, cls, ic, label, n) => `<a class="delta-chip q-jump ${cls}" href="#/queue" data-act="jump" data-to="lane-${to}">${icon(ic)}${label} <span class="num">${n}</span></a>`;
-    const chips = [
-        lanes.out.length ? chip('out', 'k-out', 'arrow-circle-up', 'Money out', lanes.out.length) : '',
-        lanes.in.length ? chip('in', 'k-in', 'arrow-circle-down', 'Money in', lanes.in.length) : '',
-        q.lanes.books.length ? chip('books', 'delta-chip--warn', 'warning', 'Figures and statements', q.lanes.books.length) : '',
-        q.lanes.aside.length ? chip('aside', 'q-jump--context', 'circle-dashed', 'Set aside', q.lanes.aside.length) : '',
-    ].join('');
-    const hero = `<section class="hero-card q-hero">
-        <span class="eyebrow">Queue</span>
-        ${q.count ? `<h1 class="q-hero__line"><span class="q-hero__count num">${q.count}</span> <span class="q-hero__words">${q.count === 1 ? 'thing waits' : 'things wait'} for you</span></h1>
-            <p class="q-hero__sub">Money out and money in are kept apart, each under what it holds out of the books.</p>
-            <div class="chip-row">${chips}</div>`
-        : `<h1 class="q-hero__line"><span class="q-hero__words">Nothing waits for you</span></h1>
-            <p class="q-empty">${icon('check-circle')}Every row has a label and every statement ties.</p>${chips ? `<div class="chip-row">${chips}</div>` : ''}`}
-        ${q.capped.length ? `<p class="notice warn small" style="margin-top:12px">${icon('warning')}<span>Too many to read at once, so the counts and sums here are short: ${esc(q.capped.join('; '))}.</span></p>` : ''}</section>`;
-    return `<div class="queue">${hero}${sureCardHTML(r.books)}
-        <div class="waits-cols q-cols">${out}${inn}</div>
-        ${books}${aside}</div>`;
+    laneCardByKey.clear();
+    const all = [...cards.out, ...cards.in];
+    all.forEach(c => laneCardByKey.set(c.key, c));
+    let step = store.get('queueStep', '');
+    if (!all.some(c => c.step === step)) step = '';
+    const found = { out: cards.out.filter(c => hit(c.find)), in: cards.in.filter(c => hit(c.find)) };
+    const counts = {};
+    [...found.out, ...found.in].forEach(c => { counts[c.step] = (counts[c.step] || 0) + 1; });
+    const chip = (k, label, n) => `<button type="button" class="chip${k ? ` q-step--${k}` : ''}" data-act="q-step" data-step="${k}" aria-pressed="${step === k}">${k ? '<span class="q-dot" aria-hidden="true"></span>' : ''}${esc(label)}${k ? ` <span class="n">${n}</span>` : ''}</button>`;
+    const chips = all.length ? `<div class="chips q-steps" role="group" aria-label="Steps">${chip('', 'All steps')}${QUEUE_STEPS.filter(s => counts[s.k] || s.k === step).map(s => chip(s.k, s.label, counts[s.k] || 0)).join('')}</div>` : '';
+    const lanes = await Promise.all(['out', 'in'].map(lane => {
+        const list = step ? found[lane].filter(c => c.step === step) : found[lane];
+        const empty = !cards[lane].length ? 'Nothing that needs thought.'
+            : needle ? `Nothing here matches “${queueSearch.trim()}”.` : `Nothing here under ${step && QUEUE_STEPS.find(s => s.k === step).label}.`;
+        return laneHTML(lane, list, { books: r.books, ask, empty });
+    }));
+    return `${sureCardHTML(r.books)}${chips}<div class="waits-cols q-cols">${lanes.join('')}</div>`;
 }
-ACT['queue-more'] = el => { queueOpen[el.dataset.lane] = 9999; rerender(); };
-ACT.jump = el => $('#' + el.dataset.to)?.scrollIntoView({ behavior: 'smooth' });
+async function drawWork({ focus = '' } = {}) {
+    const token = ++workToken;
+    const html = await workHTML();
+    const box = $('#q-work');
+    if (token !== workToken || !box) return;
+    box.innerHTML = html;
+    if (focus) $(focus, box)?.focus();
+}
+/** What else waits, on Books: each count opens it with "Needs a look" on. */
+function alsoHTML(q) {
+    const refused = q.lanes.books.filter(i => i.kind === 'refused').length;
+    const figures = q.lanes.books.length - refused;
+    const parts = [[refused, plural(refused, 'refused statement')], [q.lanes.aside.length, `${q.lanes.aside.length} set aside`],
+        [figures, `${plural(figures, 'figure')} to look at`]].filter(([n]) => n);
+    if (!parts.length) return '';
+    return `<p class="q-also">Also waiting, in Books: ${parts.map(([, words]) =>
+        `<button type="button" class="link" data-act="needs-look-link">${esc(words)}</button>`).join('<span aria-hidden="true">·</span>')}</p>`;
+}
+
+async function viewQueue() {
+    const [q, guesses, r, ask] = await Promise.all([loadQueue(), loadGuesses(), refs(), suggestionsOn()]);
+    // The sure groups sit in their card, so they leave the lanes below.
+    const sure = sureGroups(q, guesses, r);
+    const sureIds = new Set(sure.flatMap(g => g.items.map(i => i.row.id)));
+    const left = lane => q.lanes[lane].filter(i => !(i.kind === 'untyped' && sureIds.has(i.row.id)));
+    const cards = { out: laneCards('out', left('out'), guesses), in: laneCards('in', left('in'), guesses) };
+    queueModel = { r, ask, sure, cards };
+    const todo = sure.length + cards.out.length + cards.in.length;
+    const rows = sure.reduce((n, g) => n + g.items.length, 0) + [...cards.out, ...cards.in].reduce((n, c) => n + c.rows.length, 0);
+    // A redraw while the search has focus keeps it, and where the caret was.
+    const typing = document.activeElement && document.activeElement.id === 'q-search' ? document.activeElement : null;
+    if (typing) {
+        const [from, to] = [typing.selectionStart, typing.selectionEnd];
+        afterRender(() => { const box = $('#q-search'); if (box) { box.focus(); box.setSelectionRange(from, to); } });
+    }
+    const head = `<div class="page-head q-head"><div><h1>Queue</h1><p>${todo ? `${todo} to do · ${plural(rows, 'row')}` : 'Nothing to do'}</p></div></div>
+        ${q.capped.length ? `<p class="notice warn small">${icon('warning')}<span>Too many to read at once, so the counts and sums here are short: ${esc(q.capped.join('; '))}.</span></p>` : ''}`;
+    const tools = `<div class="q-tools"><label class="field q-search"><span class="sr-only">Find a merchant</span>
+        <input type="search" id="q-search" value="${esc(queueSearch)}" placeholder="Find a merchant" autocomplete="off"></label></div>`;
+    return `<div class="queue">${head}${tools}<div class="q-work" id="q-work">${await workHTML()}</div>${alsoHTML(q)}</div>`;
+}
+ACT['queue-more'] = el => { queueOpen[el.dataset.lane] = 9999; drawWork(); };
+ACT['q-step'] = el => { store.set('queueStep', el.dataset.step); drawWork({ focus: `[data-act="q-step"][data-step="${el.dataset.step}"]` }); };
+document.addEventListener('input', e => {
+    if (e.target.id !== 'q-search') return;
+    queueSearch = e.target.value;
+    drawWork();
+});
 
 async function findRow(txId) {
     const q = await loadQueue();
@@ -2835,7 +3011,10 @@ ACT['bill-find'] = el => {
 ACT['bill-queue'] = el => {
     const s = ACT.__subs.get(Number(el.dataset.id));
     const title = `${s.service_name || s.match_pattern}: no payment seen`;
-    queueOpen.out = 9999;
+    queueOpen['out-bill'] = 9999;
+    queueSearch = '';
+    if (store.get('queueStep', '') !== 'bill') store.set('queueStep', '');
+    store.set('queueFolded', store.get('queueFolded', []).filter(k => k !== 'out-bill'));
     afterNextRender = () => {
         const item = $$('#view article.item.bill').find(a => ($('.what', a)?.textContent || '').trim().startsWith(title));
         if (item) { item.setAttribute('tabindex', '-1'); item.scrollIntoView({ block: 'center' }); item.focus({ preventScroll: true }); }
