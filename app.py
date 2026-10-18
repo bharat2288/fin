@@ -1532,6 +1532,48 @@ def api_services_check_each_row(svc_id):
     return jsonify({"success": True, "on": on, "checked": checked, "waiting": waiting})
 
 
+# fin suggests Check each row (fin-surfaces 14) once the operator has moved
+# this many of an Every row the same merchant's rows to another book.
+BOOK_VARIES_AFTER = 2
+
+
+@app.route("/api/services/<int:svc_id>/book-varies")
+def api_services_book_varies(svc_id):
+    """Whether fin asks to check each row of this merchant: {suggest, moved,
+    to_book}. moved counts its spending and refund rows hand-set to a book
+    other than its own; to_book is that book when they all share one. suggest
+    is true for an Every row the same merchant with BOOK_VARIES_AFTER moved
+    rows, unless the operator said No (screens.py keeps that). It writes nothing."""
+    with get_db() as conn:
+        svc = conn.execute("SELECT book, review_each_time FROM services WHERE id = ?", (svc_id,)).fetchone()
+        if not svc:
+            return jsonify({"error": "This merchant is no longer in fin"}), 404
+        books = conn.execute(
+            f"SELECT {book_expr()} AS book, COUNT(*) AS n FROM transactions t WHERE t.service_id = ?"
+            " AND t.cat_source = 'manual' AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')"
+            f" AND {book_expr()} != ? GROUP BY 1",
+            (svc_id, svc["book"]),
+        ).fetchall()
+        declined = svc_id in screens.declined_check_each_row(conn)
+    moved = sum(b["n"] for b in books)
+    return jsonify({
+        "suggest": not svc["review_each_time"] and moved >= BOOK_VARIES_AFTER and not declined,
+        "moved": moved,
+        "to_book": books[0]["book"] if len(books) == 1 else None,
+    })
+
+
+@app.route("/api/services/<int:svc_id>/book-varies/decline", methods=["POST"])
+def api_services_book_varies_decline(svc_id):
+    """No to "check each row from now on?": fin does not ask again for this
+    merchant. Kept in app_settings, so not a change to the book (no Undo)."""
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM services WHERE id = ?", (svc_id,)).fetchone():
+            return jsonify({"error": "This merchant is no longer in fin"}), 404
+        screens.decline_check_each_row(conn, svc_id)
+    return jsonify({"success": True})
+
+
 @app.route("/api/services/<int:svc_id>/merge", methods=["POST"])
 def api_services_merge(svc_id):
     """Merge source service into target: reassign all FKs, delete source."""
