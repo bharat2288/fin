@@ -625,11 +625,12 @@ function rowItem(row, kind) {
         return { ...base, holds: lane === 'out' ? 'Counted in spending as “No type”' : 'A refund with no type; counted back as “No type”',
             actions: [{ label: 'This was…', act: 'resolve', data: { tx: row.id } }] };
     }
-    // a mixed merchant: its rows take a default type and are looked at each time
-    const type = row.display_type || 'no type';
-    return { ...base, holds: `${row.service_name || 'A mixed merchant'} sells more than one kind of thing: is ${type} right?`,
-        actions: [{ label: `Yes, ${type}`, act: 'mixed-yes', data: { tx: row.id }, primary: true },
-            { label: 'Another type', act: 'resolve', data: { tx: row.id, kind: 'mixed' } }] };
+    // a merchant set to check each row: its row came in with the merchant's
+    // type and usual book, and counts there until it is checked
+    const label = `${row.display_type || 'no type'} · ${row.book || ''}`;
+    return { ...base, holds: `Counted as ${label} until you check it`,
+        actions: [{ label: `Yes, ${label}`, act: 'mixed-yes', data: { tx: row.id }, primary: true },
+            { label: 'Something else', act: 'resolve', data: { tx: row.id, kind: 'mixed' } }] };
 }
 
 async function loadQueue() {
@@ -639,7 +640,7 @@ async function loadQueue() {
         const [review, untyped, mixed, sheet, refused, subs, r] = await Promise.all([
             getAllRows('flow=review&sort=amount&sort_dir=desc'),
             getAllRows('types=__untyped__&sort=amount&sort_dir=desc'),
-            getAllRows('look=mixed&sort=amount&sort_dir=desc'),
+            getAllRows('look=each&sort=amount&sort_dir=desc'),
             sheetFor(month),
             get('/api/statements/refused'),
             get('/api/subscriptions'),
@@ -647,14 +648,14 @@ async function loadQueue() {
         ]);
         const items = [];
         // One item per row: a row the server lists twice is shown once, as
-        // the first of these it is (waiting for review, no type, mixed).
+        // the first of these it is (waiting for review, no type, not checked).
         const seen = new Set();
         [[review, 'transfer'], [untyped, 'untyped'], [mixed, 'mixed']].forEach(([list, kind]) => list.transactions.forEach(row => {
             if (seen.has(row.id)) return;
             seen.add(row.id);
             items.push(rowItem(row, kind));
         }));
-        const capped = [[review, 'transfers waiting'], [untyped, 'rows with no type'], [mixed, 'mixed-merchant rows']]
+        const capped = [[review, 'transfers waiting'], [untyped, 'rows with no type'], [mixed, 'rows to check']]
             .filter(([list]) => list.total > list.transactions.length)
             .map(([list, what]) => `${what}: ${shownOf(list)}`);
         subs.forEach(sub => {
@@ -946,7 +947,7 @@ function homeItemHTML(item, guesses) {
             : item.kind === 'refused' ? `<span class="num">off by ${esc(money(item.amount, item.currency))}</span>` : '';
     const marker = { refused: tag('refused', 'refused', { act: 'refused-sum', data: { id: item.refused?.id }, title: 'See the tie line' }),
         off: tag('off', 'off by', item.line ? { href: `#/books/account/${item.line.account_id}`, title: 'See the tie line' } : {}),
-        stale: tag('stale', 'stale'), nofig: tag('nofig', 'no figure'), mixed: tag('notchecked', 'mixed merchant'),
+        stale: tag('stale', 'stale'), nofig: tag('nofig', 'no figure'), mixed: tag('notchecked', 'not checked'),
         bill: tag('stale', 'missed bill'), untyped: tag('nofig', 'no type') }[item.kind] || '';
     const btn = (label, cls, act, data = {}) => `<button type="button" class="btn sm${cls ? ' ' + cls : ''}" data-act="${act}"${Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(label)}</button>`;
     const link = (label, cls, href) => `<a class="btn sm${cls ? ' ' + cls : ''}" href="${href}">${esc(label)}</a>`;
@@ -959,7 +960,7 @@ function homeItemHTML(item, guesses) {
         actions = btn(`Yes, ${guess.name}`, 'primary', 'home-guess-yes', { tx: item.row.id, type: guess.type_id, merchant: guess.merchant || '' })
             + btn('Something else', '', 'resolve', { tx: item.row.id });
     } else if (item.kind === 'untyped') actions = btn('This was…', '', 'resolve', { tx: item.row.id });
-    else if (item.kind === 'mixed') actions = btn(`Yes, ${item.row.display_type || 'no type'}`, 'primary', 'mixed-yes', { tx: item.row.id }) + btn('Another type', '', 'resolve', { tx: item.row.id });
+    else if (item.kind === 'mixed') actions = btn(`Yes, ${item.row.display_type || 'no type'} · ${item.row.book || ''}`, 'primary', 'mixed-yes', { tx: item.row.id }) + btn('Something else', '', 'resolve', { tx: item.row.id, kind: 'mixed' });
     else if (item.kind === 'refused') actions = btn('See the tie line', 'ink', 'refused-sum', { id: item.refused.id })
         + link('Import a fixed file', '', '#/books/import') + btn('Known, leave it', 'quiet', 'aside', { id: item.refused.id, aside: 1 });
     else actions = (item.actions || []).map(a => a.href ? link(a.label, a.primary ? 'ink' : '', a.href) : btn(a.label, a.primary ? 'ink' : '', a.act, a.data)).join('');
@@ -975,7 +976,7 @@ function homeItemHTML(item, guesses) {
 /** What a lane holds, said kind by kind: "5 transfers S$ 12,200.00 · 84 rows with no type S$ 6,477.50 · 7 bills not seen". */
 function laneSummary(list) {
     const kinds = [['transfer', 'transfer', 'transfers', true], ['untyped', 'row with no type', 'rows with no type', true],
-        ['mixed', 'mixed-merchant row', 'mixed-merchant rows', true], ['bill', 'bill not seen', 'bills not seen', false],
+        ['mixed', 'row to check', 'rows to check', true], ['bill', 'bill not seen', 'bills not seen', false],
         ['refused', 'refused statement', 'refused statements', false], ['off', 'statement off', 'statements off', false],
         ['stale', 'old figure', 'old figures', false], ['nofig', 'line with no figure', 'lines with no figure', false]];
     return kinds.map(([k, one, many, summed]) => {
@@ -1131,14 +1132,14 @@ ACT['needs-look-link'] = () => { S.needsLook = true; location.hash = '#/books'; 
 // 06): a step is a section that folds, with its count.
 const queueOpen = {};
 const QUEUE_PAGE = 6;
-const LINES_PAGE = 12;         // the sure card's merchants, and a Book each row card's lines, shown before "Show N more"
+const LINES_PAGE = 12;         // the sure card's merchants, and a Check each row card's lines, shown before "Show N more"
 const queueGroups = new Map();     // a card's key -> its rows, for "This was… (all 4)"
 const transferGuesses = new Map(); // a waiting transfer's id -> fin's guess for it
 const QUEUE_STEPS = [
     { k: 'transfer', label: 'Transfer?' },
     { k: 'pick', label: 'Pick a type' },
     { k: 'noguess', label: 'No guess' },
-    { k: 'mixed', label: 'Book each row' },
+    { k: 'mixed', label: 'Check each row' },   // a merchant set to check each row: its rows not checked yet
     { k: 'bill', label: 'Missed bill' },
 ];
 
@@ -1319,7 +1320,7 @@ function seeRowsHTML(rows) {
 }
 
 /** One card in a money lane: a transfer, a merchant's rows with no type and
- *  no guess, or a missed bill (Pick a type and Book each row draw their own). */
+ *  no guess, or a missed bill (Pick a type and Check each row draw their own). */
 async function queueCardHTML(card) {
     const n = card.rows.length;
     if (n) queueGroups.set(card.key, card.rows);
@@ -1328,7 +1329,7 @@ async function queueCardHTML(card) {
     if (card.kind === 'untyped') guess = await showResolveSuggestion(row, { n, guess: (await loadGuesses()).get(row.id) || null });
     else if (card.kind === 'transfer') guess = transferGuessHTML(row, await transferGuess(row));
     const amount = `${dirTag(card.lane)} <span class="num">${esc(sumByCurrency([card], c => c.amount))}</span>`;
-    const marker = { untyped: tag('nofig', 'no type'), mixed: tag('notchecked', 'mixed merchant'), bill: tag('stale', 'missed bill') }[card.kind] || '';
+    const marker = { untyped: tag('nofig', 'no type'), mixed: tag('notchecked', 'not checked'), bill: tag('stale', 'missed bill') }[card.kind] || '';
     const count = n > 1 ? ` <span class="tag yours">${n} rows</span>` : '';
     const meta = n > 1 ? rowsMeta(card.rows) : card.meta;
     const data = a => Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('') + (card.rows.length ? ` data-group="${esc(card.key)}"` : '');
@@ -1348,8 +1349,8 @@ async function queueCardHTML(card) {
 /** A lane's items as the cards it draws, each under its step: a waiting
  *  transfer; Jev's three guesses for a merchant (one card per merchant
  *  string, as the guesses read groups them); rows with no guess (one card
- *  per merchant text, as before); a mixed merchant's rows (one card per
- *  merchant) and a missed bill. `find` is the merchant text the search reads. */
+ *  per merchant text, as before); a Check each row merchant's rows not
+ *  checked yet (one card per merchant) and a missed bill. `find` is the merchant text the search reads. */
 function laneCards(lane, items, guesses) {
     const cards = [];
     const picks = new Map(), mixed = new Map(), noGuess = [];
@@ -1396,7 +1397,7 @@ function queueSaveWaits() {
 function queueSaving(box = null) {
     queueBusy = true;
     drawSureState();
-    $$('#q-work [data-act="pick-save"], #q-work [data-act="each-save"]').forEach(b => { b.disabled = true; });
+    $$('#q-work [data-act="pick-save"], #q-work [data-act="each-save"], #q-work [data-act="each-ok"]').forEach(b => { b.disabled = true; });
     if (box) $$('button, select', box).forEach(b => { b.disabled = true; });
 }
 /** Who each row on the Queue is, by the merchant its card names: for a toast
@@ -1467,46 +1468,94 @@ ACT['pick-save'] = async el => {
     rerender(); refreshFrame();
 };
 
-// Book each row: a mixed merchant's rows on one card, one line per row with
-// its type and a book picker; Save writes the type shown and the book picked
-// onto each row in turn (today's per-row write), and one Undo covers them all.
-const eachBooks = new Map();   // a row's id -> the book picked for it on its line
-function eachBook(row) { return eachBooks.has(row.id) ? eachBooks.get(row.id) : (row.book || ''); }
+// Check each row (fin-surfaces 12): the rows of a merchant set to check each
+// row that are not checked yet, one card per merchant, one line per row with
+// a type and a book picker. A line's ✓ checks that row; Confirm all checks
+// every line as shown. Each is one bulk-label write (hand-set labels): one
+// change, one Undo.
+const eachPicks = new Map();   // a row's id -> {typeId, book} as changed on its line
+/** fin's book for a line when it beats the row's own (its usual book): the
+ *  last book on this account, or a company's own card (book prefill,
+ *  fin-surfaces 10, read once for the Queue as queueModel.prefills). A
+ *  prefill from the type is not shown here: the usual book stands. */
+function eachPrefill(row) {
+    const p = queueModel && queueModel.prefills ? queueModel.prefills.get(row.id) : null;
+    if (!p || !p.book || (p.reason !== 'last' && p.reason !== 'account')) return null;
+    const card = queueModel.r.accountById.get(row.account_id)?.short_name || p.account || row.account_name || '';
+    return { book: p.book, hint: p.reason === 'last' ? `${p.book} last time on ${card}` : `${p.book}’s own card` };
+}
+/** A line as it stands: its type and book, and the hint while the book is fin's prefill. */
+function eachLine(row) {
+    const pick = eachPicks.get(row.id) || {};
+    const pre = eachPrefill(row);
+    const book = pick.book ?? pre?.book ?? row.book ?? '';
+    return { typeId: pick.typeId ?? row.type_id, book, hint: pre && pick.book === undefined ? pre.hint : '' };
+}
+const eachReady = line => !!(line.typeId && line.book);
 function eachCardHTML(card, books) {
     const n = card.rows.length;
     const limit = queueOpen[card.key] || LINES_PAGE;
-    const lines = card.rows.slice(0, limit).map(x => `<div class="q-each__row">
-        <div class="q-each__what"><span>${esc(day(x.date))} · ${esc(x.account_name || '')}${rowMark(x.id)}</span>
-            <span class="q-each__type">${esc(x.display_type || 'no type')} · <button type="button" class="link" data-act="resolve" data-tx="${x.id}" data-kind="mixed">Another type</button></span></div>
-        <span class="num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</span>
-        <select data-change="each-book" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Book for the ${esc(day(x.date))} row">${bookOptions(books, eachBook(x), 'Choose book')}</select></div>`).join('');
-    return `<article class="item q-card mixed" data-key="${esc(card.key)}">${cardHead(card, tag('notchecked', 'mixed merchant'))}
-        <div class="q-each"><p class="holds">It sells more than one kind of thing: check each row’s type and pick its book.</p>${lines}
+    const types = queueModel.r.types;
+    const off = queueBusy ? ' disabled' : '';
+    const newest = [...card.rows].sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
+    const lines = newest.slice(0, limit).map(x => {
+        const line = eachLine(x), when = esc(day(x.date));
+        return `<div class="ce" data-tx="${x.id}">
+            <div class="ce-what"><span>${when} · ${esc(x.account_name || '')}</span>${tag('notchecked', 'not checked')}${rowMark(x.id)}</div>
+            <span class="num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</span>
+            <div class="ce-pick"><select data-change="each-type" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Type for the ${when} row"${off}>${typeOptions(types, line.typeId)}</select>
+                <select data-change="each-book" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Book for the ${when} row"${off}>${bookOptions(books, line.book, 'Choose book')}</select>
+                <span class="hint">${esc(line.hint)}</span>
+                <button type="button" class="btn sm subtle" data-act="each-ok" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Confirm the ${when} row"${eachReady(line) && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></div></div>`;
+    }).join('');
+    const ready = card.rows.every(x => eachReady(eachLine(x)));
+    return `<article class="item q-card mixed" data-key="${esc(card.key)}">${cardHead(card, '')}
+        <div class="q-each"><p class="holds">Each row came in with ${esc(card.merchant)}’s type and usual book, and counts there until you check it: confirm it as it is, or change its type or book.</p>${lines}
             ${n > limit ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="${esc(card.key)}">Show ${plural(n - limit, 'more line')}</button>` : ''}</div>
-        <div class="act"><button type="button" class="btn sm primary" data-act="each-save" data-key="${esc(card.key)}"${card.rows.every(eachBook) && !queueBusy ? '' : ' disabled'}>Save ${n > 1 ? `${n} rows` : 'the row'}</button></div></article>`;
+        <div class="act"><button type="button" class="btn sm primary" data-act="each-save" data-key="${esc(card.key)}"${ready && !queueBusy ? '' : ' disabled'}>Confirm all</button></div></article>`;
 }
-ACT['each-book'] = el => {
-    eachBooks.set(Number(el.dataset.tx), el.value);
+/** A pick redraws its line's hint and the card's buttons in place (focus stays). */
+function eachPick(el, k, v) {
+    const id = Number(el.dataset.tx);
+    eachPicks.set(id, { ...eachPicks.get(id), [k]: v });
+    const card = laneCardByKey.get(el.dataset.key), box = laneCardEl(el.dataset.key);
+    if (!card || !box) return;
+    const x = card.rows.find(y => y.id === id), line = eachLine(x);
+    const ce = $(`.ce[data-tx="${id}"]`, box);
+    $('.hint', ce).textContent = line.hint;
+    $('[data-act="each-ok"]', ce).disabled = queueBusy || !eachReady(line);
+    $('[data-act="each-save"]', box).disabled = queueBusy || !card.rows.every(y => eachReady(eachLine(y)));
+}
+ACT['each-type'] = el => eachPick(el, 'typeId', Number(el.value) || null);
+ACT['each-book'] = el => eachPick(el, 'book', el.value);
+/** Check rows as their lines show them: one bulk-label write. A refusal
+ *  writes nothing, so every line stays waiting, as picked. */
+async function saveEach(card, rows) {
+    queueSaving(laneCardEl(card.key));
+    const r = await send('POST', '/api/transactions/bulk-label', {
+        rows: rows.map(x => { const line = eachLine(x); return { tx_id: x.id, type_id: line.typeId, book: line.book }; }),
+    });
+    queueBusy = false;
+    if (r.ok) rows.forEach(x => eachPicks.delete(x.id));
+    else toast(r.data.error || 'That did not work; nothing was changed', { bad: true, ms: 9000 });
+    return r;
+}
+ACT['each-ok'] = async el => {
     const card = laneCardByKey.get(el.dataset.key);
-    const go = $('[data-act="each-save"]', laneCardEl(el.dataset.key));
-    if (card && go) go.disabled = queueBusy || !card.rows.every(eachBook);
+    const x = card && card.rows.find(y => y.id === Number(el.dataset.tx));
+    if (!x || queueSaveWaits()) return;
+    const line = eachLine(x);
+    if (!eachReady(line)) return;
+    const r = await saveEach(card, [x]);
+    const type = queueModel.r.typeById.get(line.typeId);
+    if (r.ok) toast(`Saved the ${day(x.date)} row of ${card.merchant}: ${type?.display_name || type?.name || 'its type'} · ${line.book}.`, { undo: r.change });
+    rerender(); refreshFrame();
 };
 ACT['each-save'] = async el => {
     const card = laneCardByKey.get(el.dataset.key);
-    if (!card || !card.rows.every(eachBook) || queueSaveWaits()) return;
-    queueSaving(laneCardEl(card.key));
-    const changes = [];
-    let saved = 0, error = null;
-    for (const x of card.rows) {
-        const r = await send('PUT', `/api/transactions/${x.id}`, { type_id: x.type_id, book: eachBook(x) });
-        if (!r.ok) { error = r.data.error || 'That did not work'; break; }
-        if (r.change) changes.push(r.change);
-        eachBooks.delete(x.id);
-        saved += 1;
-    }
-    queueBusy = false;
-    if (error) toast(`Saved ${saved} of ${plural(card.rows.length, 'row')} of ${card.merchant}; then: ${error}`, { bad: true, undo: changes, ms: 9000 });
-    else toast(`Saved ${plural(saved, 'row')} of ${card.merchant}.`, { undo: changes });
+    if (!card || !card.rows.every(x => eachReady(eachLine(x))) || queueSaveWaits()) return;
+    const r = await saveEach(card, card.rows);
+    if (r.ok) toast(`Saved ${plural(card.rows.length, 'row')} of ${card.merchant}.`, { undo: r.change });
     rerender(); refreshFrame();
 };
 
@@ -2057,10 +2106,11 @@ ACT['review-guess-yes'] = async el => {
     if (r) { closeSheet(); rerender(); }
 };
 
+// "Yes, Shopping · Household": a row not checked yet, checked as it came in (hand-set).
 ACT['mixed-yes'] = async el => {
     const row = await findRow(Number(el.dataset.tx));
     if (!row) return;
-    const r = await act('PUT', `/api/transactions/${row.id}`, { type_id: row.type_id, book: row.book }, `Kept ${row.display_type || 'its type'}`);
+    const r = await act('PUT', `/api/transactions/${row.id}`, { type_id: row.type_id, book: row.book }, `Checked: ${row.display_type || 'its type'} · ${row.book}`);
     if (r) rerender();
 };
 
@@ -2641,6 +2691,9 @@ function pager(list, actName) {
         <button class="btn sm" data-act="${actName}" data-page="${list.page - 1}"${list.page <= 1 ? ' disabled' : ''}>Newer</button>
         <button class="btn sm" data-act="${actName}" data-page="${list.page + 1}"${list.page >= list.pages ? ' disabled' : ''}>Older</button></div>`;
 }
+/** A row of a Check each row merchant that nobody has checked yet: it counts
+ *  in its usual book meanwhile, and waits in the Queue. */
+function notCheckedTag(row) { return row.not_checked ? ` ${tag('notchecked', 'not checked')}` : ''; }
 function rowTr(row, { account = true, book = false } = {}) {
     const minor = toMinor(row.amount_sgd, row.currency);
     const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted small">transfer</span>', payment: '<span class="muted small">card payment</span>', movement: `<span class="muted small">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted small">income</span>' }[row.flow_type];
@@ -2648,7 +2701,7 @@ function rowTr(row, { account = true, book = false } = {}) {
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
         <td>${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
-        <td>${label}${book || (row.book && row.book !== 'Household') ? ` <span class="small muted">· ${esc(row.book || '')}</span>` : ''}</td>
+        <td>${label}${book || (row.book && row.book !== 'Household') ? ` <span class="small muted">· ${esc(row.book || '')}</span>` : ''}${notCheckedTag(row)}</td>
         <td class="r">${rowAmount(minor, row.currency)}</td></tr>`;
 }
 ACT['figure-fix'] = async el => {
@@ -2750,7 +2803,7 @@ function spendRowTr(row) {
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
         <td>${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${esc(row.account_name || '')}</div></td>
-        <td>${label}</td>
+        <td>${label}${notCheckedTag(row)}</td>
         <td class="r">${amount}</td></tr>`;
 }
 
@@ -3202,7 +3255,7 @@ async function viewLists(tab) {
     }
     // merchants
     const services = await servicesList();
-    const filters = { all: () => true, untyped: s => !s.type_id, mixed: s => s.review_each_time, hidden: s => s.exclude_from_expense_views, unused: s => !s.txn_count };
+    const filters = { all: () => true, untyped: s => !s.type_id, each: s => s.review_each_time, hidden: s => s.exclude_from_expense_views, unused: s => !s.txn_count };
     const shown = services.filter(filters[listState.filter] || filters.all).filter(s => !needle || s.name.toLowerCase().includes(needle));
     ACT.__services = new Map(services.map(s => [s.id, s]));
     const renaming = listState.renaming;
@@ -3210,7 +3263,7 @@ async function viewLists(tab) {
         ? `<td class="sl-name sl-wide"><input type="text" class="rename-input" data-rename="${s.id}" data-orig="${esc(s.name)}" value="${esc(listState.renames[s.id] ?? s.name)}" aria-label="New name for ${esc(s.name)}"></td>`
         : `<td class="sl-name"><b>${esc(s.name)}</b></td>`;
     const typeCell = s => s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type', { act: 'merchant', data: { id: s.id }, title: 'Give it a type' });
-    const marks = s => `${s.review_each_time ? tag('notchecked', 'mixed') : ''} ${s.exclude_from_expense_views ? tag('yours', 'hidden') : ''} ${s.is_one_off ? tag('yours', 'one-off') : ''}`.trim();
+    const marks = s => `${s.review_each_time ? tag('', 'Check each row') : ''} ${s.exclude_from_expense_views ? tag('yours', 'hidden') : ''} ${s.is_one_off ? tag('yours', 'one-off') : ''}`.trim();
     const rows = shown.slice(0, 200).map(s => `<tr${renaming ? '' : ` class="clickable" data-act="merchant" data-id="${s.id}"`}>${nameCell(s)}<td>${esc(s.book || '')}</td>
         <td>${typeCell(s)}</td><td class="r num${renaming ? '' : ' sl-fig'}">${s.txn_count}<span class="sl-phone-word"> ${s.txn_count === 1 ? 'row' : 'rows'}</span></td><td class="r num">${s.rule_count}</td>
         <td>${marks(s)}</td>
@@ -3223,7 +3276,7 @@ async function viewLists(tab) {
                 ? `<button class="btn" data-act="rename-mode" data-on="0">Stop renaming</button><button class="btn primary" data-act="rename-save" id="rename-save"${pending ? '' : ' disabled'}>${pending ? `Save ${plural(pending, 'rename')}` : 'Save renames'}</button>`
                 : `<button class="btn" data-act="rename-mode" data-on="1">${icon('pencil-simple')}Rename several</button><button class="btn primary" data-act="merchant-add">${icon('plus')}Add a merchant</button>`}</div></div>
         ${renaming ? '<p class="card-foot sl-lead">Type the new names, then save them together: one change in Changes, with Undo. Rules and rows keep pointing at the same merchant.</p>' : ''}
-        ${ask}<div class="chips sl-chips">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('mixed', 'Mixed', services.filter(filters.mixed).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
+        ${ask}<div class="chips sl-chips">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('each', 'Check each row', services.filter(filters.each).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
         <div class="table-wrap"><table class="t sl-stack${renaming ? ' sl-renaming' : ''}"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty sl-name">None.</td></tr>'}</tbody></table></div>
         ${shown.length > 200 ? `<p class="card-foot">The first 200 of ${shown.length}; search to narrow.</p>` : ''}</section>`;
 }
@@ -3256,8 +3309,55 @@ function merchantFields(r, s) {
         <div class="fields two"><label class="field"><span>Book</span><select id="mc-book">${bookOptions(r.books, s?.book, s ? '—' : 'As the type says')}</select></label>
             <label class="field"><span>Type</span><select id="mc-type">${typeOptions(r.types, s?.type_id, { blank: 'No type' })}</select></label></div>
         <label class="field"><span>Note</span><textarea id="mc-notes" rows="2" placeholder="Anything worth remembering about it">${esc(s?.notes || '')}</textarea></label>
-        <label class="check"><input type="checkbox" id="mc-mixed"${s?.review_each_time ? ' checked' : ''}> Mixed merchant: look at its rows each time</label>
+        ${s ? eachSettingHTML(s) : '<label class="check"><input type="checkbox" id="mc-each"> Check each row: each new row waits in the Queue for you to check it</label>'}
         <label class="check"><input type="checkbox" id="mc-hidden"${s?.exclude_from_expense_views ? ' checked' : ''}> Hide from spending lists (never from a sum)</label>`;
+}
+// The Check each row setting (fin-surfaces 12): one route turns it on or
+// off, apart from the merchant's Save. Turning it on offers once to bring the
+// merchant's past rows to the Queue, off unless chosen; turning it off writes
+// at once, and its rows keep their labels. Lists and the merchant page use it.
+function eachSettingHTML(s) {
+    const on = !!s.review_each_time;
+    const label = `${s.display_type || s.type_name || 'no type'} · ${s.book || 'no book'}`;
+    return `<div class="field each-set"><span>How its new rows arrive</span>
+        <div class="seg" role="group" aria-label="How new rows from ${esc(s.name)} arrive">
+            <button type="button" data-act="each-set" data-id="${s.id}" data-on="0" aria-pressed="${!on}">Every row the same</button>
+            <button type="button" data-act="each-set" data-id="${s.id}" data-on="1" aria-pressed="${on}">Check each row</button></div>
+        <span class="hint">${on ? `Each new row arrives as ${esc(label)}, its usual book, marked not checked, and waits in the Queue.${s.rows_to_check ? ` ${plural(s.rows_to_check, 'row')} not checked yet.` : ''}`
+            : `Every new row is labelled ${esc(label)}, without asking.`}</span></div>`;
+}
+async function merchantById(id) { return (await servicesList()).find(s => s.id === id) || null; }
+ACT['each-set'] = async el => {
+    const s = await merchantById(Number(el.dataset.id));
+    if (!s) { toast('This merchant is no longer in fin', { bad: true }); return; }
+    const on = el.dataset.on === '1';
+    if (!!s.review_each_time === on) return;
+    if (!on) {
+        const r = await act('POST', `/api/services/${s.id}/check-each-row`, { on: false },
+            `${s.name}: every new row will be labelled ${s.display_type || s.type_name || 'no type'} · ${s.book || 'no book'}.`);
+        if (r) { closeSheet(); rerender(); }
+        return;
+    }
+    if (!s.rows_to_check) { await checkEachRowOn(s, 'leave'); return; }
+    openSheet(`Check each row for ${esc(s.name)} from now on`, `<p>Also bring its ${plural(s.rows_to_check, 'past row')} to the Queue to check?</p>
+        <p class="small muted">Either way, each new row from ${esc(s.name)} will wait in the Queue, marked not checked.</p>`,
+    { eyebrow: 'Check each row', center: true,
+      foot: `<button type="button" class="btn primary" data-act="each-on" data-id="${s.id}" data-past="leave">Not now, only new rows</button><button type="button" class="btn" data-act="each-on" data-id="${s.id}" data-past="queue">Bring them too</button>` });
+};
+ACT['each-on'] = async el => {
+    const s = await merchantById(Number(el.dataset.id));
+    if (!s) { toast('This merchant is no longer in fin', { bad: true }); closeSheet(); return; }
+    $$('#sheets .sheet-foot .btn').forEach(b => { b.disabled = true; });
+    await checkEachRowOn(s, el.dataset.past);
+};
+/** past: 'leave' accepts the past rows as they are (checked); 'queue' leaves them waiting. */
+async function checkEachRowOn(s, past) {
+    const n = s.rows_to_check;
+    const r = await act('POST', `/api/services/${s.id}/check-each-row`, { on: true, past },
+        past === 'queue' && n ? `${s.name}: Check each row from now on. Its ${plural(n, 'past row')} ${n === 1 ? 'waits' : 'wait'} in the Queue to check.`
+            : `${s.name}: Check each row from now on. Its new rows will wait in the Queue.`);
+    closeSheet();
+    if (r) rerender();
 }
 ACT['merchant-add'] = async () => {
     const r = await refs();
@@ -3269,7 +3369,7 @@ ACT['merchant-create'] = async () => {
     const name = $('#mc-name').value.trim();
     if (!name) { toast('Give it a name', { bad: true }); return; }
     const body = { name, book: $('#mc-book').value || null, type_id: $('#mc-type').value ? Number($('#mc-type').value) : null, notes: $('#mc-notes').value.trim() || null,
-        review_each_time: $('#mc-mixed').checked ? 1 : 0, exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0 };
+        review_each_time: $('#mc-each').checked ? 1 : 0, exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0 };
     const r = await act('POST', '/api/services', body, 'Merchant added');
     if (r) { closeSheet(); rerender(); }
 };
@@ -3289,7 +3389,7 @@ ACT.merchant = async el => {
 ACT['merchant-save'] = async el => {
     const body = { name: $('#mc-name').value.trim(), book: $('#mc-book').value || null, type_id: $('#mc-type').value ? Number($('#mc-type').value) : null,
         notes: $('#mc-notes').value.trim() || null,
-        review_each_time: $('#mc-mixed').checked ? 1 : 0, exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0, is_one_off: $('#mc-oneoff').checked ? 1 : 0 };
+        exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0, is_one_off: $('#mc-oneoff').checked ? 1 : 0 };
     const r = await act('PUT', `/api/services/${el.dataset.id}`, body, 'Merchant saved');
     if (r) { closeSheet(); rerender(); }
 };
@@ -3598,7 +3698,7 @@ function dayHeading(iso) {
 
 const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
 const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'kind', is_one_off: 'one-off', notes: 'note',
-    amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'mixed',
+    amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'check each row',
     exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement' };
 // An empty old or new value said plainly, never as bad news (C4.2).
 const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty' };
@@ -4132,7 +4232,7 @@ async function openRowSheet(txId, opts = {}) {
             <p class="row-figure-sub">${minor > 0 ? 'Money out' : 'Money in'} · ${esc(day(found.date))}${found.account_name ? ' · ' + esc(found.account_name) : ''}</p></div>
         <dl class="facts">
             <div><dt>Book</dt><dd>${esc(found.book || '—')}</dd></div>
-            <div><dt>Type</dt><dd>${label}</dd></div>
+            <div><dt>Type</dt><dd>${label}${notCheckedTag(found)}</dd></div>
             ${found.other_side_name ? `<div><dt>Other side</dt><dd>${esc(found.other_side_name)}</dd></div>` : ''}
             <div><dt>Merchant</dt><dd>${found.service_name ? esc(found.service_name) : '<span class="muted">none yet</span>'}</dd></div>
             <div><dt>Labelled by</dt><dd>${esc(labelledBy(found, held.details))}</dd></div>

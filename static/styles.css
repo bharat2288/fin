@@ -422,7 +422,9 @@ button.tag { cursor: pointer; }
 
 /* ---------- forms: inputs sit in a well ---------- */
 label.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-label.field > span { font-size: 13px; font-weight: var(--font-medium); color: var(--text-secondary); }
+label.field > span, .field.each-set > span:first-child { font-size: 13px; font-weight: var(--font-medium); color: var(--text-secondary); }
+/* the Check each row setting: its two words, and what they mean under them */
+.field.each-set { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
 .hint { font-size: 12.5px; color: var(--text-tertiary); }
 input[type="text"], input[type="search"], input[type="number"], input[type="date"], input[type="url"], select, textarea {
     width: 100%; min-width: 0; min-height: 38px; padding: 8px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
@@ -893,7 +895,7 @@ li.empty { list-style: none; margin-top: 8px; }
 .q-step--transfer { --c: var(--chart-5); }
 .q-step--pick { --c: var(--chart-1); }
 .q-step--noguess { --c: var(--chart-6); }
-.q-step--mixed { --c: var(--chart-3); }
+.q-step--mixed { --c: var(--chart-3); }   /* Check each row */
 .q-step--bill { --c: var(--chart-4); }
 .q-steps .chip[aria-pressed="true"] .q-dot { box-shadow: 0 0 0 1.5px var(--bg-surface); }
 
@@ -931,14 +933,19 @@ li.empty { list-style: none; margin-top: 8px; }
 .q-picks .link { margin-left: 4px; font-size: 13px; }
 .q-pick-save select, .q-each select { width: auto; max-width: 160px; min-height: 32px; padding: 4px 10px; font-size: 12.5px; }
 
-/* Book each row: one line per row, its type and a book picker */
-.q-each { display: grid; gap: 4px; padding: 6px 10px; border-radius: var(--radius-xl); background: var(--bg-raised); }
+/* Check each row: one line per row not checked yet, on two rows: its date,
+   account and mark with the amount; then its type, book, hint and ✓ */
+.q-each { display: grid; gap: 6px; padding: 8px 10px; border-radius: var(--radius-xl); background: var(--bg-raised); }
 .q-each .holds { margin: 0 0 2px; }
-.q-each__row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; font-size: 12.5px; color: var(--text-secondary); }
-.q-each__what { display: grid; min-width: 0; overflow-wrap: anywhere; }
-.q-each__type { color: var(--text-tertiary); }
-.q-each__type .link { font-size: inherit; }
-.q-each__row .num { font-weight: var(--font-semibold); color: var(--text-primary); white-space: nowrap; }
+.ce { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 8px 10px; border-radius: var(--radius-lg);
+    background: var(--bg-surface); font-size: 12.5px; color: var(--text-secondary); }
+.ce-what { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; overflow-wrap: anywhere; }
+.ce > .num { font-weight: var(--font-semibold); color: var(--text-primary); white-space: nowrap; }
+.ce-pick { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.ce-pick .hint { flex: 1 1 120px; font-size: 12px; }
+.ce-pick .hint:empty { display: none; }
+.ce-pick .btn { margin-left: auto; padding: 5px; min-width: 32px; }
+.ce-pick .btn svg { width: 15px; height: 15px; }
 
 /* also waiting, in Books: a dashed strip of counts, each a link */
 .q-also { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 0; padding: 10px 16px; border: 1px dashed var(--border-default);
@@ -1025,8 +1032,9 @@ li.empty { list-style: none; margin-top: 8px; }
     .q-sec__fold, .q-pick, .q-picks .link, .q-also .link { min-height: var(--tap); }
     .q-pick-save select, .q-each select { min-height: var(--tap); max-width: none; }
     .q-pick-save select { flex: 1 1 0; }
-    .q-each__row { grid-template-columns: minmax(0, 1fr) auto; }
-    .q-each__row select { grid-column: 1 / -1; }
+    .ce-pick select { flex: 1 1 100px; }
+    .ce-pick .hint { flex: 1 1 0; order: 3; }
+    .ce-pick .btn { min-width: var(--tap); min-height: var(--tap); order: 4; }
     .q-card .act .btn { flex: 1 1 auto; }
     .q-card .act .link { min-height: var(--tap); }
     .q-rows > summary { min-height: var(--tap); padding: 0; }

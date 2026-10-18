@@ -79,6 +79,19 @@ UNTYPED_FILTER = "__untyped__"
 # Which rows those are: spending and refund rows with no type. The list's
 # filter and the Queue's guesses read both use it, so they list the same rows.
 UNTYPED_ROWS = "(t.type_id IS NULL AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund'))"
+# Which rows wait to be checked (Check each row, fin-surfaces 12): their
+# merchant is set to check each row (services.review_each_time) and their
+# label is not hand-set. Only a typed spending or refund row: an untyped one
+# is already the Queue's "no type" item and a transfer waiting for review its
+# "This was…" item, so the same row is never listed twice. CHECKABLE_ROWS is
+# the row half: the rows that wait, or would once the flag is on. `svc` is
+# the row's merchant. The Queue's step, the not-checked mark and the setting
+# read them.
+CHECKABLE_ROWS = (
+    "(COALESCE(t.cat_source, 'auto') != 'manual'"
+    " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL)"
+)
+NOT_CHECKED_ROWS = f"(COALESCE(svc.review_each_time, 0) = 1 AND {CHECKABLE_ROWS})"
 
 
 def book_expr(alias: str = "t") -> str:
@@ -519,6 +532,8 @@ _CHANGE_SUMMARIES = {
     "api_services_bulk_rename": "Renamed merchants",
     "api_services_create": "Added a merchant",
     "api_services_update": "Changed a merchant",
+    "api_services_check_each_row": "Changed whether a merchant's rows are checked",
+    "api_bulk_label": "Labelled rows by hand",
     "api_services_merge": "Merged merchants",
     "api_services_delete": "Deleted a merchant",
     "api_update_transaction": "Changed a row's labels",
@@ -1321,7 +1336,9 @@ def api_services():
             SELECT s.*, ty.name as type_name, tp.name as parent_type,
                    (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
                     AND COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')) as txn_count,
-                   (SELECT COUNT(*) FROM merchant_rules mr WHERE mr.service_id = s.id) as rule_count
+                   (SELECT COUNT(*) FROM merchant_rules mr WHERE mr.service_id = s.id) as rule_count,
+                   (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
+                    AND """ + CHECKABLE_ROWS + """) as rows_to_check
             FROM services s
             """ + _TYPE_JOINS.format(owner="s") + """
             ORDER BY s.name
@@ -1449,6 +1466,42 @@ def api_services_update(svc_id):
         except Exception as e:
             app.logger.warning("Failed to update service: %s", e)
             return jsonify({"error": "Failed to update service"}), 400
+
+
+# Turning Check each row on offers once to bring the merchant's past rows to
+# the Queue: `leave` accepts them as they are (hand-set, so none waits), and
+# `queue` leaves them waiting. Off clears the flag only: its rows keep their
+# labels and wait no longer.
+CHECK_EACH_ROW_PAST = ("leave", "queue")
+
+
+@app.route("/api/services/<int:svc_id>/check-each-row", methods=["POST"])
+def api_services_check_each_row(svc_id):
+    """Set a merchant to Check each row, or back to Every row the same.
+    Body: {on: bool, past: 'leave' | 'queue'} (past only with on; leave when
+    left out). One change entry, undone whole: the flag and, with leave, the
+    rows marked checked. Returns {success, on, checked, waiting}."""
+    data = request.get_json(silent=True) or {}
+    on = data.get("on")
+    past = data.get("past") or "leave"
+    if not isinstance(on, bool):
+        return jsonify({"error": "on must be true or false"}), 400
+    if past not in CHECK_EACH_ROW_PAST:
+        return jsonify({"error": f"past must be one of {', '.join(CHECK_EACH_ROW_PAST)}"}), 400
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM services WHERE id = ?", (svc_id,)).fetchone():
+            return jsonify({"error": "This merchant is no longer in fin"}), 404
+        conn.execute("UPDATE services SET review_each_time = ? WHERE id = ?", (1 if on else 0, svc_id))
+        theirs = f"SELECT t.id FROM transactions t WHERE t.service_id = ? AND {CHECKABLE_ROWS}"
+        checked = 0
+        if on and past == "leave":
+            checked = conn.execute(
+                f"UPDATE transactions SET cat_source = 'manual' WHERE id IN ({theirs})", (svc_id,)
+            ).rowcount
+        waiting = len(conn.execute(theirs, (svc_id,)).fetchall()) if on else 0
+        conn.commit()
+        invalidate_rules_cache()  # the rule cache holds each merchant's flag
+    return jsonify({"success": True, "on": on, "checked": checked, "waiting": waiting})
 
 
 @app.route("/api/services/<int:svc_id>/merge", methods=["POST"])
@@ -2011,8 +2064,10 @@ def api_transactions():
     flow=review is the review list: the transfers waiting for a label. It
     hides no merchant, so it lists every row the waiting count counts.
     """
-    # A row asked for by id is shown whatever its merchant's hiding says.
-    hide = request.args.get("flow") != flow.REVIEW and request.args.get("tx_id") is None
+    # A row asked for by id, or by its merchant, is shown whatever its
+    # merchant's hiding says.
+    hide = (request.args.get("flow") != flow.REVIEW and request.args.get("tx_id") is None
+            and request.args.get("service_id") is None)
     filters, params = _build_filters(request.args, hide=hide)
 
     flow_filter = request.args.get("flow")
@@ -2030,16 +2085,16 @@ def api_transactions():
         filters += " AND t.id = ?"
         params.append(tx_id)
 
-    # look=mixed: rows of a mixed merchant (looked at each time) that nobody
-    # has set by hand yet: the queue's "is this type right?" items. Only a
-    # typed spending or refund row: an untyped one is already the queue's
-    # "no type" item and a transfer waiting for review its "This was…" item,
-    # so the same row is never listed twice.
-    if request.args.get("look") == "mixed":
-        filters += (
-            " AND COALESCE(svc.review_each_time, 0) = 1 AND COALESCE(t.cat_source, 'auto') != 'manual'"
-            " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL"
-        )
+    # look=each: the rows waiting in the Queue's Check each row step (not
+    # checked yet). look=mixed is its name from before the words changed.
+    if request.args.get("look") in ("each", "mixed"):
+        filters += f" AND {NOT_CHECKED_ROWS}"
+
+    # service_id: one merchant's rows, as its page reads them.
+    service_id = request.args.get("service_id", type=int)
+    if service_id is not None:
+        filters += " AND t.service_id = ?"
+        params.append(service_id)
 
     # Type filter (from chart selection or multi-select dropdown): type names,
     # a parent taking its sub-types with it. __untyped__ is the list of rows
@@ -2132,7 +2187,8 @@ def api_transactions():
                 COALESCE(a.currency, 'SGD') as currency,
                 t.service_id,
                 svc.name as service_name,
-                COALESCE(svc.review_each_time, 0) as review_each_time
+                COALESCE(svc.review_each_time, 0) as review_each_time,
+                CASE WHEN {NOT_CHECKED_ROWS} THEN 1 ELSE 0 END as not_checked
             FROM transactions t
             {type_joins}
             LEFT JOIN services svc ON t.service_id = svc.id
@@ -2153,6 +2209,7 @@ def api_transactions():
         # the key is the old one, and holds rupees for a rupee account.
         tx["amount_sgd"] = money.from_minor(tx.pop("amount_minor"), tx["currency"])
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])
+        tx["not_checked"] = bool(tx["not_checked"])
         if tx.get("account_name"):
             tx["account_name"] = mask_card_number(tx["account_name"])
         if tx.get("other_side_name"):
@@ -2194,6 +2251,50 @@ def api_update_transaction(tx_id: int):
         conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", values)
         conn.commit()
     return jsonify({"ok": True, "id": tx_id})
+
+
+@app.route("/api/transactions/bulk-label", methods=["POST"])
+def api_bulk_label():
+    """Hand-set labels on many rows at once, each with its own book and type:
+    {rows: [{tx_id, book?, type_id?}]}. A row's book or type left out (or
+    null) keeps its own; either way the label becomes hand-set (checked). One
+    transaction, one change entry. Refused whole, writing nothing, on any
+    unknown book, type or row. Returns {success, labelled, ids}."""
+    data = request.get_json(silent=True) or {}
+    lines = data.get("rows")
+    if not isinstance(lines, list) or not lines:
+        return jsonify({"error": "rows must be a list of {tx_id, book, type_id}"}), 400
+    with get_db() as conn:
+        seen = set()
+        for line in lines:
+            tx_id = line.get("tx_id") if isinstance(line, dict) else None
+            if isinstance(tx_id, bool) or not isinstance(tx_id, int):
+                return jsonify({"error": "every row needs its tx_id"}), 400
+            if tx_id in seen:
+                return jsonify({"error": f"row {tx_id} is listed twice"}), 400
+            seen.add(tx_id)
+            try:
+                _checked_labels(conn, line)
+            except UnknownLabel as e:
+                return jsonify({"error": str(e)}), 400
+        ids = list(seen)
+        found = set()
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            found.update(r[0] for r in conn.execute(
+                f"SELECT id FROM transactions WHERE id IN ({','.join('?' * len(chunk))})", chunk
+            ))
+        gone = [i for i in ids if i not in found]
+        if gone:
+            return jsonify({"error": f"{len(gone)} of these rows {'is' if len(gone) == 1 else 'are'} "
+                                     "no longer in fin (changed elsewhere); nothing was saved"}), 400
+        for line in lines:
+            given = {k: v for k, v in line.items() if k in ("book", "type_id") and v not in (None, "")}
+            sets, values = _build_update_sets(given, ["book", "type_id"])
+            sets.append("cat_source = 'manual'")
+            conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", (*values, line["tx_id"]))
+        conn.commit()
+    return jsonify({"success": True, "labelled": len(ids), "ids": ids})
 
 
 @app.route("/api/transactions/resolve", methods=["POST"])
