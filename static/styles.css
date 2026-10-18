@@ -894,6 +894,36 @@ li.empty { list-style: none; margin-top: 8px; }
 .lane-card .section-header p { margin-top: 2px; }
 .lane-card > .item + .item { margin-top: 10px; }
 
+/* the "Jev is sure" card: a title row that folds, a note, one table row per
+   merchant (a dot for its side, the merchant, Jev's type, a book picker, ✓) */
+.sure-card { padding: 0; overflow: hidden; }
+.sure-head { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; padding: 14px 18px; }
+.sure-head__title { flex: 1 1 260px; min-width: 0; }
+.sure-head h2 { margin: 0; font-family: var(--font-display); font-size: var(--text-xl); }
+.sure-fold { display: inline-flex; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.sure-fold .caret { width: 15px; height: 15px; flex: none; color: var(--text-tertiary); transform: rotate(90deg); transition: transform var(--duration-fast) var(--ease-default); }
+.sure-fold[aria-expanded="false"] .caret { transform: none; }
+.sure-head__meta { display: block; margin: 2px 0 0 23px; font-size: 13px; color: var(--text-tertiary); }
+.sure-note { margin: 0; padding: 10px 18px 12px; border-top: 1px solid var(--border-subtle); background: var(--bg-elevated); font-size: 13px; color: var(--text-secondary); }
+.sure-table { width: 100%; border-collapse: collapse; }
+.sure-table td { padding: 8px 10px; border-top: 1px solid var(--border-subtle); vertical-align: middle; font-size: 13px; color: var(--text-secondary); }
+.sure-table td:first-child { width: 14px; padding-left: 18px; }
+.sure-table td:last-child { padding-right: 18px; text-align: right; }
+.sure-dot { display: inline-block; width: 9px; height: 9px; border-radius: 3px; background: var(--k); vertical-align: middle; }
+.sure-dot.out { --k: var(--k-out); }
+.sure-dot.in { --k: var(--k-in); }
+.sure-row__m { min-width: 0; overflow-wrap: anywhere; }
+.sure-row__name { font-weight: var(--font-semibold); color: var(--text-primary); }
+.sure-row__meta { display: block; color: var(--text-tertiary); font-size: 12.5px; }
+.sure-row__need { display: none; }
+.sure-row.need .sure-row__need { display: inline; }
+.sure-row.need { background: var(--warn-subtle); }
+.sure-row__type { color: var(--text-primary); white-space: nowrap; }
+.sure-row__pct { color: var(--text-tertiary); font-size: 12px; }
+.sure-row__book { width: 150px; }
+.sure-row__book select { min-height: 32px; padding: 5px 10px; }
+.sure-row__go .btn svg { width: 15px; height: 15px; }
+
 /* a group under its own heading: what it holds out, its count, its sum */
 .q-group + .q-group { margin-top: 22px; }
 .q-group__head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin: 0 0 10px; padding: 0 2px 8px;
@@ -957,6 +987,18 @@ li.empty { list-style: none; margin-top: 8px; }
     .guess__act .btn { flex: 1 1 auto; min-height: var(--tap); }
     .choice.is-chosen .link, .scope-line .link { min-height: var(--tap); }
     .scope-pick input[type="text"] { margin-top: 4px; }
+    /* the sure card: each row stacks, the merchant then its type, book and ✓ */
+    .sure-head { padding: 12px 14px; }
+    .sure-head .btn { flex: 1 1 auto; }
+    .sure-fold { min-height: var(--tap); }
+    .sure-note { padding: 10px 14px; }
+    .sure-table, .sure-table tbody { display: block; }
+    .sure-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 14px; border-top: 1px solid var(--border-subtle); }
+    .sure-table td, .sure-table td:first-child, .sure-table td:last-child { width: auto; padding: 0; border: 0; }
+    .sure-row__m { flex: 1 1 calc(100% - 30px); }
+    .sure-table .sure-row__type { flex: 1 1 100%; padding-left: 19px; }
+    .sure-table .sure-row__book { flex: 1 1 0; min-width: 0; padding-left: 19px; }
+    .sure-row__book select { min-height: var(--tap); }
 }
 
 /* ========================================================================== */

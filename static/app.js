@@ -300,7 +300,10 @@ async function servicesList() { return get('/api/services'); }
 // Toasts and sheets
 // ---------------------------------------------------------------------------
 
+/** A toast. undo: the change it offers to undo, or a list of them (undone
+ *  newest first; an empty list offers none). */
 function toast(message, { bad = false, undo = null, ms = 6000 } = {}) {
+    if (Array.isArray(undo) && !undo.length) undo = null;
     const box = document.createElement('div');
     box.className = 'toast' + (bad ? ' bad' : ' ok');
     box.setAttribute('role', bad ? 'alert' : 'status');
@@ -310,7 +313,7 @@ function toast(message, { bad = false, undo = null, ms = 6000 } = {}) {
         b.type = 'button';
         b.className = 'link';
         b.textContent = 'Undo';
-        b.onclick = async () => { box.remove(); await undoEntry(undo); };
+        b.onclick = async () => { box.remove(); await (Array.isArray(undo) ? undoChanges(undo) : undoEntry(undo)); };
         box.appendChild(b);
     }
     $('#toasts').appendChild(box);
@@ -1371,10 +1374,155 @@ async function laneHTML(key, title, list) {
         ${list.length ? groups.join('') : '<p class="card-empty">Nothing waits here.</p>'}</section>`;
 }
 
+// The "Jev is sure" card (fin-surfaces 05): one row per merchant group whose
+// stored guess is sure, across both sides, each saved with today's guess save
+// and the book its picker shows; "Save all" is the same save in a loop.
+const SURE_NOTE = 'Saving teaches fin each merchant: its rows here, and every new row from it, get the type and book shown, without asking again.';
+const sureBooks = new Map();   // a group's key -> the book picked for it ('' = none yet)
+let sureList = [];             // the groups as last drawn, in card order
+let sureBusy = false;          // a save is running: every button on the card waits
+
+/** The lanes' rows with no type whose guess is sure, one group per merchant
+ *  string and side: money out first, then money in, each by amount. */
+function sureGroups(q, guesses, r) {
+    const groups = [];
+    ['out', 'in'].forEach(lane => {
+        const byMerchant = new Map();
+        q.lanes[lane].forEach(i => {
+            if (i.kind !== 'untyped') return;
+            const g = guesses.get(i.row.id);
+            if (!g || g.route !== 'prefill' || !g.types || !g.types.length) return;
+            let group = byMerchant.get(g.merchant);
+            if (!group) {
+                const top = g.types[0];
+                group = { key: `${lane}|${g.merchant}`, lane, merchant: g.merchant, type: top, items: [], amount: 0,
+                    proposed: r.typeById.get(top.type_id)?.proposed_book || null };
+                byMerchant.set(g.merchant, group);
+            }
+            group.items.push(i);
+            group.amount += i.amount;
+        });
+        groups.push(...[...byMerchant.values()].sort((a, b) => b.amount - a.amount));
+    });
+    return groups;
+}
+/** The book a group would be saved with: the one picked, else its type's. */
+function sureBook(g) { return sureBooks.has(g.key) ? sureBooks.get(g.key) : (g.proposed || ''); }
+/** The title row's words and its button, from what is ready now. */
+function sureHead() {
+    const ready = sureList.filter(sureBook).length;
+    const rows = sureList.reduce((n, g) => n + g.items.length, 0);
+    const need = sureList.length - ready;
+    return {
+        ready,
+        meta: `${plural(rows, 'row')} across both sides${need ? ` · ${need} ${need === 1 ? 'needs' : 'need'} a book first` : ''}`,
+        label: ready === sureList.length ? 'Save all' : `Save ${ready} ready`,
+    };
+}
+function sureRowHTML(g, books) {
+    const book = sureBook(g);
+    const side = g.lane === 'out' ? 'Money out' : 'Money in';
+    const asks = g.proposed ? '' : ' · the book you pick becomes this merchant’s book';
+    return `<tr class="sure-row${book ? '' : ' need'}" data-key="${esc(g.key)}">
+        <td class="sure-row__dot"><span class="sure-dot ${g.lane}" title="${side}"><span class="sr-only">${side}</span></span></td>
+        <td class="sure-row__m"><span class="sure-row__name">${esc(g.merchant)}</span> <span class="sure-row__need">${tag('nofig', 'needs a book')}</span>
+            <span class="sure-row__meta">${esc(plural(g.items.length, 'row'))} · <span class="num">${esc(sumByCurrency(g.items))}</span>${asks}</span></td>
+        <td class="sure-row__type">${esc(g.type.name)} <span class="sure-row__pct">${Math.round(g.type.probability * 100)}%</span></td>
+        <td class="sure-row__book"><select data-change="sure-book" data-key="${esc(g.key)}" aria-label="Book for ${esc(g.merchant)}"${sureBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select></td>
+        <td class="sure-row__go"><button type="button" class="btn sm subtle" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.merchant)}"${book && !sureBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>`;
+}
+function sureCardHTML(books) {
+    if (!sureList.length) return '';
+    const open = store.get('sureOpen', true);
+    const h = sureHead();
+    return `<section class="card card--lift sure-card" id="sure-card">
+        <div class="sure-head">
+            <div class="sure-head__title"><h2><button type="button" class="sure-fold" data-act="sure-fold" aria-expanded="${open}" aria-controls="sure-body">${icon('caret-right', 'caret')}<span>Jev is sure of ${esc(plural(sureList.length, 'merchant'))}</span></button></h2>
+                <span class="sure-head__meta" id="sure-meta">${esc(h.meta)}</span></div>
+            <button type="button" class="btn primary" data-act="sure-all" id="sure-all"${h.ready && !sureBusy ? '' : ' disabled'}>${esc(h.label)}</button>
+        </div>
+        <div class="sure-body" id="sure-body"${open ? '' : ' hidden'}>
+            <p class="sure-note">${esc(SURE_NOTE)}</p>
+            <table class="sure-table"><tbody>${sureList.map(g => sureRowHTML(g, books)).join('')}</tbody></table></div></section>`;
+}
+/** Readiness and the busy state, drawn in place (a pick keeps its focus). */
+function drawSureState() {
+    const card = $('#sure-card');
+    if (!card) return;
+    sureList.forEach(g => {
+        const tr = $$('tr.sure-row', card).find(x => x.dataset.key === g.key);
+        if (!tr) return;
+        const ready = !!sureBook(g);
+        tr.classList.toggle('need', !ready);
+        $('select', tr).disabled = sureBusy;
+        $('[data-act="sure-save"]', tr).disabled = sureBusy || !ready;
+    });
+    const h = sureHead();
+    $('#sure-meta').textContent = h.meta;
+    const all = $('#sure-all');
+    all.textContent = h.label;
+    all.disabled = sureBusy || !h.ready;
+}
+ACT['sure-fold'] = el => {
+    const open = el.getAttribute('aria-expanded') !== 'true';
+    store.set('sureOpen', open);
+    el.setAttribute('aria-expanded', String(open));
+    $('#sure-body').hidden = !open;
+};
+ACT['sure-book'] = el => { sureBooks.set(el.dataset.key, el.value); drawSureState(); };
+/** One group saved with today's guess save and the book shown. Rows an
+ *  earlier save in the same press already labelled are left out; a group
+ *  left with none is skipped. */
+async function saveSureGroup(g, labelled) {
+    const rows = g.items.map(i => i.row).filter(x => !labelled.has(x.id));
+    if (!rows.length) return { skipped: true };
+    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { visible: true, book: sureBook(g) }), rows, { quiet: true });
+    res.labelledIds.forEach(id => labelled.add(id));
+    return res;
+}
+ACT['sure-save'] = async el => {
+    const g = sureList.find(x => x.key === el.dataset.key);
+    if (sureBusy || !g || !sureBook(g)) return;
+    const book = sureBook(g);
+    sureBusy = true; drawSureState();
+    const res = await saveSureGroup(g, new Set());
+    sureBusy = false;
+    if (res.skipped) { /* its rows already have a type */ } else if (res.ok) {
+        sureBooks.delete(g.key);
+        toast(`Saved ${g.merchant} as ${g.type.name} · ${book}, now and from now on.`, { undo: res.changes });
+    } else toast(res.error, { bad: true, undo: res.changes, ms: 9000 });
+    rerender(); refreshFrame();
+};
+ACT['sure-all'] = async () => {
+    const ready = sureList.filter(sureBook);
+    if (sureBusy || !ready.length) return;
+    sureBusy = true; drawSureState();
+    const labelled = new Set(), changes = [];
+    let saved = 0, error = null;
+    for (const g of ready) {
+        const res = await saveSureGroup(g, labelled);
+        if (res.skipped) continue;
+        changes.push(...res.changes);
+        if (!res.ok) { error = res.error; break; }
+        sureBooks.delete(g.key);
+        saved += 1;
+    }
+    sureBusy = false;
+    if (error) toast(`Saved ${saved} of ${plural(ready.length, 'merchant')}; then: ${error}`, { bad: true, undo: changes, ms: 9000 });
+    else if (saved) toast(`Saved ${plural(saved, 'merchant')}; their new rows will be labelled the same way.`, { undo: changes });
+    else toast('Nothing left to save: those rows already have a type.');
+    rerender(); refreshFrame();
+};
+
 async function viewQueue() {
-    const q = await loadQueue();
+    const [q, guesses, r] = await Promise.all([loadQueue(), loadGuesses(), refs()]);
     queueGroups.clear();
-    const [out, inn] = await Promise.all([laneHTML('out', 'Money out', q.lanes.out), laneHTML('in', 'Money in', q.lanes.in)]);
+    // The sure groups sit in their card, so they leave the lanes below.
+    sureList = sureGroups(q, guesses, r);
+    const sureIds = new Set(sureList.flatMap(g => g.items.map(i => i.row.id)));
+    const lanes = { out: q.lanes.out, in: q.lanes.in };
+    if (sureIds.size) ['out', 'in'].forEach(k => { lanes[k] = lanes[k].filter(i => !(i.kind === 'untyped' && sureIds.has(i.row.id))); });
+    const [out, inn] = await Promise.all([laneHTML('out', 'Money out', lanes.out), laneHTML('in', 'Money in', lanes.in)]);
     const booksOpen = queueOpen.books || 12;
     const books = `<section class="card card--lift lane-card" id="lane-books">
         <div class="section-header"><div><h2>Figures and statements</h2><p>What the balances rest on</p></div><span class="section-header__aside"><b>${q.lanes.books.length}</b> ${q.lanes.books.length === 1 ? 'item' : 'items'}</span></div>
@@ -1384,8 +1532,8 @@ async function viewQueue() {
         <p>Known, left as they are. Still marked refused on their accounts.</p></div><span class="section-header__aside"><b>${q.lanes.aside.length}</b> ${q.lanes.aside.length === 1 ? 'statement' : 'statements'}</span></div>${q.lanes.aside.map(itemHTML).join('')}</section>` : '';
     const chip = (to, cls, ic, label, n) => `<a class="delta-chip q-jump ${cls}" href="#/queue" data-act="jump" data-to="lane-${to}">${icon(ic)}${label} <span class="num">${n}</span></a>`;
     const chips = [
-        q.lanes.out.length ? chip('out', 'k-out', 'arrow-circle-up', 'Money out', q.lanes.out.length) : '',
-        q.lanes.in.length ? chip('in', 'k-in', 'arrow-circle-down', 'Money in', q.lanes.in.length) : '',
+        lanes.out.length ? chip('out', 'k-out', 'arrow-circle-up', 'Money out', lanes.out.length) : '',
+        lanes.in.length ? chip('in', 'k-in', 'arrow-circle-down', 'Money in', lanes.in.length) : '',
         q.lanes.books.length ? chip('books', 'delta-chip--warn', 'warning', 'Figures and statements', q.lanes.books.length) : '',
         q.lanes.aside.length ? chip('aside', 'q-jump--context', 'circle-dashed', 'Set aside', q.lanes.aside.length) : '',
     ].join('');
@@ -1397,7 +1545,7 @@ async function viewQueue() {
         : `<h1 class="q-hero__line"><span class="q-hero__words">Nothing waits for you</span></h1>
             <p class="q-empty">${icon('check-circle')}Every row has a label and every statement ties.</p>${chips ? `<div class="chip-row">${chips}</div>` : ''}`}
         ${q.capped.length ? `<p class="notice warn small" style="margin-top:12px">${icon('warning')}<span>Too many to read at once, so the counts and sums here are short: ${esc(q.capped.join('; '))}.</span></p>` : ''}</section>`;
-    return `<div class="queue">${hero}
+    return `<div class="queue">${hero}${sureCardHTML(r.books)}
         <div class="waits-cols q-cols">${out}${inn}</div>
         ${books}${aside}</div>`;
 }
@@ -1573,27 +1721,46 @@ function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern
     return body;
 }
 /** Save a type for a row with no type. A merchant text too plain to make a
- *  rule from (a PayNow or a GIRO) labels the card's other rows one by one. */
-async function saveResolve(body, group = []) {
+ *  rule from (a PayNow or a GIRO) labels the card's other rows one by one.
+ *  Returns {ok, changes, labelled, labelledIds, error}: the change ids it
+ *  wrote, newest last, and the rows it labelled. quiet: no toast and no
+ *  redraw, for a caller that words its own (the sure card). */
+async function saveResolve(body, group = [], { quiet = false } = {}) {
     const services = await servicesList();
     const svc = services.find(s => s.name.toLowerCase() === body.service_name.toLowerCase());
     if (svc) body.service_id = svc.id;
-    const r = await act('POST', '/api/transactions/resolve', body, 'Saved');
-    if (!r) return;
+    const r = await send('POST', '/api/transactions/resolve', body);
+    if (!r.ok) {
+        const error = r.data.error || 'That did not work; nothing was changed';
+        if (!quiet) toast(error, { bad: true });
+        return { ok: false, changes: [], labelled: 0, labelledIds: [], error };
+    }
+    if (!quiet) { toast('Saved', { undo: r.change }); refreshFrame(); }
+    const changes = r.change ? [r.change] : [];
     // The group's other rows the rule did not reach (a merchant text too plain
     // for a rule, or rows whose text the pattern misses) are labelled one by one.
     const reached = new Set(r.data.backfilled_ids || []);
+    const labelledIds = new Set([body.tx_id, ...reached]);
     const rest = body.apply_scope === 'transaction' || (body.apply_scope === 'rule' && body.pattern) ? []
         : group.filter(x => x.id !== body.tx_id && !reached.has(x.id) && !x.type_id);
-    let done = 0;
+    let done = 0, error = null;
     for (const x of rest) {
         const more = await send('POST', '/api/transactions/resolve', { ...body, tx_id: x.id, apply_scope: 'transaction', service_id: r.data.service_id ?? body.service_id });
-        if (!more.ok) { toast(more.data.error || 'One of the rows could not be labelled', { bad: true }); break; }
+        if (!more.ok) {
+            error = more.data.error || 'One of the rows could not be labelled';
+            if (!quiet) toast(error, { bad: true });
+            break;
+        }
+        if (more.change) changes.push(more.change);
+        labelledIds.add(x.id);
         done += 1;
     }
     const others = done + (r.data.backfilled || 0);
-    if (others) toast(`${plural(others, 'other row')} took the same label`);
-    closeSheet(); rerender();
+    if (!quiet) {
+        if (others) toast(`${plural(others, 'other row')} took the same label`);
+        closeSheet(); rerender();
+    }
+    return { ok: !error, changes, labelled: labelledIds.size, labelledIds: [...labelledIds], error };
 }
 ACT['ww-save'] = async () => {
     const { row, choice, untyped, group } = step;
@@ -3578,6 +3745,20 @@ async function undoEntry(id, { quiet = false } = {}) {
     return r.data;
 }
 ACT.undo = el => undoEntry(Number(el.dataset.entry));
+/** A toast's Undo over several changes: newest first, as the batch undo
+ *  below; it stops at the first one refused and says so. */
+async function undoChanges(ids) {
+    const list = [...ids].sort((a, b) => b - a);
+    if (list.length === 1) return undoEntry(list[0]);
+    let done = 0;
+    for (const id of list) {
+        const r = await send('POST', `/api/history/${id}/undo`);
+        if (!r.ok) { toast(`Undid ${done} of ${list.length}. One was refused: ${r.data.error || ''}`, { bad: true, ms: 10000 }); break; }
+        done += 1;
+    }
+    if (done === list.length) toast(`Undid ${plural(done, 'change')}. Each undo is in Recent changes, and can itself be undone.`);
+    refreshFrame(); rerender();
+}
 ACT['batch-undo'] = async () => {
     const ids = $$('.log input[data-change="entry-tick"]:checked').map(x => Number(x.dataset.entry)).sort((a, b) => b - a);
     if (!ids.length) return;
