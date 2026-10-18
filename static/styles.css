@@ -946,7 +946,9 @@ li.empty { list-style: none; margin-top: 8px; }
 .q-also .link { padding: 0; border: 0; background: none; font: inherit; font-weight: var(--font-semibold); }
 
 /* the "Jev is sure" card: a title row that folds, a note, one table row per
-   merchant (a dot for its side, the merchant, Jev's type, a book picker, ✓) */
+   merchant (a dot for its side, the merchant its save makes with Jev's name
+   when it differs, Jev's type, a book picker, ✓), and under it the merchant's
+   rows when opened */
 .sure-card { padding: 0; overflow: hidden; }
 .sure-head { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; padding: 14px 18px; }
 .sure-head__title { flex: 1 1 260px; min-width: 0; }
@@ -975,6 +977,16 @@ li.empty { list-style: none; margin-top: 8px; }
 .sure-row__book { width: 150px; }
 .sure-row__book select { min-height: 32px; padding: 5px 10px; }
 .sure-row__go .btn svg { width: 15px; height: 15px; }
+.sure-row__jev { font-size: 11.5px; color: var(--text-tertiary); overflow-wrap: anywhere; }
+.sure-row__links { display: flex; flex-wrap: wrap; gap: 0 14px; font-size: 12.5px; }
+.sure-rows[hidden] { display: none; }
+.sure-table .sure-rows > td { width: auto; padding: 0 18px 12px 42px; border-top: 0; text-align: left; }
+table.t.sure-rows__t { border: 1px solid var(--border-default); border-collapse: separate; border-spacing: 0; border-radius: var(--radius-lg); overflow: hidden; background: var(--bg-surface); }
+.sure-table .sure-rows__t td, .sure-table .sure-rows__t td:first-child, .sure-table .sure-rows__t td:last-child {
+    width: auto; padding: 5px 10px; border-top: 0; font-size: 12.5px; text-align: left; }
+.sure-table .sure-rows__t td:first-child { white-space: nowrap; }
+.sure-table .sure-rows__t td.r { text-align: right; white-space: nowrap; }
+.sure-table .sure-rows__t .sure-rows__text { width: 100%; font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; }
 
 /* a card: what it was, its date and account, the amount right; the guess, then the buttons */
 .q-card .what { line-height: 1.6; }
@@ -1042,13 +1054,25 @@ li.empty { list-style: none; margin-top: 8px; }
     .sure-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 14px; border-top: 1px solid var(--border-subtle); }
     .sure-table td, .sure-table td:first-child, .sure-table td:last-child { width: auto; padding: 0; border: 0; }
     .sure-row__m { flex: 1 1 calc(100% - 30px); display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
-    .sure-row__name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sure-row__name { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+    .sure-row__jev { flex: 0 1 auto; min-width: 0; }
     .sure-row__need { flex: none; }
-    .sure-row__meta { flex: 1 1 100%; min-width: 0; }
+    .sure-row__meta, .sure-row__links { flex: 1 1 100%; min-width: 0; }
     .sure-table .sure-row__type { flex: 1 1 0; min-width: 0; padding-left: 19px; white-space: normal; overflow-wrap: anywhere; }
     .sure-table .sure-row__book { flex: 0 1 150px; min-width: 0; }
     .sure-row__book select { width: 100%; min-height: var(--tap); }
     .sure-row__go .btn { min-width: var(--tap); }
+    /* a line's rows on a phone: date and amount, the account, then the text */
+    .sure-rows { display: block; padding: 0 14px 12px; }
+    .sure-table .sure-rows > td { display: block; padding: 0; }
+    .sure-rows__t, .sure-rows__t tbody { display: block; }
+    .sure-rows__t tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 8px 10px; border-bottom: 1px solid var(--border-subtle); }
+    .sure-rows__t tr:last-child { border-bottom: 0; }
+    .sure-table .sure-rows__t td, .sure-table .sure-rows__t td:first-child, .sure-table .sure-rows__t td:last-child { padding: 0; border: 0; }
+    .sure-rows__t td:nth-child(1) { grid-row: 1; grid-column: 1; }
+    .sure-rows__t td:nth-child(2) { grid-row: 2; grid-column: 1; }
+    .sure-rows__t td:nth-child(3) { grid-row: 1; grid-column: 2; }
+    .sure-rows__t td:nth-child(4) { grid-column: 1 / -1; }
     /* the Out / In toggle: one side at a time, the choice kept */
     .q-side { display: flex; width: 100%; }
     .q-side > button { flex: 1 1 0; }

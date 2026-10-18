@@ -1404,7 +1404,7 @@ function queueSaving(box = null) {
 function queueNames() {
     const names = new Map();
     if (!queueModel) return names;
-    queueModel.sure.forEach(g => g.items.forEach(i => names.set(i.row.id, g.merchant)));
+    queueModel.sure.forEach(g => g.items.forEach(i => names.set(i.row.id, g.name)));
     [...queueModel.cards.out, ...queueModel.cards.in].forEach(c => c.rows.forEach(x => names.set(x.id, c.merchant || c.title)));
     return names;
 }
@@ -1543,14 +1543,23 @@ ACT['q-fold'] = el => {
 
 // The "Jev is sure" card (fin-surfaces 05): one row per merchant group whose
 // stored guess is sure, across both sides, each saved with today's guess save
-// and the book its picker shows; "Save all" is the same save in a loop.
+// and the book its picker shows; "Save all" is the same save in a loop. A line
+// reads the merchant its save makes, opens to its rows, and its Something else…
+// opens "This was…" for them (fin-surfaces 09).
 const SURE_NOTE = 'Saving teaches fin each merchant: its rows here, and every new row from it, get the type and book shown, without asking again.';
 const sureBooks = new Map();   // a group's key -> the book picked for it ('' = none yet)
+const sureShown = new Set();   // the keys of the lines opened to their rows
 let sureList = [];             // the groups as last drawn, in card order
 
+/** The merchant a line's save makes: resolve's name from its first row's
+ *  text, or the merchant fin already holds by that name (the save reuses it). */
+function sureName(row, services) {
+    const name = resolveBody(row, null).service_name;
+    return services.find(s => s.name.toLowerCase() === name.toLowerCase())?.name || name;
+}
 /** The lanes' rows with no type whose guess is sure, one group per merchant
  *  string and side: money out first, then money in, each by amount. */
-function sureGroups(q, guesses, r) {
+function sureGroups(q, guesses, r, services) {
     const groups = [];
     ['out', 'in'].forEach(lane => {
         const byMerchant = new Map();
@@ -1567,6 +1576,11 @@ function sureGroups(q, guesses, r) {
             }
             group.items.push(i);
             group.amount += i.amount;
+        });
+        // A line's rows run oldest first, and the first names the merchant its save makes.
+        byMerchant.forEach(group => {
+            group.items.sort((a, b) => (a.row.date || '').localeCompare(b.row.date || '') || a.row.id - b.row.id);
+            group.name = sureName(group.items[0].row, services);
         });
         groups.push(...[...byMerchant.values()].sort((a, b) => b.amount - a.amount));
     });
@@ -1585,17 +1599,28 @@ function sureHead() {
         label: ready === sureList.length ? 'Save all' : `Save ${ready} ready`,
     };
 }
-function sureRowHTML(g, books) {
+/** "See the 2 rows" / "Hide the row": the words of a line's rows toggle. */
+function sureRowsWords(n, open) { return `${open ? 'Hide' : 'See'} the ${n === 1 ? 'row' : `${n} rows`}`; }
+/** A line's rows (oldest first): date, account, amount and statement text. */
+function sureRowsHTML(g) {
+    const rows = g.items.map(i => i.row);
+    return `<table class="t table-tight sure-rows__t"><tbody>${rows.map(x => `<tr><td>${esc(day(x.date))}</td><td>${esc(x.account_name || '')}</td>
+        <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td><td class="sure-rows__text">${esc(x.description || '')}</td></tr>`).join('')}</tbody></table>`;
+}
+function sureRowHTML(g, books, at) {
     const book = sureBook(g);
     const side = g.lane === 'out' ? 'Money out' : 'Money in';
     const asks = g.proposed ? '' : ' · the book you pick becomes this merchant’s book';
+    const n = g.items.length, open = sureShown.has(g.key);
     return `<tr class="sure-row${book ? '' : ' need'}" data-key="${esc(g.key)}">
         <td class="sure-row__dot"><span class="sure-dot ${g.lane}" title="${side}"><span class="sr-only">${side}</span></span></td>
-        <td class="sure-row__m"><span class="sure-row__name">${esc(g.merchant)}</span> <span class="sure-row__need">${tag('nofig', 'needs a book')}</span>
-            <span class="sure-row__meta">${esc(plural(g.items.length, 'row'))} · <span class="num">${esc(sumByCurrency(g.items))}</span>${asks}</span></td>
+        <td class="sure-row__m"><span class="sure-row__name">${esc(g.name)}</span>${g.name !== g.merchant ? ` <span class="sure-row__jev">Jev’s name: ${esc(g.merchant)}</span>` : ''} <span class="sure-row__need">${tag('nofig', 'needs a book')}</span>
+            <span class="sure-row__meta">${esc(plural(n, 'row'))} · <span class="num">${esc(sumByCurrency(g.items))}</span>${asks}</span>
+            <span class="sure-row__links"><button type="button" class="link" data-act="sure-rows" data-key="${esc(g.key)}" aria-expanded="${open}" aria-controls="sure-rows-${at}">${sureRowsWords(n, open)}</button><button type="button" class="link" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></span></td>
         <td class="sure-row__type">${esc(g.type.name)} <span class="sure-row__pct">${Math.round(g.type.probability * 100)}%</span></td>
-        <td class="sure-row__book"><select data-change="sure-book" data-key="${esc(g.key)}" aria-label="Book for ${esc(g.merchant)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select></td>
-        <td class="sure-row__go"><button type="button" class="btn sm subtle" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.merchant)}"${book && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>`;
+        <td class="sure-row__book"><select data-change="sure-book" data-key="${esc(g.key)}" aria-label="Book for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select></td>
+        <td class="sure-row__go"><button type="button" class="btn sm subtle" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${book && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>
+        <tr class="sure-rows" id="sure-rows-${at}"${open ? '' : ' hidden'}><td colspan="5">${open ? sureRowsHTML(g) : ''}</td></tr>`;
 }
 function sureCardHTML(books) {
     if (!sureList.length) return '';
@@ -1612,7 +1637,7 @@ function sureCardHTML(books) {
         </div>
         <div class="sure-body" id="sure-body"${open ? '' : ' hidden'}>
             <p class="sure-note">${esc(SURE_NOTE)}</p>
-            <table class="sure-table"><tbody>${sureList.slice(0, limit).map(g => sureRowHTML(g, books)).join('')}</tbody></table>
+            <table class="sure-table"><tbody>${sureList.slice(0, limit).map((g, at) => sureRowHTML(g, books, at)).join('')}</tbody></table>
             ${more > 0 ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="sure">Show ${more} more</button>` : ''}</div></section>`;
 }
 /** Readiness and the busy state, drawn in place (a pick keeps its focus). */
@@ -1640,13 +1665,32 @@ ACT['sure-fold'] = el => {
     $('#sure-body').hidden = !open;
 };
 ACT['sure-book'] = el => { sureBooks.set(el.dataset.key, el.value); drawSureState(); };
+// A line opens to its rows and folds back in place; neither writes anything.
+ACT['sure-rows'] = el => {
+    const g = sureList.find(x => x.key === el.dataset.key);
+    const box = document.getElementById(el.getAttribute('aria-controls'));
+    if (!g || !box) return;
+    const open = el.getAttribute('aria-expanded') !== 'true';
+    if (open) sureShown.add(g.key); else sureShown.delete(g.key);
+    if (open && !box.cells[0].innerHTML) box.cells[0].innerHTML = sureRowsHTML(g);
+    box.hidden = !open;
+    el.setAttribute('aria-expanded', String(open));
+    el.textContent = sureRowsWords(g.items.length, open);
+};
+// Jev is wrong: "This was…" for the line's rows, Jev's guess already turned down.
+ACT['sure-else'] = el => {
+    const g = sureList.find(x => x.key === el.dataset.key);
+    if (!g || queueSaveWaits()) return;
+    const rows = g.items.map(i => i.row);
+    openWhatWas(rows[0], rows, { notGuess: g.type.name });
+};
 /** One group saved with today's guess save and the book shown. Rows an
  *  earlier save in the same press already labelled are left out; a group
  *  left with none is skipped. */
 async function saveSureGroup(g, labelled) {
     const rows = g.items.map(i => i.row).filter(x => !labelled.has(x.id));
     if (!rows.length) return { skipped: true };
-    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { visible: true, book: sureBook(g) }), rows, { quiet: true });
+    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { merchant: g.name, visible: true, book: sureBook(g) }), rows, { quiet: true });
     res.labelledIds.forEach(id => labelled.add(id));
     return res;
 }
@@ -1659,7 +1703,7 @@ ACT['sure-save'] = async el => {
     queueBusy = false;
     if (!res.skipped) {   // skipped: its rows already have a type
         if (res.ok) sureBooks.delete(g.key);
-        savedToast(g.merchant, g.type.name, book, res, g.items.map(i => i.row));
+        savedToast(g.name, g.type.name, book, res, g.items.map(i => i.row));
     }
     rerender(); refreshFrame();
 };
@@ -1681,9 +1725,9 @@ ACT['sure-all'] = async () => {
     let saved = 0, error = null, at = ready.length;
     for (const [n, g] of ready.entries()) {
         const res = await saveSureGroup(g, labelled);
-        if (res.skipped) { skipped.push([g.merchant, by.get(g.items[0].row.id)]); continue; }
+        if (res.skipped) { skipped.push([g.name, by.get(g.items[0].row.id)]); continue; }
         changes.push(...res.changes);
-        res.labelledIds.forEach(id => { if (!by.has(id)) by.set(id, g.merchant); });
+        res.labelledIds.forEach(id => { if (!by.has(id)) by.set(id, g.name); });
         // A merchant whose rule was made counts as saved even if one of its
         // rows then failed: its changes are in the Undo.
         if (res.resolved) { sureBooks.delete(g.key); saved += 1; }
@@ -1714,7 +1758,7 @@ async function workHTML() {
     const { r, ask, sure, cards } = queueModel;
     const needle = queueSearch.trim().toLowerCase();
     const hit = text => !needle || String(text || '').toLowerCase().includes(needle);
-    sureList = sure.filter(g => hit(g.merchant));
+    sureList = sure.filter(g => hit(g.name) || hit(g.merchant));
     queueGroups.clear();
     laneCardByKey.clear();
     const all = [...cards.out, ...cards.in];
@@ -1764,9 +1808,9 @@ function alsoHTML(q) {
 }
 
 async function viewQueue() {
-    const [q, guesses, r, ask] = await Promise.all([loadQueue(), loadGuesses(), refs(), suggestionsOn()]);
+    const [q, guesses, r, ask, services] = await Promise.all([loadQueue(), loadGuesses(), refs(), suggestionsOn(), servicesList()]);
     // The sure groups sit in their card, so they leave the lanes below.
-    const sure = sureGroups(q, guesses, r);
+    const sure = sureGroups(q, guesses, r, services);
     const sureIds = new Set(sure.flatMap(g => g.items.map(i => i.row.id)));
     const left = lane => q.lanes[lane].filter(i => !(i.kind === 'untyped' && sureIds.has(i.row.id)));
     const cards = { out: laneCards('out', left('out'), guesses), in: laneCards('in', left('in'), guesses) };
@@ -1848,7 +1892,9 @@ async function openStepFor(el) {
     const group = (el.dataset.group && queueGroups.get(el.dataset.group)) || [row];
     openWhatWas(row, group, { mixed: el.dataset.kind === 'mixed' });
 }
-async function openWhatWas(row, group, { mixed = false } = {}) {
+/** notGuess: the type Jev guessed and the operator turned down (the sure
+ *  card's Something else…), so the guess is not offered again. */
+async function openWhatWas(row, group, { mixed = false, notGuess = '' } = {}) {
     const [r, incomeKinds, services, q] = await Promise.all([refs(), get('/api/types?kind=income'), servicesList(), loadQueue()]);
     const minor = toMinor(row.amount_sgd, row.currency);
     const untyped = row.flow_type !== 'review';
@@ -1857,14 +1903,15 @@ async function openWhatWas(row, group, { mixed = false } = {}) {
     const waiting = q.lanes.out.concat(q.lanes.in).filter(i => i.kind === 'untyped' && i.row.id !== row.id);
     const others = pattern ? waiting.filter(i => (i.row.description || '').toUpperCase().includes(pattern)).length : group.length - 1;
     let guess;
-    if (untyped) guess = await showResolveSuggestion(row, { n: group.length, where: 'step' });
+    if (notGuess) guess = { html: '', visible: true };
+    else if (untyped) guess = await showResolveSuggestion(row, { n: group.length, where: 'step' });
     else guess = transferGuessHTML(row, await transferGuess(row), { where: 'step' });
     step = { row, group, untyped, mixed, choice: null, more: false, merchant, pattern, others, r, incomeKinds, services,
-        suggestionVisible: !!(guess && guess.visible), guessed: !!(guess && guess.html) };
+        suggestionVisible: !!(guess && guess.visible), guessed: !!(notGuess || (guess && guess.html)) };
     const title = `${minor < 0 ? 'Money in' : 'Money out'} · what was it?`;
     openSheet(title, `${rowHead(row, { more: group.length - 1 })}
         <div id="ww-guess">${guess.html || ''}</div>
-        <p class="ww-label" id="ww-label">${guess.html ? 'Or something else' : 'What was it?'}</p>
+        <p class="ww-label" id="ww-label">${notGuess ? `Not ${esc(notGuess)}? Something else` : guess.html ? 'Or something else' : 'What was it?'}</p>
         <div class="choices" id="ww-choices"></div>
         <div id="ww-ask"></div>`, { eyebrow: group.length > 1 ? `This was… · all ${group.length} rows` : 'This was…' });
     drawChoices();
@@ -2031,13 +2078,17 @@ ACT['ww-save'] = async () => {
         if (r) { closeSheet(); rerender(); }
         return;
     }
-    let done = 0;
+    // One request a row; the toast's Undo takes back every row it labelled.
+    let done = 0, failed = false;
+    const changes = [];
     for (const x of rows) {
         const r = await send('POST', `/api/review/${x.id}/label`, body);
-        if (!r.ok) { toast(`${done ? `${plural(done, 'row')} labelled; then: ` : ''}${r.data.error || 'that did not work'}`, { bad: true }); break; }
+        if (!r.ok) { toast(`${done ? `${plural(done, 'row')} labelled; then: ` : ''}${r.data.error || 'that did not work'}`, { bad: true, undo: changes, ms: 9000 }); failed = true; break; }
+        if (r.change) changes.push(r.change);
         done += 1;
     }
-    if (done) { toast(`${plural(done, 'row')} labelled. Each can be undone in Changes.`); closeSheet(); rerender(); refreshFrame(); }
+    if (done && !failed) toast(`${plural(done, 'row')} labelled: ${choice.label}.`, { undo: changes });
+    if (done) { closeSheet(); rerender(); refreshFrame(); }
 };
 // "Yes, Groceries": fin's type guess, saved at once for the merchant's rows.
 ACT['guess-yes'] = async el => {
