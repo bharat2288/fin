@@ -1328,25 +1328,27 @@ def api_loan_interest():
 # Services API
 # ---------------------------------------------------------------------------
 
-@app.route("/api/services")
-def api_services():
-    """List all services with their book, type and transaction/rule counts."""
-    with get_db() as conn:
-        rows = conn.execute("""
-            SELECT s.*, ty.name as type_name, tp.name as parent_type,
-                   (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
-                    AND COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')) as txn_count,
-                   (SELECT COUNT(*) FROM merchant_rules mr WHERE mr.service_id = s.id) as rule_count,
-                   (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
-                    AND """ + CHECKABLE_ROWS + """) as rows_to_check
-            FROM services s
-            """ + _TYPE_JOINS.format(owner="s") + """
-            ORDER BY s.name
-        """).fetchall()
-        # Fetch all rule patterns grouped by service_id
-        rule_rows = conn.execute(
-            "SELECT service_id, pattern, match_type FROM merchant_rules WHERE service_id IS NOT NULL ORDER BY pattern"
-        ).fetchall()
+def _merchants(conn, svc_id: int | None = None) -> list[dict]:
+    """Merchants with their book, type, rules and counts; one when svc_id is given."""
+    one = "WHERE s.id = ?" if svc_id is not None else ""
+    rows = conn.execute("""
+        SELECT s.*, ty.name as type_name, tp.name as parent_type,
+               (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
+                AND COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')) as txn_count,
+               (SELECT COUNT(*) FROM merchant_rules mr WHERE mr.service_id = s.id) as rule_count,
+               (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
+                AND """ + CHECKABLE_ROWS + """) as rows_to_check
+        FROM services s
+        """ + _TYPE_JOINS.format(owner="s") + f"""
+        {one}
+        ORDER BY s.name
+    """, (svc_id,) if svc_id is not None else ()).fetchall()
+    # Fetch the rule patterns grouped by service_id
+    rule_rows = conn.execute(
+        "SELECT service_id, pattern, match_type FROM merchant_rules WHERE service_id IS NOT NULL"
+        + (" AND service_id = ?" if svc_id is not None else "") + " ORDER BY pattern",
+        (svc_id,) if svc_id is not None else (),
+    ).fetchall()
     rules_by_svc: dict[int, list[dict]] = {}
     for rr in rule_rows:
         rules_by_svc.setdefault(rr["service_id"], []).append(
@@ -1359,7 +1361,32 @@ def api_services():
         d["display_type"] = format_type_display(d["parent_type"], d["type_name"])
         d["rules"] = rules_by_svc.get(d["id"], [])
         result.append(d)
-    return jsonify(result)
+    return result
+
+
+@app.route("/api/services")
+def api_services():
+    """List all services with their book, type and transaction/rule counts."""
+    with get_db() as conn:
+        return jsonify(_merchants(conn))
+
+
+@app.route("/api/services/<int:svc_id>")
+def api_service(svc_id):
+    """One merchant, as its page shows it: the list's facts, plus its spending
+    and refund rows' span (rows, first and last date, accounts paid from)."""
+    with get_db() as conn:
+        found = _merchants(conn, svc_id)
+        if not found:
+            return jsonify({"error": "This merchant is no longer in fin"}), 404
+        span = conn.execute(
+            "SELECT COUNT(*) AS rows, MIN(t.date) AS first_date, MAX(t.date) AS last_date,"
+            " COUNT(DISTINCT s.account_id) AS accounts"
+            " FROM transactions t JOIN statements s ON s.id = t.statement_id"
+            " WHERE t.service_id = ? AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')",
+            (svc_id,),
+        ).fetchone()
+    return jsonify({**found[0], **dict(span)})
 
 
 @app.route("/api/services/bulk-rename", methods=["POST"])
