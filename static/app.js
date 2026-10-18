@@ -1671,14 +1671,24 @@ async function workHTML() {
     [...found.out, ...found.in].forEach(c => { counts[c.step] = (counts[c.step] || 0) + 1; });
     const chip = (k, label, n) => `<button type="button" class="chip${k ? ` q-step--${k}` : ''}" data-act="q-step" data-step="${k}" aria-pressed="${step === k}">${k ? '<span class="q-dot" aria-hidden="true"></span>' : ''}${esc(label)}${k ? ` <span class="n">${n}</span>` : ''}</button>`;
     const chips = all.length ? `<div class="chips q-steps" role="group" aria-label="Steps">${chip('', 'All steps')}${QUEUE_STEPS.filter(s => counts[s.k] || s.k === step).map(s => chip(s.k, s.label, counts[s.k] || 0)).join('')}</div>` : '';
+    const shown = { out: step ? found.out.filter(c => c.step === step) : found.out, in: step ? found.in.filter(c => c.step === step) : found.in };
     const lanes = await Promise.all(['out', 'in'].map(lane => {
-        const list = step ? found[lane].filter(c => c.step === step) : found[lane];
         const empty = !cards[lane].length ? 'Nothing that needs thought.'
             : needle ? `Nothing here matches “${queueSearch.trim()}”.` : `Nothing here under ${step && QUEUE_STEPS.find(s => s.k === step).label}.`;
-        return laneHTML(lane, list, { books: r.books, ask, empty });
+        return laneHTML(lane, shown[lane], { books: r.books, ask, empty });
     }));
-    return `${sureCardHTML(r.books)}${chips}<div class="waits-cols q-cols">${lanes.join('')}</div>`;
+    // On a phone one side shows at a time; the desk hides the toggle and shows both.
+    const side = store.get('queueSide', 'out') === 'in' ? 'in' : 'out';
+    const sides = `<div class="seg q-side" role="group" aria-label="Show">${['out', 'in'].map(lane =>
+        `<button type="button" data-act="q-side" data-side="${lane}" aria-pressed="${side === lane}"><span class="sure-dot ${lane}" aria-hidden="true"></span>${lane === 'out' ? 'Money out' : 'Money in'} <span class="n">${shown[lane].length}</span></button>`).join('')}</div>`;
+    return `${sureCardHTML(r.books)}${chips}${sides}<div class="waits-cols q-cols" data-side="${side}">${lanes.join('')}</div>`;
 }
+ACT['q-side'] = el => {
+    store.set('queueSide', el.dataset.side);
+    $$('[data-act="q-side"]').forEach(b => b.setAttribute('aria-pressed', String(b === el)));
+    const cols = $('.q-cols');
+    if (cols) cols.dataset.side = el.dataset.side;
+};
 async function drawWork({ focus = '' } = {}) {
     const token = ++workToken;
     const html = await workHTML();

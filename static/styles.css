@@ -884,6 +884,10 @@ li.empty { list-style: none; margin-top: 8px; }
 .q-search { flex: 1 1 260px; }
 .q-work > * + * { margin-top: 14px; }
 .q-cols { align-items: start; }
+/* the Out / In toggle: a phone shows one side at a time; the desk shows both */
+.q-side { display: none; }
+.q-side .sure-dot { flex: none; }
+.q-side .n { font-weight: var(--font-bold); opacity: 0.7; font-variant-numeric: tabular-nums; }
 /* a step's colour: its dot on a chip and on its section's heading */
 .q-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--c); }
 .q-step--transfer { --c: var(--chart-5); }
@@ -1036,10 +1040,18 @@ li.empty { list-style: none; margin-top: 8px; }
     .sure-table, .sure-table tbody { display: block; }
     .sure-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 14px; border-top: 1px solid var(--border-subtle); }
     .sure-table td, .sure-table td:first-child, .sure-table td:last-child { width: auto; padding: 0; border: 0; }
-    .sure-row__m { flex: 1 1 calc(100% - 30px); }
-    .sure-table .sure-row__type { flex: 1 1 100%; padding-left: 19px; }
-    .sure-table .sure-row__book { flex: 1 1 0; min-width: 0; padding-left: 19px; }
-    .sure-row__book select { min-height: var(--tap); }
+    .sure-row__m { flex: 1 1 calc(100% - 30px); display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
+    .sure-row__name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sure-row__need { flex: none; }
+    .sure-row__meta { flex: 1 1 100%; min-width: 0; }
+    .sure-table .sure-row__type { flex: 1 1 0; min-width: 0; padding-left: 19px; white-space: normal; overflow-wrap: anywhere; }
+    .sure-table .sure-row__book { flex: 0 1 150px; min-width: 0; }
+    .sure-row__book select { width: 100%; min-height: var(--tap); }
+    .sure-row__go .btn { min-width: var(--tap); }
+    /* the Out / In toggle: one side at a time, the choice kept */
+    .q-side { display: flex; width: 100%; }
+    .q-side > button { flex: 1 1 0; }
+    .q-cols[data-side="out"] > #lane-in, .q-cols[data-side="in"] > #lane-out { display: none; }
 }
 
 /* ========================================================================== */
