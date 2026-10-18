@@ -2342,6 +2342,12 @@ def api_resolve_transaction():
             'transaction'     this row only (a row may override both)
             'rule'            a rule override for the pattern
             'service_default' the merchant's default (the default)
+        check_each_row: the merchant setting, in the same transaction
+            (service_default only; left out, the merchant keeps its own).
+            true is Check each row: a merchant fin already held keeps its past
+            rows as they are (checked), as the setting's "Not now" does, and
+            the rows the new rule reaches wait to be checked. false is Every
+            row the same: the flag is cleared, labels kept.
 
     Flow:
         1. Find existing service by service_id or name, or create new one
@@ -2366,6 +2372,11 @@ def api_resolve_transaction():
         return jsonify({"error": "service_name or service_id required"}), 400
     if apply_scope == "rule" and not pattern:
         return jsonify({"error": "pattern required for rule override"}), 400
+    check_each_row = data.get("check_each_row")
+    if check_each_row is not None and not isinstance(check_each_row, bool):
+        return jsonify({"error": "check_each_row must be true or false"}), 400
+    if check_each_row is not None and apply_scope != "service_default":
+        return jsonify({"error": "Check each row is a merchant setting: it goes with every row from this merchant"}), 400
     pattern_error = _rule_pattern_error(pattern)
     if pattern and apply_scope in {"rule", "service_default"} and pattern_error:
         return jsonify({"error": pattern_error}), 400
@@ -2387,14 +2398,14 @@ def api_resolve_transaction():
             # Step 1: Resolve service — find existing or create new
             if service_id:
                 svc = conn.execute(
-                    "SELECT id, book, type_id FROM services WHERE id = ?", (service_id,)
+                    "SELECT id, book, type_id, review_each_time FROM services WHERE id = ?", (service_id,)
                 ).fetchone()
                 if not svc:
                     return jsonify({"error": f"Service ID {service_id} not found"}), 404
             else:
                 # Look up by name (case-insensitive)
                 svc = conn.execute(
-                    "SELECT id, book, type_id FROM services WHERE UPPER(name) = ?",
+                    "SELECT id, book, type_id, review_each_time FROM services WHERE UPPER(name) = ?",
                     (service_name.upper(),),
                 ).fetchone()
 
@@ -2426,6 +2437,20 @@ def api_resolve_transaction():
                 )
                 service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                 merchant_book = book
+
+            # The setting, as taught: Check each row, or Every row the same. A
+            # merchant fin already held, newly set to check each row, keeps its
+            # past rows as they are (checked), so they never come to the Queue
+            # unasked; the rows this save labels wait.
+            if check_each_row and svc and not svc["review_each_time"]:
+                conn.execute(
+                    f"UPDATE transactions SET cat_source = 'manual' WHERE id IN ("
+                    f"SELECT t.id FROM transactions t WHERE t.service_id = ? AND t.id != ? AND {CHECKABLE_ROWS})",
+                    (service_id, tx_id),
+                )
+            if check_each_row is not None:
+                conn.execute("UPDATE services SET review_each_time = ? WHERE id = ?",
+                             (1 if check_each_row else 0, service_id))
 
             # Step 2: Create merchant rule if pattern provided (optional for PayNow/transfers)
             rule_id = None
