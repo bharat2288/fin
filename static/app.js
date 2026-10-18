@@ -816,7 +816,7 @@ function homeClaudeLine(settings) {
         return `<div class="notice claude home-claude"><span class="home-claude__mark" aria-hidden="true">✳</span>
             <p class="home-claude__text"><b>${plural(settings.claude_count, 'change')} by Claude</b> since you last looked${looked ? ` ${esc(looked)}` : ''}${settings.latest_claude_at ? ` · newest ${esc(when(settings.latest_claude_at).replace(/^today /, ''))}` : ''}</p>
             <div class="home-claude__act"><a class="btn sm" href="#/changes">Check them</a>
-            <button type="button" class="btn sm quiet" data-act="looks-right" data-upto="${esc(settings.newest)}">Looks right</button></div></div>`;
+            <button type="button" class="btn sm ghost" data-act="looks-right" data-upto="${esc(settings.newest)}">Looks right</button></div></div>`;
     }
     return `<div class="notice home-claude is-quiet"><span class="home-claude__mark" aria-hidden="true">✳</span>
         <p class="home-claude__text">Nothing new from Claude since you last looked${looked ? ` ${esc(looked)}` : ''}.</p>
@@ -938,8 +938,9 @@ function monthCheckMini(sheet) {
 }
 
 /** One waiting thing, as folio's attention item: an icon tile, the title and
- *  its marker, what it holds out, the amount, and its actions (one ink at
- *  most; accepting fin's guess is camel; setting aside is quiet). */
+ *  its marker, what it holds out, the amount, and its actions (its next step
+ *  outlined; accepting fin's guess is sand, a save in a row; setting aside a
+ *  ghost). */
 const HOME_ITEM_ICONS = { transfer: 'arrows-left-right', untyped: 'warning', mixed: 'list-bullets', bill: 'receipt',
     refused: 'prohibit', off: 'prohibit', stale: 'clock', nofig: 'warning', aside: 'circle-dashed' };
 function homeItemHTML(item, guesses) {
@@ -960,13 +961,13 @@ function homeItemHTML(item, guesses) {
     if (item.kind === 'transfer') actions = btn('This was…', '', 'this-was', { tx: item.row.id });
     else if (item.kind === 'untyped' && guess) {
         guessLine = `<p class="att__guess">fin’s guess: <b>${esc(guess.name)}</b>, ${Math.round(guess.probability * 100)}% sure</p>`;
-        actions = btn(`Yes, ${guess.name}`, 'primary', 'home-guess-yes', { tx: item.row.id, type: guess.type_id, merchant: guess.merchant || '' })
+        actions = btn(`Yes, ${guess.name}`, 'subtle', 'home-guess-yes', { tx: item.row.id, type: guess.type_id, merchant: guess.merchant || '' })
             + btn('Something else', '', 'resolve', { tx: item.row.id });
     } else if (item.kind === 'untyped') actions = btn('This was…', '', 'resolve', { tx: item.row.id });
-    else if (item.kind === 'mixed') actions = btn(`Yes, ${item.row.display_type || 'no type'} · ${item.row.book || ''}`, 'primary', 'mixed-yes', { tx: item.row.id }) + btn('Something else', '', 'resolve', { tx: item.row.id, kind: 'mixed' });
-    else if (item.kind === 'refused') actions = btn('See the tie line', 'ink', 'refused-sum', { id: item.refused.id })
-        + link('Import a fixed file', '', '#/books/import') + btn('Known, leave it', 'quiet', 'aside', { id: item.refused.id, aside: 1 });
-    else actions = (item.actions || []).map(a => a.href ? link(a.label, a.primary ? 'ink' : '', a.href) : btn(a.label, a.primary ? 'ink' : '', a.act, a.data)).join('');
+    else if (item.kind === 'mixed') actions = btn(`Yes, ${item.row.display_type || 'no type'} · ${item.row.book || ''}`, 'subtle', 'mixed-yes', { tx: item.row.id }) + btn('Something else', '', 'resolve', { tx: item.row.id, kind: 'mixed' });
+    else if (item.kind === 'refused') actions = btn('See the tie line', '', 'refused-sum', { id: item.refused.id })
+        + link('Import a fixed file', '', '#/books/import') + btn('Known, leave it', 'ghost', 'aside', { id: item.refused.id, aside: 1 });
+    else actions = (item.actions || []).map(a => a.href ? link(a.label, '', a.href) : btn(a.label, '', a.act, a.data)).join('');
     const mark = item.row ? rowMark(item.row.id) : item.line ? accountMark(item.line.account_id) : '';
     return `<article class="att att--${item.kind}${item.kind === 'refused' ? ' is-blocking' : ''}">
         <span class="att__ic" aria-hidden="true">${icon(HOME_ITEM_ICONS[item.kind] || 'info')}</span>
@@ -1205,7 +1206,7 @@ async function showResolveSuggestion(row, { n = 1, where = 'card', guess } = {})
             html: `<div class="guess"><span>fin’s guess: <b>${esc(top.name)}</b>${book ? `, ${esc(book)}` : ''}</span>
                 <span class="guess__meter" aria-hidden="true"><i style="width:${share(top.probability)}%"></i></span><span class="guess__sure">${share(top.probability)}% sure</span>
                 ${where === 'step' ? `<div class="guess__act">${yes(top, 'primary')}</div>` : ''}</div>`,
-            actions: yes(top, 'sm primary'), top3: '', visible: true,
+            actions: yes(top, 'sm subtle'), top3: '', visible: true,
         };
     }
     if (suggestion.route === 'top3') {
@@ -1230,7 +1231,7 @@ async function suggestionsOn() {
 }
 function suggestEntryHTML({ lists = false } = {}) {
     return `<p class="suggest-entry${lists ? ' suggest-entry--lists' : ''}"><span class="small muted">${lists ? 'Merchants no rule knows can be' : 'These can be'} sent for a type suggestion, one name at a time, after you read the list.</span>
-        <button type="button" class="btn sm quiet" data-act="suggest-types">${icon('list-bullets')}Suggest types…</button></p>`;
+        <button type="button" class="btn sm ghost" data-act="suggest-types">${icon('list-bullets')}Suggest types…</button></p>`;
 }
 let suggestList = [];
 ACT['suggest-types'] = async el => {
@@ -1243,7 +1244,7 @@ ACT['suggest-types'] = async el => {
     const items = suggestList.map((m, i) => `<label class="check suggest-pick"><input type="checkbox" class="suggest-pick-box" data-index="${i}" checked data-change="suggest-tick"><span>${esc(m)}</span></label>`).join('');
     openSheet('Read the list before anything is sent', `<p>Nothing has been sent. Each ticked name below is sent on its own, with the type list and nothing else. Untick any that is a person’s name or that you do not want sent.</p>
         <div class="suggest-pick-head"><span class="small muted" id="suggest-n">${plural(suggestList.length, 'name')} ticked</span>
-            <span><button type="button" class="btn sm quiet" data-act="suggest-all" data-on="1">Tick all</button><button type="button" class="btn sm quiet" data-act="suggest-all" data-on="0">Untick all</button></span></div>
+            <span><button type="button" class="btn sm ghost" data-act="suggest-all" data-on="1">Tick all</button><button type="button" class="btn sm ghost" data-act="suggest-all" data-on="0">Untick all</button></span></div>
         <div class="suggest-pick-list" role="group" aria-label="Merchant names to send">${items}</div>`,
         { eyebrow: 'Suggest types', center: true,
           foot: `<button class="btn" data-act="close-sheet">Not now</button><button class="btn primary" data-act="suggest-send" id="suggest-send">Send the ticked names</button>` });
@@ -1293,7 +1294,7 @@ function transferGuessHTML(row, g, { where = 'card' } = {}) {
         html: `<div class="guess"><span>fin’s guess: ${w.what}</span>
             <span class="guess__meter" aria-hidden="true"><i style="width:${p}%"></i></span><span class="guess__sure">${p}% sure · ${g.agree === g.of ? `the last ${g.of} went the same way` : `${g.agree} of the last ${g.of} went this way`}</span>
             ${where === 'step' ? `<div class="guess__act">${yes('primary')}</div>` : ''}</div>`,
-        actions: yes('sm primary'),
+        actions: yes('sm subtle'),
     };
 }
 async function transferGuess(row) {
@@ -1338,8 +1339,8 @@ async function queueCardHTML(card) {
     const data = a => Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('') + (card.rows.length ? ` data-group="${esc(card.key)}"` : '');
     const all = n > 1 ? ` (all ${n})` : '';
     const own = (card.actions || []).map(a => a.href
-        ? `<a class="btn sm${a.primary ? ' ink' : ''}" href="${a.href}">${esc(a.label)}</a>`
-        : `<button type="button" class="btn sm${a.primary && !guess.actions ? ' ink' : ''}" data-act="${a.act}"${data(a)}>${esc(guess.actions && /^This was/.test(a.label) ? 'Something else' : a.label + (/^This was/.test(a.label) ? all : ''))}</button>`).join('');
+        ? `<a class="btn sm" href="${a.href}">${esc(a.label)}</a>`
+        : `<button type="button" class="btn sm" data-act="${a.act}"${data(a)}>${esc(guess.actions && /^This was/.test(a.label) ? 'Something else' : a.label + (/^This was/.test(a.label) ? all : ''))}</button>`).join('');
     const seeRows = seeRowsHTML(card.rows);
     return `<article class="item q-card ${card.kind}">
         <div><div class="what">${esc(card.title)} ${marker}${count}${row ? rowMark(row.id) : ''}</div><div class="meta">${esc(meta || '')}</div>${card.holds && card.kind === 'mixed' ? `<div class="holds">${esc(card.holds)}</div>` : ''}</div>
@@ -1462,7 +1463,7 @@ function pickSaveHTML(card, books) {
     if (!pick) return '';
     return `${eachSetHTML('pick-set', card.key, card.merchant, pick.each)}
         <label class="usual-pick">${pick.each ? '<span class="usual-l">usual book</span>' : ''}<select data-change="pick-book" data-key="${esc(card.key)}" aria-label="${pick.each ? 'Usual book' : 'Book'} for ${esc(card.merchant)}">${bookOptions(books, pick.book, 'Choose book')}</select></label>${prefillHintHTML(card.prefill, pick.book, 'q-pick-hint')}
-        <button type="button" class="btn sm primary" data-act="pick-save" data-key="${esc(card.key)}"${pick.book && !queueBusy ? '' : ' disabled'}>Save</button>`;
+        <button type="button" class="btn sm subtle" data-act="pick-save" data-key="${esc(card.key)}"${pick.book && !queueBusy ? '' : ' disabled'}>Save</button>`;
 }
 function pickCardHTML(card, books) {
     queueGroups.set(card.key, card.rows);
@@ -1557,13 +1558,13 @@ function eachCardHTML(card, books) {
             <div class="ce-pick"><select data-change="each-type" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Type for the ${when} row"${off}>${typeOptions(types, line.typeId)}</select>
                 <select data-change="each-book" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Book for the ${when} row"${off}>${bookOptions(books, line.book, 'Choose book')}</select>
                 <span class="hint">${esc(line.hint)}</span>
-                <button type="button" class="btn sm subtle" data-act="each-ok" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Confirm the ${when} row"${eachReady(line) && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></div></div>`;
+                <button type="button" class="btn sm subtle icon" data-act="each-ok" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Confirm the ${when} row"${eachReady(line) && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></div></div>`;
     }).join('');
     const ready = card.rows.every(x => eachReady(eachLine(x)));
     return `<article class="item q-card mixed" data-key="${esc(card.key)}">${cardHead(card, '')}
         <div class="q-each"><p class="holds">Each row came in with ${esc(card.merchant)}’s type and usual book, and counts there until you check it: confirm it as it is, or change its type or book.</p>${lines}
             ${n > limit ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="${esc(card.key)}">Show ${plural(n - limit, 'more line')}</button>` : ''}</div>
-        <div class="act"><button type="button" class="btn sm primary" data-act="each-save" data-key="${esc(card.key)}"${ready && !queueBusy ? '' : ' disabled'}>Confirm all</button>
+        <div class="act"><button type="button" class="btn sm subtle" data-act="each-save" data-key="${esc(card.key)}"${ready && !queueBusy ? '' : ' disabled'}>Confirm all</button>
             ${card.rows[0].service_id ? `<a class="link" href="#/books/merchant/${card.rows[0].service_id}">${esc(card.merchant)}’s page</a>` : ''}</div></article>`;
 }
 /** A pick redraws its line's hint and the card's buttons in place (focus stays). */
@@ -1623,12 +1624,12 @@ async function laneHTML(lane, list, { books, ask, empty }) {
         const drawn = await Promise.all(cards.slice(0, limit).map(c =>
             c.step === 'pick' ? pickCardHTML(c, books) : c.step === 'mixed' ? eachCardHTML(c, books) : queueCardHTML(c)));
         const more = cards.length - limit;
-        return `<section class="q-sec q-step--${s.k}">
-            <h3 class="q-sec__h"><button type="button" class="q-sec__fold" data-act="q-fold" data-sec="${key}" aria-expanded="${open}" aria-controls="q-sec-${key}"><span class="q-dot" aria-hidden="true"></span>${esc(s.label)} <span class="q-sec__n">· ${cards.length}</span>${icon('caret-right', 'caret')}</button></h3>
+        return `<section class="q-sec">
+            <h3 class="q-sec__h"><button type="button" class="q-sec__fold" data-act="q-fold" data-sec="${key}" aria-expanded="${open}" aria-controls="q-sec-${key}">${esc(s.label)} <span class="q-sec__n">· ${cards.length}</span>${icon('caret-right', 'caret')}</button></h3>
             <div class="q-sec__body" id="q-sec-${key}"${open ? '' : ' hidden'}>${s.k === 'noguess' && ask ? suggestEntryHTML() : ''}${drawn.join('')}
                 ${more > 0 ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="${key}">Show ${more} more</button>` : ''}</div></section>`;
     }));
-    return `<section class="card card--lift q-lane" id="lane-${lane}">
+    return `<section class="card q-lane" id="lane-${lane}">
         <h2 class="q-lane__h"><span class="sure-dot ${lane}" aria-hidden="true"></span>${lane === 'out' ? 'Money out' : 'Money in'} <small>${list.length} to do · ${plural(rows, 'row')}</small></h2>
         ${list.length ? sections.join('') : `<p class="q-lane__empty">${esc(empty)}</p>`}</section>`;
 }
@@ -1753,7 +1754,7 @@ function sureRowHTML(g, books, at) {
         <td class="sure-row__type">${esc(g.type.name)} <span class="sure-row__pct">${Math.round(g.type.probability * 100)}%</span></td>
         <td class="sure-row__set">${eachSetHTML('sure-set', g.key, g.name, each)}</td>
         <td class="sure-row__book"><label>${each ? '<span class="usual-l">usual book</span>' : ''}<select data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select></label>${prefillHintHTML(g.prefill, book, 'sure-row__hint')}</td>
-        <td class="sure-row__go"><button type="button" class="btn sm subtle" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${sureReady(g) && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>
+        <td class="sure-row__go"><button type="button" class="btn sm subtle icon" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${sureReady(g) && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>
         <tr class="sure-rows" id="sure-rows-${at}"${open ? '' : ' hidden'}><td colspan="6">${open ? sureRowsHTML(g) : ''}</td></tr>`;
 }
 function sureCardHTML(books) {
@@ -1763,7 +1764,7 @@ function sureCardHTML(books) {
     // Many merchants show a page at a time; Save all still saves every ready one.
     const limit = queueOpen.sure || LINES_PAGE;
     const more = sureList.length - limit;
-    return `<section class="card card--lift sure-card" id="sure-card">
+    return `<section class="card sure-card" id="sure-card">
         <div class="sure-head">
             <div class="sure-head__title"><h2><button type="button" class="sure-fold" data-act="sure-fold" aria-expanded="${open}" aria-controls="sure-body">${icon('caret-right', 'caret')}<span>Jev is sure of ${esc(plural(sureList.length, 'merchant'))}</span></button></h2>
                 <span class="sure-head__meta" id="sure-meta">${esc(h.meta)}</span></div>
@@ -1970,7 +1971,7 @@ async function workHTML() {
     const found = { out: cards.out.filter(c => hit(c.find)), in: cards.in.filter(c => hit(c.find)) };
     const counts = {};
     [...found.out, ...found.in].forEach(c => { counts[c.step] = (counts[c.step] || 0) + 1; });
-    const chip = (k, label, n) => `<button type="button" class="chip${k ? ` q-step--${k}` : ''}" data-act="q-step" data-step="${k}" aria-pressed="${step === k}">${k ? '<span class="q-dot" aria-hidden="true"></span>' : ''}${esc(label)}${k ? ` <span class="n">${n}</span>` : ''}</button>`;
+    const chip = (k, label, n) => `<button type="button" class="chip" data-act="q-step" data-step="${k}" aria-pressed="${step === k}">${esc(label)}${k ? ` <span class="n">${n}</span>` : ''}</button>`;
     const chips = all.length ? `<div class="chips q-steps" role="group" aria-label="Steps">${chip('', 'All steps')}${QUEUE_STEPS.filter(s => counts[s.k] || s.k === step).map(s => chip(s.k, s.label, counts[s.k] || 0)).join('')}</div>` : '';
     const shown = { out: step ? found.out.filter(c => c.step === step) : found.out, in: step ? found.in.filter(c => c.step === step) : found.in };
     const lanes = await Promise.all(['out', 'in'].map(lane => {
@@ -2408,7 +2409,7 @@ ACT['refused-sum'] = async el => {
     { eyebrow: `Tie line · refused at upload ${esc(when(f.refused_at))}`,
         foot: `${f.set_aside ? `<button class="btn" data-act="aside" data-id="${f.id}" data-aside="0">Bring it back</button>`
             : `<button class="btn" data-act="aside" data-id="${f.id}" data-aside="1">Known, leave it</button>`}
-            <a class="btn primary" href="#/books/import">Import a fixed file</a>` });
+            <a class="btn" href="#/books/import">Import a fixed file</a>` });
 };
 
 ACT['bill-pause'] = async el => {
@@ -2940,7 +2941,7 @@ async function viewAccount(id) {
     return `${booksNav('sheet')}
     <div class="page-head"><div><a class="link small back-link" href="#/books">← Balance sheet</a><span class="eyebrow">Books · ${esc(KIND_WORDS[acct.type] || acct.type)}</span><h1>${esc(acct.name)}${accountMark(id)}</h1>
         <p>${esc(acct.type)} · ${esc(acct.owner)} · kept in ${esc(cur)}${acct.status === 'archived' ? ' · archived' : ''}</p></div>
-        <div class="row page-head__end">${acct.takes_a_figure ? `<button class="btn primary" data-act="figure" data-account="${id}">${icon('pencil-simple')}Enter a figure</button>` : ''}${monthPicker()}</div></div>
+        <div class="row page-head__end">${acct.takes_a_figure ? `<button class="btn" data-act="figure" data-account="${id}">${icon('pencil-simple')}Enter a figure</button>` : ''}${monthPicker()}</div></div>
     <div class="acct-top${tieCard ? '' : ' acct-top--one'}">${hero}${tieCard}</div>
     ${refusedHTML ? `<section class="card"><div class="section-header"><h2>Refused at upload</h2><span class="section-header__aside">a statement that does not tie is kept out whole</span></div>${refusedHTML}</section>` : ''}
     ${figures ? `<section class="card"><div class="section-header"><h2>Your figures</h2><span class="section-header__aside">${plural(supplied.length, 'figure')} · each the fact</span></div><ul class="fig-list">${figures}</ul></section>` : ''}
@@ -3194,7 +3195,7 @@ async function viewSpending() {
         </div>
         <div class="sp-more">${spendFilterFields(sp, r)}${active.length ? '<button type="button" class="link sp-clear" data-act="spend-clear">Clear filters</button>' : ''}</div>
         <div class="sp-fold-row">
-            <button type="button" class="btn subtle" data-act="spend-filters" aria-haspopup="dialog">${icon('funnel')}Filters${active.length ? ` <span class="count">${active.length}</span>` : ''}</button>
+            <button type="button" class="btn" data-act="spend-filters" aria-haspopup="dialog">${icon('funnel')}Filters${active.length ? ` <span class="count">${active.length}</span>` : ''}</button>
             ${active.map(f => `<button type="button" class="chip" data-act="spend-drop" data-k="${f.k}" data-v="${esc(f.v || '')}" aria-label="Remove ${esc(f.label)}">${esc(f.label)} ${icon('x')}</button>`).join('')}
         </div>
     </section>
@@ -3231,7 +3232,7 @@ async function openSpendFilters() {
     const r = await refs();
     const sp = spendState();
     openSheet('Filters', `<div class="sp-sheet">${spendFilterFields(sp, r)}</div>`, { eyebrow: 'Spending',
-        foot: '<button type="button" class="btn" data-act="spend-clear">Clear every filter</button><button type="button" class="btn primary" data-act="close-sheet">Done</button>' });
+        foot: '<button type="button" class="btn" data-act="spend-clear">Clear every filter</button><button type="button" class="btn" data-act="close-sheet">Done</button>' });
 }
 ACT['spend-drill'] = el => {
     const sp = spendState();
@@ -3345,7 +3346,7 @@ async function viewBills() {
     }).join('');
     return `${booksNav('bills')}
     <div class="page-head"><div><span class="eyebrow">Books</span><h1>Bills</h1><p>What renews and when, from the rows that pay it. A renewal with no payment seen also waits in the queue.</p></div>
-        <div class="row"><button class="btn" data-act="bills-refresh">${icon('arrows-clockwise')}Refresh from rows</button><button class="btn primary" data-act="bill" data-id="">${icon('plus')}Add a bill</button></div></div>
+        <div class="row"><button class="btn" data-act="bills-refresh">${icon('arrows-clockwise')}Refresh from rows</button><button class="btn" data-act="bill" data-id="">${icon('plus')}Add a bill</button></div></div>
     <section class="card"><div class="table-wrap"><table class="t sl-stack sl-bills"><thead><tr><th>Bill</th><th class="r">Amount</th><th>How often</th><th class="r">A month</th><th>Paid from</th><th>Last paid</th><th>Next</th></tr></thead>
         <tbody>${subs.length ? groups : '<tr><td colspan="8" class="empty sl-name">No bills yet.</td></tr>'}</tbody></table></div>
         <p class="card-foot">Monthly figures in S$ at each bill’s own rate. Each book’s bills are their own total; no line adds the books.</p></section>`;
@@ -3464,7 +3465,7 @@ async function viewLists(tab) {
             <td class="sl-sub">${esc(x.pair)}${x.source ? ' · ' + esc(plainWords(x.source)) : ''}</td>
             <td class="r sl-end"><button class="btn sm" data-act="rate" data-currency="${esc(String(x.pair).split('/')[0])}" data-date="${esc(x.date)}">Change</button></td></tr>`).join('');
         return `${head}<section class="card"><div class="section-header"><div><h2>Rates</h2><p>S$ for one unit, by day. A balance in another currency joins the S$ totals at the rate for its day, or the latest saved before it.</p></div>
-            <div class="row">${(foreign.length ? foreign : ['INR']).map(c => `<button class="btn primary" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay())}">Fetch or enter a ${esc(c)} rate</button>`).join('')}</div></div>
+            <div class="row">${(foreign.length ? foreign : ['INR']).map(c => `<button class="btn" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay())}">Fetch or enter a ${esc(c)} rate</button>`).join('')}</div></div>
             <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Day</th><th>Pair</th><th class="r">Rate</th><th>Where from</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rate saved yet.</td></tr>'}</tbody></table></div>
             ${saved.length > 200 ? `<p class="card-foot">The newest 200 of ${saved.length}.</p>` : ''}</section>`;
     }
@@ -3493,7 +3494,7 @@ async function viewLists(tab) {
             <td class="r num sl-fig">${a.anchor ? `<span class="${a.anchor.amount_minor < 0 ? 'neg' : ''}">${esc(money(a.anchor.amount_minor, a.currency))}</span>` : ''}</td>
             <td class="sl-sub">${esc(a.type)} · ${restsCell(a)}</td>
             <td class="r sl-end"><button class="btn sm" data-act="account-edit" data-id="${a.id}">Edit</button></td></tr>`).join('');
-        return `${head}<section class="card"><div class="section-header"><h2>Accounts</h2><button class="btn primary" data-act="account-edit" data-id="">${icon('plus')}Add an account</button></div>
+        return `${head}<section class="card"><div class="section-header"><h2>Accounts</h2><button class="btn" data-act="account-edit" data-id="">${icon('plus')}Add an account</button></div>
             <div class="table-wrap"><table class="t sl-stack sl-accounts"><thead><tr><th>Account</th><th>Kind</th><th>Whose</th><th>Currency</th><th>What its balance rests on</th><th class="r">Latest balance held</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
             <p class="card-foot">Stale and missing figures say so, and open their fix. Owed balances are negative.</p></section>`;
     }
@@ -3513,7 +3514,7 @@ async function viewLists(tab) {
             <td class="r num sl-fig">${x.rows_labelled ?? ''}<span class="sl-phone-word"> ${x.rows_labelled === 1 ? 'row' : 'rows'}</span></td>
             <td class="sl-sub">${esc(MATCH_WORDS[x.match_type] || x.match_type)} · gives ${esc(x.service_name || '')}${sets(x) ? ' · ' + sets(x) : ''}</td></tr>`).join('');
         return `${head}<section class="card"><div class="section-header">${search('Search patterns or merchants')}
-            <div class="row"><button class="btn" data-act="rerun-rules">${icon('arrows-clockwise')}Re-run every rule</button><button class="btn primary" data-act="rule" data-id="">${icon('plus')}Add a rule</button></div></div>
+            <div class="row"><button class="btn" data-act="rerun-rules">${icon('arrows-clockwise')}Re-run every rule</button><button class="btn" data-act="rule" data-id="">${icon('plus')}Add a rule</button></div></div>
             <p class="card-foot sl-lead">${shown.length} of ${rules.length} rules${shown.length > 200 ? ' · the first 200 shown' : ''}. A rule gives a row its merchant, and with it a book and type.</p>
             <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Pattern</th><th>Match</th><th>Merchant</th><th>Sets</th><th class="r">Rows it labelled</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rule matches.</td></tr>'}</tbody></table></div></section>`;
     }
@@ -3538,7 +3539,7 @@ async function viewLists(tab) {
     return `${head}<section class="card"><div class="section-header">${search('Search merchants')}
             <div class="row">${renaming
                 ? `<button class="btn" data-act="rename-mode" data-on="0">Stop renaming</button><button class="btn primary" data-act="rename-save" id="rename-save"${pending ? '' : ' disabled'}>${pending ? `Save ${plural(pending, 'rename')}` : 'Save renames'}</button>`
-                : `<button class="btn" data-act="rename-mode" data-on="1">${icon('pencil-simple')}Rename several</button><button class="btn primary" data-act="merchant-add">${icon('plus')}Add a merchant</button>`}</div></div>
+                : `<button class="btn" data-act="rename-mode" data-on="1">${icon('pencil-simple')}Rename several</button><button class="btn" data-act="merchant-add">${icon('plus')}Add a merchant</button>`}</div></div>
         ${renaming ? '<p class="card-foot sl-lead">Type the new names, then save them together: one change in Changes, with Undo. Rules and rows keep pointing at the same merchant.</p>' : ''}
         ${ask}<div class="chips sl-chips">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('each', 'Check each row', services.filter(filters.each).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
         <div class="table-wrap"><table class="t sl-stack${renaming ? ' sl-renaming' : ''}"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty sl-name">None.</td></tr>'}</tbody></table></div>
@@ -3916,7 +3917,7 @@ async function viewImport() {
     <section class="card import-drop">
         <div class="drop desk-only" id="drop"><span class="drop__icon">${icon('upload-simple')}</span><b>Drop statement files here</b>
             <span>or <label class="link" for="imp-files">choose them</label>. Each goes through the same tie check.</span></div>
-        <div class="phone-only"><label class="btn primary block" for="imp-files">${icon('upload-simple')}Choose statement files</label></div>
+        <div class="phone-only"><label class="btn block" for="imp-files">${icon('upload-simple')}Choose statement files</label></div>
         <input type="file" id="imp-files" multiple hidden data-change="import-files">
         ${importState.busy ? '<p class="loading">Reading…</p>' : ''}
     </section>
@@ -4301,7 +4302,7 @@ function writeSwitchHTML(state, h) {
                     <p>Claude can still read fin and answer in chat. Every write from chat is refused and changes nothing.</p>
                     ${state.unreadable ? '<p class="write-since">The switch could not be read, so writes are off. Turning it on saves it again.</p>'
                         : state.changed_at ? `<p class="write-since">Off since ${esc(when(state.changed_at))}.</p>` : ''}</div>
-                <div class="write-end">${sw}<button class="btn primary" data-act="claude-switch-on">Turn it back on</button></div>
+                <div class="write-end">${sw}<button class="btn" data-act="claude-switch-on">Turn it back on</button></div>
             </div></section>`;
     }
     return `<section class="card write-card" aria-labelledby="write-head">
@@ -4656,7 +4657,7 @@ async function openRowSheet(txId, opts = {}) {
     $('#sheet-title').textContent = found.description;
     // "This was…" is the row's one main action only while it waits for a label (walk C8.3).
     const thisWas = waiting || untyped
-        ? `<button class="btn ink" data-act="${waiting ? 'this-was' : 'resolve'}" data-tx="${found.id}">This was…</button>`
+        ? `<button class="btn" data-act="${waiting ? 'this-was' : 'resolve'}" data-tx="${found.id}">This was…</button>`
         : `<button class="link" data-act="resolve" data-tx="${found.id}">Change what this was…</button>`;
     sheetBody().innerHTML = `<div class="row-figure-block">
             <div class="row-figure num">${esc(money(-minor, found.currency, { signed: true }))}</div>
