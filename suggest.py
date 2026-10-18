@@ -290,6 +290,16 @@ def stored_answer(conn: sqlite3.Connection, merchant: str) -> sqlite3.Row | None
     ).fetchone()
 
 
+def stored_answers(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+    """Every answer `stored_answer` would hand back, keyed by merchant string:
+    one read for a list of merchants instead of one per merchant."""
+    return {
+        r["merchant"]: r for r in conn.execute(
+            f"SELECT * FROM suggestion_answers WHERE {_CURRENT}", _CURRENT_VALUES
+        )
+    }
+
+
 def unanswered(conn: sqlite3.Connection) -> list[str]:
     """The distinct merchant strings of rows with no type and no merchant that
     no rule matches, that pass the gate (so: card purchases only) and have no
