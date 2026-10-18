@@ -1776,7 +1776,7 @@ table.sl-stack td.sl-sub { display: none; }
 
 /* a picker: boxed; a quiet one reads as text until hovered or focused */
 .mp select.sel { min-height: var(--ctl-sm); height: var(--ctl-sm); padding: 0 26px 0 10px; border: 1px solid var(--border-default); border-radius: var(--radius-md);
-    background-color: var(--bg-elevated); box-shadow: none; font-size: var(--t-ui); -webkit-appearance: none; appearance: none; cursor: pointer;
+    background-color: var(--bg-elevated); box-shadow: none; font-size: var(--t-ui); line-height: inherit; -webkit-appearance: none; appearance: none; cursor: pointer;
     background-image: var(--caret); background-position: right 8px center; background-size: 12px; background-repeat: no-repeat; }
 .mp select.sel:hover { border-color: var(--border-emphasis); }
 .mp select.sel:focus { border-color: var(--accent-primary); box-shadow: 0 0 0 2px var(--accent-primary-subtle); }
