@@ -2622,14 +2622,17 @@ def api_transaction_suggestion(tx_id: int):
 
 def _suggested(answer, type_ids: dict) -> tuple[str, list]:
     """A stored answer as the screens are given it: the route and the types
-    it offers. No answer is blank."""
+    it offers. No answer is blank. A type the answer names that the book no
+    longer has (renamed or removed since) is left out; an answer left with
+    none is blank."""
     if answer is None:
         return "blank", []
     where, offered = suggest.route(answer["pick"], json.loads(answer["probabilities"]))
-    return where, [
+    types = [
         {"type_id": type_ids[name], "name": name, "probability": probability}
-        for name, probability in offered
+        for name, probability in offered if name in type_ids
     ]
+    return (where, types) if types else ("blank", [])
 
 
 @app.route("/api/queue/guesses")

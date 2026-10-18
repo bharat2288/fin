@@ -258,6 +258,45 @@ def test_a_row_whose_merchant_is_set_groups_apart_from_the_asked_rows(client, co
     ]
 
 
+# --- a stored answer naming a type that is gone --------------------------------
+
+
+def stale_answer(conn, merchant: str, probabilities: dict) -> None:
+    """An answer held from before a type was renamed or removed: its pick
+    names a type the book no longer has."""
+    suggest.store(conn, {
+        "merchant": merchant, "model_id": suggest.MODEL_ID,
+        "returned_model_id": suggest.RETURNED_MODEL_ID, "pick": next(iter(probabilities)),
+        "probabilities": probabilities, "confidence": None,
+        "input_tokens": 1000, "cost_usd": "0.000042", "latency_ms": 5,
+    })
+    conn.commit()
+
+
+def test_a_stored_pick_naming_a_type_that_is_gone_reads_blank_and_spares_the_rest(
+    client, conn, card, key
+):
+    gone = row(conn, card, "LANTERN NOODLE HOUSE 0042 SG", 18.90)
+    half = row(conn, card, "HARBOUR KITE SHOP", 61.00)
+    kept = row(conn, card, "MOSSY BOOKS 0003", 9.00)
+    stale_answer(conn, "LANTERN NOODLE HOUSE", {"Eating out": 0.95, "Dining": 0.03, "Travel": 0.02})
+    stale_answer(conn, "HARBOUR KITE SHOP", {"Eating out": 0.60, "Shopping": 0.25, "Travel": 0.15})
+    answer(conn, "MOSSY BOOKS", "Shopping", 0.95)
+
+    groups = {g["merchant"]: g for g in guesses(client)}
+
+    assert (groups["LANTERN NOODLE HOUSE"]["route"], groups["LANTERN NOODLE HOUSE"]["types"]) == ("blank", [])
+    # Three offered, one of them gone: the two left are still offered.
+    assert groups["HARBOUR KITE SHOP"]["route"] == "top3"
+    assert [t["name"] for t in groups["HARBOUR KITE SHOP"]["types"]] == ["Shopping", "Travel"]
+    assert groups["MOSSY BOOKS"]["route"] == "prefill"
+    assert [(t["name"], t["type_id"]) for t in groups["MOSSY BOOKS"]["types"]] == [("Shopping", type_id(conn, "Shopping"))]
+    seen = {tx: g for g in groups.values() for tx in g["tx_ids"]}
+    for tx in (gone, half, kept):
+        one = per_row(client, tx)
+        assert (seen[tx]["route"], seen[tx]["types"]) == (one["route"], one["types"]), tx
+
+
 # --- it writes nothing and never asks -----------------------------------------
 
 

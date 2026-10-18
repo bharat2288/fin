@@ -960,6 +960,7 @@ li.empty { list-style: none; margin-top: 8px; }
 .sure-table td { padding: 8px 10px; border-top: 1px solid var(--border-subtle); vertical-align: middle; font-size: 13px; color: var(--text-secondary); }
 .sure-table td:first-child { width: 14px; padding-left: 18px; }
 .sure-table td:last-child { padding-right: 18px; text-align: right; }
+.sure-body > .q-show { width: calc(100% - 36px); margin: 4px 18px 14px; }
 .sure-dot { display: inline-block; width: 9px; height: 9px; border-radius: 3px; background: var(--k); vertical-align: middle; }
 .sure-dot.out { --k: var(--k-out); }
 .sure-dot.in { --k: var(--k-in); }
