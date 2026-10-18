@@ -1385,7 +1385,7 @@ function cardHead(card, marker) {
 
 // Pick a type: Jev's three guesses as pick buttons, none chosen; a pick shows
 // a book picker prefilled with the type's book, and Save is the sure card's save.
-const pickState = new Map();   // a card's key -> {typeId, book} once a type is picked
+const pickState = new Map();   // a card's key -> {typeId, book, each} once a type is picked
 let queueBusy = false;         // a Queue save is running: every other save waits for it
 
 /** A save that would start while another runs is refused, and says so. */
@@ -1411,8 +1411,9 @@ function queueNames() {
     return names;
 }
 /** The rows a save labelled beyond the ones it was pressed for (the rule it
- *  made reached them too), said: " 1 more row took the same label: ADI MEDIA PTE LTD." */
-function alsoLabelled(labelledIds, rows) {
+ *  made reached them too), said: " 1 more row took the same label: ADI MEDIA PTE LTD."
+ *  waits: they came to a Check each row merchant, so they wait to be checked. */
+function alsoLabelled(labelledIds, rows, { waits = false } = {}) {
     const own = new Set(rows.map(x => x.id));
     const extra = labelledIds.filter(id => !own.has(id));
     if (!extra.length) return '';
@@ -1420,7 +1421,8 @@ function alsoLabelled(labelledIds, rows) {
     const named = [...new Set(extra.map(id => names.get(id)).filter(Boolean))].slice(0, 2);
     const rest = extra.filter(id => !named.includes(names.get(id))).length;
     const who = named.length ? `: ${named.join(rest ? ', ' : ' and ')}${rest ? ` and ${rest} more` : ''}` : '';
-    return ` ${plural(extra.length, 'more row')} took the same label${who}.`;
+    const did = !waits ? 'took the same label' : extra.length === 1 ? 'waits for you to check it' : 'wait for you to check them';
+    return ` ${plural(extra.length, 'more row')} ${did}${who}.`;
 }
 
 // Book prefill (fin-surfaces 10): a book picker starts at the operator's last
@@ -1456,7 +1458,8 @@ function prefillHintHTML(prefill, book, cls) {
 function pickSaveHTML(card, books) {
     const pick = pickState.get(card.key);
     if (!pick) return '';
-    return `<select data-change="pick-book" data-key="${esc(card.key)}" aria-label="Book for ${esc(card.merchant)}">${bookOptions(books, pick.book, 'Choose book')}</select>${prefillHintHTML(card.prefill, pick.book, 'q-pick-hint')}
+    return `${eachSetHTML('pick-set', card.key, card.merchant, pick.each)}
+        <label class="usual-pick">${pick.each ? '<span class="usual-l">usual book</span>' : ''}<select data-change="pick-book" data-key="${esc(card.key)}" aria-label="${pick.each ? 'Usual book' : 'Book'} for ${esc(card.merchant)}">${bookOptions(books, pick.book, 'Choose book')}</select></label>${prefillHintHTML(card.prefill, pick.book, 'q-pick-hint')}
         <button type="button" class="btn sm primary" data-act="pick-save" data-key="${esc(card.key)}"${pick.book && !queueBusy ? '' : ' disabled'}>Save</button>`;
 }
 function pickCardHTML(card, books) {
@@ -1473,7 +1476,9 @@ ACT['pick-type'] = el => {
     const card = laneCardByKey.get(el.dataset.key);
     if (!card || queueBusy) return;
     const typeId = Number(el.dataset.type);
-    pickState.set(card.key, { typeId, book: card.prefill?.book || queueModel.r.typeById.get(typeId)?.proposed_book || '' });
+    const was = pickState.get(card.key);
+    pickState.set(card.key, { typeId, book: card.prefill?.book || queueModel.r.typeById.get(typeId)?.proposed_book || '',
+        each: was ? was.each : merchantChecksEach(resolveBody(card.rows[0], null).service_name) });
     const box = laneCardEl(card.key);
     $$('.q-pick', box).forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.type) === typeId)));
     const save = $('.q-pick-save', box);
@@ -1489,15 +1494,26 @@ ACT['pick-book'] = el => {
     const go = $('[data-act="pick-save"]', laneCardEl(el.dataset.key));
     if (go) go.disabled = queueBusy || !pick.book;
 };
+// Every row the same or Check each row: the card's rows are saved with the
+// book shown either way (checked, under Check each row); new rows then wait.
+ACT['pick-set'] = el => {
+    const pick = pickState.get(el.dataset.key), card = laneCardByKey.get(el.dataset.key);
+    if (!pick || !card) return;
+    pick.each = el.value === 'each';
+    const save = $('.q-pick-save', laneCardEl(card.key));
+    save.innerHTML = pickSaveHTML(card, queueModel.r.books);
+    $('[data-change="pick-set"]', save)?.focus();
+};
 ACT['pick-save'] = async el => {
     const card = laneCardByKey.get(el.dataset.key), pick = pickState.get(el.dataset.key);
     if (!card || !pick || !pick.book || queueSaveWaits()) return;
     const type = card.guess.types.find(t => t.type_id === pick.typeId);
     queueSaving(laneCardEl(card.key));
-    const res = await saveResolve(resolveBody(card.rows[0], type.type_id, { visible: true, book: pick.book }), card.rows, { quiet: true });
+    const res = await saveResolve(resolveBody(card.rows[0], type.type_id, { visible: true, book: pick.book, each: pick.each }), card.rows,
+        { quiet: true, check: pick.each ? () => pick.book : null });
     queueBusy = false;
     if (res.ok) pickState.delete(card.key);
-    savedToast(card.merchant, type.name, pick.book, res, card.rows);
+    savedToast(card.merchant, type.name, pick.book, res, card.rows, { each: pick.each });
     rerender(); refreshFrame();
 };
 
@@ -1628,11 +1644,37 @@ ACT['q-fold'] = el => {
 // stored guess is sure, across both sides, each saved with today's guess save
 // and the book its picker shows; "Save all" is the same save in a loop. A line
 // reads the merchant its save makes, opens to its rows, and its Something else…
-// opens "This was…" for them (fin-surfaces 09).
-const SURE_NOTE = 'Saving teaches fin each merchant: its rows here, and every new row from it, get the type and book shown, without asking again.';
+// opens "This was…" for them (fin-surfaces 09). A line set to Check each row
+// gives its rows their own book pickers, saved checked (fin-surfaces 13).
+const SURE_NOTE = '<b>Every row the same:</b> saving teaches fin each merchant: its rows here, and every new row from it, get the type and book shown, without asking again. <b>Check each row:</b> you give the rows here their own book, and each new row waits in the Queue with the usual book, marked not checked.';
 const sureBooks = new Map();   // a group's key -> the book picked for it ('' = none yet)
 const sureShown = new Set();   // the keys of the lines opened to their rows
+const sureSets = new Map();    // a group's key -> true for Check each row, false for Every row the same, as picked
+const sureRowBooks = new Map(); // a row's id -> the book picked on its line under Check each row
 let sureList = [];             // the groups as last drawn, in card order
+
+// Teaching with Check each row (fin-surfaces 13): wherever a merchant is
+// taught (the sure card, Pick a type, "This was…") the setting is offered;
+// it starts as the merchant's own when fin already holds it.
+function merchantChecksEach(name, services = queueModel?.services || []) {
+    const svc = services.find(s => s.name.toLowerCase() === String(name || '').toLowerCase());
+    return !!(svc && svc.review_each_time);
+}
+function eachSetHTML(act, key, name, each) {
+    return `<select data-change="${act}" data-key="${esc(key)}" aria-label="How ${esc(name)}’s new rows arrive"${queueBusy ? ' disabled' : ''}>
+        <option value="same"${each ? '' : ' selected'}>Every row the same</option><option value="each"${each ? ' selected' : ''}>Check each row</option></select>`;
+}
+/** A line's setting: as picked, else the merchant's own. */
+function sureEach(g) { return sureSets.has(g.key) ? sureSets.get(g.key) : !!g.checksEach; }
+/** A row's book on a line set to Check each row: as picked on it, else fin's
+ *  prefill from history or the card's company, else the line's usual book. */
+function sureRowBook(g, x) {
+    if (sureRowBooks.has(x.id)) return sureRowBooks.get(x.id);
+    return eachPrefill(x)?.book || sureBook(g);
+}
+function sureRowHint(x) { return sureRowBooks.has(x.id) ? '' : eachPrefill(x)?.hint || ''; }
+/** Ready to save: a book, and under Check each row a book on every row. */
+function sureReady(g) { return !!sureBook(g) && (!sureEach(g) || g.items.every(i => sureRowBook(g, i.row))); }
 
 /** The merchant a line's save makes: resolve's name from its first row's
  *  text, or the merchant fin already holds by that name (the save reuses it). */
@@ -1664,6 +1706,7 @@ function sureGroups(q, guesses, r, services) {
         byMerchant.forEach(group => {
             group.items.sort((a, b) => (a.row.date || '').localeCompare(b.row.date || '') || a.row.id - b.row.id);
             group.name = sureName(group.items[0].row, services);
+            group.checksEach = merchantChecksEach(group.name, services);
         });
         groups.push(...[...byMerchant.values()].sort((a, b) => b.amount - a.amount));
     });
@@ -1673,7 +1716,7 @@ function sureGroups(q, guesses, r, services) {
 function sureBook(g) { return sureBooks.has(g.key) ? sureBooks.get(g.key) : (g.prefill?.book || g.proposed || ''); }
 /** The title row's words and its button, from what is ready now. */
 function sureHead() {
-    const ready = sureList.filter(sureBook).length;
+    const ready = sureList.filter(sureReady).length;
     const rows = sureList.reduce((n, g) => n + g.items.length, 0);
     const need = sureList.length - ready;
     return {
@@ -1684,26 +1727,32 @@ function sureHead() {
 }
 /** "See the 2 rows" / "Hide the row": the words of a line's rows toggle. */
 function sureRowsWords(n, open) { return `${open ? 'Hide' : 'See'} the ${n === 1 ? 'row' : `${n} rows`}`; }
-/** A line's rows (oldest first): date, account, amount and statement text. */
+/** A line's rows (oldest first): date, account, amount and statement text,
+ *  and under Check each row each row's own book picker with its hint. */
 function sureRowsHTML(g) {
-    const rows = g.items.map(i => i.row);
-    return `<table class="t table-tight sure-rows__t"><tbody>${rows.map(x => `<tr><td>${esc(day(x.date))}</td><td>${esc(x.account_name || '')}</td>
-        <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td><td class="sure-rows__text">${esc(x.description || '')}</td></tr>`).join('')}</tbody></table>`;
+    const rows = g.items.map(i => i.row), each = sureEach(g);
+    const pick = x => {
+        const when = esc(day(x.date)), hint = sureRowHint(x);
+        return `<td class="sure-rows__bk"><select data-change="sure-row-book" data-key="${esc(g.key)}" data-tx="${x.id}" aria-label="Book for the ${when} row"${queueBusy ? ' disabled' : ''}>${bookOptions(queueModel.r.books, sureRowBook(g, x), 'Choose book')}</select>${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</td>`;
+    };
+    return `<table class="t table-tight sure-rows__t${each ? ' is-each' : ''}"><tbody>${rows.map(x => `<tr data-tx="${x.id}"><td>${esc(day(x.date))}</td><td>${esc(x.account_name || '')}</td>
+        <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td><td class="sure-rows__text">${esc(x.description || '')}</td>${each ? pick(x) : ''}</tr>`).join('')}</tbody></table>`;
 }
 function sureRowHTML(g, books, at) {
-    const book = sureBook(g);
+    const book = sureBook(g), each = sureEach(g);
     const side = g.lane === 'out' ? 'Money out' : 'Money in';
     const asks = g.proposed ? '' : ' · the book you pick becomes this merchant’s book';
     const n = g.items.length, open = sureShown.has(g.key);
-    return `<tr class="sure-row${book ? '' : ' need'}" data-key="${esc(g.key)}">
+    return `<tr class="sure-row${sureReady(g) ? '' : ' need'}${each ? ' is-each' : ''}" data-key="${esc(g.key)}" data-at="${at}">
         <td class="sure-row__dot"><span class="sure-dot ${g.lane}" title="${side}"><span class="sr-only">${side}</span></span></td>
         <td class="sure-row__m"><span class="sure-row__name">${esc(g.name)}</span>${g.name !== g.merchant ? ` <span class="sure-row__jev">Jev’s name: ${esc(g.merchant)}</span>` : ''} <span class="sure-row__need">${tag('nofig', 'needs a book')}</span>
             <span class="sure-row__meta">${esc(plural(n, 'row'))} · <span class="num">${esc(sumByCurrency(g.items))}</span>${asks}</span>
             <span class="sure-row__links"><button type="button" class="link" data-act="sure-rows" data-key="${esc(g.key)}" aria-expanded="${open}" aria-controls="sure-rows-${at}">${sureRowsWords(n, open)}</button><button type="button" class="link" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></span></td>
         <td class="sure-row__type">${esc(g.type.name)} <span class="sure-row__pct">${Math.round(g.type.probability * 100)}%</span></td>
-        <td class="sure-row__book"><select data-change="sure-book" data-key="${esc(g.key)}" aria-label="Book for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(g.prefill, book, 'sure-row__hint')}</td>
-        <td class="sure-row__go"><button type="button" class="btn sm subtle" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${book && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>
-        <tr class="sure-rows" id="sure-rows-${at}"${open ? '' : ' hidden'}><td colspan="5">${open ? sureRowsHTML(g) : ''}</td></tr>`;
+        <td class="sure-row__set">${eachSetHTML('sure-set', g.key, g.name, each)}</td>
+        <td class="sure-row__book"><label>${each ? '<span class="usual-l">usual book</span>' : ''}<select data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select></label>${prefillHintHTML(g.prefill, book, 'sure-row__hint')}</td>
+        <td class="sure-row__go"><button type="button" class="btn sm subtle" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${sureReady(g) && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>
+        <tr class="sure-rows" id="sure-rows-${at}"${open ? '' : ' hidden'}><td colspan="6">${open ? sureRowsHTML(g) : ''}</td></tr>`;
 }
 function sureCardHTML(books) {
     if (!sureList.length) return '';
@@ -1719,7 +1768,7 @@ function sureCardHTML(books) {
             <button type="button" class="btn primary" data-act="sure-all" id="sure-all"${h.ready && !queueBusy ? '' : ' disabled'}>${esc(h.label)}</button>
         </div>
         <div class="sure-body" id="sure-body"${open ? '' : ' hidden'}>
-            <p class="sure-note">${esc(SURE_NOTE)}</p>
+            <p class="sure-note">${SURE_NOTE}</p>
             <table class="sure-table"><tbody>${sureList.slice(0, limit).map((g, at) => sureRowHTML(g, books, at)).join('')}</tbody></table>
             ${more > 0 ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="sure">Show ${more} more</button>` : ''}</div></section>`;
 }
@@ -1730,9 +1779,10 @@ function drawSureState() {
     sureList.forEach(g => {
         const tr = $$('tr.sure-row', card).find(x => x.dataset.key === g.key);
         if (!tr) return;
-        const ready = !!sureBook(g);
+        const ready = sureReady(g);
         tr.classList.toggle('need', !ready);
-        $('select', tr).disabled = queueBusy;
+        $$('select', tr).forEach(x => { x.disabled = queueBusy; });
+        $$('select', tr.nextElementSibling).forEach(x => { x.disabled = queueBusy; });
         const hint = $('.sure-row__hint', tr);
         if (hint) hint.hidden = sureBook(g) !== g.prefill.book;
         $('[data-act="sure-save"]', tr).disabled = queueBusy || !ready;
@@ -1749,7 +1799,45 @@ ACT['sure-fold'] = el => {
     el.setAttribute('aria-expanded', String(open));
     $('#sure-body').hidden = !open;
 };
-ACT['sure-book'] = el => { sureBooks.set(el.dataset.key, el.value); drawSureState(); };
+/** A line drawn again in place (its setting changed): focus goes back to the control changed. */
+function drawSureLine(g, focus) {
+    const tr = $$('#sure-card tr.sure-row').find(x => x.dataset.key === g.key);
+    if (!tr) return;
+    const body = document.createElement('tbody');
+    body.innerHTML = sureRowHTML(g, queueModel.r.books, Number(tr.dataset.at));
+    tr.nextElementSibling.replaceWith(body.rows[1]);
+    tr.replaceWith(body.rows[0]);
+    drawSureState();
+    if (focus) $$(`#sure-card ${focus}`).find(x => x.dataset.key === g.key)?.focus();
+}
+/** Its rows' pickers drawn again (the usual book changed): picked rows keep theirs. */
+function drawSureRows(g) {
+    const tr = $$('#sure-card tr.sure-row').find(x => x.dataset.key === g.key);
+    const box = tr && tr.nextElementSibling;
+    if (box && sureShown.has(g.key)) box.cells[0].innerHTML = sureRowsHTML(g);
+}
+ACT['sure-book'] = el => {
+    sureBooks.set(el.dataset.key, el.value);
+    const g = sureList.find(x => x.key === el.dataset.key);
+    if (g && sureEach(g)) drawSureRows(g);
+    drawSureState();
+};
+// Check each row opens the line to its rows, each with its own book picker.
+ACT['sure-set'] = el => {
+    const g = sureList.find(x => x.key === el.dataset.key);
+    if (!g) return;
+    sureSets.set(g.key, el.value === 'each');
+    if (sureEach(g)) sureShown.add(g.key);
+    drawSureLine(g, '[data-change="sure-set"]');
+};
+ACT['sure-row-book'] = el => {
+    const g = sureList.find(x => x.key === el.dataset.key);
+    if (!g) return;
+    const id = Number(el.dataset.tx);
+    sureRowBooks.set(id, el.value);
+    el.parentElement.querySelector('.hint')?.remove();
+    drawSureState();
+};
 // A line opens to its rows and folds back in place; neither writes anything.
 ACT['sure-rows'] = el => {
     const g = sureList.find(x => x.key === el.dataset.key);
@@ -1775,47 +1863,59 @@ ACT['sure-else'] = el => {
 async function saveSureGroup(g, labelled) {
     const rows = g.items.map(i => i.row).filter(x => !labelled.has(x.id));
     if (!rows.length) return { skipped: true };
-    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { merchant: g.name, visible: true, book: sureBook(g) }), rows, { quiet: true });
+    const each = sureEach(g);
+    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { merchant: g.name, visible: true, book: sureBook(g), each }), rows,
+        { quiet: true, check: each ? x => sureRowBook(g, x) : null });
     res.labelledIds.forEach(id => labelled.add(id));
     return res;
 }
 ACT['sure-save'] = async el => {
     const g = sureList.find(x => x.key === el.dataset.key);
-    if (!g || !sureBook(g) || queueSaveWaits()) return;
-    const book = sureBook(g);
+    if (!g || !sureReady(g) || queueSaveWaits()) return;
+    const book = sureBook(g), each = sureEach(g);
     queueSaving();
     const res = await saveSureGroup(g, new Set());
     queueBusy = false;
     if (!res.skipped) {   // skipped: its rows already have a type
-        if (res.ok) sureBooks.delete(g.key);
-        savedToast(g.name, g.type.name, book, res, g.items.map(i => i.row));
+        if (res.ok) sureForget(g);
+        savedToast(g.name, g.type.name, book, res, g.items.map(i => i.row), { each });
     }
     rerender(); refreshFrame();
 };
-/** One merchant's save said: the sure card's ✓ and Pick a type's Save. Rows
- *  the rule reached beyond the merchant's own (rows) are named. */
-function savedToast(merchant, typeName, book, res, rows) {
-    const said = `Saved ${merchant} as ${typeName} · ${book}`;
-    if (res.ok) toast(`${said}, now and from now on.${alsoLabelled(res.labelledIds, rows)}`, { undo: res.changes });
+/** A saved line's picks are let go. */
+function sureForget(g) {
+    sureBooks.delete(g.key);
+    sureSets.delete(g.key);
+    g.items.forEach(i => sureRowBooks.delete(i.row.id));
+}
+/** One merchant's save said: the sure card's ✓, Pick a type's Save and "This
+ *  was…". Rows the rule reached beyond the merchant's own (rows) are named;
+ *  under Check each row they wait to be checked. */
+function savedToast(merchant, typeName, book, res, rows, { each = false } = {}) {
+    const said = each ? `Saved ${merchant} as ${typeName}, usually ${book}` : `Saved ${merchant} as ${typeName} · ${book}`;
+    const then = each ? '; each new row will wait for you to check it.' : ', now and from now on.';
+    if (res.ok) toast(`${said}${then}${alsoLabelled(res.labelledIds, rows, { waits: each })}`, { undo: res.changes });
     else if (res.resolved) toast(`${said}; then: ${res.error}`, { bad: true, undo: res.changes, ms: 9000 });
     else toast(res.error, { bad: true, undo: res.changes, ms: 9000 });
 }
 ACT['sure-all'] = async () => {
-    const ready = sureList.filter(sureBook);
+    const ready = sureList.filter(sureReady);
     if (!ready.length || queueSaveWaits()) return;
     queueSaving();
     const labelled = new Set(), changes = [];
     const by = new Map();      // a row's id -> the merchant whose save labelled it
     const skipped = [];        // [merchant, the merchant whose save took its rows]
+    const each = [];           // the merchants saved as Check each row
     let saved = 0, error = null, at = ready.length;
     for (const [n, g] of ready.entries()) {
+        const checks = sureEach(g);
         const res = await saveSureGroup(g, labelled);
         if (res.skipped) { skipped.push([g.name, by.get(g.items[0].row.id)]); continue; }
         changes.push(...res.changes);
         res.labelledIds.forEach(id => { if (!by.has(id)) by.set(id, g.name); });
         // A merchant whose rule was made counts as saved even if one of its
         // rows then failed: its changes are in the Undo.
-        if (res.resolved) { sureBooks.delete(g.key); saved += 1; }
+        if (res.resolved) { sureForget(g); saved += 1; if (checks) each.push(g.name); }
         if (!res.ok) { error = res.error; at = n + 1; break; }
     }
     queueBusy = false;
@@ -1827,7 +1927,10 @@ ACT['sure-all'] = async () => {
         const took = skipped.slice(0, 2).map(([m, from]) => ` ${m} took ${from}’s label.`).join('');
         const rest = skipped.length > 2 ? ` ${plural(skipped.length - 2, 'more merchant')} took an earlier one’s label.` : '';
         const outside = alsoLabelled([...labelled], ready.flatMap(g => g.items.map(i => i.row)));
-        toast(`Saved ${plural(saved, 'merchant')}; their new rows will be labelled the same way.${took}${rest}${outside}`, { undo: changes });
+        const names = each.length > 1 ? `${each.slice(0, -1).join(', ')} and ${each[each.length - 1]}` : each[0];
+        const how = !each.length ? '; their new rows will be labelled the same way.'
+            : `. New rows from ${names} will wait for you to check them${saved > each.length ? '; the rest will be labelled the same way' : ''}.`;
+        toast(`Saved ${plural(saved, 'merchant')}${how}${took}${rest}${outside}`, { undo: changes });
     } else toast('Nothing left to save: those rows already have a type.');
     rerender(); refreshFrame();
 };
@@ -1905,7 +2008,7 @@ async function viewQueue() {
     const prefills = await loadPrefills([...sureIds, ...lines.flatMap(c => c.rows.map(x => x.id))]);
     sure.forEach(g => { g.prefill = sharedPrefill(g.items.map(i => i.row), prefills); });
     lines.forEach(c => { if (c.step === 'pick') c.prefill = sharedPrefill(c.rows, prefills); });
-    queueModel = { r, ask, sure, cards, prefills };
+    queueModel = { r, ask, sure, cards, prefills, services };
     const todo = sure.length + cards.out.length + cards.in.length;
     const rows = sure.reduce((n, g) => n + g.items.length, 0) + [...cards.out, ...cards.in].reduce((n, c) => n + c.rows.length, 0);
     // A redraw while the search has focus keeps it, and where the caret was.
@@ -2035,9 +2138,14 @@ ACT['ww-pick'] = el => {
     step.choice = choice;
     drawChoices();
     let fields = '';
+    // Spending, every row from this merchant, teaches it: Every row the same,
+    // or Check each row (fin-surfaces 13), shown with that scope only.
+    const teaches = untyped && choice.name === 'spending';
     if (choice.asks === 'type') {
         fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types, row.type_id)}</select></label>
-            <label class="field"><span>Book</span><select id="cw-book">${bookOptions(r.books, null, untyped ? 'As the merchant or type says' : 'As the type says')}</select></label>`;
+            <label class="field"><span id="cw-book-l">Book</span><select id="cw-book">${bookOptions(r.books, null, untyped ? 'As the merchant or type says' : 'As the type says')}</select></label>
+            ${teaches ? `<label class="field" id="cw-set-f"><span>New rows from it</span><select id="cw-set">
+                <option value="same">Every row the same</option><option value="each"${merchantChecksEach(step.merchant, step.services) ? ' selected' : ''}>Check each row</option></select></label>` : ''}`;
     } else if (choice.asks === 'account') {
         const allowed = r.accounts.filter(a => choice.kinds.includes(a.type) && !step.group.some(x => x.account_id === a.id) && a.status !== 'archived');
         fields = `<label class="field"><span>Which account</span><select id="cw-account"><option value="">Choose</option>${allowed.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.currency)})</option>`).join('')}</select></label>`;
@@ -2071,6 +2179,11 @@ ACT['ww-pick'] = el => {
         const w = $('#ww-scope-words');
         if (!w) return;
         const s = $('input[name="rs-scope"]:checked')?.value;
+        const set = $('#cw-set-f');
+        if (set) {
+            set.hidden = s !== 'service_default';
+            $('#cw-book-l').textContent = !set.hidden && $('#cw-set').value === 'each' ? 'Usual book' : 'Book';
+        }
         const name = $('#rs-merchant')?.value.trim() || step.merchant;
         w.textContent = s === 'transaction' ? 'Label only this row'
             : s === 'rule' ? `Label rows whose text contains ${$('#rs-pattern').value.trim() || '…'}` : `Label every row from ${name} the same way`;
@@ -2091,21 +2204,27 @@ ACT['ww-scope'] = el => {
     el.setAttribute('aria-expanded', String(!more.hidden));
     el.textContent = more.hidden ? 'change' : 'done';
 };
-/** What resolve takes for a row with no type and the type chosen for it. */
-function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern, book = '', visible = false } = {}) {
+/** What resolve takes for a row with no type and the type chosen for it.
+ *  each: the merchant setting as taught (true: Check each row); left out,
+ *  the merchant keeps its own. */
+function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern, book = '', visible = false, each } = {}) {
     const name = merchant || row.service_name || titleCase(suggestPattern(row.description) || row.description || '');
     const body = { tx_id: row.id, service_name: name, type_id: typeId, apply_scope: scope,
         pattern: pattern ?? suggestPattern(row.description), match_type: 'contains', suggestion_visible: visible };
     if (book) body.book = book;
+    if (typeof each === 'boolean' && scope === 'service_default') body.check_each_row = each;
     return body;
 }
 /** Save a type for a row with no type. A merchant text too plain to make a
  *  rule from (a PayNow or a GIRO) labels the card's other rows one by one.
- *  Returns {ok, resolved, changes, labelled, labelledIds, error}: whether the
+ *  Returns {ok, resolved, changes, labelled, labelledIds, book, error}: whether the
  *  type was saved for the row (resolved; ok also needs the card's other rows),
- *  the change ids it wrote, newest last, and the rows it labelled. quiet: no toast and no
- *  redraw, for a caller that words its own (the sure card). */
-async function saveResolve(body, group = [], { quiet = false } = {}) {
+ *  the change ids it wrote, newest last, the rows it labelled and the
+ *  merchant's book. quiet: no toast and no redraw, for a caller that words its
+ *  own (the sure card). check: taught as Check each row, the rows on screen
+ *  (the group, or the row) are then checked with their books (check(row), or
+ *  the merchant's): one bulk-label write; rows the rule reached beyond them wait. */
+async function saveResolve(body, group = [], { quiet = false, check = null } = {}) {
     const services = await servicesList();
     const svc = services.find(s => s.name.toLowerCase() === body.service_name.toLowerCase());
     if (svc) body.service_id = svc.id;
@@ -2125,7 +2244,8 @@ async function saveResolve(body, group = [], { quiet = false } = {}) {
         : group.filter(x => x.id !== body.tx_id && !reached.has(x.id) && !x.type_id);
     let done = 0, error = null;
     for (const x of rest) {
-        const more = await send('POST', '/api/transactions/resolve', { ...body, tx_id: x.id, apply_scope: 'transaction', service_id: r.data.service_id ?? body.service_id });
+        const { check_each_row: _, ...one } = body;   // the setting went with the first
+        const more = await send('POST', '/api/transactions/resolve', { ...one, tx_id: x.id, apply_scope: 'transaction', service_id: r.data.service_id ?? body.service_id });
         if (!more.ok) {
             error = more.data.error || 'One of the rows could not be labelled';
             if (!quiet) toast(error, { bad: true });
@@ -2135,12 +2255,21 @@ async function saveResolve(body, group = [], { quiet = false } = {}) {
         labelledIds.add(x.id);
         done += 1;
     }
+    if (check && !error) {
+        const onScreen = (group.length ? group : [{ id: body.tx_id }]).filter(x => labelledIds.has(x.id));
+        const typeId = r.data.type_id ?? body.type_id;
+        const checked = await send('POST', '/api/transactions/bulk-label', {
+            rows: onScreen.map(x => ({ tx_id: x.id, type_id: typeId, book: check(x) || r.data.book })),
+        });
+        if (checked.change) changes.push(checked.change);
+        if (!checked.ok) error = checked.data.error || 'The rows here could not be checked';
+    }
     const others = done + (r.data.backfilled || 0);
     if (!quiet) {
         if (others) toast(`${plural(others, 'other row')} took the same label`);
         closeSheet(); rerender();
     }
-    return { ok: !error, resolved: true, changes, labelled: labelledIds.size, labelledIds: [...labelledIds], error };
+    return { ok: !error, resolved: true, changes, labelled: labelledIds.size, labelledIds: [...labelledIds], book: r.data.book, error };
 }
 ACT['ww-save'] = async () => {
     const { row, choice, untyped, group } = step;
@@ -2153,7 +2282,17 @@ ACT['ww-save'] = async () => {
         if (!typeId) { toast('Choose a type', { bad: true }); return; }
         const pattern = (val('rs-pattern') || '').trim();
         if (scope === 'rule' && !pattern) { toast('Say what text the rows contain', { bad: true }); return; }
-        await saveResolve(resolveBody(row, typeId, { merchant: name, scope, pattern, book: val('cw-book'), visible: step.suggestionVisible }), group);
+        const each = scope === 'service_default' && val('cw-set') === 'each';
+        const body = resolveBody(row, typeId, { merchant: name, scope, pattern, book: val('cw-book'), visible: step.suggestionVisible,
+            each: scope === 'service_default' && val('cw-set') ? each : undefined });
+        if (!each) { await saveResolve(body, group); return; }
+        // Check each row: the rows here are checked with the book shown, and
+        // the toast's one Undo takes the whole save.
+        const res = await saveResolve(body, group, { quiet: true, check: () => val('cw-book') || null });
+        const type = step.r.typeById.get(typeId);
+        if (res.resolved) closeSheet();
+        savedToast(name, type?.display_name || type?.name || 'its type', res.book, res, group, { each });
+        if (res.resolved) { rerender(); refreshFrame(); }
         return;
     }
     const body = { choice: choice.name };
