@@ -520,6 +520,8 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 # ---------------------------------------------------------------------------
 
 _WRITE_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+# Reads sent as POST for their body (a list of row ids): no entry, no lock.
+_READ_ONLY_POSTS = {"api_book_prefill"}
 
 # What each writing route did, in words, for the history's list.
 _CHANGE_SUMMARIES = {
@@ -570,7 +572,7 @@ def _caller() -> tuple[str, str]:
 
 @app.before_request
 def _open_change_entry():
-    if request.method not in _WRITE_METHODS:
+    if request.method not in _WRITE_METHODS or request.endpoint in _READ_ONLY_POSTS:
         return None
     history.WRITE_LOCK.acquire()
     g.change_locked = True
@@ -2386,10 +2388,13 @@ def api_resolve_transaction():
             'service_default' the merchant's default (the default)
         check_each_row: the merchant setting, in the same transaction
             (service_default only; left out, the merchant keeps its own).
-            true is Check each row: a merchant fin already held keeps its past
-            rows as they are (checked), as the setting's "Not now" does, and
-            the rows the new rule reaches wait to be checked. false is Every
-            row the same: the flag is cleared, labels kept.
+            true is Check each row: the flag, and the rows the new rule
+            reaches wait to be checked. false is Every row the same: the flag
+            is cleared, labels kept.
+        past: with check_each_row true, the operator's answer to the offer
+            for a merchant fin already held as Every row the same: 'leave'
+            marks its past rows checked (labels unchanged), in the same
+            change; 'queue', or left out, leaves them waiting.
 
     Flow:
         1. Find existing service by service_id or name, or create new one
@@ -2419,6 +2424,9 @@ def api_resolve_transaction():
         return jsonify({"error": "check_each_row must be true or false"}), 400
     if check_each_row is not None and apply_scope != "service_default":
         return jsonify({"error": "Check each row is a merchant setting: it goes with every row from this merchant"}), 400
+    past = data.get("past")
+    if past is not None and (check_each_row is not True or past not in CHECK_EACH_ROW_PAST):
+        return jsonify({"error": f"past goes with check_each_row true, as one of {', '.join(CHECK_EACH_ROW_PAST)}"}), 400
     pattern_error = _rule_pattern_error(pattern)
     if pattern and apply_scope in {"rule", "service_default"} and pattern_error:
         return jsonify({"error": pattern_error}), 400
@@ -2480,11 +2488,13 @@ def api_resolve_transaction():
                 service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                 merchant_book = book
 
-            # The setting, as taught: Check each row, or Every row the same. A
-            # merchant fin already held, newly set to check each row, keeps its
-            # past rows as they are (checked), so they never come to the Queue
-            # unasked; the rows this save labels wait.
-            if check_each_row and svc and not svc["review_each_time"]:
+            # The setting, as taught: Check each row, or Every row the same.
+            # A merchant fin already held, newly set to check each row, has
+            # its past rows answered by the screen's offer (past): leave marks
+            # them checked, as the setting route's "Not now" does; queue, or no
+            # answer, leaves them waiting. Before the backfill, so the rows
+            # this save labels wait whatever the answer.
+            if past == "leave" and svc and not svc["review_each_time"]:
                 conn.execute(
                     f"UPDATE transactions SET cat_source = 'manual' WHERE id IN ("
                     f"SELECT t.id FROM transactions t WHERE t.service_id = ? AND t.id != ? AND {CHECKABLE_ROWS})",

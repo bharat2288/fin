@@ -321,6 +321,7 @@ function toast(message, { bad = false, undo = null, ms = 6000 } = {}) {
 }
 
 let sheetCloser = null;
+let pastAnswer = null;         // a question waiting on the sheet (askPast): closing it answers null
 /** A sheet: a right drawer on the desk, a bottom sheet on a phone (folio's
  *  kit drawer). eyebrow sits over the title; center makes a short confirm;
  *  foot is a row of buttons kept in view under the body. */
@@ -344,6 +345,7 @@ function openSheet(title, body, { sub = '', eyebrow = '', center = false, foot =
 function closeSheet() {
     if (sheetCloser) { sheetCloser(); sheetCloser = null; }
     $('#sheets').innerHTML = '';
+    if (pastAnswer) { const answer = pastAnswer; pastAnswer = null; answer(null); }
 }
 function sheetBody() { return $('#sheets .sheet-body'); }
 
@@ -1441,7 +1443,7 @@ async function loadPrefills(ids) {
 /** Where a row's prefilled book came from; none when it is the type's. */
 function prefillHint(p) {
     if (p.reason === 'last') return `${p.book} last time on ${p.account}`;
-    if (p.reason === 'account') return `${p.book}’s own ${p.account_kind === 'card' ? 'card' : 'account'}`;
+    if (p.reason === 'account') return `${p.book} ${p.account_kind === 'card' ? 'card' : 'account'}`;
     return '';
 }
 /** One picker for several rows: {book, hint} when every row's prefill is the
@@ -1892,11 +1894,19 @@ function sureForget(g) {
  *  was…". Rows the rule reached beyond the merchant's own (rows) are named;
  *  under Check each row they wait to be checked. */
 function savedToast(merchant, typeName, book, res, rows, { each = false } = {}) {
+    if (res.cancelled) { toast(res.error); return; }
     const said = each ? `Saved ${merchant} as ${typeName}, usually ${book}` : `Saved ${merchant} as ${typeName} · ${book}`;
     const then = each ? '; each new row will wait for you to check it.' : ', now and from now on.';
-    if (res.ok) toast(`${said}${then}${alsoLabelled(res.labelledIds, rows, { waits: each })}`, { undo: res.changes });
+    if (res.ok) toast(`${said}${then}${alsoLabelled(res.labelledIds, rows, { waits: each })}${pastWords(merchant, res.past)}`, { undo: res.changes });
     else if (res.resolved) toast(`${said}; then: ${res.error}`, { bad: true, undo: res.changes, ms: 9000 });
     else toast(res.error, { bad: true, undo: res.changes, ms: 9000 });
+}
+/** What the answer to the offer did to a held merchant's past rows, for a toast. */
+function pastWords(merchant, past) {
+    if (!past) return '';
+    const n = past.n, rows = `${merchant}’s ${plural(n, 'past row')}`;
+    return past.answer === 'leave' ? ` ${rows} ${n === 1 ? 'is' : 'are'} marked checked, labels unchanged.`
+        : ` ${rows} ${n === 1 ? 'waits' : 'wait'} in the Queue too.`;
 }
 ACT['sure-all'] = async () => {
     const ready = sureList.filter(sureReady);
@@ -1906,11 +1916,14 @@ ACT['sure-all'] = async () => {
     const by = new Map();      // a row's id -> the merchant whose save labelled it
     const skipped = [];        // [merchant, the merchant whose save took its rows]
     const each = [];           // the merchants saved as Check each row
-    let saved = 0, error = null, at = ready.length;
+    let pasts = '';            // what the offer's answers did to past rows
+    let saved = 0, cancelled = 0, error = null, at = ready.length;
     for (const [n, g] of ready.entries()) {
         const checks = sureEach(g);
         const res = await saveSureGroup(g, labelled);
         if (res.skipped) { skipped.push([g.name, by.get(g.items[0].row.id)]); continue; }
+        if (res.cancelled) { cancelled += 1; continue; }   // its question closed: that line is left as it was
+        pasts += pastWords(g.name, res.past);
         changes.push(...res.changes);
         res.labelledIds.forEach(id => { if (!by.has(id)) by.set(id, g.name); });
         // A merchant whose rule was made counts as saved even if one of its
@@ -1930,8 +1943,9 @@ ACT['sure-all'] = async () => {
         const names = each.length > 1 ? `${each.slice(0, -1).join(', ')} and ${each[each.length - 1]}` : each[0];
         const how = !each.length ? '; their new rows will be labelled the same way.'
             : `. New rows from ${names} will wait for you to check them${saved > each.length ? '; the rest will be labelled the same way' : ''}.`;
-        toast(`Saved ${plural(saved, 'merchant')}${how}${took}${rest}${outside}`, { undo: changes });
-    } else toast('Nothing left to save: those rows already have a type.');
+        toast(`Saved ${plural(saved, 'merchant')}${how}${took}${rest}${outside}${pasts}`, { undo: changes });
+    } else if (cancelled) toast('Nothing was saved.');
+    else toast('Nothing left to save: those rows already have a type.');
     rerender(); refreshFrame();
 };
 
@@ -2220,7 +2234,9 @@ function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern
  *  Returns {ok, resolved, changes, labelled, labelledIds, book, error}: whether the
  *  type was saved for the row (resolved; ok also needs the card's other rows),
  *  the change ids it wrote, newest last, the rows it labelled and the
- *  merchant's book. quiet: no toast and no redraw, for a caller that words its
+ *  merchant's book, and past ({answer, n}) when a merchant fin held was asked
+ *  about its past rows (cancelled: the question was closed, nothing was
+ *  written). quiet: no toast and no redraw, for a caller that words its
  *  own (the sure card). check: taught as Check each row, the rows on screen
  *  (the group, or the row) are then checked with their books (check(row), or
  *  the merchant's): one bulk-label write; rows the rule reached beyond them wait. */
@@ -2228,6 +2244,16 @@ async function saveResolve(body, group = [], { quiet = false, check = null } = {
     const services = await servicesList();
     const svc = services.find(s => s.name.toLowerCase() === body.service_name.toLowerCase());
     if (svc) body.service_id = svc.id;
+    // Taught as Check each row, a merchant fin already holds as Every row the
+    // same asks first what becomes of its past rows (12's offer, once); the
+    // answer goes in the same change. Closing the question saves nothing.
+    let past = null;
+    if (body.check_each_row === true && svc && !svc.review_each_time && svc.rows_to_check) {
+        const answer = await askPast(svc);
+        if (!answer) return { ok: false, resolved: false, cancelled: true, changes: [], labelled: 0, labelledIds: [], error: 'Nothing was saved.' };
+        body.past = answer;
+        past = { answer, n: svc.rows_to_check };
+    }
     const r = await send('POST', '/api/transactions/resolve', body);
     if (!r.ok) {
         const error = r.data.error || 'That did not work; nothing was changed';
@@ -2269,7 +2295,7 @@ async function saveResolve(body, group = [], { quiet = false, check = null } = {
         if (others) toast(`${plural(others, 'other row')} took the same label`);
         closeSheet(); rerender();
     }
-    return { ok: !error, resolved: true, changes, labelled: labelledIds.size, labelledIds: [...labelledIds], book: r.data.book, error };
+    return { ok: !error, resolved: true, changes, labelled: labelledIds.size, labelledIds: [...labelledIds], book: r.data.book, past, error };
 }
 ACT['ww-save'] = async () => {
     const { row, choice, untyped, group } = step;
@@ -2293,7 +2319,8 @@ ACT['ww-save'] = async () => {
         }
         // Check each row: the rows here are checked with the book shown, and
         // the toast's one Undo takes the whole save.
-        const res = await saveResolve(body, group, { quiet: true, check: () => val('cw-book') || null });
+        const shown = val('cw-book') || null;   // read now: the offer's question may replace this sheet
+        const res = await saveResolve(body, group, { quiet: true, check: () => shown });
         const type = step.r.typeById.get(typeId);
         if (res.resolved) closeSheet();
         savedToast(name, type?.display_name || type?.name || 'its type', res.book, res, group, { each });
@@ -3552,10 +3579,21 @@ function merchantFields(r, s) {
 // The Check each row setting (fin-surfaces 12): one route turns it on or
 // off, apart from the merchant's Save. Turning it on offers once to bring the
 // merchant's past rows to the Queue, off unless chosen; turning it off writes
-// at once, and its rows keep their labels. Lists and the merchant page use it.
+// at once, and its rows keep their labels. The switch lives on the merchant
+// page; the edit sheet (Lists, the page's Edit) shows the setting and links
+// there, as a switch that writes at once would close the sheet on its edits.
 function eachSettingHTML(s) {
-    return `<div class="field each-set"><span>How its new rows arrive</span>${eachSegHTML(s)}</div>`;
+    const on = !!s.review_each_time;
+    return `<div class="field each-set"><span>How its new rows arrive</span>
+        <p class="small"><b>${on ? 'Check each row' : 'Every row the same'}</b>${on && s.rows_to_check ? ` · ${plural(s.rows_to_check, 'row')} not checked yet` : ''}</p>
+        <span class="hint">Change it on <a class="link" href="#/books/merchant/${s.id}" data-act="each-page" data-id="${s.id}">the merchant page</a>, where it saves at once.</span></div>`;
 }
+// The link closes the sheet even when the page is already open behind it.
+ACT['each-page'] = el => {
+    closeSheet();
+    const to = `#/books/merchant/${el.dataset.id}`;
+    if (location.hash !== to) location.hash = to;
+};
 function eachSegHTML(s) {
     const on = !!s.review_each_time;
     const label = `${s.display_type || s.type_name || 'no type'} · ${s.book || 'no book'}`;
@@ -3578,10 +3616,27 @@ ACT['each-set'] = async el => {
         return;
     }
     if (!s.rows_to_check) { await checkEachRowOn(s, 'leave'); return; }
+    openEachOffer(s, 'each-on');
+};
+/** The offer, once, as a merchant fin holds turns to Check each row: its
+ *  past rows stay as they are (checked) or come to the Queue. act answers. */
+function openEachOffer(s, act) {
     openSheet(`Check each row for ${esc(s.name)} from now on`, `<p>Also bring its ${plural(s.rows_to_check, 'past row')} to the Queue to check?</p>
         <p class="small muted">Either way, each new row from ${esc(s.name)} will wait in the Queue, marked not checked.</p>`,
     { eyebrow: 'Check each row', center: true,
-      foot: `<button type="button" class="btn primary" data-act="each-on" data-id="${s.id}" data-past="leave">Not now, only new rows</button><button type="button" class="btn" data-act="each-on" data-id="${s.id}" data-past="queue">Bring them too</button>` });
+      foot: `<button type="button" class="btn primary" data-act="${act}" data-id="${s.id}" data-past="leave">Not now, only new rows</button><button type="button" class="btn" data-act="${act}" data-id="${s.id}" data-past="queue">Bring them too</button>` });
+}
+// Teaching a merchant fin holds as Check each row (fin-surfaces 13) asks the
+// offer before its save: the answer, or null when the sheet is closed
+// (pastAnswer, kept beside the sheet so closeSheet can answer it).
+function askPast(s) {
+    return new Promise(done => { openEachOffer(s, 'past-answer'); pastAnswer = done; });
+}
+ACT['past-answer'] = el => {
+    const answer = pastAnswer;
+    pastAnswer = null;
+    closeSheet();
+    if (answer) answer(el.dataset.past);
 };
 ACT['each-on'] = async el => {
     const s = await merchantById(Number(el.dataset.id));
@@ -3594,7 +3649,7 @@ async function checkEachRowOn(s, past) {
     const n = s.rows_to_check;
     const r = await act('POST', `/api/services/${s.id}/check-each-row`, { on: true, past },
         past === 'queue' && n ? `${s.name}: Check each row from now on. Its ${plural(n, 'past row')} ${n === 1 ? 'waits' : 'wait'} in the Queue to check.`
-            : `${s.name}: Check each row from now on. Its new rows will wait in the Queue.`);
+            : `${s.name}: Check each row from now on. Its new rows will wait in the Queue.${n ? ` Its ${plural(n, 'past row')} ${n === 1 ? 'is' : 'are'} marked checked, labels unchanged.` : ''}`);
     closeSheet();
     if (r) rerender();
 }

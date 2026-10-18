@@ -7,6 +7,7 @@ reads it for many rows in one call and writes nothing. These hold that,
 against the temporary database. Every account, merchant and figure is invented.
 """
 
+import threading
 import time
 
 import pytest
@@ -147,6 +148,30 @@ def test_one_read_for_many_rows_writes_nothing(client, conn, cards):
 
     assert got == {tool: {"book": "Moom", "reason": "account", "account": "Moom card", "account_kind": "card"}}
     assert changes(conn) == before
+
+
+def test_the_read_opens_no_change_entry_and_never_waits_on_a_write(client, conn, cards):
+    """A POST for its body only: it takes no entry id and not the write lock,
+    so a Queue open is not held behind a long write."""
+    from history import WRITE_LOCK
+
+    air = merchant(conn, "Sample Air", "Household", "Travel")
+    tx = row(conn, cards["you"], "SAMPLE AIR 312-1", 100.0, book="Household", type_name="Travel",
+             service_id=air, cat_source="service_default")
+    seq = lambda: conn.execute(  # noqa: E731
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'change_entries'), 0)").fetchone()[0]
+    before = seq()
+    done = []
+    WRITE_LOCK.acquire()   # a write running elsewhere
+    try:
+        # Its own client: a `with` client's kept context belongs to this thread.
+        reader = threading.Thread(target=lambda: done.append(prefill(client.application.test_client(), tx)))
+        reader.start()
+        reader.join(timeout=10)
+        assert done, "the prefill read waited on the write lock"
+    finally:
+        WRITE_LOCK.release()
+    assert seq() == before
 
 
 @pytest.mark.parametrize("body", [None, {}, {"tx_ids": "1"}, {"tx_ids": [1, "x"]}, {"tx_ids": [True]}])

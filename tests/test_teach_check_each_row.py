@@ -4,7 +4,9 @@ Resolve takes an optional `check_each_row: true`, which sets the flag on the
 merchant it finds or creates, in the same transaction (one change entry).
 The screen then checks the rows it showed with their picked books through
 bulk label (a second entry; the toast's Undo takes both). Rows the rule
-reached that were not on screen stay waiting. Driven through the Flask test
+reached that were not on screen stay waiting. A merchant fin already held
+keeps its past rows waiting unless the screen's offer answers `past: leave`
+(case 12's "Not now"), written in the same change. Driven through the Flask test
 client against the temporary database. Every merchant, figure and name is
 invented.
 """
@@ -105,15 +107,23 @@ def test_case_5_taught_as_check_each_row_on_the_sure_card(client, conn, statemen
     assert waiting(client) == []
 
 
-def test_an_existing_merchant_taught_as_check_each_row_takes_the_flag_in_the_same_change(client, conn, statement):
-    """Its past rows are left as they are (checked, as the setting's "Not now"
-    does), so they never flood the Queue unasked; the row taught and the rows
-    the new rule reached wait."""
+def held_merchant(conn, statement) -> tuple[int, int, int, int]:
+    """Sample Air, Every row the same, with one past row fin labelled; and
+    two new rows the rule will reach: the one taught and one more."""
     svc = merchant(conn, "Sample Air", "Household", "Travel")
     past = row(conn, statement, "SAMPLE AIR OLD BOOKING", 90.0, book="Household", type_name="Travel",
                service_id=svc, cat_source="service_default", day="2026-03-01")
     tx = row(conn, statement, "SAMPLE AIR 0042", 120.0, day="2026-09-02")
     reached = row(conn, statement, "SAMPLE AIR 0077", 130.0, day="2026-09-05")
+    return svc, past, tx, reached
+
+
+def test_an_existing_merchant_taught_as_check_each_row_takes_the_flag_only(client, conn, statement):
+    """No answer to the offer: the flag only, in one change. Its past rows
+    keep their labels and wait, with the row taught and the rows the new rule
+    reached; nothing is marked checked unasked."""
+    svc, past, tx, reached = held_merchant(conn, statement)
+    before = len(entries(client))
 
     resp = client.post("/api/transactions/resolve", json=teach(conn, tx, "Sample Air", "SAMPLE AIR", "Travel", "Household",
                                                                service_id=svc))
@@ -121,13 +131,82 @@ def test_an_existing_merchant_taught_as_check_each_row_takes_the_flag_in_the_sam
     assert resp.status_code == 200, resp.get_json()
     assert resp.get_json()["service_id"] == svc
     assert flag(conn, svc) == 1
+    assert label(client, past) == ("Household", "Travel", "service_default")
+    assert waiting(client) == sorted([past, tx, reached])
+    assert len(entries(client)) == before + 1
+
+    undo(client, resp)
+    assert flag(conn, svc) == 0
+    assert waiting(client) == []
+    assert shown(client, tx)["type_id"] is None
+
+
+def test_case_12s_not_now_when_taught_marks_the_past_rows_checked_in_the_same_change(client, conn, statement):
+    """past: leave, the operator's "Not now, only new rows": its past rows are
+    marked checked, labels unchanged; the rows this save labels still wait.
+    One change, and its Undo returns all of it."""
+    svc, past, tx, reached = held_merchant(conn, statement)
+    before = len(entries(client))
+
+    resp = client.post("/api/transactions/resolve", json=teach(conn, tx, "Sample Air", "SAMPLE AIR", "Travel", "Household",
+                                                               service_id=svc, past="leave"))
+
+    assert resp.status_code == 200, resp.get_json()
+    assert flag(conn, svc) == 1
     assert label(client, past) == ("Household", "Travel", "manual")
     assert waiting(client) == sorted([tx, reached])
+    assert len(entries(client)) == before + 1
 
     undo(client, resp)
     assert flag(conn, svc) == 0
     assert label(client, past) == ("Household", "Travel", "service_default")
     assert shown(client, tx)["type_id"] is None
+    assert shown(client, reached)["type_id"] is None
+
+
+def test_case_13s_bring_them_too_when_taught_leaves_the_past_rows_waiting(client, conn, statement):
+    svc, past, tx, reached = held_merchant(conn, statement)
+
+    resp = client.post("/api/transactions/resolve", json=teach(conn, tx, "Sample Air", "SAMPLE AIR", "Travel", "Household",
+                                                               service_id=svc, past="queue"))
+
+    assert resp.status_code == 200, resp.get_json()
+    assert label(client, past) == ("Household", "Travel", "service_default")
+    assert waiting(client) == sorted([past, tx, reached])
+
+
+@pytest.mark.parametrize("more", [
+    {"past": "leave", "check_each_row": False},         # an answer with no Check each row
+    {"past": "leave", "check_each_row": None},
+    {"past": "forget"},                                  # not an answer
+])
+def test_a_past_answer_out_of_place_is_refused_and_nothing_is_written(client, conn, statement, more):
+    svc, past, tx, _ = held_merchant(conn, statement)
+    before = len(entries(client))
+    body = teach(conn, tx, "Sample Air", "SAMPLE AIR", "Travel", "Household", service_id=svc, **more)
+    if body["check_each_row"] is None:
+        del body["check_each_row"]
+
+    resp = client.post("/api/transactions/resolve", json=body)
+
+    assert resp.status_code == 400
+    assert len(entries(client)) == before
+    assert flag(conn, svc) == 0
+    assert label(client, past) == ("Household", "Travel", "service_default")
+    assert shown(client, tx)["type_id"] is None
+
+
+def test_a_past_answer_for_a_merchant_already_checking_each_row_changes_nothing_past(client, conn, statement):
+    """The offer is for a merchant newly set: one already set keeps its waiting rows."""
+    svc, past, tx, _ = held_merchant(conn, statement)
+    conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (svc,))
+    conn.commit()
+
+    resp = client.post("/api/transactions/resolve", json=teach(conn, tx, "Sample Air", "SAMPLE AIR", "Travel", "Household",
+                                                               service_id=svc, past="leave"))
+
+    assert resp.status_code == 200, resp.get_json()
+    assert past in waiting(client)
 
 
 def test_a_merchant_already_set_to_check_each_row_keeps_its_waiting_rows(client, conn, statement):
