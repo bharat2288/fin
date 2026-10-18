@@ -1008,13 +1008,12 @@ function laneSummary(list) {
 
 async function homeGuesses(items) {
     const rows = items.filter(i => i.kind === 'untyped' && i.row).map(i => i.row.id);
+    const all = await loadGuesses();
     const out = new Map();
-    await Promise.all(rows.map(async id => {
-        try {
-            const s = await get(`/api/transactions/${id}/suggestion`);
-            if (s && (s.route === 'prefill' || s.route === 'top3') && s.types && s.types.length) out.set(id, { ...s.types[0], merchant: s.merchant });
-        } catch (_) { /* no guess: the card says "This was…" */ }
-    }));
+    rows.forEach(id => {
+        const s = all.get(id);
+        if (s && (s.route === 'prefill' || s.route === 'top3') && s.types.length) out.set(id, { ...s.types[0], merchant: s.merchant });
+    });
     return out;
 }
 
@@ -1178,13 +1177,32 @@ function merchantCards(items) {
     return cards;
 }
 
+/** Every row with no type, grouped by merchant, with the stored guess for
+ *  each group: one read for the Queue and Home instead of one per row.
+ *  Returns a Map tx id → {merchant, route, types}; an empty Map when it
+ *  cannot be read (no guesses, and every card still says "This was…"). */
+async function loadGuesses() {
+    if (cache.has('guesses')) return cache.get('guesses');
+    const p = get('/api/queue/guesses').then(data => {
+        const byRow = new Map();
+        data.groups.forEach(({ merchant, route, types, tx_ids }) => tx_ids.forEach(id => byRow.set(id, { merchant, route, types })));
+        return byRow;
+    });
+    cache.set('guesses', p);
+    p.catch(() => cache.delete('guesses'));
+    return p.catch(() => new Map());
+}
+
 /** fin's stored type guess for a row with no type, as the card and the step
- *  show it. The server hands over the route; this only draws it. Returns
- *  {html, actions, top3, visible}. */
-async function showResolveSuggestion(row, { n = 1, where = 'card' } = {}) {
+ *  show it. The server hands over the route; this only draws it. A card
+ *  passes its guess from loadGuesses (null: none); the step reads its row's
+ *  own. Returns {html, actions, top3, visible}. */
+async function showResolveSuggestion(row, { n = 1, where = 'card', guess } = {}) {
     const none = { html: '', actions: '', top3: '', visible: false };
-    let suggestion;
-    try { suggestion = await get(`/api/transactions/${row.id}/suggestion`); } catch (_) { return none; }
+    let suggestion = guess;
+    if (suggestion === undefined) {
+        try { suggestion = await get(`/api/transactions/${row.id}/suggestion`); } catch (_) { return none; }
+    }
     if (!suggestion || !suggestion.types || !suggestion.types.length) return none;
     const r = await refs();
     const share = p => Math.round(p * 100);
@@ -1307,7 +1325,7 @@ async function queueCardHTML(card) {
     if (n) queueGroups.set(card.key, card.rows);
     const row = card.rows[0];
     let guess = { html: '', actions: '' };
-    if (card.kind === 'untyped') guess = await showResolveSuggestion(row, { n });
+    if (card.kind === 'untyped') guess = await showResolveSuggestion(row, { n, guess: (await loadGuesses()).get(row.id) || null });
     else if (card.kind === 'transfer') guess = transferGuessHTML(row, await transferGuess(row));
     const amount = `${dirTag(card.lane)} <span class="num">${esc(sumByCurrency([card], c => c.amount))}</span>`;
     const marker = { untyped: tag('nofig', 'no type'), mixed: tag('notchecked', 'mixed merchant'), bill: tag('stale', 'missed bill') }[card.kind] || '';

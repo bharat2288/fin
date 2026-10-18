@@ -76,6 +76,9 @@ _TYPE_JOINS = (
 NO_TYPE_LABEL = "No type"
 # The same rows, as the transaction list's type filter names them.
 UNTYPED_FILTER = "__untyped__"
+# Which rows those are: spending and refund rows with no type. The list's
+# filter and the Queue's guesses read both use it, so they list the same rows.
+UNTYPED_ROWS = "(t.type_id IS NULL AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund'))"
 
 
 def book_expr(alias: str = "t") -> str:
@@ -2048,9 +2051,7 @@ def api_transactions():
         conds = []
         if UNTYPED_FILTER in type_list:
             type_list.remove(UNTYPED_FILTER)
-            conds.append(
-                "(t.type_id IS NULL AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund'))"
-            )
+            conds.append(UNTYPED_ROWS)
         if type_list:
             placeholders = ",".join("?" * len(type_list))
             conds.append(
@@ -2615,17 +2616,58 @@ def api_transaction_suggestion(tx_id: int):
             return jsonify(blank)
         answer = suggest.stored_answer(conn, merchant)
         type_ids = book_type.spending_type_ids(conn)
+    where, offered = _suggested(answer, type_ids)
+    return jsonify({"route": where, "merchant": merchant, "types": offered})
+
+
+def _suggested(answer, type_ids: dict) -> tuple[str, list]:
+    """A stored answer as the screens are given it: the route and the types
+    it offers. No answer is blank."""
     if answer is None:
-        return jsonify({**blank, "merchant": merchant})
+        return "blank", []
     where, offered = suggest.route(answer["pick"], json.loads(answer["probabilities"]))
-    return jsonify({
-        "route": where,
-        "merchant": merchant,
-        "types": [
-            {"type_id": type_ids[name], "name": name, "probability": probability}
-            for name, probability in offered
-        ],
-    })
+    return where, [
+        {"type_id": type_ids[name], "name": name, "probability": probability}
+        for name, probability in offered
+    ]
+
+
+@app.route("/api/queue/guesses")
+def api_queue_guesses():
+    """Every row with no type, grouped by merchant, with the stored guess for
+    each group: what the Queue and Home draw, in one read instead of one per
+    row. A group is the merchant string the gate would send, or the row's
+    description, upper-cased and trimmed, when the gate stops the row (a
+    PayNow, a GIRO). A row gets the route the per-row read gives it: blank
+    with no key, for a row whose merchant is set, or for a row the gate
+    stops, so those rows group apart from asked rows of the same string.
+    Read from the stored answers; it never asks and writes nothing."""
+    on = suggest.key() is not None
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT t.id, t.description, t.flow_type, t.service_id, a.type AS account_kind
+            FROM transactions t
+            LEFT JOIN services svc ON t.service_id = svc.id
+            JOIN statements s ON t.statement_id = s.id
+            JOIN accounts a ON s.account_id = a.id
+            WHERE {UNTYPED_ROWS} AND {_expense_visibility_filter('svc')}
+            ORDER BY t.amount_minor DESC, t.id
+        """).fetchall()
+        held = suggest.stored_answers(conn) if on else {}
+        type_ids = book_type.spending_type_ids(conn) if on else {}
+    groups = {}
+    for r in rows:
+        merchant = suggest.merchant_string(r["description"], r["flow_type"], r["account_kind"])
+        asked = on and merchant is not None and r["service_id"] is None
+        name = merchant if merchant is not None else (r["description"] or "").strip().upper()
+        group = groups.get((name, asked))
+        if group is None:
+            where, offered = _suggested(held.get(name), type_ids) if asked else ("blank", [])
+            group = groups[(name, asked)] = {
+                "merchant": name, "route": where, "types": offered, "tx_ids": [],
+            }
+        group["tx_ids"].append(r["id"])
+    return jsonify({"groups": list(groups.values())})
 
 
 # ---------------------------------------------------------------------------
