@@ -68,6 +68,9 @@ const ICONS = Object.freeze({
     'gear': '<path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm88-29.84q.06-2.16,0-4.32l14.92-18.64a8,8,0,0,0,1.48-7.06,107.21,107.21,0,0,0-10.88-26.25,8,8,0,0,0-6-3.93l-23.72-2.64q-1.48-1.56-3-3L186,40.54a8,8,0,0,0-3.94-6,107.71,107.71,0,0,0-26.25-10.87,8,8,0,0,0-7.06,1.49L130.16,40Q128,40,125.84,40L107.2,25.11a8,8,0,0,0-7.06-1.48A107.6,107.6,0,0,0,73.89,34.51a8,8,0,0,0-3.93,6L67.32,64.27q-1.56,1.49-3,3L40.54,70a8,8,0,0,0-6,3.94,107.71,107.71,0,0,0-10.87,26.25,8,8,0,0,0,1.49,7.06L40,125.84Q40,128,40,130.16L25.11,148.8a8,8,0,0,0-1.48,7.06,107.21,107.21,0,0,0,10.88,26.25,8,8,0,0,0,6,3.93l23.72,2.64q1.49,1.56,3,3L70,215.46a8,8,0,0,0,3.94,6,107.71,107.71,0,0,0,26.25,10.87,8,8,0,0,0,7.06-1.49L125.84,216q2.16.06,4.32,0l18.64,14.92a8,8,0,0,0,7.06,1.48,107.21,107.21,0,0,0,26.25-10.88,8,8,0,0,0,3.93-6l2.64-23.72q1.56-1.48,3-3L215.46,186a8,8,0,0,0,6-3.94,107.71,107.71,0,0,0,10.87-26.25,8,8,0,0,0-1.49-7.06Zm-16.1-6.5a73.93,73.93,0,0,1,0,8.68,8,8,0,0,0,1.74,5.48l14.19,17.73a91.57,91.57,0,0,1-6.23,15L187,173.11a8,8,0,0,0-5.1,2.64,74.11,74.11,0,0,1-6.14,6.14,8,8,0,0,0-2.64,5.1l-2.51,22.58a91.32,91.32,0,0,1-15,6.23l-17.74-14.19a8,8,0,0,0-5-1.75h-.48a73.93,73.93,0,0,1-8.68,0,8,8,0,0,0-5.48,1.74L100.45,215.8a91.57,91.57,0,0,1-15-6.23L82.89,187a8,8,0,0,0-2.64-5.1,74.11,74.11,0,0,1-6.14-6.14,8,8,0,0,0-5.1-2.64L46.43,170.6a91.32,91.32,0,0,1-6.23-15l14.19-17.74a8,8,0,0,0,1.74-5.48,73.93,73.93,0,0,1,0-8.68,8,8,0,0,0-1.74-5.48L40.2,100.45a91.57,91.57,0,0,1,6.23-15L69,82.89a8,8,0,0,0,5.1-2.64,74.11,74.11,0,0,1,6.14-6.14A8,8,0,0,0,82.89,69L85.4,46.43a91.32,91.32,0,0,1,15-6.23l17.74,14.19a8,8,0,0,0,5.48,1.74,73.93,73.93,0,0,1,8.68,0,8,8,0,0,0,5.48-1.74L155.55,40.2a91.57,91.57,0,0,1,15,6.23L173.11,69a8,8,0,0,0,2.64,5.1,74.11,74.11,0,0,1,6.14,6.14,8,8,0,0,0,5.1,2.64l22.58,2.51a91.32,91.32,0,0,1,6.23,15l-14.19,17.74A8,8,0,0,0,199.87,123.66Z"/>',   // upstream
     'arrows-clockwise': '<path d="M224,48V96a8,8,0,0,1-8,8H168a8,8,0,0,1,0-16h28.69L182.06,73.37a79.56,79.56,0,0,0-56.13-23.43h-.45A79.52,79.52,0,0,0,69.59,72.71,8,8,0,0,1,58.41,61.27a96,96,0,0,1,135,.79L208,76.69V48a8,8,0,0,1,16,0ZM186.41,183.29a80,80,0,0,1-112.47-.66L59.31,168H88a8,8,0,0,0,0-16H40a8,8,0,0,0-8,8v48a8,8,0,0,0,16,0V179.31l14.63,14.63A95.43,95.43,0,0,0,130,222.06h.53a95.36,95.36,0,0,0,67.07-27.33,8,8,0,0,0-11.18-11.44Z"/>',   // upstream
     'asterisk': '<path d="M214.86,180.12a8,8,0,0,1-11,2.74L136,142.13V216a8,8,0,0,1-16,0V142.13L52.12,182.86a8,8,0,1,1-8.23-13.72L112.45,128,43.89,86.86a8,8,0,1,1,8.23-13.72L120,113.87V40a8,8,0,0,1,16,0v73.87l67.88-40.73a8,8,0,1,1,8.23,13.72L143.55,128l68.56,41.14A8,8,0,0,1,214.86,180.12Z"/>',   // upstream
+    'check': '<path d="M229.66,77.66l-128,128a8,8,0,0,1-11.32,0l-56-56a8,8,0,0,1,11.32-11.32L96,188.69,218.34,66.34a8,8,0,0,1,11.32,11.32Z"/>',   // upstream
+    'arrow-up': '<path d="M205.66,117.66a8,8,0,0,1-11.32,0L136,59.31V216a8,8,0,0,1-16,0V59.31L61.66,117.66a8,8,0,0,1-11.32-11.32l72-72a8,8,0,0,1,11.32,0l72,72A8,8,0,0,1,205.66,117.66Z"/>',   // upstream
+    'arrow-down': '<path d="M205.66,149.66l-72,72a8,8,0,0,1-11.32,0l-72-72a8,8,0,0,1,11.32-11.32L120,196.69V40a8,8,0,0,1,16,0V196.69l58.34-58.35a8,8,0,0,1,11.32,11.32Z"/>',   // upstream
 });
 /** An inline icon by name, sized by its class or 1em. */
 function icon(name, cls = '') {
@@ -1128,6 +1131,37 @@ let afterNextRender = null;
 ACT['needs-look-link'] = () => { S.needsLook = true; location.hash = '#/books'; };
 
 // ---------------------------------------------------------------------------
+// kit (from folio): bandedTable, rowDetailToggle and bindRowDetail, ported
+// by shape (fin has no modules); their CSS is the "kit (from folio)" blocks
+// ---------------------------------------------------------------------------
+
+/** kit (from folio): bandedTable. The tight table with a header band: a
+ *  caption a screen reader reads, th scope="col", money right in tabular
+ *  figures. columns: [{label, cls, sr}] (sr: the label is for a screen
+ *  reader only); rows: each row's <tr> HTML; colgroup: a width in px for each
+ *  column, 0 for the one that takes the rest. */
+function bandedTable({ columns, rows, caption, colgroup = null, cls = '' }) {
+    const cols = colgroup ? `<colgroup>${colgroup.map(w => w ? `<col style="width:${w}px">` : '<col>').join('')}</colgroup>` : '';
+    const head = columns.map(c => `<th scope="col"${c.cls ? ` class="${c.cls}"` : ''}>${c.sr ? `<span class="sr-only">${esc(c.label)}</span>` : esc(c.label)}</th>`).join('');
+    return `<table class="bt${cls ? ' ' + cls : ''}"><caption class="sr-only">${esc(caption)}</caption>${cols}<thead><tr>${head}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+/** kit (from folio): rowDetailToggle, the caret inside the name: a button
+ *  that opens the detail it controls (id). act: the ACT that toggles it. */
+function rowDetailToggle({ id, label, open = false, act, data = {} }) {
+    const attrs = Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
+    return `<button type="button" class="disc" data-act="${act}"${attrs} aria-expanded="${open}" aria-controls="${esc(id)}">${icon('caret-right', 'caret')}<span class="nm">${esc(label)}</span></button>`;
+}
+/** kit (from folio): bindRowDetail, as fin's one listener calls it: the
+ *  toggle shows or hides what it controls and says so. Returns open. */
+function toggleRowDetail(el) {
+    const open = el.getAttribute('aria-expanded') !== 'true';
+    const box = document.getElementById(el.getAttribute('aria-controls'));
+    if (box) box.hidden = !open;
+    el.setAttribute('aria-expanded', String(open));
+    return open;
+}
+
+// ---------------------------------------------------------------------------
 // Queue
 // ---------------------------------------------------------------------------
 
@@ -1309,22 +1343,51 @@ function groupKeyOf(row) {
     return '';
 }
 
+/** Several rows' first and last dates: "12 Sep to 9 Oct 2026", the year
+ *  said once when they share it. */
+function spanWords(rows) {
+    const dates = rows.map(x => x.date).sort();
+    const a = dates[0], b = dates[dates.length - 1];
+    return a === b ? day(a) : `${day(a, { year: a.slice(0, 4) !== b.slice(0, 4) })} to ${day(b)}`;
+}
 /** Several rows' dates and accounts, in one line: "3 Mar to 9 Apr 2026 · DBS". */
 function rowsMeta(rows) {
-    const n = rows.length;
-    const dates = rows.map(x => x.date).sort();
     const accounts = new Set(rows.map(x => x.account_name));
-    return `${dates[0] === dates[n - 1] ? day(dates[0]) : `${day(dates[0])} to ${day(dates[n - 1])}`} · ${accounts.size === 1 ? rows[0].account_name : plural(accounts.size, 'account')}`;
+    return `${spanWords(rows)} · ${accounts.size === 1 ? rows[0].account_name : plural(accounts.size, 'account')}`;
 }
-function seeRowsHTML(rows) {
-    const n = rows.length;
-    return n > 1 ? `<details class="q-rows"><summary class="link">See the ${n} rows</summary>
-        <table class="t table-tight"><tbody>${rows.map(x => `<tr><td>${esc(day(x.date))}</td><td>${esc(x.account_name || '')}</td>
-            <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td></tr>`).join('')}</tbody></table></details>` : '';
+/** Rows as a banded sub-table with its header and caption (fin-surfaces 17,
+ *  T7): date, account, statement text, amount; book(x), when given, adds
+ *  each row's Book cell. */
+function rowsTableHTML(rows, caption, { book = null } = {}) {
+    const columns = [{ label: 'Date' }, { label: 'Account' }, { label: 'Statement text' }, { label: 'Amount', cls: 'r' }];
+    if (book) columns.push({ label: 'Book' });
+    return `<div class="tshell">${bandedTable({ columns, caption, cls: 'bt--in', rows: rows.map(x => `<tr data-tx="${x.id}"><td class="num">${esc(day(x.date))}</td>
+        <td>${esc(x.account_name || '')}</td><td class="stext">${esc(x.description || '')}</td>
+        <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td>${book ? book(x) : ''}</tr>`) })}</div>`;
+}
+/** Money out or money in, once for a side: folio's kind-pill square, no word. */
+function dirSquare(lane) {
+    return `<span class="dir ${lane}" aria-hidden="true"><span class="dir__icon">${icon(lane === 'in' ? 'arrow-down' : 'arrow-up')}</span></span>`;
 }
 
-/** One card in a money lane: a transfer, a merchant's rows with no type and
- *  no guess, or a missed bill (Pick a type and Check each row draw their own). */
+// A lane row (fin-surfaces 17): what | amount | action, on the side's one
+// grid, so amounts and actions line up down the side. Several rows open on
+// "2 rows" at the start of the meta line to their sub-table.
+const qiShown = new Set();     // the keys of the lane rows opened to their rows
+function qiMeta(card, words) {
+    if (card.rows.length < 2) return esc(words || '');
+    const open = qiShown.has(card.key);
+    return `<button type="button" class="disc disc--meta" data-act="qi-rows" data-key="${esc(card.key)}" aria-expanded="${open}" aria-controls="qr-${esc(card.key)}">${plural(card.rows.length, 'row')}${icon('caret-right', 'caret')}</button> · ${esc(rowsMeta(card.rows))}`;
+}
+function qiRowsHTML(card) {
+    if (card.rows.length < 2) return '';
+    return `<div class="qi__more" id="qr-${esc(card.key)}"${qiShown.has(card.key) ? '' : ' hidden'}>${rowsTableHTML(card.rows, `${card.merchant || card.title}: its rows`)}</div>`;
+}
+ACT['qi-rows'] = el => { if (toggleRowDetail(el)) qiShown.add(el.dataset.key); else qiShown.delete(el.dataset.key); };
+
+/** One row in a money lane: a transfer, a merchant's rows with no type and
+ *  no guess, or a missed bill (Pick a type and Check each row draw their own).
+ *  One outline action; a missed bill's Open Bills is a link on its meta. */
 async function queueCardHTML(card) {
     const n = card.rows.length;
     if (n) queueGroups.set(card.key, card.rows);
@@ -1332,22 +1395,20 @@ async function queueCardHTML(card) {
     let guess = { html: '', actions: '' };
     if (card.kind === 'untyped') guess = await showResolveSuggestion(row, { n, guess: (await loadGuesses()).get(row.id) || null });
     else if (card.kind === 'transfer') guess = transferGuessHTML(row, await transferGuess(row));
-    const amount = `${dirTag(card.lane)} <span class="num">${esc(sumByCurrency([card], c => c.amount))}</span>`;
-    const marker = { untyped: tag('nofig', 'no type'), mixed: tag('notchecked', 'not checked'), bill: tag('stale', 'missed bill') }[card.kind] || '';
-    const count = n > 1 ? ` <span class="tag yours">${n} rows</span>` : '';
-    const meta = n > 1 ? rowsMeta(card.rows) : card.meta;
+    const bill = card.kind === 'bill';
+    const title = bill ? card.sub.service_name || card.sub.match_pattern : card.title;
+    const meta = bill ? `No payment seen · ${card.meta}`
+        : card.kind === 'transfer' && card.holds ? `${card.meta} · ${card.holds.charAt(0).toLowerCase()}${card.holds.slice(1)}` : card.meta;
     const data = a => Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('') + (card.rows.length ? ` data-group="${esc(card.key)}"` : '');
-    const all = n > 1 ? ` (all ${n})` : '';
-    const own = (card.actions || []).map(a => a.href
-        ? `<a class="btn sm" href="${a.href}">${esc(a.label)}</a>`
-        : `<button type="button" class="btn sm" data-act="${a.act}"${data(a)}>${esc(guess.actions && /^This was/.test(a.label) ? 'Something else' : a.label + (/^This was/.test(a.label) ? all : ''))}</button>`).join('');
-    const seeRows = seeRowsHTML(card.rows);
-    return `<article class="item q-card ${card.kind}">
-        <div><div class="what">${esc(card.title)} ${marker}${count}${row ? rowMark(row.id) : ''}</div><div class="meta">${esc(meta || '')}</div>${card.holds && card.kind === 'mixed' ? `<div class="holds">${esc(card.holds)}</div>` : ''}</div>
-        <div class="amt">${amount}</div>
-        ${guess.html ? `<div class="q-guess">${guess.html}</div>` : ''}
-        <div class="act">${guess.actions || ''}${own}</div>
-        ${seeRows ? `<div class="q-more">${seeRows}</div>` : ''}</article>`;
+    const own = (card.actions || []).find(a => !a.href);
+    const links = (card.actions || []).filter(a => a.href).map(a => ` · <a class="link" href="${a.href}">${esc(a.label)}</a>`).join('');
+    const act = own ? `<button type="button" class="btn sm" data-act="${own.act}"${data(own)}>${esc(guess.actions && /^This was/.test(own.label) ? 'Something else' : own.label)}</button>` : '';
+    return `<article class="qi qi--${card.kind}">
+        <div class="qi__w"><p class="qi__t">${esc(title)}${row ? rowMark(row.id) : ''}</p><p class="qi__m">${qiMeta(card, meta)}${links}</p></div>
+        <div class="qi__amt num">${esc(sumByCurrency([card], c => c.amount))}</div>
+        <div class="qi__act">${act}</div>
+        ${guess.html ? `<div class="qi__more q-guess">${guess.html}${guess.actions ? `<div class="q-guess__act">${guess.actions}</div>` : ''}</div>` : ''}
+        ${qiRowsHTML(card)}</article>`;
 }
 
 /** A lane's items as the cards it draws, each under its step: a waiting
@@ -1379,11 +1440,12 @@ function laneCards(lane, items, guesses) {
 }
 /** A card the lanes drew, found by its key (drawn in place, so focus stays). */
 function laneCardEl(key) { return $$('#q-work article[data-key]').find(a => a.dataset.key === key); }
-function cardHead(card, marker) {
-    const n = card.rows.length;
-    return `<div><div class="what">${esc(card.title)} ${marker}${n > 1 ? ` <span class="tag yours">${n} rows</span>` : ''}${card.step === 'pick' ? rowMark(card.rows[0].id) : ''}</div>
-        <div class="meta">${esc(n > 1 ? rowsMeta(card.rows) : card.items[0].meta)}</div></div>
-        <div class="amt">${dirTag(card.lane)} <span class="num">${esc(sumByCurrency(card.items))}</span></div>`;
+/** Every row the same | Check each row, as a segmented control: act is the
+ *  ACT its press calls (data-v is the choice). */
+function eachSegHTMLQ(act, key, name, each, { labelledBy = '' } = {}) {
+    const label = labelledBy ? ` aria-labelledby="${labelledBy}"` : ` aria-label="How ${esc(name)}’s new rows arrive"`;
+    return `<div class="seg each-seg" role="group"${label}>${[['same', 'Every row the same'], ['each', 'Check each row']].map(([v, words]) =>
+        `<button type="button" data-act="${act}" data-key="${esc(key)}" data-v="${v}" aria-pressed="${(v === 'each') === !!each}"${queueBusy ? ' disabled' : ''}>${words}</button>`).join('')}</div>`;
 }
 
 // Pick a type: Jev's three guesses as pick buttons, none chosen; a pick shows
@@ -1461,19 +1523,21 @@ function prefillHintHTML(prefill, book, cls) {
 function pickSaveHTML(card, books) {
     const pick = pickState.get(card.key);
     if (!pick) return '';
-    return `${eachSetHTML('pick-set', card.key, card.merchant, pick.each)}
-        <label class="usual-pick">${pick.each ? '<span class="usual-l">usual book</span>' : ''}<select data-change="pick-book" data-key="${esc(card.key)}" aria-label="${pick.each ? 'Usual book' : 'Book'} for ${esc(card.merchant)}">${bookOptions(books, pick.book, 'Choose book')}</select></label>${prefillHintHTML(card.prefill, pick.book, 'q-pick-hint')}
-        <button type="button" class="btn sm subtle" data-act="pick-save" data-key="${esc(card.key)}"${pick.book && !queueBusy ? '' : ' disabled'}>Save</button>`;
+    return `${eachSegHTMLQ('pick-set', card.key, card.merchant, pick.each)}
+        <select class="sel" data-change="pick-book" data-key="${esc(card.key)}" aria-label="${pick.each ? 'Usual book' : 'Book'} for ${esc(card.merchant)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, pick.book, 'Choose book')}</select>${prefillHintHTML(card.prefill, pick.book, 'q-pick-hint')}
+        <button type="button" class="btn sm subtle" data-act="pick-save" data-key="${esc(card.key)}"${pick.book && !queueBusy ? '' : ' disabled'}>${icon('check')}Save</button>`;
 }
 function pickCardHTML(card, books) {
     queueGroups.set(card.key, card.rows);
     const pick = pickState.get(card.key);
-    const types = card.guess.types.map(t => `<button type="button" class="q-pick" data-act="pick-type" data-key="${esc(card.key)}" data-type="${t.type_id}" aria-pressed="${pick ? pick.typeId === t.type_id : false}">${esc(t.name)} <em>${Math.round(t.probability * 100)}%</em></button>`).join('');
-    return `<article class="item q-card pick" data-key="${esc(card.key)}">${cardHead(card, tag('nofig', 'no type'))}
-        <div class="q-picks" role="group" aria-label="Jev’s guesses for ${esc(card.merchant)}">${types}
-            <button type="button" class="link" data-act="resolve" data-tx="${card.rows[0].id}" data-group="${esc(card.key)}">Another type…</button></div>
-        <div class="q-pick-save"${pick ? '' : ' hidden'}>${pickSaveHTML(card, books)}</div>
-        ${card.rows.length > 1 ? `<div class="q-more">${seeRowsHTML(card.rows)}</div>` : ''}</article>`;
+    const types = card.guess.types.map(t => `<button type="button" class="pick" data-act="pick-type" data-key="${esc(card.key)}" data-type="${t.type_id}" aria-pressed="${pick ? pick.typeId === t.type_id : false}">${esc(t.name)} <em>${Math.round(t.probability * 100)}%</em></button>`).join('');
+    return `<article class="qi qi--pick" data-key="${esc(card.key)}">
+        <div class="qi__w"><p class="qi__t">${esc(card.title)}${rowMark(card.rows[0].id)}</p><p class="qi__m">${qiMeta(card, card.items[0].meta)}</p></div>
+        <div class="qi__amt num">${esc(sumByCurrency(card.items))}</div>
+        <div class="qi__act"><button type="button" class="btn sm" data-act="resolve" data-tx="${card.rows[0].id}" data-group="${esc(card.key)}">Another type…</button></div>
+        <div class="qi__more"><div class="picks" role="group" aria-label="Jev’s guesses for ${esc(card.merchant)}">${types}</div>
+            <div class="pick-save"${pick ? '' : ' hidden'}>${pickSaveHTML(card, books)}</div></div>
+        ${qiRowsHTML(card)}</article>`;
 }
 ACT['pick-type'] = el => {
     const card = laneCardByKey.get(el.dataset.key);
@@ -1483,8 +1547,8 @@ ACT['pick-type'] = el => {
     pickState.set(card.key, { typeId, book: card.prefill?.book || queueModel.r.typeById.get(typeId)?.proposed_book || '',
         each: was ? was.each : merchantChecksEach(resolveBody(card.rows[0], null).service_name) });
     const box = laneCardEl(card.key);
-    $$('.q-pick', box).forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.type) === typeId)));
-    const save = $('.q-pick-save', box);
+    $$('.pick', box).forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.type) === typeId)));
+    const save = $('.pick-save', box);
     save.innerHTML = pickSaveHTML(card, queueModel.r.books);
     save.hidden = false;
 };
@@ -1501,11 +1565,11 @@ ACT['pick-book'] = el => {
 // book shown either way (checked, under Check each row); new rows then wait.
 ACT['pick-set'] = el => {
     const pick = pickState.get(el.dataset.key), card = laneCardByKey.get(el.dataset.key);
-    if (!pick || !card) return;
-    pick.each = el.value === 'each';
-    const save = $('.q-pick-save', laneCardEl(card.key));
+    if (!pick || !card || queueBusy) return;
+    pick.each = el.dataset.v === 'each';
+    const save = $('.pick-save', laneCardEl(card.key));
     save.innerHTML = pickSaveHTML(card, queueModel.r.books);
-    $('[data-change="pick-set"]', save)?.focus();
+    $(`[data-act="pick-set"][data-v="${el.dataset.v}"]`, save)?.focus();
 };
 ACT['pick-save'] = async el => {
     const card = laneCardByKey.get(el.dataset.key), pick = pickState.get(el.dataset.key);
@@ -1544,29 +1608,38 @@ function eachLine(row) {
     return { typeId: pick.typeId ?? row.type_id, book, hint: pre && pick.book === undefined ? pre.hint : '' };
 }
 const eachReady = line => !!(line.typeId && line.book);
+const eachShut = new Set();    // the Check each row merchants folded shut (open by default)
 function eachCardHTML(card, books) {
     const n = card.rows.length;
     const limit = queueOpen[card.key] || LINES_PAGE;
     const types = queueModel.r.types;
     const off = queueBusy ? ' disabled' : '';
     const newest = [...card.rows].sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
+    // One line per row on the side's grid: its date and account, amount and
+    // ✓; under them a quiet type picker, the book picker and the hint.
     const lines = newest.slice(0, limit).map(x => {
         const line = eachLine(x), when = esc(day(x.date));
         return `<div class="ce" data-tx="${x.id}">
-            <div class="ce-what"><span>${when} · ${esc(x.account_name || '')}</span>${tag('notchecked', 'not checked')}${rowMark(x.id)}</div>
-            <span class="num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</span>
-            <div class="ce-pick"><select data-change="each-type" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Type for the ${when} row"${off}>${typeOptions(types, line.typeId)}</select>
-                <select data-change="each-book" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Book for the ${when} row"${off}>${bookOptions(books, line.book, 'Choose book')}</select>
-                <span class="hint">${esc(line.hint)}</span>
-                <button type="button" class="btn sm subtle icon" data-act="each-ok" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Confirm the ${when} row"${eachReady(line) && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></div></div>`;
+            <div class="ce__when">${esc(day(x.date, { year: false }))} · ${esc(x.account_name || '')}${rowMark(x.id)}</div>
+            <div class="ce__amt num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</div>
+            <div class="ce__go"><button type="button" class="btn sm subtle icon" data-act="each-ok" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Confirm the ${when} row"${eachReady(line) && !queueBusy ? '' : ' disabled'}>${icon('check')}</button></div>
+            <div class="ce__pick"><select class="sel sel--quiet" data-change="each-type" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Type for the ${when} row"${off}>${typeOptions(types, line.typeId)}</select>
+                <select class="sel" data-change="each-book" data-tx="${x.id}" data-key="${esc(card.key)}" aria-label="Book for the ${when} row"${off}>${bookOptions(books, line.book, 'Choose book')}</select>
+                <span class="hint">${esc(line.hint)}</span></div></div>`;
     }).join('');
     const ready = card.rows.every(x => eachReady(eachLine(x)));
-    return `<article class="item q-card mixed" data-key="${esc(card.key)}">${cardHead(card, '')}
-        <div class="q-each"><p class="holds">Each row came in with ${esc(card.merchant)}’s type and usual book, and counts there until you check it: confirm it as it is, or change its type or book.</p>${lines}
-            ${n > limit ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="${esc(card.key)}">Show ${plural(n - limit, 'more line')}</button>` : ''}</div>
-        <div class="act"><button type="button" class="btn sm subtle" data-act="each-save" data-key="${esc(card.key)}"${ready && !queueBusy ? '' : ' disabled'}>Confirm all</button>
-            ${card.rows[0].service_id ? `<a class="link" href="#/books/merchant/${card.rows[0].service_id}">${esc(card.merchant)}’s page</a>` : ''}</div></article>`;
+    const svcId = card.rows[0].service_id;
+    const usual = (queueModel.services || []).find(s => s.id === svcId)?.book || card.rows[0].book || '';
+    const open = !eachShut.has(card.key), id = `ce-${card.key}`;
+    return `<article class="qi qi--each" data-key="${esc(card.key)}">
+        <div class="qi__w"><p class="qi__t">${rowDetailToggle({ id, label: card.merchant, open, act: 'each-open', data: { key: card.key } })}</p>
+            <p class="qi__m">${plural(n, 'row')} · ${esc(spanWords(card.rows))}${usual ? ` · usual book ${esc(usual)}` : ''}${svcId ? ` · <a class="link" href="#/books/merchant/${svcId}">its page</a>` : ''}</p></div>
+        <div class="qi__amt num">${esc(sumByCurrency(card.items))}</div>
+        <div class="qi__act"><button type="button" class="btn sm subtle" data-act="each-save" data-key="${esc(card.key)}"${ready && !queueBusy ? '' : ' disabled'}>${icon('check')}Confirm all</button></div>
+        <div class="qi__more" id="${esc(id)}"${open ? '' : ' hidden'}>${lines}
+            ${n > limit ? `<div class="q-show"><button type="button" class="btn sm ghost" data-act="queue-more" data-lane="${esc(card.key)}">Show ${plural(n - limit, 'more line')}</button></div>` : ''}</div></article>`;
 }
+ACT['each-open'] = el => { if (toggleRowDetail(el)) eachShut.delete(el.dataset.key); else eachShut.add(el.dataset.key); };
 /** A pick redraws its line's hint and the card's buttons in place (focus stays). */
 function eachPick(el, k, v) {
     const id = Number(el.dataset.tx);
@@ -1612,7 +1685,10 @@ ACT['each-save'] = async el => {
     rerender(); refreshFrame();
 };
 
-/** One side: its head, then a section that folds for each step with cards. */
+/** The Check each row step's one note: "not checked" is said here, once. */
+const EACH_NOTE = 'Each row came in with its merchant’s type and usual book, not checked. Confirm it, or change its type or book.';
+/** One side: its head, then a section that folds for each step with rows,
+ *  all on one grid (what | amount | action) so the columns line up. */
 async function laneHTML(lane, list, { books, ask, empty }) {
     const folded = new Set(store.get('queueFolded', []));
     const rows = list.reduce((n, c) => n + c.rows.length, 0);
@@ -1624,14 +1700,15 @@ async function laneHTML(lane, list, { books, ask, empty }) {
         const drawn = await Promise.all(cards.slice(0, limit).map(c =>
             c.step === 'pick' ? pickCardHTML(c, books) : c.step === 'mixed' ? eachCardHTML(c, books) : queueCardHTML(c)));
         const more = cards.length - limit;
-        return `<section class="q-sec">
-            <h3 class="q-sec__h"><button type="button" class="q-sec__fold" data-act="q-fold" data-sec="${key}" aria-expanded="${open}" aria-controls="q-sec-${key}">${esc(s.label)} <span class="q-sec__n">· ${cards.length}</span>${icon('caret-right', 'caret')}</button></h3>
-            <div class="q-sec__body" id="q-sec-${key}"${open ? '' : ' hidden'}>${s.k === 'noguess' && ask ? suggestEntryHTML() : ''}${drawn.join('')}
-                ${more > 0 ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="${key}">Show ${more} more</button>` : ''}</div></section>`;
+        const suggest = s.k === 'noguess' && ask ? '<button type="button" class="btn sm ghost" data-act="suggest-types">Suggest types…</button>' : '';
+        return `<section class="step">
+            <h3 class="step-h"><button type="button" class="fold" data-act="q-fold" data-sec="${key}" aria-expanded="${open}" aria-controls="q-sec-${key}">${esc(s.label)} <span class="n">${cards.length}</span>${icon('caret-right', 'caret')}</button>${suggest}</h3>
+            <div class="step-b" id="q-sec-${key}"${open ? '' : ' hidden'}>${s.k === 'mixed' ? `<p class="step-note">${EACH_NOTE}</p>` : ''}${drawn.join('')}
+                ${more > 0 ? `<div class="q-show"><button type="button" class="btn sm ghost" data-act="queue-more" data-lane="${key}">Show ${more} more</button></div>` : ''}</div></section>`;
     }));
-    return `<section class="card q-lane" id="lane-${lane}">
-        <h2 class="q-lane__h"><span class="sure-dot ${lane}" aria-hidden="true"></span>${lane === 'out' ? 'Money out' : 'Money in'} <small>${list.length} to do · ${plural(rows, 'row')}</small></h2>
-        ${list.length ? sections.join('') : `<p class="q-lane__empty">${esc(empty)}</p>`}</section>`;
+    return `<section class="card q-lane" id="lane-${lane}" aria-labelledby="lh-${lane}">
+        <header class="lane-h">${dirSquare(lane)}<h2 id="lh-${lane}">${lane === 'out' ? 'Money out' : 'Money in'}</h2><span class="sub">${list.length} to do · ${plural(rows, 'row')}</span></header>
+        <div class="lane-body">${list.length ? sections.join('') : `<p class="lane-empty">${esc(empty)}</p>`}</div></section>`;
 }
 ACT['q-fold'] = el => {
     const open = el.getAttribute('aria-expanded') !== 'true';
@@ -1646,12 +1723,16 @@ ACT['q-fold'] = el => {
 // The "Jev is sure" card (fin-surfaces 05): one row per merchant group whose
 // stored guess is sure, across both sides, each saved with today's guess save
 // and the book its picker shows; "Save all" is the same save in a loop. A line
-// reads the merchant its save makes, opens to its rows, and its Something else…
-// opens "This was…" for them (fin-surfaces 09). A line set to Check each row
-// gives its rows their own book pickers, saved checked (fin-surfaces 13).
-const SURE_NOTE = '<b>Every row the same:</b> saving teaches fin each merchant: its rows here, and every new row from it, get the type and book shown, without asking again. <b>Check each row:</b> you give the rows here their own book, and each new row waits in the Queue with the usual book, marked not checked.';
+// reads the merchant its save makes and opens on its name to the rest: how
+// new rows arrive, Something else… ("This was…" for its rows, fin-surfaces
+// 09) and its rows. A line set to Check each row gives its rows their own
+// book pickers, saved checked (fin-surfaces 13). Drawn as folio's banded
+// table (fin-surfaces 17): merchant · rows · amount · Jev's type · book · ✓.
+const SURE_NOTE = 'Saving teaches fin each merchant: its rows here, and every new row from it, get the type and book shown, without asking again.';
+const SURE_ROWS = 5;           // a line's rows shown before "Show N more rows"
 const sureBooks = new Map();   // a group's key -> the book picked for it ('' = none yet)
-const sureShown = new Set();   // the keys of the lines opened to their rows
+const sureShown = new Set();   // the keys of the lines opened to their detail
+const sureAll = new Set();     // the keys of the lines showing every row
 const sureSets = new Map();    // a group's key -> true for Check each row, false for Every row the same, as picked
 const sureRowBooks = new Map(); // a row's id -> the book picked on its line under Check each row
 let sureList = [];             // the groups as last drawn, in card order
@@ -1662,10 +1743,6 @@ let sureList = [];             // the groups as last drawn, in card order
 function merchantChecksEach(name, services = queueModel?.services || []) {
     const svc = services.find(s => s.name.toLowerCase() === String(name || '').toLowerCase());
     return !!(svc && svc.review_each_time);
-}
-function eachSetHTML(act, key, name, each) {
-    return `<select data-change="${act}" data-key="${esc(key)}" aria-label="How ${esc(name)}’s new rows arrive"${queueBusy ? ' disabled' : ''}>
-        <option value="same"${each ? '' : ' selected'}>Every row the same</option><option value="each"${each ? ' selected' : ''}>Check each row</option></select>`;
 }
 /** A line's setting: as picked, else the merchant's own. */
 function sureEach(g) { return sureSets.has(g.key) ? sureSets.get(g.key) : !!g.checksEach; }
@@ -1724,38 +1801,52 @@ function sureHead() {
     const need = sureList.length - ready;
     return {
         ready,
-        meta: `${plural(rows, 'row')} across both sides${need ? ` · ${need} ${need === 1 ? 'needs' : 'need'} a book first` : ''}`,
+        meta: `${plural(rows, 'row')} across both sides.${need ? ` ${need} ${need === 1 ? 'needs' : 'need'} a book first.` : ''}`,
         label: ready === sureList.length ? 'Save all' : `Save ${ready} ready`,
     };
 }
-/** "See the 2 rows" / "Hide the row": the words of a line's rows toggle. */
-function sureRowsWords(n, open) { return `${open ? 'Hide' : 'See'} the ${n === 1 ? 'row' : `${n} rows`}`; }
-/** A line's rows (oldest first): date, account, amount and statement text,
- *  and under Check each row each row's own book picker with its hint. */
-function sureRowsHTML(g) {
-    const rows = g.items.map(i => i.row), each = sureEach(g);
+/** Jev's name for a line, only when it differs from the merchant's beyond
+ *  letter case ("GRAB" for Grab is not news; ruling D3). */
+function jevName(g) { return g.merchant.toLowerCase() === g.name.toLowerCase() ? '' : g.merchant; }
+/** The one sentence for a line's setting, then Jev's name when it differs. */
+function sureSay(g) {
+    const book = sureBook(g) ? esc(sureBook(g)) : 'the book you pick';
+    const say = sureEach(g)
+        ? `You give the rows below their own book. Each new row from ${esc(g.name)} arrives as ${esc(g.type.name)} in its usual book, ${book}, marked not checked, and waits in the Queue’s Check each row step.`
+        : `Every new row from ${esc(g.name)} will be ${esc(g.type.name)} · ${book}, without asking.`;
+    const jev = jevName(g);
+    return `${say}${jev ? ` Jev’s name for it: ${esc(jev)}.` : ''}`;
+}
+/** A line's detail (folio rowDetail): how new rows arrive, with Something
+ *  else… at the right; the sentence for that setting; its rows (oldest
+ *  first), with a book picker per row under Check each row. */
+function sureDetailHTML(g, at) {
+    const each = sureEach(g), rows = g.items.map(i => i.row);
+    const shown = sureAll.has(g.key) ? rows : rows.slice(0, SURE_ROWS);
     const pick = x => {
         const when = esc(day(x.date)), hint = sureRowHint(x);
-        return `<td class="sure-rows__bk"><select data-change="sure-row-book" data-key="${esc(g.key)}" data-tx="${x.id}" aria-label="Book for the ${when} row"${queueBusy ? ' disabled' : ''}>${bookOptions(queueModel.r.books, sureRowBook(g, x), 'Choose book')}</select>${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</td>`;
+        return `<td class="sl-rbk"><select class="sel" data-change="sure-row-book" data-key="${esc(g.key)}" data-tx="${x.id}" aria-label="Book for the ${when} row"${queueBusy ? ' disabled' : ''}>${bookOptions(queueModel.r.books, sureRowBook(g, x), 'Choose book')}</select>${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</td>`;
     };
-    return `<table class="t table-tight sure-rows__t${each ? ' is-each' : ''}"><tbody>${rows.map(x => `<tr data-tx="${x.id}"><td>${esc(day(x.date))}</td><td>${esc(x.account_name || '')}</td>
-        <td class="r num">${esc(money(Math.abs(toMinor(x.amount_sgd, x.currency)), x.currency))}</td><td class="sure-rows__text">${esc(x.description || '')}</td>${each ? pick(x) : ''}</tr>`).join('')}</tbody></table>`;
+    return `<div class="det">
+        <div class="det__top"><div class="det__set"><span class="cap" id="nr-${at}">New rows</span>${eachSegHTMLQ('sure-set', g.key, g.name, each, { labelledBy: `nr-${at}` })}</div>
+            <button type="button" class="btn sm ghost" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></div>
+        <p class="det__say">${sureSay(g)}</p>
+        ${rowsTableHTML(shown, `${g.name}: its rows`, { book: each ? pick : null })}
+        ${rows.length > shown.length ? `<button type="button" class="btn sm ghost det__more" data-act="sure-all-rows" data-key="${esc(g.key)}">Show ${plural(rows.length - shown.length, 'more row')}</button>` : ''}</div>`;
 }
+/** A line: the name opens its detail; the setting shows only as a tag, and
+ *  only when it is Check each row; the select alone says it needs a book. */
 function sureRowHTML(g, books, at) {
     const book = sureBook(g), each = sureEach(g);
-    const side = g.lane === 'out' ? 'Money out' : 'Money in';
-    const asks = g.proposed ? '' : ' · the book you pick becomes this merchant’s book';
-    const n = g.items.length, open = sureShown.has(g.key);
-    return `<tr class="sure-row${sureReady(g) ? '' : ' need'}${each ? ' is-each' : ''}" data-key="${esc(g.key)}" data-at="${at}">
-        <td class="sure-row__dot"><span class="sure-dot ${g.lane}" title="${side}"><span class="sr-only">${side}</span></span></td>
-        <td class="sure-row__m"><span class="sure-row__name">${esc(g.name)}</span>${g.name !== g.merchant ? ` <span class="sure-row__jev">Jev’s name: ${esc(g.merchant)}</span>` : ''} <span class="sure-row__need">${tag('nofig', 'needs a book')}</span>
-            <span class="sure-row__meta">${esc(plural(n, 'row'))} · <span class="num">${esc(sumByCurrency(g.items))}</span>${asks}</span>
-            <span class="sure-row__links"><button type="button" class="link" data-act="sure-rows" data-key="${esc(g.key)}" aria-expanded="${open}" aria-controls="sure-rows-${at}">${sureRowsWords(n, open)}</button><button type="button" class="link" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></span></td>
-        <td class="sure-row__type">${esc(g.type.name)} <span class="sure-row__pct">${Math.round(g.type.probability * 100)}%</span></td>
-        <td class="sure-row__set">${eachSetHTML('sure-set', g.key, g.name, each)}</td>
-        <td class="sure-row__book"><label>${each ? '<span class="usual-l">usual book</span>' : ''}<select data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select></label>${prefillHintHTML(g.prefill, book, 'sure-row__hint')}</td>
-        <td class="sure-row__go"><button type="button" class="btn sm subtle icon" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${sureReady(g) && !queueBusy ? '' : ' disabled'}>${icon('check-circle')}</button></td></tr>
-        <tr class="sure-rows" id="sure-rows-${at}"${open ? '' : ' hidden'}><td colspan="6">${open ? sureRowsHTML(g) : ''}</td></tr>`;
+    const n = g.items.length, open = sureShown.has(g.key), id = `sd-${at}`;
+    return `<tr class="sl${open ? ' is-open' : ''}" data-key="${esc(g.key)}" data-at="${at}">
+        <td class="sl-m">${rowDetailToggle({ id, label: g.name, open, act: 'sure-open', data: { key: g.key } })}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
+        <td class="r num sl-n">${n}<span class="ph-w"> ${n === 1 ? 'row' : 'rows'}</span></td>
+        <td class="r num sl-a">${esc(sumByCurrency(g.items))}</td>
+        <td class="sl-ty">${esc(g.type.name)} <em>${Math.round(g.type.probability * 100)}%</em></td>
+        <td class="sl-bk"><select class="sel${book ? '' : ' need'}" data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(g.prefill, book, 'sl-hint')}</td>
+        <td class="sl-go"><button type="button" class="btn sm subtle icon" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${sureReady(g) && !queueBusy ? '' : ' disabled'}>${icon('check')}</button></td></tr>
+        <tr class="sl-det" id="${id}"${open ? '' : ' hidden'}><td colspan="6">${open ? sureDetailHTML(g, at) : ''}</td></tr>`;
 }
 function sureCardHTML(books) {
     if (!sureList.length) return '';
@@ -1764,29 +1855,39 @@ function sureCardHTML(books) {
     // Many merchants show a page at a time; Save all still saves every ready one.
     const limit = queueOpen.sure || LINES_PAGE;
     const more = sureList.length - limit;
-    return `<section class="card sure-card" id="sure-card">
+    // Money out and money in are section rows, each with its count.
+    const rows = [];
+    let side = '';
+    sureList.slice(0, limit).forEach((g, at) => {
+        if (g.lane !== side) {
+            side = g.lane;
+            rows.push(`<tr class="sec"><td colspan="6">${dirSquare(side)}${side === 'out' ? 'Money out' : 'Money in'} · ${sureList.filter(x => x.lane === side).length}</td></tr>`);
+        }
+        rows.push(sureRowHTML(g, books, at));
+    });
+    const table = bandedTable({ caption: 'Merchants Jev is sure of', cls: 'sure-t', colgroup: [0, 64, 124, 200, 150, 64], rows,
+        columns: [{ label: 'Merchant' }, { label: 'Rows', cls: 'r' }, { label: 'Amount', cls: 'r' }, { label: 'Jev’s type' }, { label: 'Book' }, { label: 'Save', sr: true }] });
+    return `<section class="card sure-card" id="sure-card" aria-labelledby="sure-title">
         <div class="sure-head">
-            <div class="sure-head__title"><h2><button type="button" class="sure-fold" data-act="sure-fold" aria-expanded="${open}" aria-controls="sure-body">${icon('caret-right', 'caret')}<span>Jev is sure of ${esc(plural(sureList.length, 'merchant'))}</span></button></h2>
-                <span class="sure-head__meta" id="sure-meta">${esc(h.meta)}</span></div>
+            <div><h2 id="sure-title"><button type="button" class="disc sure-fold" data-act="sure-fold" aria-expanded="${open}" aria-controls="sure-body">${icon('caret-right', 'caret')}<span>Jev is sure of ${esc(plural(sureList.length, 'merchant'))}</span></button></h2>
+                <p class="sub"><span id="sure-meta">${esc(h.meta)}</span> ${SURE_NOTE}</p></div>
             <button type="button" class="btn primary" data-act="sure-all" id="sure-all"${h.ready && !queueBusy ? '' : ' disabled'}>${esc(h.label)}</button>
         </div>
-        <div class="sure-body" id="sure-body"${open ? '' : ' hidden'}>
-            <p class="sure-note">${SURE_NOTE}</p>
-            <table class="sure-table"><tbody>${sureList.slice(0, limit).map((g, at) => sureRowHTML(g, books, at)).join('')}</tbody></table>
-            ${more > 0 ? `<button type="button" class="btn block q-show" data-act="queue-more" data-lane="sure">Show ${more} more</button>` : ''}</div></section>`;
+        <div class="sure-body" id="sure-body"${open ? '' : ' hidden'}>${table}
+            ${more > 0 ? `<div class="q-show"><button type="button" class="btn sm ghost" data-act="queue-more" data-lane="sure">Show ${more} more</button></div>` : ''}</div></section>`;
 }
 /** Readiness and the busy state, drawn in place (a pick keeps its focus). */
 function drawSureState() {
     const card = $('#sure-card');
     if (!card) return;
     sureList.forEach(g => {
-        const tr = $$('tr.sure-row', card).find(x => x.dataset.key === g.key);
+        const tr = $$('tr.sl', card).find(x => x.dataset.key === g.key);
         if (!tr) return;
         const ready = sureReady(g);
-        tr.classList.toggle('need', !ready);
+        $('[data-change="sure-book"]', tr).classList.toggle('need', !sureBook(g));
         $$('select', tr).forEach(x => { x.disabled = queueBusy; });
-        $$('select', tr.nextElementSibling).forEach(x => { x.disabled = queueBusy; });
-        const hint = $('.sure-row__hint', tr);
+        $$('select, .seg button', tr.nextElementSibling).forEach(x => { x.disabled = queueBusy; });
+        const hint = $('.sl-hint', tr);
         if (hint) hint.hidden = sureBook(g) !== g.prefill.book;
         $('[data-act="sure-save"]', tr).disabled = queueBusy || !ready;
     });
@@ -1804,7 +1905,7 @@ ACT['sure-fold'] = el => {
 };
 /** A line drawn again in place (its setting changed): focus goes back to the control changed. */
 function drawSureLine(g, focus) {
-    const tr = $$('#sure-card tr.sure-row').find(x => x.dataset.key === g.key);
+    const tr = $$('#sure-card tr.sl').find(x => x.dataset.key === g.key);
     if (!tr) return;
     const body = document.createElement('tbody');
     body.innerHTML = sureRowHTML(g, queueModel.r.books, Number(tr.dataset.at));
@@ -1813,25 +1914,27 @@ function drawSureLine(g, focus) {
     drawSureState();
     if (focus) $$(`#sure-card ${focus}`).find(x => x.dataset.key === g.key)?.focus();
 }
-/** Its rows' pickers drawn again (the usual book changed): picked rows keep theirs. */
+/** Its detail drawn again (the usual book changed, or every row asked for):
+ *  the sentence names the book; picked rows keep theirs. */
 function drawSureRows(g) {
-    const tr = $$('#sure-card tr.sure-row').find(x => x.dataset.key === g.key);
+    const tr = $$('#sure-card tr.sl').find(x => x.dataset.key === g.key);
     const box = tr && tr.nextElementSibling;
-    if (box && sureShown.has(g.key)) box.cells[0].innerHTML = sureRowsHTML(g);
+    if (box && sureShown.has(g.key)) box.cells[0].innerHTML = sureDetailHTML(g, Number(tr.dataset.at));
 }
 ACT['sure-book'] = el => {
     sureBooks.set(el.dataset.key, el.value);
     const g = sureList.find(x => x.key === el.dataset.key);
-    if (g && sureEach(g)) drawSureRows(g);
+    if (g) drawSureRows(g);
     drawSureState();
 };
-// Check each row opens the line to its rows, each with its own book picker.
+// Every row the same | Check each row, in the line's detail: the line is
+// drawn again (its tag, its rows' book pickers) and stays open.
 ACT['sure-set'] = el => {
     const g = sureList.find(x => x.key === el.dataset.key);
-    if (!g) return;
-    sureSets.set(g.key, el.value === 'each');
-    if (sureEach(g)) sureShown.add(g.key);
-    drawSureLine(g, '[data-change="sure-set"]');
+    if (!g || queueBusy) return;
+    sureSets.set(g.key, el.dataset.v === 'each');
+    sureShown.add(g.key);
+    drawSureLine(g, `[data-act="sure-set"][data-v="${el.dataset.v}"]`);
 };
 ACT['sure-row-book'] = el => {
     const g = sureList.find(x => x.key === el.dataset.key);
@@ -1841,17 +1944,24 @@ ACT['sure-row-book'] = el => {
     el.parentElement.querySelector('.hint')?.remove();
     drawSureState();
 };
-// A line opens to its rows and folds back in place; neither writes anything.
-ACT['sure-rows'] = el => {
+// A line opens on its name to its detail and folds back in place; neither writes anything.
+ACT['sure-open'] = el => {
     const g = sureList.find(x => x.key === el.dataset.key);
+    const tr = el.closest('tr');
     const box = document.getElementById(el.getAttribute('aria-controls'));
-    if (!g || !box) return;
+    if (!g || !tr || !box) return;
     const open = el.getAttribute('aria-expanded') !== 'true';
     if (open) sureShown.add(g.key); else sureShown.delete(g.key);
-    if (open && !box.cells[0].innerHTML) box.cells[0].innerHTML = sureRowsHTML(g);
-    box.hidden = !open;
-    el.setAttribute('aria-expanded', String(open));
-    el.textContent = sureRowsWords(g.items.length, open);
+    if (open && !box.cells[0].innerHTML) box.cells[0].innerHTML = sureDetailHTML(g, Number(tr.dataset.at));
+    toggleRowDetail(el);
+    tr.classList.toggle('is-open', open);
+    if (open) drawSureState();
+};
+ACT['sure-all-rows'] = el => {
+    const g = sureList.find(x => x.key === el.dataset.key);
+    if (!g) return;
+    sureAll.add(g.key);
+    drawSureRows(g);
 };
 // Jev is wrong: "This was…" for the line's rows, Jev's guess already turned down.
 ACT['sure-else'] = el => {
@@ -1982,7 +2092,7 @@ async function workHTML() {
     // On a phone one side shows at a time; the desk hides the toggle and shows both.
     const side = store.get('queueSide', 'out') === 'in' ? 'in' : 'out';
     const sides = `<div class="seg q-side" role="group" aria-label="Show">${['out', 'in'].map(lane =>
-        `<button type="button" data-act="q-side" data-side="${lane}" aria-pressed="${side === lane}"><span class="sure-dot ${lane}" aria-hidden="true"></span>${lane === 'out' ? 'Money out' : 'Money in'} <span class="n">${shown[lane].length}</span></button>`).join('')}</div>`;
+        `<button type="button" data-act="q-side" data-side="${lane}" aria-pressed="${side === lane}">${lane === 'out' ? 'Money out' : 'Money in'} <span class="n">${shown[lane].length}</span></button>`).join('')}</div>`;
     return `${sureCardHTML(r.books)}${chips}${sides}<div class="waits-cols q-cols" data-side="${side}">${lanes.join('')}</div>`;
 }
 ACT['q-side'] = el => {
@@ -2032,11 +2142,12 @@ async function viewQueue() {
         const [from, to] = [typing.selectionStart, typing.selectionEnd];
         afterRender(() => { const box = $('#q-search'); if (box) { box.focus(); box.setSelectionRange(from, to); } });
     }
-    const head = `<div class="page-head q-head"><div><h1>Queue</h1><p>${todo ? `${todo} to do · ${plural(rows, 'row')}` : 'Nothing to do'}</p></div></div>
+    // The head and the merchant search on one line (the search under it on a phone).
+    const head = `<div class="page-head q-head"><div><h1>Queue</h1><p>${todo ? `${todo} to do · ${plural(rows, 'row')}` : 'Nothing to do'}</p></div>
+        <label class="search-field q-search"><span class="sr-only">Find a merchant</span>${icon('magnifying-glass')}
+            <input type="search" id="q-search" value="${esc(queueSearch)}" placeholder="Find a merchant" autocomplete="off"></label></div>
         ${q.capped.length ? `<p class="notice warn small">${icon('warning')}<span>Too many to read at once, so the counts and sums here are short: ${esc(q.capped.join('; '))}.</span></p>` : ''}`;
-    const tools = `<div class="q-tools"><label class="field q-search"><span class="sr-only">Find a merchant</span>
-        <input type="search" id="q-search" value="${esc(queueSearch)}" placeholder="Find a merchant" autocomplete="off"></label></div>`;
-    return `<div class="queue">${head}${tools}<div class="q-work" id="q-work">${await workHTML()}</div>${alsoHTML(q)}</div>`;
+    return `<div class="queue">${head}<div class="q-work" id="q-work">${await workHTML()}</div>${alsoHTML(q)}</div>`;
 }
 ACT['queue-more'] = el => { queueOpen[el.dataset.lane] = 9999; drawWork(); };
 ACT['q-step'] = el => { store.set('queueStep', el.dataset.step); drawWork({ focus: `[data-act="q-step"][data-step="${el.dataset.step}"]` }); };
