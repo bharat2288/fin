@@ -227,7 +227,7 @@ main:focus { outline: none; }
 }
 .place svg { width: 15px; height: 15px; flex: none; }
 .place:hover { background: var(--bg-raised); color: var(--text-secondary); }
-.place[aria-current="page"] { background: var(--pick-bg); color: var(--pick-fg); box-shadow: var(--shadow-sm); }
+.place[aria-current="page"] { background: var(--pick-bg); color: var(--pick-fg); }
 /* counts: folio's Ops badge. Claude's is teal, the Queue's ink. */
 .count { display: inline-grid; place-items: center; min-width: 20px; height: 18px; padding: 0 7px; border-radius: 12px;
     background: var(--text-primary); color: var(--bg-surface); font-size: var(--t-cap); font-weight: var(--font-semibold); line-height: 1;
@@ -405,7 +405,7 @@ button.tag { cursor: pointer; }
     background: linear-gradient(135deg, var(--accent-primary-hover), var(--accent-ink));
     box-shadow: var(--shadow-sm), var(--shadow-glow-camel); }
 .btn.primary:hover { color: var(--on-accent); transform: translateY(-1px); box-shadow: var(--shadow-md), var(--shadow-glow-camel); }
-.btn.subtle { background: var(--bg-raised); border-color: var(--border-default); box-shadow: var(--shadow-sm); }
+.btn.subtle { background: var(--bg-raised); border-color: var(--border-default); }
 .btn.subtle:hover { background: color-mix(in srgb, var(--bg-raised) 70%, var(--border-default)); }
 .btn.ghost { border-color: transparent; background: transparent; color: var(--accent-ink); padding-inline: var(--space-2); }
 .btn.ghost:hover { background: var(--accent-primary-subtle); color: var(--accent-ink); border-color: transparent; }
@@ -725,7 +725,7 @@ li.empty { list-style: none; margin-top: 8px; }
         display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
         border-radius: var(--radius-md); font-size: var(--t-meta); font-weight: var(--font-semibold); color: var(--text-tertiary); text-decoration: none; }
     .tabbar a svg { width: 20px; height: 20px; }
-    .tabbar a[aria-current="page"] { background: var(--pick-bg); color: var(--pick-fg); box-shadow: var(--shadow-sm); }
+    .tabbar a[aria-current="page"] { background: var(--pick-bg); color: var(--pick-fg); }
     /* H1.1: the count sits in the slot's top-right corner, clear of the icon */
     .tabbar .count { position: absolute; top: 3px; right: 4px; min-width: 18px; height: 16px; padding: 0 5px; font-size: var(--t-cap); line-height: 16px; }
     .banner { margin-top: 10px; }
@@ -1087,7 +1087,7 @@ button.pick[aria-pressed="true"] em { color: inherit; opacity: 0.7; }
 
 /* also waiting, in Books: a dashed strip of counts, each a link */
 .q-also { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-bottom: 0; padding: var(--space-3) var(--space-4); border: 1px dashed var(--border-default);
-    border-radius: var(--radius-xl); background: var(--bg-surface); font-size: var(--t-ui); color: var(--text-secondary); }
+    border-radius: var(--radius-xl); font-size: var(--t-ui); color: var(--text-secondary); }
 .q-also .link { padding: 0; border: 0; background: none; font: inherit; font-weight: var(--font-semibold); }
 
 /* fin's guess: a camel-tinted box, the guess in bold, a small meter and how sure */
@@ -1124,6 +1124,7 @@ button.pick[aria-pressed="true"] em { color: inherit; opacity: 0.7; }
 .fg-now b { font-weight: var(--font-bold); }
 
 @media (max-width: 720px) {
+    .q-search input { font-size: var(--t-title); }   /* 16px: a phone does not zoom into it */
     .q-also .link, .pick { min-height: var(--tap); }
     .queue .disc, .queue .qi .link { min-height: var(--tap); }
     .queue .disc--meta { margin-block: -12px; }   /* a 44px target that does not push its line apart */
@@ -1787,7 +1788,7 @@ table.sl-stack td.sl-sub { display: none; }
 table.t.mp-t { table-layout: fixed; }
 .mp-t col.c-k { width: 44px; } .mp-t col.c-d { width: 104px; } .mp-t col.c-ac { width: 176px; } .mp-t col.c-a { width: 100px; }
 .mp-t col.c-ty { width: 130px; } .mp-t col.c-bk { width: 132px; } .mp-t col.c-s { width: 140px; }
-table.t.mp-t th { padding: 7px var(--space-3); }
+table.t.mp-t th { padding: 7px var(--space-3); font-weight: var(--font-bold); letter-spacing: 0.07em; }   /* the band, as .bt th */
 table.t.mp-t td { padding: 9px var(--space-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 table.t.mp-t th:first-child, table.t.mp-t td:first-child { padding-left: var(--space-5); padding-right: 0; font-weight: inherit; }
 table.t.mp-t th:last-child, table.t.mp-t td:last-child { padding-right: var(--space-5); }
