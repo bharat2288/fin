@@ -1514,8 +1514,8 @@ const eachPicks = new Map();   // a row's id -> {typeId, book} as changed on its
 function eachPrefill(row) {
     const p = queueModel && queueModel.prefills ? queueModel.prefills.get(row.id) : null;
     if (!p || !p.book || (p.reason !== 'last' && p.reason !== 'account')) return null;
-    const card = queueModel.r.accountById.get(row.account_id)?.short_name || p.account || row.account_name || '';
-    return { book: p.book, hint: p.reason === 'last' ? `${p.book} last time on ${card}` : `${p.book}’s own card` };
+    // One home for the hint's words: prefillHint, as the sure card and Pick a type show it.
+    return { book: p.book, hint: prefillHint(p) };
 }
 /** A line as it stands: its type and book, and the hint while the book is fin's prefill. */
 function eachLine(row) {
