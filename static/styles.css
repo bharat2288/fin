@@ -974,6 +974,9 @@ li.empty { list-style: none; margin-top: 8px; }
 .sure-row__pct { color: var(--text-tertiary); font-size: 12px; }
 .sure-row__book { width: 150px; }
 .sure-row__book select { min-height: 32px; padding: 5px 10px; }
+.sure-row__hint { display: block; margin-top: 3px; font-size: 12px; line-height: 1.3; text-align: left; }
+.sure-row__hint[hidden], .q-pick-hint[hidden] { display: none; }
+.q-pick-hint { flex: 1 1 120px; font-size: 12px; }
 .sure-row__go .btn svg { width: 15px; height: 15px; }
 
 /* a card: what it was, its date and account, the amount right; the guess, then the buttons */

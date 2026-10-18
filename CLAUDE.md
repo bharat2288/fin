@@ -21,6 +21,7 @@ schema.sql          ← SQLite schema (source of truth)
 parsers.py          ← Statement parser orchestrator
 parse_dbs.py        ← DBS PDF/CSV parser
 card_balance.py     ← A card split by cardholder held as one balance (the Vantage card)
+book_prefill.py     ← A row's book picker prefill: last book on that card, a company's card, the type's
 parse_citi_csv.py   ← Citi CSV parser
 parse_uob.py        ← UOB PDF parser
 seed_mock_data.py   ← Demo data generator (for GitHub)

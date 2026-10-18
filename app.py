@@ -23,6 +23,7 @@ import account_kind
 import anchors
 import backup
 import balance_sheet
+import book_prefill
 import book_type
 import card_balance
 import chat_writes
@@ -2416,6 +2417,24 @@ def api_resolve_transaction():
             conn.rollback()
             app.logger.warning("Failed to resolve transaction: %s", e)
             return jsonify({"error": "Failed to resolve transaction"}), 400
+
+
+@app.route("/api/book-prefill", methods=["POST"])
+def api_book_prefill():
+    """The book each row's picker shows first, and why: {tx_ids: [...]} ->
+    {prefill: {tx_id: {book, reason, account, account_kind}}}. reason is
+    `last` (this merchant's last hand-set book on this account), `account` (a
+    company's own account) or `type` (the type's book; null means it asks).
+    One read for every row on screen; it writes nothing."""
+    data = request.get_json(silent=True)
+    ids = data.get("tx_ids") if isinstance(data, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        return jsonify({"error": "tx_ids must be a list of row ids"}), 400
+    with get_db() as conn:
+        found = book_prefill.book_prefills(conn, ids)
+    for hit in found.values():
+        hit["account"] = mask_card_number(hit["account"] or "")
+    return jsonify({"prefill": found})
 
 
 def _build_filters(args, hide: bool = True) -> tuple[str, list]:
