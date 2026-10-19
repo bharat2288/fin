@@ -40,17 +40,10 @@ import review
 import screens
 import suggest
 import tie
-from db import first_rule, get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
+import trend_routes
+from scope import _HOUSEHOLD_ACCOUNT, _SGD_ACCOUNT, _TYPE_JOINS, book_expr
+from db import first_rule, get_connection, get_db, init_db, invalidate_rules_cache, match_merchant, rule_label
 
-
-@contextmanager
-def get_db():
-    """Context manager wrapping get_connection() for automatic cleanup."""
-    conn = get_connection()
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 # LOCAL_DEV: off unless a caller turns it on (python app.py, serve.py in
@@ -59,19 +52,13 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 # store, set by serve.py; None means backups are not configured.
 app.config.update(LOCAL_DEV=False, BACKUP_STORE=None)
 app.wsgi_app = access_gate.RequireGateIdentity(app.wsgi_app, app.config)
+app.register_blueprint(trend_routes.bp)
 
 
 def format_type_display(parent: str | None, child: str | None) -> str:
     """Format a type as 'Parent > Child', or the bare name with no parent."""
     return book_type.display_name(child, parent) if child else ""
 
-
-# The joins that give a labelled table its type (ty) and that type's parent
-# (tp). `{owner}` is the alias of the table carrying type_id.
-_TYPE_JOINS = (
-    "LEFT JOIN types ty ON {owner}.type_id = ty.id "
-    "LEFT JOIN types tp ON ty.parent_id = tp.id"
-)
 
 # What the charts call spending rows nobody has given a type.
 NO_TYPE_LABEL = "No type"
@@ -93,12 +80,6 @@ CHECKABLE_ROWS = (
     " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL)"
 )
 NOT_CHECKED_ROWS = f"(COALESCE(svc.review_each_time, 0) = 1 AND {CHECKABLE_ROWS})"
-
-
-def book_expr(alias: str = "t") -> str:
-    """SQL for the book a row is read as: its own, or the default when no one
-    has placed it. Scope comes from here and from nowhere else."""
-    return f"COALESCE({alias}.book, '{book_type.DEFAULT_BOOK}')"
 
 
 def _requested_book(args) -> str | None:
@@ -1681,20 +1662,6 @@ def api_service_transactions(svc_id):
 # Dashboard API
 # ---------------------------------------------------------------------------
 
-# Rows on an account kept in the currency the dashboard's figures are in. A
-# row on an account in another currency (the rupee account) is whole minor
-# units of that currency, and is never added to SGD cents as if it were SGD:
-# it is held out of these sums. `s` is the row's statement.
-_SGD_ACCOUNT = (
-    "s.account_id IN (SELECT id FROM accounts WHERE COALESCE(currency, 'SGD') = 'SGD')"
-)
-
-
-# Rows on an account the household owns: what household spending is counted
-# on (ruling 6). Takes the owner as its parameter.
-_HOUSEHOLD_ACCOUNT = "s.account_id IN (SELECT id FROM accounts WHERE owner = ?)"
-
-
 def _waiting_sides(conn, filters: str = "", params: tuple | list = ()) -> dict:
     """The transfers waiting for review, money out and money in apart: how
     many each side holds and what each adds up to in whole minor units, both
@@ -2131,7 +2098,10 @@ def api_transactions():
     """Paginated transaction list with filters.
 
     Query params: start, end, book, exclude_one_off, types, account_id, month,
-                  page, per_page, search, flow
+                  page, per_page, search, flow, include_hidden
+
+    include_hidden=true lists the rows of merchants hidden from expense views
+    too (default: they stay out).
 
     flow=review is the review list: the transfers waiting for a label. It
     hides no merchant, so it lists every row the waiting count counts.
@@ -2139,7 +2109,8 @@ def api_transactions():
     # A row asked for by id, or by its merchant, is shown whatever its
     # merchant's hiding says.
     hide = (request.args.get("flow") != flow.REVIEW and request.args.get("tx_id") is None
-            and request.args.get("service_id") is None)
+            and request.args.get("service_id") is None
+            and request.args.get("include_hidden") != "true")
     filters, params = _build_filters(request.args, hide=hide)
 
     flow_filter = request.args.get("flow")
