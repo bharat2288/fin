@@ -139,13 +139,13 @@ def test_a_later_change_to_the_merchant_never_reaches_a_labelled_transfer(client
     assert held(client, waiting_row) == ("Household", "Dining", "chosen", "chosen")
 
 
-def test_a_later_rule_added_edited_or_re_run_never_reaches_a_labelled_transfer(client, conn, waiting_row):
+def test_a_later_rule_added_edited_or_the_drift_applied_never_reaches_a_labelled_transfer(client, conn, waiting_row):
     label(client, waiting_row, choice="spending", type_id=type_id(conn, "Dining"))
     catch_all = merchant(conn, "Sample Catch-all", "Moom", "Shopping")
 
     added = client.post("/api/rules", json={"pattern": "SAMPLE PAYEE", "service_id": catch_all})
     edited = client.put(f"/api/rules/{added.get_json()['id']}", json={"pattern": "PAYNOW TO SAMPLE"})
-    rerun = client.post("/api/rules/recategorize")
+    rerun = client.post("/api/rules/drift", json={"past": "apply"})
 
     assert (added.status_code, edited.status_code, rerun.status_code) == (200, 200, 200)
     assert held(client, waiting_row) == ("Household", "Dining", "chosen", "chosen")

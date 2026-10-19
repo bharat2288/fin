@@ -27,10 +27,12 @@ rupee row converts) and the months it touches, the newest three examples,
 and the rows another merchant holds (a rule's change and a taught wording
 name them; none for a merchant's own change or a merge).
 
-Four ways to a plan: merchant_change (a merchant's book or type, fin-surfaces
+Five ways to a plan: merchant_change (a merchant's book or type, fin-surfaces
 49), merge_change and rule_change (a merge; a rule added, edited or deleted,
-fin-surfaces 50), and taking (the rows another merchant holds that a wording
-taught from the Queue would take, fin-surfaces 53). A rule change's rows are
+fin-surfaces 50), taking (the rows another merchant holds that a wording
+taught from the Queue would take, fin-surfaces 53), and drift (the rows that
+differ from what their rule says now, Re-run every rule's place,
+fin-surfaces 51). A rule change's rows are
 those whose winning rule, after the change, differs from before, or whose
 label from that rule changes: the winner is asked of the rules as the change
 would leave them (db.pick_rule), never of the cache, so nothing is written to
@@ -629,6 +631,132 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
     return plan
 
 
+# --- the drift count: Re-run every rule retired (fin-surfaces 51) --------------------------
+
+
+class _Winner:
+    """The rule that labels a row, as db.pick_rule picks it among `rules`
+    (in match order), asked of many rows. A wording matches a row only if
+    every GRAM-letter run of it is in the row's text, so each wording is
+    indexed by the one of its runs the fewest wordings share, and a row asks
+    only the rules indexed by a run of its own text (a wording shorter than
+    GRAM is always asked); the first of those in match order that matches
+    wins, as pick_rule's walk down the list finds it. A wording is read once
+    however many rows carry it."""
+
+    GRAM = 3
+
+    def __init__(self, rules):
+        self.grams: dict[str, list] = {}
+        self.exact: dict[str, list] = {}
+        self.short: list = []
+        runs = lambda text: {text[i:i + self.GRAM] for i in range(len(text) - self.GRAM + 1)}
+        shared: dict[str, int] = {}
+        for r in rules:
+            for run in runs(r["pattern"].upper()):
+                shared[run] = shared.get(run, 0) + 1
+        for place, r in enumerate(rules):
+            pattern = r["pattern"].upper()
+            entry = (place, r, pattern, r["match_type"])
+            if r["match_type"] == "exact":
+                self.exact.setdefault(pattern, []).append(entry)
+            elif r["match_type"] in ("contains", "startswith"):
+                if len(pattern) < self.GRAM:
+                    self.short.append(entry)
+                else:
+                    rarest = min(sorted(runs(pattern)), key=lambda run: shared[run])
+                    self.grams.setdefault(rarest, []).append(entry)
+        self.limited = any(r["min_amount_minor"] is not None or r["max_amount_minor"] is not None for r in rules)
+        self.seen: dict = {}
+
+    def _first(self, text: str, amount_minor):
+        asked = list(self.short) + self.exact.get(text, [])
+        for run in {text[i:i + self.GRAM] for i in range(len(text) - self.GRAM + 1)}:
+            asked += self.grams.get(run, ())
+        for place, r, pattern, kind in sorted(asked, key=lambda e: e[0]):
+            if kind == "contains":
+                matched = pattern in text
+            elif kind == "startswith":
+                matched = text.startswith(pattern)
+            else:
+                matched = text == pattern
+            if matched and _wins_amount(r, amount_minor):
+                return r
+        return None
+
+    def of(self, description: str | None, amount_minor):
+        key = (description, amount_minor if self.limited else None)
+        if key not in self.seen:
+            self.seen[key] = self._first((description or "").upper(), amount_minor)
+        return self.seen[key]
+
+
+def drift(conn: sqlite3.Connection, fallback) -> Plan:
+    """The rows that differ from what their rule says now: Re-run every
+    rule's place (fin-surfaces 21 and 51; spec 24, the drift count). A row
+    counts when a field of it from the merchant, a rule or the wording holds
+    a value other than what the winning rule (or the wording, `fallback`)
+    gives now, or, every field being from fin, its merchant is not the
+    rule's. A checked or chosen field is never counted and never written;
+    an empty field reads the row's old mark, as the rule preview reads it.
+    Apply writes what the rules give, each field taking the source that
+    gives it, its flow worked out again, in one change; there is no Only new
+    rows (Leave them writes nothing). Transfers and card payments are not
+    the rules' to label."""
+    rules = db.load_rules(conn)
+    winner = _Winner(rules)
+    plan = Plan(subject={"kind": "drift", "id": None, "name": "the rules"}, change={},
+                called="These rows", doing="Relabelling the rows that differ from their rule")
+    plan.words = []
+    # Read light first (plain tuples, no join): every row with a field from
+    # fin; then whole, for the rows that differ only.
+    cursor = conn.cursor()
+    cursor.row_factory = None
+    read = cursor.execute(
+        "SELECT t.id, t.description, t.amount_minor, t.service_id, t.book, t.book_source, t.type_id,"
+        " t.type_source, t.cat_source FROM transactions t"
+        " WHERE COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')"
+        f" AND {label_source.from_fin_sql('t')}").fetchall()
+    from_fin, source_of = label_source.FROM_FIN, label_source.source_of
+    by_rule: dict = {}                     # what a rule that gives a type gives every row it wins
+    writes_of: dict[int, dict] = {}
+    for tx_id, description, amount_minor, service_id, book, book_source, type_id, type_source, mark in read:
+        rule = winner.of(description, amount_minor)
+        key = rule["id"] if rule is not None and (rule["type_override_id"] or rule["type_id"]) else None
+        found = by_rule.get(key) if key is not None else None
+        if found is None:
+            found = _given(rule, description, conn, fallback)
+            if key is not None:
+                by_rule[key] = found
+        sets, differs, kept = {}, False, False
+        for field_name, column, value, source in (("book", "book_source", book, book_source),
+                                                  ("type_id", "type_source", type_id, type_source)):
+            if source_of(source, mark) not in from_fin:
+                kept = True
+                continue
+            differs = differs or found[field_name] != value
+            sets[field_name], sets[column] = found[field_name], found[column]
+        if not kept:
+            differs = differs or found["service_id"] != service_id
+        if not differs:
+            continue
+        if not kept or found["service_id"] is not None:
+            sets["service_id"] = found["service_id"]      # a row keeping a field keeps its merchant
+        writes_of[tx_id] = sets
+    for held in _held_rows(conn, list(writes_of)):        # newest first
+        writes = {k: v for k, v in writes_of[held["id"]].items() if held[k] != v}
+        plan.rows.append(Planned(held, writes, {}, reflow=True))
+    plan.token = _stamp("drift", [tuple(sorted(r.items())) for r in rules], [tuple(p.held) for p in plan.rows])
+    return plan
+
+
+def drift_asked(plan: Plan) -> str:
+    """The refusal the drift's Apply answers with when it was not answered."""
+    return (f"Nothing was relabelled yet: {plan.count} row{'' if plan.count == 1 else 's'} "
+            f"differ from what their rule says now. Send past: {APPLY} to relabel them; "
+            "leaving them as they are writes nothing.")
+
+
 # --- the preview as the drawer and chat read it --------------------------------------------
 
 
@@ -756,7 +884,7 @@ def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
     if plan.wording is not None:                       # a taught wording (fin-surfaces 53)
         change = [*change, {"field": "wording", "from": None, "to": plan.wording}]
     names = None
-    if plan.subject["kind"] == "rule":
+    if plan.subject["kind"] in ("rule", "drift"):
         names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM services")}
     out = {
         "subject": plan.subject,

@@ -471,7 +471,7 @@ def test_a_rule_threshold_is_met_at_exactly_its_cents(client, conn, fake_stateme
     assert entries["SAMPLE SHOP B"]["service_id"] is None
 
 
-def test_recategorize_all_reads_the_rows_cents_against_the_threshold(client, conn, statement):
+def test_the_drift_apply_reads_the_rows_cents_against_the_threshold(client, conn, statement):
     big = merchant(conn, "Sample Big Shop", "Household", "Shopping")
     client.post("/api/rules", json={
         "pattern": "SAMPLE SHOP", "service_id": big, "max_amount": 0.29,
@@ -479,7 +479,7 @@ def test_recategorize_all_reads_the_rows_cents_against_the_threshold(client, con
     at = row(conn, statement, "SAMPLE SHOP A", 29)
     over = row(conn, statement, "SAMPLE SHOP B", 30)
 
-    resp = client.post("/api/rules/recategorize")
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     rows = {t["id"]: t for t in listed(client)}

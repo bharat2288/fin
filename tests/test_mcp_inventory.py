@@ -29,11 +29,14 @@ from gate_tokens import (
 GOLDEN: list[str] = [
     # reads
     "balance_sheet", "spending_cards", "spending_by_type", "spending_by_month", "transactions",
-    "review_summary", "accounts", "figures", "merchants", "rules", "types", "books", "flows",
-    "coverage", "rates", "history", "change", "expected_back",
+    "review_summary", "accounts", "figures", "merchants", "rules",
+    # fin-surfaces 51: the rows that differ from their rule (Re-run every rule's place)
+    "rule_drift",
+    "types", "books", "flows", "coverage", "rates", "history", "change", "expected_back",
     # writes
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
-    "add_rule", "change_rule", "delete_rule", "rerun_rules", "change_merchant", "merge_merchants",
+    # fin-surfaces 51: rerun_rules removed, as Re-run every rule is retired
+    "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
     "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",

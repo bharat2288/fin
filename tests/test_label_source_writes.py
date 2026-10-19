@@ -461,7 +461,10 @@ def test_a_rule_edit_reaches_checked_fields_and_leaves_chosen_ones(client, conn,
     assert next(r for r in client.get("/api/rules").get_json() if r["id"] == rule_id)["type_override_id"] is None
 
 
-def test_re_running_the_rules_reaches_checked_fields_and_leaves_chosen_ones(client, conn, statement):
+def test_the_drift_count_never_reaches_a_checked_or_a_chosen_field(client, conn, statement):
+    """Re-run every rule reached a checked field; its place, the drift count
+    (fin-surfaces 51), counts only fields from fin: a checked field is
+    reached by a previewed change only."""
     air = merchant(conn, "Sample Air", "Household", "Travel")
     conn.execute("INSERT INTO merchant_rules (pattern, service_id, match_type, confidence)"
                  " VALUES ('SAMPLE AIR', ?, 'contains', 'confirmed')", (air,))
@@ -472,10 +475,11 @@ def test_re_running_the_rules_reaches_checked_fields_and_leaves_chosen_ones(clie
     chosen = row(conn, statement, "SAMPLE AIR 3", book="Moom", type_name="Shopping", service_id=air,
                  sources=("chosen", "chosen"), cat_source="manual")
 
-    resp = client.post("/api/rules/recategorize")
+    assert client.get("/api/rules/drift").get_json()["count"] == 0
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
-    assert held(client, checked) == ("Household", "Travel", "checked", "checked")
+    assert held(client, checked) == ("Household", "Shopping", "checked", "checked")
     assert held(client, chosen) == ("Moom", "Shopping", "chosen", "chosen")
 
 

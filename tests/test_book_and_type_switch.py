@@ -511,10 +511,10 @@ def test_a_rule_overriding_the_type_alone_keeps_the_merchants_book(client, conn,
     assert label(client, tx) == ("Kalesh", "Equipment", "rule_override")
 
 
-# --- P4: recategorize-all ------------------------------------------------------
+# --- P4: the rows that differ from their rule (Re-run every rule retired, fin-surfaces 51) ---
 
 
-def test_recategorize_all_writes_book_and_type_from_the_rules_and_keeps_manual_rows(
+def test_applying_the_drift_writes_book_and_type_from_the_rules_and_keeps_manual_rows(
     client, conn, statement
 ):
     ads = merchant(conn, "Sample Ads", "Moom", "Advertising")
@@ -525,23 +525,23 @@ def test_recategorize_all_writes_book_and_type_from_the_rules_and_keeps_manual_r
     by_hand = row(conn, statement, "SMPL ADS 0099", book="Kalesh", type_name="Advertising",
                   cat_source="manual")
 
-    resp = client.post("/api/rules/recategorize")
+    assert client.get("/api/rules/drift").get_json()["count"] == 2   # the hand-set row is not counted
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
-    body = resp.get_json()
-    assert (body["updated"], body["skipped_manual"]) == (2, 1)
+    assert resp.get_json()["recategorized"] == 2
     for tx in (unlabelled, stale):
         assert label(client, tx) == ("Moom", "Advertising", "service_default")
         assert shown(client, tx)["service_id"] == ads
     assert label(client, by_hand) == ("Kalesh", "Advertising", "manual")
     assert shown(client, by_hand)["service_id"] is None
 
-    # Run again: nothing left to change.
-    again = client.post("/api/rules/recategorize").get_json()
-    assert (again["updated"], again["unchanged"]) == (0, 2)
+    # Nothing left that differs.
+    assert client.get("/api/rules/drift").get_json()["count"] == 0
+    assert client.post("/api/rules/drift", json={"past": "apply"}).get_json()["recategorized"] == 0
 
 
-def test_recategorize_all_applies_a_rules_override(client, conn, statement):
+def test_applying_the_drift_applies_a_rules_override(client, conn, statement):
     market = merchant(conn, "Sample Market", "Household", "Shopping")
     rule_id = rule(conn, "SAMPLE MARKET WHOLESALE", market)
     conn.execute(
@@ -552,7 +552,7 @@ def test_recategorize_all_applies_a_rules_override(client, conn, statement):
     db.invalidate_rules_cache()
     tx = row(conn, statement, "SAMPLE MARKET WHOLESALE 0042")
 
-    client.post("/api/rules/recategorize")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     assert label(client, tx) == ("Moom", "Stock purchases", "rule_override")
 
@@ -563,7 +563,7 @@ def test_the_paynow_fallback_gives_a_type_and_the_book_its_type_proposes(
     # No merchant rule knows this payee; the fixed PayNow wording list does.
     tx = row(conn, statement, "PayNow Transfer 0042 To: INLAND REVENUE AUTHORITY", 310.0)
 
-    client.post("/api/rules/recategorize")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     assert label(client, tx) == ("Household", "Tax", "fallback")
     assert shown(client, tx)["service_id"] is None
@@ -1200,7 +1200,7 @@ def test_a_refund_is_known_by_its_wording_and_no_category_name_makes_one():
     ) == "income"
 
 
-def test_resolve_and_recategorize_keep_a_flow_set_by_hand(client, conn, statement):
+def test_resolve_and_the_drift_apply_keep_a_flow_set_by_hand(client, conn, statement):
     cafe = merchant(conn, "Sample Cafe", "Household", "Dining")
     rule(conn, "SAMPLE CAFE", cafe)
     tx = row(conn, statement, "SAMPLE CAFE CREDIT", -9.0, flow="refund")
@@ -1211,7 +1211,7 @@ def test_resolve_and_recategorize_keep_a_flow_set_by_hand(client, conn, statemen
     client.post("/api/transactions/resolve", json={
         "tx_id": tx, "service_id": cafe, "apply_scope": "transaction",
     })
-    client.post("/api/rules/recategorize")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     # Set by hand: kept. Derived: read again from the wording.
     assert shown(client, tx)["flow_type"] == "refund"

@@ -590,7 +590,7 @@ _CHANGE_SUMMARIES = {
     "api_rules_create": "Added a merchant rule",
     "api_rules_update": "Changed a merchant rule",
     "api_rules_delete": "Deleted a merchant rule",
-    "api_rules_recategorize": "Re-ran every merchant rule",
+    "api_rules_drift_apply": "Relabelled the rows that differed from their rule",
     "api_rates_fetch": "Fetched an exchange rate",
     "api_rates_overwrite": "Overwrote an exchange rate",
     "api_review_label": "Labelled a waiting transfer",
@@ -4643,71 +4643,45 @@ def api_rules_delete(rule_id):
     return jsonify({"success": True, "recategorized": recategorized, "checked": checked})
 
 
-@app.route("/api/rules/recategorize", methods=["POST"])
-def api_rules_recategorize():
-    """Re-run all merchant rules against existing transactions.
+# Re-run every rule is retired (fin-surfaces 21 and 51): in its place the
+# drift count, the rows whose label differs from what the rules give now,
+# read on Lists › Rules and applied through the same preview.
 
-    Each field a later change may reach (label_source: from fin, or
-    checked) takes the book or type its rule gives it (the merchant's
-    default, or the rule's override); a checked field stays checked, and is
-    not emptied where no rule gives it a value. A chosen field is left
-    alone, and a flow set by hand keeps its flow and its other side.
-    """
+
+@app.route("/api/rules/drift")
+def api_rules_drift():
+    """The rows that differ from what their rule says now
+    (relabel_preview.drift): the preview the drawer and chat read, {count,
+    examples, token, ...}. Fields from the merchant, a rule or the wording
+    only; a checked or chosen field is never counted. It writes nothing."""
     with get_db() as conn:
-        # Only the rows a later change may reach.
-        rows = conn.execute(f"""
-            SELECT {_LABEL_HELD}
-            FROM transactions t
-            WHERE COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')
-              AND {label_source.any_reachable_sql('t')}
-        """).fetchall()
+        return jsonify(relabel_preview.summary(conn, relabel_preview.drift(conn, _paynow_fallback_label)))
 
-        skipped = conn.execute(f"""
-            SELECT COUNT(*) FROM transactions t
-            WHERE COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')
-              AND NOT {label_source.any_reachable_sql('t')}
-        """).fetchone()[0]
 
-        updated = 0
-        unchanged = 0
-        flow_ctx = None
-        for tx in rows:
-            found = _label_for(conn, tx["description"], tx["amount_minor"])
-            sets = {"service_id": found["service_id"]}
-            kept = False
-            for field, column in label_source.FIELDS.items():
-                held = _source(tx, column)
-                if held is not None and not label_source.reachable(held):
-                    kept = True
-                    continue
-                if held == label_source.CHECKED and found[field] is None:
-                    kept = True
-                    continue  # a checked value is not emptied
-                sets[field] = found[field]
-                sets[column] = label_source.reached(held, found[field], found[column])
-            if kept and found["service_id"] is None:
-                del sets["service_id"]  # a row keeping a field keeps its merchant
-            if all(_source(tx, c) not in label_source.LOOKED_AT + label_source.KEPT
-                   for c in label_source.FIELDS.values()):
-                # A row wholly from fin takes the mark the rules give, as before.
-                sets["cat_source"] = found["cat_source"]
-            if not tx["flow_type_manual"]:
-                if flow_ctx is None:
-                    flow_ctx = flow.build_context(conn)
-                new_flow = _classify_flow_for_tx(
-                    conn, tx["description"], tx["amount_minor"], flow_ctx=flow_ctx,
-                    tx_id=tx["id"], service_id=found["service_id"],
-                    labelled=bool(found["type_id"] or found["service_id"]),
-                )
-                if new_flow != ((tx["flow_type"] or "expense"), tx["other_side_id"]):
-                    sets["flow_type"], sets["other_side_id"] = new_flow
-            if _write_label(conn, tx, sets):
-                updated += 1
-            else:
-                unchanged += 1
-
+@app.route("/api/rules/drift", methods=["POST"])
+def api_rules_drift_apply():
+    """Apply to the rows that differ from their rule: {past: 'apply',
+    token}. Each takes what the rules give now, in one change; its flow is
+    worked out again (a flow set by hand keeps its own). Without `past` the
+    preview comes back (409) and nothing is written; there is no other
+    answer (Leave them writes nothing, so it is never sent). `token` is
+    refused once the rules or those rows changed since the preview. Returns
+    {success, recategorized}."""
+    data = request.get_json(silent=True) or {}
+    past = data.get("past")
+    if past is not None and past != relabel_preview.APPLY:
+        return jsonify({"error": f"past must be {relabel_preview.APPLY}: leaving the rows as they are "
+                                 "writes nothing, so there is nothing to send"}), 400
+    with get_db() as conn:
+        plan = relabel_preview.drift(conn, _paynow_fallback_label)
+        if data.get("token") is not None and data["token"] != plan.token:
+            return jsonify({"error": relabel_preview.stale(plan), "stale": True}), 409
+        if plan.count and past is None:
+            return jsonify({"error": relabel_preview.drift_asked(plan),
+                            "preview": relabel_preview.summary(conn, plan)}), 409
+        recategorized, _ = _write_plan(conn, plan, past, fill=False)
         conn.commit()
-    return jsonify({"updated": updated, "unchanged": unchanged, "skipped_manual": skipped})
+    return jsonify({"success": True, "recategorized": recategorized})
 
 
 # ---------------------------------------------------------------------------
