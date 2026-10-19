@@ -6,7 +6,7 @@
   },
   "start": "2025-11",
   "end": "2026-10",
-  "stack_by": "book",
+  "stack_by": "type",
   "series": {
     "2025-11": {
       "Household": {
