@@ -3055,27 +3055,31 @@ def api_resolve_transaction():
                     f"AND {match_cond}"
                 )
                 fill_params = (service_id, tx_id, pattern.upper())
-                backfilled_ids = [
-                    r[0] for r in conn.execute(
-                        f"SELECT id FROM transactions WHERE {fill_where}", fill_params
-                    ).fetchall()
-                ]
                 # The rows the rule now labels take its label: from the rule
                 # for the field it overrides, from the merchant for the other.
-                cur = conn.execute(
-                    f"UPDATE transactions SET service_id = ?, book = ?, type_id = ?, cat_source = ?, "
-                    f"book_source = ?, type_source = ? WHERE {fill_where}",
-                    (
-                        service_id,
-                        book,
-                        type_id,
-                        "rule_override" if apply_scope == "rule" else "service_default",
-                        label_source.given(book, taught[0]),
-                        label_source.given(type_id, taught[1]),
-                        *fill_params,
-                    ),
-                )
-                backfilled = cur.rowcount
+                # A field chosen or worked out keeps its own, as every later
+                # change leaves it (spec 24; an empty field reads the row's
+                # old mark, as the rule preview reads it), and a checked one
+                # stays checked; a row with no field to reach keeps its
+                # merchant too (fin-surfaces 54).
+                given = {"book": (book, taught[0]), "type_id": (type_id, taught[1])}
+                for held in conn.execute(
+                    f"SELECT {_LABEL_HELD} FROM transactions t WHERE {fill_where}", fill_params
+                ).fetchall():
+                    reached = [
+                        (field, column) for field, column in label_source.FIELDS.items()
+                        if label_source.reachable(held[column], held["cat_source"])
+                    ]
+                    if not reached:
+                        continue
+                    sets = {"service_id": service_id}
+                    for field, column in reached:
+                        value, source = given[field]
+                        sets[field] = value
+                        sets[column] = label_source.reached(_source(held, column), value, source)
+                    if _write_label(conn, held, sets):
+                        backfilled_ids.append(held["id"])
+                backfilled = len(backfilled_ids)
 
             # Step 3: Update the target transaction with explicit provenance.
             # flow_type override is independent of the label (ADR v2):
