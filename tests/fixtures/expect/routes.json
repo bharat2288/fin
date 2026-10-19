@@ -1,0 +1,98 @@
+{
+  "_note": "Every route the expect-back drawers call, with the fixture holding its shape. A write's history entry comes back in the X-Fin-Change header, as every fin write; a refusal is a 4xx with {\"error\": words} and writes nothing.",
+  "routes": {
+    "mark": {
+      "method": "POST",
+      "path": "/api/transactions/<tx_id>/expectation",
+      "fixture": "mark"
+    },
+    "undo_mark": {
+      "method": "DELETE",
+      "path": "/api/expectations/<id>",
+      "fixture": "undo_mark"
+    },
+    "open_list": {
+      "method": "GET",
+      "path": "/api/expectations",
+      "fixture": "open_list",
+      "query": [
+        "direction",
+        "person",
+        "currency",
+        "near",
+        "payment"
+      ]
+    },
+    "page": {
+      "method": "GET",
+      "path": "/api/expectations/<id>",
+      "fixture": "page"
+    },
+    "set_off": {
+      "method": "POST",
+      "path": "/api/transactions/<tx_id>/set-offs",
+      "fixture": "setoff"
+    },
+    "unlink": {
+      "method": "DELETE",
+      "path": "/api/set-offs/<id>",
+      "fixture": "unlink"
+    },
+    "waiting": {
+      "method": "POST",
+      "path": "/api/transactions/<tx_id>/waiting",
+      "fixture": "waiting"
+    },
+    "attach": {
+      "method": "POST",
+      "path": "/api/set-offs/<id>/attach",
+      "fixture": "waiting"
+    },
+    "let_go": {
+      "method": "POST",
+      "path": "/api/expectations/<id>/let-go",
+      "fixture": "letgo"
+    },
+    "undo_let_go": {
+      "method": "DELETE",
+      "path": "/api/expectations/<id>/let-go",
+      "fixture": "letgo"
+    },
+    "not_a_payback": {
+      "method": "POST",
+      "path": "/api/transactions/<tx_id>/not-a-payback",
+      "fixture": "not_a_payback"
+    },
+    "books_sections": {
+      "method": "GET",
+      "path": "/api/balance-sheet",
+      "key": "expect",
+      "fixture": "books_sections"
+    },
+    "queue_paybacks": {
+      "method": "GET",
+      "path": "/api/queue/paybacks",
+      "fixture": "queue_paybacks"
+    },
+    "refund_asks": {
+      "method": "GET",
+      "path": "/api/refund-links/asks",
+      "fixture": "refund_ask_which"
+    },
+    "refund_hand_link": {
+      "method": "POST",
+      "path": "/api/refund-links",
+      "fixture": "refund_ask_which"
+    },
+    "refund_answer": {
+      "method": "POST",
+      "path": "/api/refund-links/<id>/answer",
+      "fixture": "refund_ask_paid_back"
+    },
+    "refund_unlink": {
+      "method": "DELETE",
+      "path": "/api/refund-links/<id>",
+      "fixture": "refund_ask_paid_back"
+    }
+  }
+}
