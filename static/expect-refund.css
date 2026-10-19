@@ -1,3 +1,8 @@
 /* Expect back: a linked refund's "refund of 20 Jul" on the row sheet.
    A shell from personal-ledger 26, filled by personal-ledger 38. Every class here is prefixed .xb-
    (tests/test_expect_contract.py), so no rule reaches a page it was not written for. */
+
+/* The cell sits in the row sheet's actions line, beside its buttons; empty until the link is read. */
+.xb-refund-of { display: inline-flex; align-items: center; gap: 4px; }
+.xb-refund-of:empty { display: none; }
+.xb-refund-of__what { color: var(--text-secondary); font-size: var(--t-ui); }
