@@ -31,6 +31,7 @@ import db
 import expect_back
 import flow
 import history
+import label_source
 import loan_interest
 import mcp_tools
 import money
@@ -76,17 +77,16 @@ UNTYPED_FILTER = "__untyped__"
 # filter and the Queue's guesses read both use it, so they list the same rows.
 UNTYPED_ROWS = "(t.type_id IS NULL AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund'))"
 # Which rows wait to be checked (Check each row, fin-surfaces 12): their
-# merchant is set to check each row (services.review_each_time) and their
-# label is not hand-set. Only a typed spending or refund row: an untyped one
-# is already the Queue's "no type" item and a transfer waiting for review its
-# "This was…" item, so the same row is never listed twice. CHECKABLE_ROWS is
-# the row half: the rows that wait, or would once the flag is on. `svc` is
-# the row's merchant. The Queue's step, the not-checked mark and the setting
-# read them.
-CHECKABLE_ROWS = (
-    "(COALESCE(t.cat_source, 'auto') != 'manual'"
-    " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL)"
-)
+# merchant is set to check each row (services.review_each_time) and neither
+# field of theirs is checked or chosen (label_source.waits_sql, personal-
+# ledger 24). Only a typed spending or refund row: an untyped one is already
+# the Queue's "no type" item and a transfer waiting for review its "This
+# was…" item, so the same row is never listed twice. LABELLED_ROWS is the
+# kind of row that can wait; CHECKABLE_ROWS is the row half: the rows that
+# wait, or would once the flag is on. `svc` is the row's merchant. The
+# Queue's step, the not-checked mark and the setting read them.
+LABELLED_ROWS = "(COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL)"
+CHECKABLE_ROWS = f"({label_source.waits_sql('t')} AND {LABELLED_ROWS})"
 NOT_CHECKED_ROWS = f"(COALESCE(svc.review_each_time, 0) = 1 AND {CHECKABLE_ROWS})"
 
 
@@ -336,12 +336,21 @@ def _account_currency(conn, account_name: str, stated=None) -> str:
 def _label_for(conn, description: str, amount_minor: int) -> dict:
     """What the rules, then the PayNow wording, make of a row: the result of
     match_merchant, with the fallback's type when no rule gave one. A merchant
-    the rules did find is kept, and so is its book."""
+    the rules did find is kept, and so is its book. With each field's source
+    (book_source, type_source): from the merchant or the rule that gave it,
+    or from the wording; none for a field left empty."""
     found = match_merchant(description, conn, amount_minor=amount_minor)
+    rule = first_rule(description, conn, amount_minor) if found["service_id"] is not None else None
+    book_source, type_source = label_source.rule_sources(rule) if rule else (None, None)
     if found["type_id"] is None:
         book, type_id = _paynow_fallback_label(description, conn)
         if type_id is not None:
+            if found["book"] is None:
+                book_source = label_source.WORDING
             found.update(book=found["book"] or book, type_id=type_id, cat_source="fallback")
+            type_source = label_source.WORDING
+    found["book_source"] = label_source.given(found["book"], book_source or label_source.MERCHANT)
+    found["type_source"] = label_source.given(found["type_id"], type_source or label_source.MERCHANT)
     return found
 
 
@@ -1451,6 +1460,111 @@ def api_loan_interest():
 
 
 # ---------------------------------------------------------------------------
+# A row's label and its sources (personal-ledger 24): every write of a row's
+# book or type goes through _write_label, which keeps cat_source in step.
+# ---------------------------------------------------------------------------
+
+# The columns a label write may set; nothing else is ever named in its SQL.
+_LABEL_COLUMNS = frozenset({
+    "book", "type_id", "service_id", "book_source", "type_source", "cat_source", "flow_type",
+    "other_side_id", "flow_type_manual",
+})
+# What a label write reads of a row first.
+_LABEL_HELD = ("t.id, t.description, t.amount_minor, t.book, t.type_id, t.service_id, "
+               "t.book_source, t.type_source, t.cat_source, t.flow_type, t.flow_type_manual, t.other_side_id")
+# A rule's override of each field.
+_OVERRIDE_OF = {"book": "book_override", "type_id": "type_override_id"}
+
+
+def _write_label(conn, held, sets: dict) -> bool:
+    """Write `sets` to the row `held` (as _LABEL_HELD reads it), with
+    cat_source in step when a source changes (unless `sets` names it).
+    Returns whether anything changed."""
+    if not set(sets) <= _LABEL_COLUMNS:
+        raise ValueError(f"not a label column: {sorted(set(sets) - _LABEL_COLUMNS)}")
+    named = "cat_source" in sets
+    sets = {k: v for k, v in sets.items() if held[k] != v}
+    if not sets:
+        return False
+    if {"book_source", "type_source"} & set(sets) and not named:
+        sets["cat_source"] = label_source.mark(
+            sets.get("book_source", held["book_source"]), sets.get("type_source", held["type_source"]),
+            held["cat_source"],
+        )
+    conn.execute(
+        f"UPDATE transactions SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
+        (*sets.values(), held["id"]),
+    )
+    return True
+
+
+def _source(held, column: str) -> str | None:
+    """A held row's source for one field, as label_source reads it: its own,
+    or what the old mark says for a field that has a value and none (expand);
+    none for an empty field."""
+    field = next(f for f, c in label_source.FIELDS.items() if c == column)
+    if held[field] is None and held[column] is None:
+        return None
+    return label_source.source_of(held[column], held["cat_source"])
+
+
+def _own_rule(conn, held, service_id: int | None):
+    """The rule that labels the row's wording now, when it is one of
+    `service_id`'s; a rule of another merchant gives this row nothing."""
+    rule = first_rule(held["description"] or "", conn, held["amount_minor"])
+    if rule is None or service_id is None or rule["service_id"] != service_id:
+        return None
+    return rule
+
+
+def _reach_merchant_rows(conn, svc_id: int, label: dict, only: list[int] | None = None) -> int:
+    """A merchant's new book or type ({field: value}, the fields that
+    changed) written to its rows (`only` those, when given): each field a
+    later change may reach takes it, unless the row's own rule overrides that
+    field. A checked field stays checked; one from fin is from the merchant.
+    Returns the rows changed."""
+    if not label:
+        return 0
+    reach = " OR ".join(label_source.reachable_sql(field) for field in label)
+    picked = None if only is None else set(only)
+    changed = 0
+    for held in conn.execute(
+        f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.service_id = ? AND ({reach})", (svc_id,)
+    ).fetchall():
+        if picked is not None and held["id"] not in picked:
+            continue
+        own = _own_rule(conn, held, svc_id)
+        sets = {}
+        for field, value in label.items():
+            column = label_source.FIELDS[field]
+            held_source = _source(held, column)
+            # A field a rule set is the rule's, not the merchant's default.
+            if held_source is not None and (not label_source.reachable(held_source)
+                                            or held_source == label_source.RULE):
+                continue
+            if own is not None and own[_OVERRIDE_OF[field]] is not None:
+                continue
+            sets[field] = value
+            sets[column] = label_source.reached(held_source, value, label_source.MERCHANT)
+        changed += _write_label(conn, held, sets)
+    return changed
+
+
+def _accept_past(conn, where: str, params: tuple) -> int:
+    """The rows `where` picks (over transactions t) accepted as they stand
+    ("Not now, only new rows"): each field from fin becomes checked; the
+    values are unchanged. Returns the rows changed."""
+    changed = 0
+    for held in conn.execute(
+        f"SELECT {_LABEL_HELD} FROM transactions t WHERE {where} AND {label_source.from_fin_sql('t')}", params
+    ).fetchall():
+        changed += _write_label(conn, held, {
+            column: label_source.accepted(_source(held, column)) for column in label_source.FIELDS.values()
+        })
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # Services API
 # ---------------------------------------------------------------------------
 
@@ -1595,23 +1709,19 @@ def api_services_update(svc_id):
             ).fetchone()
             conn.execute(f"UPDATE services SET {', '.join(sets)} WHERE id = ?", params)
 
-            # Relabel: when the merchant's default changes, rows that inherit
-            # it take its book and type. Rows labelled by hand or by a rule
-            # override keep theirs. A default sent back unchanged (a rename,
-            # a note) relabels nothing.
+            # Relabel: when the merchant's book or type changes, each of its
+            # rows' fields a later change may reach takes it (label_source):
+            # from fin or checked, and not set by the row's own rule. A
+            # chosen field keeps its own. A default sent back unchanged (a
+            # rename, a note) relabels nothing.
             recategorized = 0
             if "book" in data or "type_id" in data:
                 svc = conn.execute(
                     "SELECT book, type_id FROM services WHERE id = ?", (svc_id,)
                 ).fetchone()
-                if svc and tuple(svc) != tuple(was):
-                    cur = conn.execute(
-                        "UPDATE transactions SET book = ?, type_id = ? "
-                        "WHERE service_id = ? AND (book IS NOT ? OR type_id IS NOT ?) "
-                        "AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default')",
-                        (svc["book"], svc["type_id"], svc_id, svc["book"], svc["type_id"]),
-                    )
-                    recategorized = cur.rowcount
+                if svc and was:
+                    moved = {field: svc[field] for field in ("book", "type_id") if svc[field] != was[field]}
+                    recategorized = _reach_merchant_rows(conn, svc_id, moved)
 
             conn.commit()
             invalidate_rules_cache()  # the rule cache holds each merchant's book and type
@@ -1622,9 +1732,9 @@ def api_services_update(svc_id):
 
 
 # Turning Check each row on offers once to bring the merchant's past rows to
-# the Queue: `leave` accepts them as they are (hand-set, so none waits), and
-# `queue` leaves them waiting. Off clears the flag only: its rows keep their
-# labels and wait no longer.
+# the Queue: `leave` accepts them as they are (each field from fin becomes
+# checked, so none waits), and `queue` leaves them waiting. Off clears the
+# flag only: its rows keep their labels and wait no longer.
 CHECK_EACH_ROW_PAST = ("leave", "queue")
 
 
@@ -1648,9 +1758,7 @@ def api_services_check_each_row(svc_id):
         theirs = f"SELECT t.id FROM transactions t WHERE t.service_id = ? AND {CHECKABLE_ROWS}"
         checked = 0
         if on and past == "leave":
-            checked = conn.execute(
-                f"UPDATE transactions SET cat_source = 'manual' WHERE id IN ({theirs})", (svc_id,)
-            ).rowcount
+            checked = _accept_past(conn, f"t.service_id = ? AND {LABELLED_ROWS}", (svc_id,))
         waiting = len(conn.execute(theirs, (svc_id,)).fetchall()) if on else 0
         conn.commit()
         invalidate_rules_cache()  # the rule cache holds each merchant's flag
@@ -1665,9 +1773,10 @@ BOOK_VARIES_AFTER = 2
 @app.route("/api/services/<int:svc_id>/book-varies")
 def api_services_book_varies(svc_id):
     """Whether fin asks to check each row of this merchant: {suggest, moved,
-    to_book}. moved counts its spending and refund rows hand-set to a book
-    other than its own; to_book is that book when they all share one. suggest
-    is true for an Every row the same merchant with BOOK_VARIES_AFTER moved
+    to_book}. moved counts its spending and refund rows whose book is chosen
+    and is not its own (a checked book is not counted); to_book is that book
+    when they all share one. suggest is true for an Every row the same
+    merchant with BOOK_VARIES_AFTER moved
     rows, unless the operator said No (screens.py keeps that). It writes nothing."""
     with get_db() as conn:
         svc = conn.execute("SELECT book, review_each_time FROM services WHERE id = ?", (svc_id,)).fetchone()
@@ -1675,7 +1784,7 @@ def api_services_book_varies(svc_id):
             return jsonify({"error": "This merchant is no longer in fin"}), 404
         books = conn.execute(
             f"SELECT {book_expr()} AS book, COUNT(*) AS n FROM transactions t WHERE t.service_id = ?"
-            " AND " + _left_to_label("t.cat_source = 'manual'") +
+            " AND " + _left_to_label(label_source.book_varies_sql("t")) +
             " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')"
             f" AND {book_expr()} != ? GROUP BY 1",
             (svc_id, svc["book"]),
@@ -1718,15 +1827,13 @@ def api_services_merge(svc_id):
         if not source or not target:
             return jsonify({"error": "Service not found"}), 404
 
-        # The rows being moved that inherit their merchant's default now
-        # inherit the target's book and type. Rows labelled by hand or by a
-        # rule override keep theirs (the rules move with them).
-        relabelled = conn.execute(
-            "UPDATE transactions SET book = ?, type_id = ? "
-            "WHERE service_id = ? AND (book IS NOT ? OR type_id IS NOT ?) "
-            "AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default')",
-            (target["book"], target["type_id"], svc_id, target["book"], target["type_id"]),
-        ).rowcount
+        # The rows being moved take the target's book and type in each field
+        # a later change may reach (label_source); a field a rule override
+        # sets keeps its own (the rules move with them), and so does a
+        # chosen one.
+        moving = [r[0] for r in conn.execute(
+            "SELECT id FROM transactions WHERE service_id = ?", (svc_id,)
+        ).fetchall()]
 
         # Reassign all references from source → target
         txn_count = conn.execute(
@@ -1737,6 +1844,10 @@ def api_services_merge(svc_id):
             "UPDATE merchant_rules SET service_id = ? WHERE service_id = ?",
             (target_id, svc_id),
         ).rowcount
+        invalidate_rules_cache()  # the moved rules are the target's now
+        relabelled = _reach_merchant_rows(
+            conn, target_id, {"book": target["book"], "type_id": target["type_id"]}, only=moving,
+        )
         sub_count = conn.execute(
             "UPDATE subscriptions SET service_id = ? WHERE service_id = ?",
             (target_id, svc_id),
@@ -2394,7 +2505,7 @@ def api_transactions():
                 t.amount_foreign, t.currency_foreign,
                 {book_expr("t")} as book,
                 t.type_id, ty.name as type, tp.name as parent_type,
-                t.cat_source,
+                t.cat_source, t.book_source, t.type_source,
                 t.is_one_off, COALESCE(t.flow_type, 'expense') as flow_type, t.flow_type_manual,
                 t.notes,
                 t.other_side_id, oa.name as other_side_name,
@@ -2528,18 +2639,17 @@ def _relabel_refusal(conn, tx_id: int, book: str | None) -> str | None:
 @app.route("/api/transactions/<int:tx_id>", methods=["PUT"])
 def api_update_transaction(tx_id: int):
     """Update a transaction's notes, book, type, or one-off flag. A row may
-    override both the book and the type its merchant gives it."""
+    override both the book and the type its merchant gives it. Each of book
+    and type sent becomes chosen (label_source); a field not sent keeps its
+    source. Chat's set_label is this route."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
-    sets, values = _build_update_sets(data, ["notes", "book", "type_id", "is_one_off"])
+    sets, values = _build_update_sets(data, ["notes", "is_one_off"])
+    labels = {field: data[field] or None for field in label_source.FIELDS if field in data}
 
-    # If the book, the type or the service is being changed, mark as manual
-    if "book" in data or "type_id" in data or "service_id" in data:
-        sets.append("cat_source = 'manual'")
-
-    if not sets:
+    if not sets and not labels:
         return jsonify({"error": "No valid fields to update"}), 400
 
     with get_db() as conn:
@@ -2551,23 +2661,32 @@ def api_update_transaction(tx_id: int):
             why = _relabel_refusal(conn, tx_id, data["book"])
             if why:
                 return jsonify({"error": why}), 400
-        values.append(tx_id)
-        conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", values)
+        if sets:
+            conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", (*values, tx_id))
+        held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
+        if held is not None and labels:
+            chosen = {label_source.FIELDS[f]: label_source.given(v, label_source.CHOSEN) for f, v in labels.items()}
+            _write_label(conn, held, {**labels, **chosen})
         conn.commit()
     return jsonify({"ok": True, "id": tx_id})
 
 
 @app.route("/api/transactions/bulk-label", methods=["POST"])
 def api_bulk_label():
-    """Hand-set labels on many rows at once, each with its own book and type:
-    {rows: [{tx_id, book?, type_id?}]}. A row's book or type left out (or
-    null) keeps its own; either way the label becomes hand-set (checked). One
+    """Labels on many rows at once, each with its own book and type, as their
+    lines show them: {rows: [{tx_id, book?, type_id?}], chosen?}. Each field
+    sent is checked where it is the row's own value and chosen where it
+    differs; with chosen true (Set book), chosen whatever it is. A row's book
+    or type left out (or null) keeps its value and its source. One
     transaction, one change entry. Refused whole, writing nothing, on any
     unknown book, type or row. Returns {success, labelled, ids}."""
     data = request.get_json(silent=True) or {}
     lines = data.get("rows")
     if not isinstance(lines, list) or not lines:
         return jsonify({"error": "rows must be a list of {tx_id, book, type_id}"}), 400
+    chosen = data.get("chosen", False)
+    if not isinstance(chosen, bool):
+        return jsonify({"error": "chosen must be true or false"}), 400
     with get_db() as conn:
         seen = set()
         for line in lines:
@@ -2599,12 +2718,40 @@ def api_bulk_label():
                 if why:
                     return jsonify({"error": why}), 400
         for line in lines:
-            given = {k: v for k, v in line.items() if k in ("book", "type_id") and v not in (None, "")}
-            sets, values = _build_update_sets(given, ["book", "type_id"])
-            sets.append("cat_source = 'manual'")
-            conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", (*values, line["tx_id"]))
+            held = conn.execute(
+                f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (line["tx_id"],)
+            ).fetchone()
+            sets = {}
+            for field, column in label_source.FIELDS.items():
+                sent = line.get(field)
+                if sent in (None, ""):
+                    continue
+                sets[field] = sent
+                sets[column] = label_source.bulk(field, sent, held[field], _source(held, column), chosen)
+            _write_label(conn, held, sets)
         conn.commit()
     return jsonify({"success": True, "labelled": len(ids), "ids": ids})
+
+
+def _resolved_sources(held, apply_scope: str, book, type_id, merchant_book) -> tuple:
+    """The (book source, type source) resolve gives its own row: for this row
+    only, chosen where the value changes (a field left as it was keeps its
+    own); a rule override from the rule for the field it sets, from the
+    merchant for the other; the merchant's default from the merchant."""
+    if apply_scope == "transaction":
+        return tuple(
+            label_source.changed_or_kept(
+                field, value, held[field] if held else None, _source(held, column) if held else None,
+                label_source.CHOSEN,
+            )
+            for (field, column), value in zip(label_source.FIELDS.items(), (book, type_id))
+        )
+    if apply_scope == "rule":
+        book_source, type_source = label_source.rule_sources(
+            {"book_override": book if book != merchant_book else None, "type_override_id": type_id})
+    else:
+        book_source = type_source = label_source.MERCHANT
+    return label_source.given(book, book_source), label_source.given(type_id, type_source)
 
 
 @app.route("/api/transactions/resolve", methods=["POST"])
@@ -2733,11 +2880,7 @@ def api_resolve_transaction():
             # answer, leaves them waiting. Before the backfill, so the rows
             # this save labels wait whatever the answer.
             if past == "leave" and svc and not svc["review_each_time"]:
-                conn.execute(
-                    f"UPDATE transactions SET cat_source = 'manual' WHERE id IN ("
-                    f"SELECT t.id FROM transactions t WHERE t.service_id = ? AND t.id != ? AND {CHECKABLE_ROWS})",
-                    (service_id, tx_id),
-                )
+                _accept_past(conn, f"t.service_id = ? AND t.id != ? AND {LABELLED_ROWS}", (service_id, tx_id))
             if check_each_row is not None:
                 conn.execute("UPDATE services SET review_each_time = ? WHERE id = ?",
                              (1 if check_each_row else 0, service_id))
@@ -2757,6 +2900,8 @@ def api_resolve_transaction():
                 override_book = (
                     book if apply_scope == "rule" and book != merchant_book else None
                 )
+                taught = label_source.rule_sources(
+                    {"book_override": override_book, "type_override_id": override_type_id})
                 if not rule_exists:
                     conn.execute(
                         "INSERT INTO merchant_rules (pattern, service_id, book_override, "
@@ -2786,14 +2931,18 @@ def api_resolve_transaction():
                         f"SELECT id FROM transactions WHERE {fill_where}", fill_params
                     ).fetchall()
                 ]
+                # The rows the rule now labels take its label: from the rule
+                # for the field it overrides, from the merchant for the other.
                 cur = conn.execute(
-                    f"UPDATE transactions SET service_id = ?, book = ?, type_id = ?, cat_source = ? "
-                    f"WHERE {fill_where}",
+                    f"UPDATE transactions SET service_id = ?, book = ?, type_id = ?, cat_source = ?, "
+                    f"book_source = ?, type_source = ? WHERE {fill_where}",
                     (
                         service_id,
                         book,
                         type_id,
                         "rule_override" if apply_scope == "rule" else "service_default",
+                        label_source.given(book, taught[0]),
+                        label_source.given(type_id, taught[1]),
                         *fill_params,
                     ),
                 )
@@ -2809,14 +2958,15 @@ def api_resolve_transaction():
                 "service_default": "service_default",
             }.get(apply_scope, "manual")
             tx_row = conn.execute(
-                "SELECT description, amount_minor, flow_type_manual FROM transactions WHERE id = ?",
-                (tx_id,),
+                f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
             ).fetchone()
-            label = (book, type_id, service_id, tx_cat_source)
+            label = (book, type_id, service_id, tx_cat_source,
+                     *_resolved_sources(tx_row, apply_scope, book, type_id, merchant_book))
+            written = ("UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
+                       "book_source = ?, type_source = ?")
             if flow_type is not None:
                 conn.execute(
-                    "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
-                    "flow_type = ?, flow_type_manual = 1 WHERE id = ?",
+                    f"{written}, flow_type = ?, flow_type_manual = 1 WHERE id = ?",
                     (*label, flow_type, tx_id),
                 )
             elif tx_row and not tx_row["flow_type_manual"]:
@@ -2825,16 +2975,11 @@ def api_resolve_transaction():
                     tx_id=tx_id, service_id=service_id, labelled=True,
                 )
                 conn.execute(
-                    "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
-                    "flow_type = ?, other_side_id = ? WHERE id = ?",
+                    f"{written}, flow_type = ?, other_side_id = ? WHERE id = ?",
                     (*label, flow_type, other_side, tx_id),
                 )
             else:
-                conn.execute(
-                    "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ? "
-                    "WHERE id = ?",
-                    (*label, tx_id),
-                )
+                conn.execute(f"{written} WHERE id = ?", (*label, tx_id))
 
             # Afterwards, for a merchant the model was asked about: the type
             # the operator chose and whether the suggestion was on screen.
@@ -3510,6 +3655,24 @@ def api_import_upload():
     })
 
 
+def _imported_sources(conn, tx: dict, amount_minor: int) -> tuple:
+    """Each field's source for an imported row: what the rules give it now
+    (from the merchant, a rule, or the wording) where the confirm writes the
+    value the rules give; a value the request brings that the rules do not
+    give is chosen. None for an empty field."""
+    found = _label_for(conn, tx["description"] or "", amount_minor)
+    out = []
+    for field, column in label_source.FIELDS.items():
+        value = tx.get(field) or None
+        if value is None:
+            out.append(None)
+        elif value == found[field] and found[column] is not None:
+            out.append(found[column])
+        else:
+            out.append(label_source.CHOSEN)
+    return tuple(out)
+
+
 @app.route("/api/import/confirm", methods=["POST"])
 def api_import_confirm():
     """Commit an upload's preview to the database.
@@ -3767,12 +3930,13 @@ def api_import_confirm():
                         tx_flow = tx.get("flow_type")
                         if tx_flow == flow.REVIEW and (tx.get("type_id") or tx.get("service_id")):
                             tx_flow = "income" if amount_val < 0 else "expense"
+                        book_source, type_source = _imported_sources(conn, tx, amount_val)
                         cur = conn.execute(
                             "INSERT INTO transactions "
                             "(statement_id, date, description, amount_minor, amount_foreign, "
                             "currency_foreign, book, type_id, service_id, "
-                            "is_one_off, cat_source, flow_type, other_side_id) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "is_one_off, cat_source, flow_type, other_side_id, book_source, type_source) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 statement_id,
                                 tx["date"],
@@ -3784,9 +3948,13 @@ def api_import_confirm():
                                 tx.get("type_id") or None,
                                 tx.get("service_id"),
                                 1 if tx.get("is_one_off") else 0,
-                                tx.get("cat_source"),
+                                # in step: a value the rules do not give is manual
+                                "manual" if label_source.CHOSEN in (book_source, type_source)
+                                else tx.get("cat_source"),
                                 tx_flow,
                                 tx.get("other_side_id"),
+                                book_source,
+                                type_source,
                             ),
                         )
                         if tx_flow is None:
@@ -4165,14 +4333,15 @@ def api_rules():
 
 
 def _rows_labelled_by_rule(conn) -> dict[int, int]:
-    """How many rows each rule labels now: every row whose label came from
-    the rules (not by hand), counted against the rule that wins for it, as
-    a re-run would find it. Transfers and card payments are not counted."""
+    """How many rows each rule labels now: every row a later change may
+    reach (label_source: a field from fin or checked), counted against the
+    rule that wins for it, as a re-run would find it. Transfers and card
+    payments are not counted."""
     counts: dict[int, int] = {}
     for tx in conn.execute(
-        "SELECT description, amount_minor FROM transactions "
+        "SELECT description, amount_minor FROM transactions t "
         "WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment') "
-        "AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')"
+        f"AND {label_source.any_reachable_sql('t')}"
     ):
         rule = first_rule(tx["description"] or "", conn, tx["amount_minor"])
         if rule is not None:
@@ -4263,34 +4432,39 @@ def api_rules_update(rule_id):
         if rule:
             pattern_upper = rule["pattern"].upper()
             match_cond = _build_match_condition(rule["match_type"])
-            book, type_id, source = rule_label(rule)
+            book, type_id, _ = rule_label(rule)
+            given = dict(zip(label_source.FIELDS, (book, type_id)))
+            from_rule = dict(zip(label_source.FIELDS, label_source.rule_sources(rule)))
             flow_ctx = None
+            # The rows the pattern matches that a later change may reach: each
+            # reachable field takes the rule's label (a checked one stays
+            # checked, one from fin is from the rule or its merchant); a
+            # chosen field keeps its own.
             rows = conn.execute(
                 f"""
-                SELECT id, description, amount_minor, flow_type_manual
-                FROM transactions
+                SELECT {_LABEL_HELD}
+                FROM transactions t
                 WHERE {match_cond}
                   AND COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
-                  AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')
+                  AND {label_source.any_reachable_sql('t')}
                 """,
                 (pattern_upper,),
             ).fetchall()
             for tx in rows:
-                params = [book, type_id, rule["service_id"], source]
-                sql = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?"
+                sets = {"service_id": rule["service_id"]}
+                for field, column in label_source.FIELDS.items():
+                    held_source = _source(tx, column)
+                    if held_source is None or label_source.reachable(held_source):
+                        sets[field] = given[field]
+                        sets[column] = label_source.reached(held_source, given[field], from_rule[field])
                 if not tx["flow_type_manual"]:
                     if flow_ctx is None:
                         flow_ctx = flow.build_context(conn)
-                    params.extend(
-                        _classify_flow_for_tx(
-                            conn, tx["description"], tx["amount_minor"], flow_ctx=flow_ctx,
-                            tx_id=tx["id"], service_id=rule["service_id"], labelled=True,
-                        )
+                    sets["flow_type"], sets["other_side_id"] = _classify_flow_for_tx(
+                        conn, tx["description"], tx["amount_minor"], flow_ctx=flow_ctx,
+                        tx_id=tx["id"], service_id=rule["service_id"], labelled=True,
                     )
-                    sql += ", flow_type = ?, other_side_id = ?"
-                sql += " WHERE id = ?"
-                params.append(tx["id"])
-                conn.execute(sql, params)
+                _write_label(conn, tx, sets)
                 recategorized += 1
 
         conn.commit()
@@ -4312,23 +4486,25 @@ def api_rules_delete(rule_id):
 def api_rules_recategorize():
     """Re-run all merchant rules against existing transactions.
 
-    Each row takes the book and type its rule gives it (the merchant's
-    default, or the rule's override). Rows labelled by hand are left alone,
-    and a flow set by hand keeps its flow and its other side.
+    Each field a later change may reach (label_source: from fin, or
+    checked) takes the book or type its rule gives it (the merchant's
+    default, or the rule's override); a checked field stays checked, and is
+    not emptied where no rule gives it a value. A chosen field is left
+    alone, and a flow set by hand keeps its flow and its other side.
     """
     with get_db() as conn:
-        # Skip manually resolved transactions — only re-run on rows the rules labelled
-        rows = conn.execute("""
-            SELECT id, description, amount_minor, book, type_id, service_id, cat_source,
-                   COALESCE(flow_type, 'expense') AS flow_type, flow_type_manual, other_side_id
-            FROM transactions
-            WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
-              AND COALESCE(cat_source, 'auto') IN ('auto', 'service_default', 'rule_override', 'fallback')
+        # Only the rows a later change may reach.
+        rows = conn.execute(f"""
+            SELECT {_LABEL_HELD}
+            FROM transactions t
+            WHERE COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')
+              AND {label_source.any_reachable_sql('t')}
         """).fetchall()
 
-        skipped = conn.execute("""
-            SELECT COUNT(*) FROM transactions
-            WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment') AND cat_source = 'manual'
+        skipped = conn.execute(f"""
+            SELECT COUNT(*) FROM transactions t
+            WHERE COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')
+              AND NOT {label_source.any_reachable_sql('t')}
         """).fetchone()[0]
 
         updated = 0
@@ -4336,9 +4512,24 @@ def api_rules_recategorize():
         flow_ctx = None
         for tx in rows:
             found = _label_for(conn, tx["description"], tx["amount_minor"])
-            new_label = (found["book"], found["type_id"], found["service_id"], found["cat_source"])
-            old_flow = (tx["flow_type"], tx["other_side_id"])
-            new_flow = old_flow
+            sets = {"service_id": found["service_id"]}
+            kept = False
+            for field, column in label_source.FIELDS.items():
+                held = _source(tx, column)
+                if held is not None and not label_source.reachable(held):
+                    kept = True
+                    continue
+                if held == label_source.CHECKED and found[field] is None:
+                    kept = True
+                    continue  # a checked value is not emptied
+                sets[field] = found[field]
+                sets[column] = label_source.reached(held, found[field], found[column])
+            if kept and found["service_id"] is None:
+                del sets["service_id"]  # a row keeping a field keeps its merchant
+            if all(_source(tx, c) not in label_source.LOOKED_AT + label_source.KEPT
+                   for c in label_source.FIELDS.values()):
+                # A row wholly from fin takes the mark the rules give, as before.
+                sets["cat_source"] = found["cat_source"]
             if not tx["flow_type_manual"]:
                 if flow_ctx is None:
                     flow_ctx = flow.build_context(conn)
@@ -4347,13 +4538,9 @@ def api_rules_recategorize():
                     tx_id=tx["id"], service_id=found["service_id"],
                     labelled=bool(found["type_id"] or found["service_id"]),
                 )
-            old_label = (tx["book"], tx["type_id"], tx["service_id"], tx["cat_source"])
-            if new_label != old_label or new_flow != old_flow:
-                conn.execute(
-                    "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
-                    "flow_type = ?, other_side_id = ? WHERE id = ?",
-                    (*new_label, *new_flow, tx["id"]),
-                )
+                if new_flow != ((tx["flow_type"] or "expense"), tx["other_side_id"]):
+                    sets["flow_type"], sets["other_side_id"] = new_flow
+            if _write_label(conn, tx, sets):
                 updated += 1
             else:
                 unchanged += 1
