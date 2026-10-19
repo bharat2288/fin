@@ -2,8 +2,9 @@
 routes R2; cases 11, 39, 40, 42, 43, 50, 51, 55, 57, 63).
 
 One book's spending as one line per type with rows in the span: a point per
-month with its net in S$, rupees valued at the month-end rate through
-balance_sheet.valued (a rate dated before the month is no rate), and anything
+month with its net in S$, rupees valued at the month-end rate merchant by
+merchant through trend_series.valued, as R1's type page values them (a rate
+dated before the month is no rate), and anything
 that cannot be valued named in `left_out`, never guessed. A line has a point
 for every month, also past 24 months: quarters are for bars.
 
@@ -26,7 +27,6 @@ and the trend modules, never app.py. Opening it never fetches.
 
 from __future__ import annotations
 
-import calendar
 import datetime
 import sqlite3
 
@@ -63,12 +63,6 @@ def _months(plan: dict) -> list[str]:
     return [month for bucket in plan["buckets"] for month in bucket["months"]]
 
 
-def _month_days(month: str) -> tuple[str, str]:
-    """The first and the calendar last day of 'YYYY-MM'."""
-    year, mon = int(month[:4]), int(month[5:7])
-    return f"{month}-01", f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
-
-
 def _month_name(month: str) -> str:
     return f"{_MONTH_NAMES[int(month[5:7]) - 1]} {month[:4]}"
 
@@ -101,21 +95,22 @@ def _scope(conn: sqlite3.Connection, book: str, start: str | None,
     return accounts, first
 
 
-def _in_sgd(conn: sqlite3.Connection, cells: dict, month: str, left_out: list) -> int:
-    """One type's month in S$: its S$ net plus every other currency valued at
-    the month-end rate, a rate from before the month counting as none. What
-    cannot be valued is appended to `left_out`, not counted."""
-    first_day, last_day = _month_days(month)
+def _in_sgd(conn: sqlite3.Connection, parts: dict, month: str, left_out: list) -> int:
+    """One type's month in S$: the sum of its merchants' cells (merchant ->
+    currency -> {spent, back, net}), each valued by trend_series.valued, the
+    rule R1's type page values the same cells by, so the two agree to the
+    cent. What cannot be valued is appended to `left_out`, not counted."""
     net = 0
-    for currency, cell in cells.items():
-        got = balance_sheet.valued(conn, cell["net"], currency, last_day, not_before=first_day)
-        if got["value_minor"] is not None:
-            net += got["value_minor"]
-        elif currency in money.MINOR_UNIT_DIGITS:
-            left_out.append(("no_rate", currency, month, cell["net"],
-                             f"no saved rate for {_month_name(month)}"))
-        else:
-            left_out.append(("no_rate_kept", currency, month, cell["net"], got["left_out"]))
+    for cells in parts.values():
+        for currency, cell in cells.items():
+            got = trend_series.valued(conn, cell, currency, month)
+            if got["net"] is not None:
+                net += got["net"]
+            elif currency in money.MINOR_UNIT_DIGITS:
+                left_out.append(("no_rate", currency, month, cell["net"],
+                                 f"no saved rate for {_month_name(month)}"))
+            else:
+                left_out.append(("no_rate_kept", currency, month, cell["net"], got["left_out"]))
     return net
 
 
@@ -166,12 +161,13 @@ def types_over_time(conn: sqlite3.Connection, book: str = book_type.DEFAULT_BOOK
 
     # One grouped read over the span and the 12M the slots are dealt on.
     window = sorted(set(months) | set(reference_months))
-    series = trend_series.series(conn, ("book", book), window[0], end, "type")["series"]
+    series = trend_series.series(conn, ("book", book), window[0], end, "type",
+                                 split_by="merchant")["series"]
     not_counted: list = []
     lines: dict = {}  # type key -> month -> net in S$, for months with rows
     for month in window:
-        for key, cells in series[month].get(book, {}).items():
-            lines.setdefault(key, {})[month] = _in_sgd(conn, cells, month, not_counted)
+        for key, parts in series[month].get(book, {}).items():
+            lines.setdefault(key, {})[month] = _in_sgd(conn, parts, month, not_counted)
 
     def nets(span_months: list[str]) -> dict:
         return {key: sum(by_month[m] for m in span_months if m in by_month)

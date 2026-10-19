@@ -165,6 +165,27 @@ def test_case_11_home_and_spending_draw_the_same_s_dollar_figure(client, conn, s
     assert sum(types_over_time(client, HOUSEHOLD).values()) - RUPEES_IN_SGD == money.to_minor("3900.00")
 
 
+def test_rupees_are_valued_per_merchant_so_the_type_page_and_types_over_time_agree_to_the_cent(
+        client, conn):
+    """Two rupee merchants in Dining, Rs 150 each in September, at 0.01549:
+    each is 232.35 cents alone (S$ 2.32) but 464.70 together (S$ 4.65). The
+    type page values each merchant's spent and back apart; Types over time
+    must value the same cells, not the type's rupees as one amount."""
+    rupee = tf.account(conn, "Rupee card", currency="INR")
+    stmt = tf.statement(conn, rupee, SEP)
+    for name in ("Swiggy", "Zomato"):
+        svc = tf.merchant(conn, name, HOUSEHOLD, "Dining")
+        tf.row(conn, stmt, name.upper(), 15_000, service_id=svc, type_name="Dining",
+               day=f"{SEP}-12")
+    tf.seed_rate(conn, "INR/SGD", "2026-09-30", "0.01549")
+
+    page = trend(client, conn, "Dining", HOUSEHOLD)
+    lines = types_over_time(client, HOUSEHOLD)
+
+    assert page["net"] == 232 + 232
+    assert lines["Dining"] == page["net"]
+
+
 # --- case 52: one figure for a company book -----------------------------------------
 
 
