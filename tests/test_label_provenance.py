@@ -111,7 +111,7 @@ def test_service_type_update_only_relabels_service_default_rows(client):
     finally:
         conn.close()
 
-    resp = client.put(f"/api/services/{service_id}", json={"type_id": groceries_id})
+    resp = client.put(f"/api/services/{service_id}", json={"type_id": groceries_id, "past": "apply"})
     assert resp.status_code == 200
     assert resp.get_json()["recategorized"] == 1
 

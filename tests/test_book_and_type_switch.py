@@ -206,6 +206,9 @@ def test_resolve_fills_matching_rows_that_have_the_merchant_but_no_type(
         "type_id": type_id(conn, "Advertising"),
         "pattern": "SAMPLE*ADS",
         "apply_scope": "service_default",
+        # The typed row is a past row the new default would relabel
+        # (fin-surfaces 21): only new rows, so it keeps its type.
+        "past_rows": "only_new",
     })
 
     assert resp.status_code == 200, resp.get_json()
@@ -582,7 +585,7 @@ def test_service_update_writes_book_and_type_to_its_inherited_rows_only(
                   service_id=hosting, cat_source="manual")
 
     resp = client.put(f"/api/services/{hosting}", json={
-        "book": "Kalesh", "type_id": type_id(conn, "Software & AI tools"),
+        "book": "Kalesh", "type_id": type_id(conn, "Software & AI tools"), "past": "apply",
     })
 
     assert resp.status_code == 200, resp.get_json()
@@ -604,7 +607,7 @@ def test_service_update_of_the_book_alone_moves_its_rows_to_that_book(
     tx = row(conn, statement, "SAMPLE HOSTING", book="Household",
              type_name="Software & AI tools", service_id=hosting, cat_source="service_default")
 
-    resp = client.put(f"/api/services/{hosting}", json={"book": "Kalesh"})
+    resp = client.put(f"/api/services/{hosting}", json={"book": "Kalesh", "past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     assert label(client, tx) == ("Kalesh", "Software & AI tools", "service_default")

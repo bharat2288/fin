@@ -47,6 +47,7 @@ import expect_back
 import trend_series
 import expect_routes
 import refund_links
+import relabel_preview
 from scope import _HOUSEHOLD_ACCOUNT, _SGD_ACCOUNT, _TYPE_JOINS, book_expr
 from missing import missing_months
 from db import first_rule, get_connection, get_db, init_db, invalidate_rules_cache, match_merchant, rule_label
@@ -1684,10 +1685,51 @@ def api_services_create():
         )
 
 
+def _previewed_answer(conn, plan, answer: str | None, token, answer_key: str = "past"):
+    """The preview's gate on a change that may reach past rows (fin-surfaces
+    21): the response a route returns instead of writing, or None to go on.
+    A token from an earlier preview that no longer holds is refused whatever
+    is left to change (case 20); with rows to change and no answer, the
+    preview itself (409, the body the drawer and chat read)."""
+    if token is not None and token != plan.token:
+        return jsonify({"error": relabel_preview.stale(plan.subject["name"]), "stale": True}), 409
+    if plan.count and answer is None:
+        return jsonify({
+            "error": relabel_preview.asked(plan.subject["name"], plan.count, answer_key),
+            "preview": relabel_preview.summary(conn, plan),
+        }), 409
+    return None
+
+
+def _write_plan(conn, plan, answer: str | None, fill: bool = True) -> tuple[int, int]:
+    """The plan the preview counted, as answered: apply writes each row's new
+    values (its sources as they were); only_new marks each kept field
+    checked, values left. With `fill`, a row with no type is given the
+    merchant's whatever the answer (the sheet, as before the preview; the
+    Queue's own backfill does it for teaching). Returns (rows whose label
+    changed, rows marked checked)."""
+    relabelled = checked = 0
+    for p in plan.rows:
+        if answer == relabel_preview.APPLY:
+            relabelled += _write_label(conn, p.held, p.apply)
+        elif answer == relabel_preview.ONLY_NEW:
+            checked += _write_label(conn, p.held, p.only_new)
+    if fill:
+        relabelled += sum(_write_label(conn, held, label) for held, label in plan.fills)
+    return relabelled, checked
+
+
 @app.route("/api/services/<int:svc_id>", methods=["PUT"])
 def api_services_update(svc_id):
-    """Update a service. A change of its book or type is written to the
-    transactions that take their label from it."""
+    """Update a service. A change of its book or type that would relabel
+    past rows goes through the preview (relabel_preview): without `past`
+    nothing is written and the preview comes back (409); `past: apply`
+    writes the merchant and the rows the preview counted, keeping their
+    sources; `past: only_new` writes the merchant and marks each kept field
+    of those rows checked. `token` (the preview's) is refused once the
+    merchant, its rules or its rows have changed since. A rename, a note, or
+    a change that reaches no row saves as it is. Returns {success,
+    recategorized, checked}."""
     data = request.get_json()
     with get_db() as conn:
         sets, params = _build_update_sets(
@@ -1699,32 +1741,30 @@ def api_services_update(svc_id):
             return jsonify({"error": "Nothing to update"}), 400
         try:
             _checked_labels(conn, data)
-        except UnknownLabel as e:
+            past = relabel_preview.checked_answer(data.get("past"))
+        except (UnknownLabel, relabel_preview.Refused) as e:
             return jsonify({"error": str(e)}), 400
         params.append(svc_id)
         try:
             was = conn.execute(
                 "SELECT book, type_id FROM services WHERE id = ?", (svc_id,)
             ).fetchone()
+            if was is None:
+                return jsonify({"error": "This merchant is no longer in fin"}), 404
+            # What the merchant's rows would take: the book or type that
+            # changes. A default sent back unchanged relabels nothing.
+            moved = {field: data[field] for field in ("book", "type_id")
+                     if field in data and data[field] != was[field]}
+            plan = relabel_preview.merchant_change(conn, svc_id, moved)
+            refused = _previewed_answer(conn, plan, past, data.get("token"))
+            if refused is not None:
+                return refused
+
             conn.execute(f"UPDATE services SET {', '.join(sets)} WHERE id = ?", params)
-
-            # Relabel: when the merchant's book or type changes, each of its
-            # rows' fields a later change may reach takes it (label_source):
-            # from fin or checked, and not set by the row's own rule. A
-            # chosen field keeps its own. A default sent back unchanged (a
-            # rename, a note) relabels nothing.
-            recategorized = 0
-            if "book" in data or "type_id" in data:
-                svc = conn.execute(
-                    "SELECT book, type_id FROM services WHERE id = ?", (svc_id,)
-                ).fetchone()
-                if svc and was:
-                    moved = {field: svc[field] for field in ("book", "type_id") if svc[field] != was[field]}
-                    recategorized = _reach_merchant_rows(conn, svc_id, moved)
-
+            recategorized, checked = _write_plan(conn, plan, past)
             conn.commit()
             invalidate_rules_cache()  # the rule cache holds each merchant's book and type
-            return jsonify({"success": True, "recategorized": recategorized})
+            return jsonify({"success": True, "recategorized": recategorized, "checked": checked})
         except Exception as e:
             app.logger.warning("Failed to update service: %s", e)
             return jsonify({"error": "Failed to update service"}), 400
@@ -2822,6 +2862,10 @@ def api_resolve_transaction():
     past = data.get("past")
     if past is not None and (check_each_row is not True or past not in CHECK_EACH_ROW_PAST):
         return jsonify({"error": f"past goes with check_each_row true, as one of {', '.join(CHECK_EACH_ROW_PAST)}"}), 400
+    try:
+        past_rows = relabel_preview.checked_answer(data.get("past_rows"), "past_rows")
+    except relabel_preview.Refused as e:
+        return jsonify({"error": str(e)}), 400
     pattern_error = _rule_pattern_error(pattern)
     if pattern and apply_scope in {"rule", "service_default"} and pattern_error:
         return jsonify({"error": pattern_error}), 400
@@ -2870,14 +2914,24 @@ def api_resolve_transaction():
                 if book is None:
                     book = svc["book"]
                 book = _book_or_proposed(conn, book, type_id)
-                # Service-default resolution can update the merchant's default.
+                # Service-default resolution can update the merchant's default,
+                # and then its past rows go through the preview, as the
+                # merchant sheet's do (fin-surfaces 21): without past_rows
+                # nothing is written and the preview comes back. Before any
+                # write, so a refusal leaves the book as it was.
                 if apply_scope == "service_default" and (
                     (book, type_id) != (svc["book"], svc["type_id"])
                 ):
+                    moved = {f: v for f, v in (("book", book), ("type_id", type_id)) if v != svc[f]}
+                    plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id})
+                    refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
+                    if refused is not None:
+                        return refused
                     conn.execute(
                         "UPDATE services SET book = ?, type_id = ? WHERE id = ?",
                         (book, type_id, service_id),
                     )
+                    _write_plan(conn, plan, past_rows, fill=False)
                 merchant_book = book if apply_scope == "service_default" else svc["book"]
             else:
                 # Create new service — the type is required
