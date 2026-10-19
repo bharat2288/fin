@@ -229,7 +229,9 @@
                 else if (n <= 12 || k === n - 1 || values[k + 1] === null) s += `<circle class="trend-line__dot trend-line--bal" cx="${f1(g.x(k))}" cy="${f1(y(p.value))}" r="3"/>`;
             });
             const last = m.points.map((p, k) => [p, k]).filter(([p]) => p.value !== null && !p.estimate).pop();
-            if (last) s += `<text class="trend-line__val" x="${f1(g.x(last[1]))}" y="${f1(y(last[0].value) - 10)}" text-anchor="end">${esc(money(last[0].value, m.cur))}</text>`;
+            // Whole rupees without paise ("₹ 5,20,000"), as the head, summary and hover word it.
+            const endText = v => { const t = money(v, m.cur); return m.cur === 'INR' && Number.isInteger(v) && v % 100 === 0 ? t.replace(/\.00$/, '') : t; };
+            if (last) s += `<text class="trend-line__val" x="${f1(g.x(last[1]))}" y="${f1(y(last[0].value) - 10)}" text-anchor="end">${esc(endText(last[0].value))}</text>`;
             s += xLabels(m.months, g, H - B + 15, phone);
             m.months.forEach((x, k) => { s += `<rect class="trend-line__hit" data-k="${k}" x="${f1(g.L + k * g.bw)}" y="${T}" width="${f1(g.bw)}" height="${H - T - B}"/>`; });
             top = `<svg class="trend-line__svg" viewBox="0 0 ${width} ${H}" height="${H}" role="img" aria-label="Balance at each month end">${s}</svg>`;

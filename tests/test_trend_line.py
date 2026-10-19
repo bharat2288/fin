@@ -290,3 +290,13 @@ def test_case_29_the_rupee_hover_names_the_rate_day_and_drops_whole_paise():
     assert "Money in ₹ 62,400 " in tip and "Money out ₹ 48,750 " in tip
     assert "Rate 0.0155 (30 Sep 2026)" in tip
     assert "2026-09-30" not in tip and ".00" not in tip
+
+
+def test_case_29_the_rupee_balance_lines_end_label_drops_whole_paise():
+    # Walk finding: the balance line's end label read "₹ 5,20,000.00" while the head,
+    # summary and hover read "₹ 5,20,000".
+    out = svg(load("balances_inr"))
+    ends = re.findall(r'<text class="trend-line__val"[^>]*>([^<]*)</text>', out)
+    assert ends == ["₹ 5,20,000"]
+    # An S$ account keeps its cents.
+    assert re.findall(r'<text class="trend-line__val"[^>]*>([^<]*)</text>', svg(load("balances_sgd"))) == ["S$ 55,000.00"]
