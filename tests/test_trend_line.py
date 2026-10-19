@@ -244,7 +244,14 @@ def test_case_41_picking_a_line_out_raises_it_and_dims_the_rest():
     m = model(load("trend_types"), {"picked": 8})
     assert line(m, "Groceries")["picked"] is True and line(m, "Groceries")["dim"] is False
     assert all(x["dim"] for x in m["lines"] if x["name"] != "Groceries")
-    assert m["lines"][-1]["name"] == "Groceries"        # drawn last, so on top
+    # The legend keeps its order (walk finding: the picked chip moved to the end of the
+    # legend); the drawing alone puts the picked line last, so on top.
+    p = load("trend_types")
+    assert [x["name"] for x in m["lines"]] == [t["name"] for t in p["types"]]
+    series = re.findall(r'<g class="(trend-line__series[^"]*)"', svg(p, {"picked": 8}))
+    assert "trend-line__series--picked" in series[-1]
+    chips = re.findall(r'class="trend-line__chip[^"]*" data-id="(\d+)"', svg(p, {"picked": 8}))
+    assert [int(c) for c in chips] == [t["id"] for t in p["types"]]
     # A grey line picked out takes a colour so it can be read.
     ins = model(load("trend_types"), {"picked": 11})
     assert line(ins, "Insurance")["colour"] == "picked"

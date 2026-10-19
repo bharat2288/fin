@@ -142,10 +142,8 @@
                 off: off.has(t.id), picked: isPicked, dim: picked !== null && !isPicked,
                 points: s.points, solid: s.solid, dashed: s.dashed };
         });
-        if (picked !== null) {
-            const k = lines.findIndex(l => l.picked);
-            lines.push(lines.splice(k, 1)[0]);
-        }
+        // lines keep the payload's order: the legend's chips follow it. The drawing puts the
+        // picked line last (typesSvg's own order), so the legend never moves.
         const values = lines.filter(l => !l.off).flatMap(l => l.points.filter(p => p.value !== null).map(p => p.value));
         const scale = values.length ? nice(Math.min(...values), Math.max(...values), 4, true)
             : { lo: 0, hi: 1, step: 1, zero: true };
