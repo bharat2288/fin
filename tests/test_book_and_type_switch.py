@@ -64,6 +64,25 @@ def rule(conn, pattern: str, service_id: int) -> int:
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
+# The book and type sources a row carries for its old single mark, as the
+# label-source step gives them where the rules agree (personal-ledger 24):
+# a hand-set row is chosen in both fields, a rule override sets the type.
+SOURCES_OF_MARK = {
+    "auto": ("merchant", "merchant"),
+    "service_default": ("merchant", "merchant"),
+    "rule_override": ("merchant", "rule"),
+    "fallback": ("wording", "wording"),
+    "manual": ("chosen", "chosen"),
+    "derived": ("derived", "derived"),
+}
+
+
+def sources_of(cat_source, book, typed) -> tuple:
+    """(book source, type source) for a seeded row: none for an empty field."""
+    book_source, type_source = SOURCES_OF_MARK.get(cat_source or "auto", (None, None))
+    return (book_source if book is not None else None, type_source if typed is not None else None)
+
+
 def row(
     conn,
     statement_id: int,
@@ -78,12 +97,13 @@ def row(
     day: str = "2026-04-10",
 ) -> int:
     """A row of `amount` dollars, stored as its whole cents."""
+    typed = type_id(conn, type_name) if type_name else None
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_minor,"
-        " book, type_id, service_id, cat_source, flow_type)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (statement_id, day, description, money.exact_minor(amount), book,
-         type_id(conn, type_name) if type_name else None, service_id, cat_source, flow),
+        " book, type_id, service_id, cat_source, flow_type, book_source, type_source)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (statement_id, day, description, money.exact_minor(amount), book, typed, service_id,
+         cat_source, flow, *sources_of(cat_source, book, typed)),
     )
     conn.commit()
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -566,12 +586,14 @@ def test_service_update_writes_book_and_type_to_its_inherited_rows_only(
     })
 
     assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["recategorized"] == 2
+    assert resp.get_json()["recategorized"] == 3
     changed = merchant_shown(client, hosting)
     assert (changed["book"], changed["display_type"]) == ("Kalesh", "Software & AI tools")
     assert label(client, inherited) == ("Kalesh", "Software & AI tools", "service_default")
     assert label(client, unlabelled)[:2] == ("Kalesh", "Software & AI tools")
-    assert label(client, by_rule) == ("Household", "Equipment", "rule_override")
+    # Each field on its own (personal-ledger 24): the rule set the type, the
+    # book came from the merchant and follows it.
+    assert label(client, by_rule) == ("Kalesh", "Equipment", "rule_override")
     assert label(client, by_hand) == ("Moom", "Office", "manual")
 
 

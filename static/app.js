@@ -2594,11 +2594,16 @@ ACT['review-guess-yes'] = async el => {
     if (r) { closeSheet(); rerender(); }
 };
 
-// "Yes, Shopping · Household": a row not checked yet, checked as it came in (hand-set).
+// "Yes, Shopping · Household": a row not checked yet, checked as it came in.
+/** Accepting what fin offered is a check, not a choice (personal-ledger 24):
+ *  bulk label with the row's own book and type, which marks both checked. */
+function mixedYesBody(row) {
+    return { rows: [{ tx_id: row.id, type_id: row.type_id, book: row.book }] };
+}
 ACT['mixed-yes'] = async el => {
     const row = await findRow(Number(el.dataset.tx));
     if (!row) return;
-    const r = await act('PUT', `/api/transactions/${row.id}`, { type_id: row.type_id, book: row.book }, `Checked: ${row.display_type || 'its type'} · ${row.book}`);
+    const r = await act('POST', '/api/transactions/bulk-label', mixedYesBody(row), `Checked: ${row.display_type || 'its type'} · ${row.book}`);
     if (r) rerender();
 };
 
@@ -4048,12 +4053,17 @@ ACT['mp-untick'] = () => {
     $('#mp-apply').disabled = !mpCanApply();
 };
 ACT['mp-bulk-book'] = el => { merchantPage.book = el.value; $('#mp-apply').disabled = !mpCanApply(); };
+/** Set book for ticked rows is a deliberate act: its book is chosen even
+ *  where it is a row's own (personal-ledger 24), so the request says so. */
+function mpSetBookBody(ids, book) {
+    return { rows: ids.map(tx_id => ({ tx_id, book })), chosen: true };
+}
 /** One write at a time on the page: bulk label, then the toast and a redraw. */
 async function mpLabel(lines, words) {
     if (merchantPage.busy) { toast('One save at a time: wait for the one running to finish.'); return null; }
     merchantPage.busy = true;
     $$('#view .mp-t select, #mp-apply').forEach(b => { b.disabled = true; });
-    const r = await send('POST', '/api/transactions/bulk-label', { rows: lines });
+    const r = await send('POST', '/api/transactions/bulk-label', Array.isArray(lines) ? { rows: lines } : lines);
     merchantPage.busy = false;
     if (r.ok) toast(words, { undo: r.change });
     else toast(r.data.error || 'That did not work; nothing was changed', { bad: true, ms: 9000 });
@@ -4064,7 +4074,7 @@ ACT['mp-apply'] = async () => {
     const mp = merchantPage, name = $('#view h1')?.textContent || 'this merchant';
     if (!mpCanApply()) return;
     const ids = [...mp.ticks];
-    const r = await mpLabel(ids.map(tx_id => ({ tx_id, book: mp.book })), `${mp.book} on ${plural(ids.length, 'row')} of ${name}`);
+    const r = await mpLabel(mpSetBookBody(ids, mp.book), `${mp.book} on ${plural(ids.length, 'row')} of ${name}`);
     if (r) { mp.ticks.clear(); askBookVaries(mp.id); }
 };
 ACT['mp-type'] = el => {
@@ -4456,7 +4466,8 @@ function dayHeading(iso) {
     return iso ? day(iso) : 'Earlier';
 }
 
-const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
+// A field's source is shown by fin-surfaces 52's marks, not as a changed field (as cat_source).
+const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'book_source', 'type_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
 const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'kind', is_one_off: 'one-off', notes: 'note',
     amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'check each row',
     exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement' };

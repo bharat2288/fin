@@ -269,8 +269,8 @@ def _account_body(a: dict) -> dict:
 _WRITES = [
     _w(
         "set_label",
-        "Set one row's book and/or type (type_id from the types tool). Marked as set by hand: "
-        "no rule changes it afterwards.",
+        "Set one row's book and/or type (type_id from the types tool). Each one sent is marked "
+        "chosen: no later merchant or rule change reaches it. One not sent keeps its source.",
         {"tx_id": _I, "book": _S, "type_id": _I, "is_one_off": _B},
         ("tx_id",),
         lambda a: ("PUT", f"/api/transactions/{int(a['tx_id'])}", _pick(a, "book", "type_id", "is_one_off")),

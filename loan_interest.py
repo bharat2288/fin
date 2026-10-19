@@ -31,6 +31,7 @@ import account_kind
 import anchors
 import book_type
 import flow
+import label_source
 
 LOAN = "loan"
 # The mark a derived row carries where a row says where its label came from.
@@ -186,10 +187,13 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
                     "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, ?)",
                     (loan, period_end, DERIVED_STATEMENT),
                 ).lastrowid
+            # Worked out, in both fields (label_source): nothing later reaches it.
             conn.execute(
                 "INSERT INTO transactions (statement_id, date, description, amount_minor, "
-                "flow_type, book, type_id, cat_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (statement_ids[period_end], day, description, amount, FLOW, BOOK, type_id, DERIVED),
+                "flow_type, book, type_id, cat_source, book_source, type_source)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (statement_ids[period_end], day, description, amount, FLOW, BOOK, type_id, DERIVED,
+                 label_source.DERIVED, label_source.DERIVED),
             )
         changed += 1
     return changed
