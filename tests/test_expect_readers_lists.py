@@ -400,7 +400,8 @@ def test_the_struck_cell_keeps_the_rows_direction():
 @needs_node
 def test_the_merchant_page_row_strikes_its_amount_and_draws_the_pill():
     fn = app_function("viewMerchant")
-    code = "\n".join([PRELUDE, app_function("struckAmount"), r"""
+    # The state column's source tags (fin-surfaces 52) are app.js's own.
+    code = "\n".join([PRELUDE, app_function("struckAmount"), app_function("sourceTagsHTML"), r"""
     const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false, month: null };
     const MP_PAGE = 50, ACT = {};
     const blank = () => '';

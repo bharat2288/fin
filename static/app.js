@@ -1671,8 +1671,8 @@ ACT['pick-save'] = async el => {
 // Check each row (fin-surfaces 12): the rows of a merchant set to check each
 // row that are not checked yet, one card per merchant, one line per row with
 // a type and a book picker. A line's ✓ checks that row; Confirm all checks
-// every line as shown. Each is one bulk-label write (hand-set labels): one
-// change, one Undo.
+// every line as shown. Each is one bulk-label write (a field left as fin
+// gave it is checked, one changed is chosen): one change, one Undo.
 const eachPicks = new Map();   // a row's id -> {typeId, book} as changed on its line
 /** fin's book for a line when it beats the row's own (its usual book): the
  *  last book on this account, or a company's own card (book prefill,
@@ -3961,8 +3961,8 @@ async function checkEachRowOn(s, past) {
 // The merchant page (fin-surfaces 11): one merchant's type, usual book and
 // setting, then all its rows (newest first, a page at a time), each with a
 // type and a book picker that saves at once. Ticked rows take one book in one
-// press (Set book). Every write is 12's bulk label: hand-set, one change, one
-// Undo. The head leaves room for a trend chart, drawing none.
+// press (Set book, which chooses the book). Every write is 12's bulk label:
+// one change, one Undo. The head leaves room for a trend chart, drawing none.
 const MP_PAGE = 50;
 const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false, month: null };
 /** The rows narrowed by a trend bar: month is one 'YYYY-MM', or a quarter's months (a list) read as one date range. */
@@ -3995,11 +3995,12 @@ async function viewMerchant(id) {
     const each = !!s.review_each_time;
     const span = s.rows ? `${plural(s.rows, 'row')} · ${s.first_date === s.last_date ? esc(day(s.first_date)) : `${esc(day(s.first_date))} to ${esc(day(s.last_date))}`} · ${plural(s.accounts, 'account')}` : 'No rows yet';
     const off = mp.busy ? ' disabled' : '';
-    // A row says only what differs from its merchant: not checked, or hand-set.
+    // A row says only what differs from its merchant: not checked, or which
+    // field was checked or chosen (fin-surfaces 52).
     // Money out is the page's default, so only money in carries its mark.
     const rows = list.transactions.map(x => {
         const on = mp.ticks.has(x.id), when = esc(day(x.date)), minor = toMinor(x.amount_sgd, x.currency);
-        const mark = x.not_checked ? tag('notchecked', 'not checked') : x.cat_source === 'manual' ? `<span class="handset">${icon('pencil-simple')}hand-set</span>` : '';
+        const mark = x.not_checked ? tag('notchecked', 'not checked') : sourceTagsHTML(x.sources);
         return `<tr${on ? ' class="is-ticked"' : ''} data-tx="${x.id}"><td class="k"><label class="tick"><input type="checkbox" data-change="mp-tick" data-tx="${x.id}"${on ? ' checked' : ''} aria-label="Tick the ${when} row"></label></td>
             <td class="num dt">${when}</td><td class="ac">${mpAccountCell(x)}</td>
             <td class="stext">${esc(x.description)}${rowMark(x.id)}${window.expectRowPill?.(x) || ''}</td>
@@ -4021,7 +4022,7 @@ async function viewMerchant(id) {
         <div class="mp-fact"><span class="cap">Rows</span><b class="num">${s.rows || 0}</b>${notChecked ? `<span class="sub">${notChecked} not checked</span>` : ''}</div>
         <div class="mp-fact mp-fact--set"><span class="cap" id="mp-nr">New rows</span>${eachSegHTML(s, 'mp-nr')}</div>
     </div></section>
-    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>Newest first. Each change is a hand-set label, undone in Changes.</p></div>
+    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>Newest first. What you set is chosen and stays; the rest follows ${esc(s.name)}. Each change is undone in Changes.</p></div>
         ${list.transactions.length ? `<div class="bulk"><span class="bulk__n" id="mp-ticked">${mpTickedWords()}</span>
             <select class="sel" data-change="mp-bulk-book" aria-label="Book for the ticked rows">${bookOptions(r.books, mp.book, 'Choose book')}</select>
             <button type="button" class="btn sm primary" data-act="mp-apply" id="mp-apply"${mpCanApply() ? '' : ' disabled'}>Set book for ticked rows</button></div>` : ''}</div>
@@ -4093,7 +4094,7 @@ ACT['mp-book'] = el => {
 };
 
 // fin suggests Check each row (fin-surfaces 14): once two rows of an Every
-// row the same merchant are hand-set to another book, fin asks, after the
+// row the same merchant have their book chosen as another, fin asks, after the
 // change (a toast that stays until answered) and on the merchant page. Yes
 // runs the setting's offer (each-set); No is kept for good, and fin does not
 // ask again for that merchant. The server decides (book-varies).
@@ -4985,6 +4986,43 @@ function labelledBy(found, details) {
     return found.cat_source ? (LABEL_SOURCE_WORDS[found.cat_source] || 'the rules') : 'not yet';
 }
 
+/** A history time's day in the viewer's own time: "12 Oct 2026". */
+function historyDay(utc) {
+    if (!utc) return '—';
+    const t = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(utc) ? utc : utc.replace(' ', 'T') + 'Z');
+    if (Number.isNaN(t.getTime())) return day(utc);
+    return `${t.getDate()} ${MONTHS[t.getMonth()]} ${t.getFullYear()}`;
+}
+// Where a row's book and type came from (fin-surfaces 52; spec 24's marks). The
+// server gives each field's source and, for checked or chosen, the change entry
+// that set it so (set_by); these only word them.
+const SOURCE_WORDS = { wording: 'from its wording', derived: 'worked out from figures' };
+/** The merchant page's state column: a dashed tag for a field checked, a solid one for chosen, nothing for one fin gave. */
+function sourceTagsHTML(sources) {
+    const tags = [['book', sources?.book], ['type', sources?.type]].filter(([, src]) => src === 'checked' || src === 'chosen')
+        .map(([field, src]) => `<span class="src-tag${src === 'chosen' ? ' is-chosen' : ''}">${field} ${src}</span>`);
+    return tags.length ? `<span class="srcs">${tags.join('')}</span>` : '';
+}
+/** One field's source in words: "from IndigoAir", "checked by you, 9 Oct 2026; follows IndigoAir",
+ *  "chosen by Claude in chat, 12 Oct 2026 · see the change", "chosen, before fin kept a history". */
+function sourceLineWords(source, by, merchant) {
+    const name = merchant ? esc(merchant) : '';
+    if (source === 'merchant') return name ? `from ${name}` : 'from its merchant';
+    if (source === 'rule') return name ? `from a rule for ${name}` : 'from a rule';
+    if (source !== 'checked' && source !== 'chosen') return SOURCE_WORDS[source] || esc(source);
+    const said = by ? `${source} by ${whoName(by, { cap: false })}${by.via === 'chat' ? ' in chat' : ''}, ${esc(historyDay(by.at))}`
+        : `${source}, before fin kept a history`;
+    if (source === 'checked') return name ? `${said}; follows ${name}` : said;
+    return by ? `${said} · <button type="button" class="link" data-act="goto-change" data-entry="${Number(by.entry_id)}">see the change</button>` : said;
+}
+/** The row sheet's source lines: one per field that has a value. */
+function sourceLinesHTML(found) {
+    const sources = found.sources || {}, by = found.set_by || {};
+    const lines = [['Book', 'book'], ['Type', 'type']].filter(([, key]) => sources[key])
+        .map(([cap, key]) => `<li><span class="cap">${cap}</span> ${sourceLineWords(sources[key], by[key], found.service_name)}</li>`);
+    return lines.length ? `<ul class="srcline" aria-label="Where the book and type came from">${lines.join('')}</ul>` : '';
+}
+
 /** The row sheet's line under the figure: direction, date and the account, which opens its page. */
 function rowSheetSubHTML(found, minor) {
     const account = found.account_name ? ' · ' + (found.account_id ? pageLink('account', found.account_id, found.account_name) : esc(found.account_name)) : '';
@@ -5028,6 +5066,7 @@ async function openRowSheet(txId, opts = {}) {
             <div class="row-figure num">${esc(money(-minor, found.currency, { signed: true }))}</div>
             <p class="row-figure-sub">${rowSheetSubHTML(found, minor)}</p></div>
         ${rowFactsHTML(found, label, labelledBy(found, held.details))}
+        ${sourceLinesHTML(found)}
         <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off <span class="muted small">(Spending can leave it out)</span></label>
         <label class="field"><span>Note</span><textarea id="row-note">${esc(found.notes || '')}</textarea></label>
         <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}${window.expectRowActions?.(found) || ''}</div>
