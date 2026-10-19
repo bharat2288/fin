@@ -14,6 +14,15 @@ printed foreign amount. Books are never added together: each book is its own
 branch of the answer.
 
 One grouped query whatever the span. Built on scope.py, never app.py.
+
+Expect back (personal-ledger 23, ticket 29): a row counts its own part (its
+amount less what is expected back on it or placed from it,
+expect_back.own_sql) and each let-go counts as a line of its own on the day it
+counts, in its own book and type (expect_back.let_go_sql). counted_lines() is
+that source; the dashboard's stat-cards, monthly and types read it too, so
+every spending figure sums the same lines. While expect_back's gate is off a
+line is a row at its bare amount and there are no let-go lines, so every
+figure is what it was.
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ import sqlite3
 
 import account_kind
 import book_type
+import expect_back
 import trend_span
 from scope import _TYPE_JOINS, book_expr
 
@@ -53,6 +63,47 @@ _ACCOUNTS_COUNTED = (
     f"(({book_expr('t')} = :household AND a.owner = :household_owner)"
     f" OR {book_expr('t')} <> :household)"
 )
+
+
+def counted_lines() -> str:
+    """The lines a spending or income figure sums, as a parenthesised SELECT a
+    reader puts in its FROM in place of `transactions`. Built at each call, so
+    it reads the gate as it is now.
+
+    One line per row, at its own part, and one per let-go on the day it counts
+    (a back let-go as spending: mine in the row's book, type and merchant, a
+    gift with no merchant; a pay let-go as income). A row whose own part is
+    nothing though its amount is not (wholly expected back, or wholly placed)
+    is accounted for: it is no line, so it adds no zero group and no row to a
+    count. Columns: id (the row's; NULL for a let-go), date, book, type_id,
+    service_id, is_one_off, flow_type, account_id (the row's account; a
+    let-go's is its expectation's) and amount_minor (what the line counts,
+    signed as a row).
+    """
+    own = expect_back.own_sql("tx")
+    return f"""(
+        SELECT tx.id AS id, tx.date AS date, tx.book AS book, tx.type_id AS type_id,
+               tx.service_id AS service_id, tx.is_one_off AS is_one_off, tx.flow_type AS flow_type,
+               st.account_id AS account_id, {own} AS amount_minor
+        FROM transactions tx JOIN statements st ON st.id = tx.statement_id
+        WHERE NOT (COALESCE({own}, 0) = 0 AND COALESCE(tx.amount_minor, 0) <> 0)
+        UNION ALL
+        SELECT NULL, lg.day, lg.book, lg.type_id,
+               CASE WHEN lgl.became = '{expect_back.MINE}' THEN lgt.service_id END,
+               CASE WHEN lgl.became = '{expect_back.MINE}' THEN COALESCE(lgt.is_one_off, 0) ELSE 0 END,
+               lg.flow_type, lg.account_id, lg.amount_minor
+        FROM ({expect_back.let_go_sql()}) lg
+        JOIN let_go lgl ON lgl.id = lg.let_go_id
+        JOIN expectation lge ON lge.id = lgl.expectation_id
+        LEFT JOIN transactions lgt ON lgt.id = lge.row_id
+    )"""
+
+
+def counted_from() -> str:
+    """`FROM` text for a reader of counted lines: the lines as `t`, and `s`
+    as the line's account, so the shared filters' `s.account_id` (scope.py,
+    app._build_filters) read as they do on rows."""
+    return f"{counted_lines()} t JOIN (SELECT id AS account_id FROM accounts) s ON s.account_id = t.account_id"
 
 
 def _months(start: str, end: str) -> list[str]:
@@ -104,8 +155,7 @@ def series(conn: sqlite3.Connection, subject, start: str, end: str,
                COALESCE(a.currency, 'SGD') AS row_currency,
                SUM(CASE WHEN t.amount_minor > 0 THEN t.amount_minor ELSE 0 END) AS spent,
                SUM(CASE WHEN t.amount_minor < 0 THEN -t.amount_minor ELSE 0 END) AS back
-        FROM transactions t
-        JOIN statements s ON s.id = t.statement_id
+        FROM {counted_from()}
         JOIN accounts a ON a.id = s.account_id
         LEFT JOIN services svc ON svc.id = t.service_id
         {_TYPE_JOINS.format(owner="t")}
