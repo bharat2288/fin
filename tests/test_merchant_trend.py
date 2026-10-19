@@ -260,6 +260,22 @@ def test_case_24_a_span_chip_asks_again_at_that_span_and_remembers_it():
     assert got["asked"][-1] == "/api/trend?subject=merchant&id=101&span=2Y" and got["kept"] == '"2Y"'
 
 
+def test_case_24_in_a_private_window_a_span_chip_still_switches_only_the_remembering_is_lost():
+    # Walk finding 19-private: with device storage refused, Trend.span() answers 12M,
+    # so the chip's own value has to reach the read, and the page's redraws keep it.
+    got = run("""
+      const host = fakeEl();
+      answer = load('grab');
+      await MT.load(101, host);
+      press(host, { trend: 'span', value: '2Y' });
+      await new Promise(r => setTimeout(r, 0));
+      await MT.load(101, host);
+      out(asked);""", private=True)
+    assert got == ["/api/trend?subject=merchant&id=101&span=12M",
+                   "/api/trend?subject=merchant&id=101&span=2Y",
+                   "/api/trend?subject=merchant&id=101&span=2Y"]
+
+
 # --- a bar narrows the rows (case 25) --------------------------------------------
 
 def test_case_25_the_sep_bar_narrows_the_rows_to_september():
