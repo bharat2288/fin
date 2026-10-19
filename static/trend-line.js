@@ -326,16 +326,23 @@
 
     function tipHtml(m, k) {
         const month = m.months[k], p = m.points[k], bar = m.bars[k], cur = m.cur, rows = [];
+        // As the card words figures: whole rupees without paise ("₹ 5,20,000"); a rate's
+        // day as "30 Sep 2026", as the bars' hover names it.
+        const amt = v => { const t = money(v, cur); return cur === 'INR' && Number.isInteger(v) && v % 100 === 0 ? t.replace(/\.00$/, '') : t; };
+        const dayOf = d => (/^\d{4}-\d{2}-\d{2}$/.test(d || '') ? `${Number(d.slice(8, 10))} ${MON[Number(d.slice(5, 7)) - 1]} ${d.slice(0, 4)}` : (d || ''));
         if (bar.hatched) rows.push(`<div class="trend-line__tip-n">⧗ ${esc(MISSING_TEXT)}</div>`);
         if (m.empty) rows.push(`<div>${esc(m.empty)}</div>`);
-        else if (p.value !== null && p.estimate) rows.push(`<div>Estimate ${esc(money(p.value, cur))}, between its neighbours; never counted</div>`);
-        else if (p.value !== null) rows.push(`<div>Balance at month end <b>${esc(money(p.value, cur))}</b></div>`);
+        else if (p.value !== null && p.estimate) rows.push(`<div>Estimate ${esc(amt(p.value))}, between its neighbours; never counted</div>`);
+        else if (p.value !== null) rows.push(`<div>Balance at month end <b>${esc(amt(p.value))}</b></div>`);
         else if (bar.note) rows.push(`<div>${esc(bar.note)}</div>`);
         else if (bar.so_far) rows.push('<div>No month end yet: so far</div>');
-        rows.push(`<div>Money in <b>${esc(money(bar.in, cur))}</b></div><div>Money out <b>${esc(money(bar.out, cur))}</b></div>`);
-        if (bar.rate && bar.rate.text) rows.push(`<div class="trend-line__tip-n">Rate ${esc(bar.rate.text)} (${esc(bar.rate.date || '')})</div>`);
+        rows.push(`<div>Money in <b>${esc(amt(bar.in))}</b></div><div>Money out <b>${esc(amt(bar.out))}</b></div>`);
+        if (bar.rate && bar.rate.text) rows.push(`<div class="trend-line__tip-n">Rate ${esc(bar.rate.text)} (${esc(dayOf(bar.rate.date))})</div>`);
         return `<div class="trend-line__tip-h">${esc(full(month))}${bar.so_far ? ' · so far' : ''}</div>${rows.join('')}`;
     }
+
+    /** A month's hover on the balance shape, as markup (for tests). */
+    Trend.lineTip = tipHtml;
 
     /** The mode: draw(el, payload, opts) → {pick(id), toggle(id), showAll(), redraw()}.
      *  opts: {off, picked, onChange(state), onMonth(months, label), onImport(month)}; months is a list, as the bars send it. */

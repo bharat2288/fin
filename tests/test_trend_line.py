@@ -272,3 +272,21 @@ def test_the_drawing_has_no_unknown_figures_at_both_widths():
         for width in (1366, 390):
             out = svg(load(name), state, width)
             assert "NaN" not in out and "undefined" not in out
+
+
+def test_case_29_the_rupee_hover_names_the_rate_day_and_drops_whole_paise():
+    # Walk finding: the hover read "Rate 0.0155 (2026-09-30)" and "₹ 5,20,000.00" while the
+    # card's summary and head read "₹ 5,20,000" and every other hover names "30 Sep 2026".
+    p = load("balances_inr")
+    k = [m["month"] for m in p["months"]].index("2026-09")
+    code = PRELUDE + "\n" + (
+        f"const m = window.Trend.lineModel({json.dumps(p)}, {{}});"
+        f"console.log(JSON.stringify(window.Trend.lineTip(m, {k})));")
+    run = subprocess.run([NODE, "-"], input=code, capture_output=True, text=True, timeout=30, encoding="utf-8")
+    assert run.returncode == 0, run.stderr
+    tip = re.sub(r"<[^>]+>", " ", json.loads(run.stdout))
+    tip = re.sub(r"\s+", " ", tip)
+    assert "Balance at month end ₹ 5,20,000 " in tip
+    assert "Money in ₹ 62,400 " in tip and "Money out ₹ 48,750 " in tip
+    assert "Rate 0.0155 (30 Sep 2026)" in tip
+    assert "2026-09-30" not in tip and ".00" not in tip
