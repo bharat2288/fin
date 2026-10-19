@@ -108,9 +108,10 @@ def _expected_back_request(a: dict) -> tuple[str, str, dict | None]:
 _READS = [
     Tool(
         "balance_sheet",
-        "The household's balance sheet at the end of a month: every account, loan, holding, "
-        "company and person with its balance, the anchor it rests on (date, statement or "
-        "typed figure), whether its rows tie; net worth and what it leaves out; currency "
+        "The household's balance sheet at the end of a month: every account, loan, holding "
+        "and company with its balance, the anchor it rests on (date, statement or typed "
+        "figure), whether its rows tie; what is expected back, waiting for its row and to pay "
+        "back (a person's money is these, never a balance); net worth and what it leaves out; currency "
         "change; and the month check (net-worth change against income less spending plus "
         "currency change, the unexplained difference, the transfers waiting for review).",
         _schema({"month": _MONTH}),

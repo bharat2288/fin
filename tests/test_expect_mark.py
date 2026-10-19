@@ -296,7 +296,12 @@ def test_case_18_from_parents_is_to_pay_back_and_march_income_is_unchanged(clien
     assert body["spending_change"] is None
     assert summary_of(conn, int(resp.headers["X-Fin-Change"])) == "Expect to pay back S$ 5,000 on FROM PARENTS"
     assert conn.execute("SELECT flow_type FROM transactions WHERE id = ?", (parents,)).fetchone()[0] == "review"
-    assert client.get(cards).get_json() == march
+    after = client.get(cards).get_json()
+    queue = ("waiting", "waiting_total", "waiting_in_total", "waiting_in_count")
+    assert {k: v for k, v in after.items() if k not in queue} == {k: v for k, v in march.items() if k not in queue}
+    # Accounted for, the payment leaves the Queue (case 18a).
+    assert (march["waiting"] - after["waiting"], march["waiting_in_count"] - after["waiting_in_count"]) == (1, 1)
+    assert march["waiting_in_total"] - after["waiting_in_total"] == 5000.0
 
 
 def test_pay_on_a_payment_already_partly_placed_offers_its_own_part_only(client, conn, story):

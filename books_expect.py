@@ -18,8 +18,8 @@ S$ total, and the section says so; no rate is fetched or guessed.
 Each line carries a key, "expectation:<id>" or "waiting:<set-off id>", which
 the month check reads in place of an account id, which these lines lack.
 
-Until the switch (expect_back.SWITCHED, ticket 45) the sections are "not in
-the total yet": shown, never added to net worth. Amounts are whole minor
+Since the switch (ticket 45) every section is in net worth (in_total), less
+any item with no rate. Amounts are whole minor
 units: open_minor and amount_minor in the item's own currency, sgd_minor in
 the currency of the totals. Worked out on read; nothing is stored, and each
 section is one read whatever the number of items (case 55).
@@ -209,7 +209,7 @@ def sections(conn: sqlite3.Connection, on: str, *, today: date | None = None) ->
             "key": key,
             "heading": heading,
             "owed": owed,
-            "in_total": expect_back.SWITCHED,
+            "in_total": True,
             "total_minor": sum(x["sgd_minor"] for x in listed if not x["no_rate"]),
             "left_out": [
                 {"key": x["key"], "title": x["title"], "currency": x["currency"],

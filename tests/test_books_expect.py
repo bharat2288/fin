@@ -4,7 +4,8 @@ Expected back, Waiting for its row and To pay back, as at a day, read through
 expect_back.open_as_at: oldest first with age, 'old' past 90 days, a rupee
 item in rupees with its S$ value beside at the latest saved rate, and no rate
 said rather than guessed. balance_sheet.sheet() carries them under "expect",
-out of the total until the switch. expect-books.js draws them in 26's slot.
+in the total since the switch (tests/test_expect_switch.py). expect-books.js
+draws them in 26's slot.
 
 Seam 2 of the spec (the sheet as a function on synthetic rows, then
 GET /api/balance-sheet once), with figures in and out. Every name and figure
@@ -191,31 +192,11 @@ def test_the_payload_has_the_shape_the_client_draws_from(conn, case48):
             assert set(g) == set(w)
 
 
-def test_case_48_the_sections_are_out_of_the_total_and_net_worth_does_not_move(conn):
-    b = check_book(conn)
-    anchor(conn, b.savings, "2026-01-01", 1000000, source="supplied")
-    case_48(conn, b)
-    after = balance_sheet.sheet(conn, "2026-10", today=date(2026, 10, 19))
-    with entry(conn, "Every record taken away, to compare"):
-        for table in ("set_off", "let_go", "expectation_name", "expectation"):
-            conn.execute(f"DELETE FROM {table}")
-    before = balance_sheet.sheet(conn, "2026-10", today=date(2026, 10, 19))
-    assert before["expect"]["sections"] == []
-    shown = after["expect"]
-    assert shown["as_at"] == OCT_19
-    assert all(s["in_total"] is False for s in shown["sections"])
-    assert by_key(shown)["expected_back"]["total_minor"] == 262490
-    # Net worth unchanged: persons stay as they are; the new sections are not in the total yet.
-    worth = lambda s: [(x["name"], x["total_minor"]) for x in s["sections"]] + [s["net_worth_minor"]]
-    assert worth(after) == worth(before)
-    assert after["left_out"] == before["left_out"]
-
-
 def test_once_through_the_route(client, conn, case48):
     body = client.get("/api/balance-sheet?month=2026-10").get_json()
     shown = body["expect"]
     totals = {s["key"]: (s["total_minor"], s["in_total"]) for s in shown["sections"]}
-    assert totals == {"expected_back": (262490, False), "waiting": (10000, False), "to_pay_back": (400000, False)}
+    assert totals == {"expected_back": (262490, True), "waiting": (10000, True), "to_pay_back": (400000, True)}
     assert body["month_check"]["month"] == "2026-10"
 
 

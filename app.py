@@ -93,12 +93,9 @@ NOT_CHECKED_ROWS = f"(COALESCE(svc.review_each_time, 0) = 1 AND {CHECKABLE_ROWS}
 # Expect back (personal-ledger 23, ticket 30). A row whose own part is 0 (all
 # of it expected back, or wholly placed against what is) is accounted for: it
 # leaves the review list, the untyped and check-each-row lists and the Queue,
-# whatever its flow, and its flow is left as it was. Behind the gate
-# (expect_back.SWITCHED): with it off each of these is its old text exactly.
+# whatever its flow, and its flow is left as it was.
 def _left_to_label(predicate: str) -> str:
-    """`predicate` narrowed to rows not accounted for, once switched."""
-    if not expect_back.SWITCHED:
-        return predicate
+    """`predicate` narrowed to rows not accounted for."""
     return f"({predicate} AND {expect_back.own_sql('t')} != 0)"
 
 
@@ -112,11 +109,9 @@ def _not_checked_rows() -> str:
 
 def _waiting_rows() -> tuple[str, list]:
     """Which rows wait for review, and its parameters: the transfers with no
-    label. Once switched, those with something left of their own, and also a
-    movement naming a person that is partly placed or expected, with money
-    left on it to label (the conversion's excess, case 43)."""
-    if not expect_back.SWITCHED:
-        return "t.flow_type = ?", [flow.REVIEW]
+    label that have something left of their own, and also a movement naming
+    a person that is partly placed or expected, with money left on it to
+    label (the conversion's excess, case 43)."""
     on_record = ("(EXISTS (SELECT 1 FROM set_off so WHERE so.payment_row_id = t.id)"
                  " OR EXISTS (SELECT 1 FROM expectation e WHERE e.row_id = t.id))")
     person = "EXISTS (SELECT 1 FROM accounts o WHERE o.id = t.other_side_id AND o.type = 'person')"
@@ -126,11 +121,9 @@ def _waiting_rows() -> tuple[str, list]:
 
 def _parts_pill(amount_minor: int, expected_minor: int, placed_minor: int, waiting_minor: int,
                 currency: str) -> str | None:
-    """What a row's pill says of its parts, once switched: 'S$ 200 expected
-    back', 'S$ 5,000 to pay back', 'S$ 40 set off', 'S$ 100 waiting for its
-    row'; None for a row with nothing on it, or with the gate off."""
-    if not expect_back.SWITCHED:
-        return None
+    """What a row's pill says of its parts: 'S$ 200 expected back',
+    'S$ 5,000 to pay back', 'S$ 40 set off', 'S$ 100 waiting for its row';
+    None for a row with nothing on it."""
     words = []
     if expected_minor:
         words.append(f"{expect_back.short(abs(expected_minor), currency)} "
@@ -2436,9 +2429,9 @@ def api_transactions():
         tx["amount_sgd"] = money.from_minor(tx["amount_minor"], tx["currency"])
         # Its parts (spec 23): what is expected and placed on it, and its own
         # part, each in whole minor units with the row's sign. counted_minor
-        # is what a sum of rows adds: the own part once switched, the amount
-        # until then. The pill words them; the client works nothing out.
-        tx["counted_minor"] = tx["own_minor"] if expect_back.SWITCHED else tx["amount_minor"]
+        # is what a sum of rows adds: the own part. The pill words them; the
+        # client works nothing out.
+        tx["counted_minor"] = tx["own_minor"]
         tx["expect_pill"] = _parts_pill(tx["amount_minor"], tx["expected_minor"], tx["placed_minor"],
                                         tx.pop("waiting_minor"), tx["currency"])
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])

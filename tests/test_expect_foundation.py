@@ -1,5 +1,5 @@
 """Expect back's foundation (personal-ledger 23, ticket 25): the seven
-records and their history, the own part and its gate, the shared rules in
+records and their history, the own part, the shared rules in
 expect_back.py, and the undo guard in history.undo.
 
 Figures in and out through public functions and routes, on a temporary
@@ -142,16 +142,7 @@ def test_a_book_from_before_the_records_will_not_start_then_converts_and_starts(
     assert conversion.run_step(path, conversion.chain_step("convert_change_history"))["status"] == "already-applied"
 
 
-# --- the own part and its gate ---------------------------------------------------
-
-
-def test_with_the_gate_off_the_own_part_is_the_bare_amount(conn, story):
-    harbour_set_against(conn, story)
-    assert expect_back.SWITCHED is False
-    read = dict(conn.execute(f"SELECT t.id, {expect_back.own_sql('t')} FROM transactions t").fetchall())
-    bare = dict(conn.execute("SELECT id, amount_minor FROM transactions").fetchall())
-    assert read == bare
-    assert conn.execute(expect_back.let_go_sql()).fetchall() == []
+# --- the own part ---------------------------------------------------------------
 
 
 def test_row_parts_gives_each_row_its_expected_placed_and_own_part(conn, story):
@@ -173,10 +164,9 @@ def test_row_parts_gives_each_row_its_expected_placed_and_own_part(conn, story):
         "amount_minor": -500000, "expected_minor": -500000, "placed_minor": 0, "own_minor": 0}
 
 
-def test_switched_on_the_own_part_and_the_let_go_terms_are_read(conn, story, monkeypatch):
+def test_the_own_part_and_the_let_go_terms_are_read(conn, story):
     held = harbour_set_against(conn, story)
     let_go(conn, held["harbour"], "gift", "2026-10-19", to_whom_id=story.people["Kim"])
-    monkeypatch.setattr(expect_back, "SWITCHED", True)
 
     read = dict(conn.execute(f"SELECT t.id, {expect_back.own_sql()} FROM transactions t").fetchall())
     assert (read[story.harbour], read[story.klook], read[story.jay_0412], read[story.golden]) == (10000, 0, 0, 9600)

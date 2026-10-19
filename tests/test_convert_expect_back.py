@@ -142,17 +142,18 @@ def backups(path: Path, step: str = "expect-back") -> list[str]:
 
 
 def person_lines(path: Path) -> dict:
-    """Each person's old line on the sheet at every month end: what the
-    conversion and the down step must leave as it was."""
+    """Each person's old line at every month end, as the sheet counted it
+    before the switch took persons off it: what the conversion and the down
+    step must leave as it was."""
     conn = open_book(path)
     try:
-        lines = {}
-        for month in MONTHS:
-            for section in balance_sheet.sheet(conn, month, today=TODAY)["sections"]:
-                for line in section["lines"]:
-                    if line.get("kind") == "person":
-                        lines[(line["name"], month)] = line["balance_minor"]
-        return lines
+        persons = conn.execute(
+            "SELECT id, name, type, currency, status FROM accounts WHERE type = 'person'").fetchall()
+        return {
+            (p["name"], month): balance_sheet._counterparty_line(
+                conn, p, balance_sheet.month_end(month), month, lambda name: name)["balance_minor"]
+            for month in MONTHS for p in persons
+        }
     finally:
         conn.close()
 
@@ -203,7 +204,7 @@ def run(path: Path, capsys, *args) -> tuple[int, str]:
 
 def test_case_40_a_loan_with_a_partial_repayment(book, capsys):
     ids = seeded(book)
-    lines, worth = person_lines(book), net_worths(book)
+    lines = person_lines(book)
 
     code, out = run(book, capsys)
 
@@ -214,10 +215,9 @@ def test_case_40_a_loan_with_a_partial_repayment(book, capsys):
     shown = (f"{ravi['title']} · {expect_back.short(ravi['open_minor'])} of "
              f"{expect_back.short(ravi['amount_minor'])} open · {ravi['age_days']} d")
     assert shown == "Loan to Ravi · S$ 1,500 of S$ 2,000 open · 138 d"
-    # Readers and totals do not change at expand: every person's old line, and
-    # net worth, at every month end, to the cent.
+    # Every person's old line at every month end, to the cent. (Net worth
+    # across the switch: tests/test_expect_switch.py, cases 40 and 43.)
     assert person_lines(book) == lines
-    assert net_worths(book) == worth
     # A dated backup first.
     assert backups(book) == [f"ledger.db.pre-expect-back-{date.today():%Y%m%d}.bak"]
 

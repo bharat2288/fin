@@ -126,7 +126,6 @@ def test_case_17_nothing_yet_leaves_the_payment_waiting_not_income(client, conn,
 
 
 def test_case_17_a_waiting_payment_labelled_income_is_not_income(client, conn, book, monkeypatch):
-    monkeypatch.setattr(expect_back, "SWITCHED", True)
     conn.execute("UPDATE transactions SET flow_type = 'income' WHERE id = ?", (book.lena_bbq,))
     conn.commit()
     assert counted(client, book.lena_bbq) == -10000
@@ -135,8 +134,8 @@ def test_case_17_a_waiting_payment_labelled_income_is_not_income(client, conn, b
 
 
 def counted(client, row_id: int) -> int:
-    """What a sum of rows adds for this row, as /api/transactions carries it (the own part once
-    switched): the figure every income and spending reader counts."""
+    """What a sum of rows adds for this row, as /api/transactions carries it (the own part):
+    the figure every income and spending reader counts."""
     got = client.get(f"/api/transactions?tx_id={row_id}").get_json()
     rows = got["transactions"] if isinstance(got, dict) else got
     [r] = [r for r in rows if r["id"] == row_id]
@@ -317,7 +316,6 @@ def test_case_17d_unlink_gives_the_payment_its_own_part_back(client, conn, book)
 
 
 def test_case_17d_unwaited_and_labelled_income_counts_as_income(client, conn, book, monkeypatch):
-    monkeypatch.setattr(expect_back, "SWITCHED", True)
     conn.execute("UPDATE transactions SET flow_type = 'income' WHERE id = ?", (book.lena_bbq,))
     conn.commit()
     w = lena_waits(client, conn, book)
