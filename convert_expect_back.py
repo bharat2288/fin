@@ -49,8 +49,11 @@ when it starts on a book with nothing left for it to convert. A row naming a
 person written straight into a converted book is no longer told apart from
 one the operator unlinked: neither is converted again.
 
-It runs through the conversion runner, last in the chain. It prints counts
-only, never a name or an amount.
+It runs through the conversion runner, last in the chain. It prints counts,
+and names a person and an amount in one place only: each row the walk
+leaves with money to label (date, text, person, what is left) and the total
+per person, which is what net worth moves by until each is labelled (the
+spec's Σ unplaced, which the operator reads).
 
     python convert_expect_back.py <path to database>
     python convert_expect_back.py --plan <path to database>
@@ -134,6 +137,9 @@ class Plan:
     # Who and what each refusal is about: (kind, person, items), the items
     # being the person's figures (date, amount) or the rows (_Row) at fault.
     refused: list = field(default_factory=list)
+    # Each row left with money to label: (person, _Row, what is left, with
+    # the row's sign: + money out, - money in).
+    left: list = field(default_factory=list)
 
 
 def _persons(conn: sqlite3.Connection, person_id: int | None = None) -> list:
@@ -193,11 +199,12 @@ def _expectations(conn: sqlite3.Connection) -> list:
 # --- the per-person rule -----------------------------------------------------------
 
 
-def _walk(plan: Plan, person_id: int, items: list[_Item], pending: list[_Row]) -> None:
+def _walk(plan: Plan, person, items: list[_Item], pending: list[_Row]) -> None:
     """The rule, row by row in order: set off what is open the other way,
     oldest first, among items dated on or before the row; with nothing set
     off the whole row becomes an expectation; a part set off leaves the rest
     on the row to label."""
+    person_id = person["id"]
     for r in pending:
         money_out = r.amount > 0
         wanted = expect_back.PAY if money_out else expect_back.BACK
@@ -220,6 +227,8 @@ def _walk(plan: Plan, person_id: int, items: list[_Item], pending: list[_Row]) -
             items.append(_Item(ref, r.day, direction, whole, (1, len(plan.actions))))
         elif placed < whole:
             plan.counts["left_to_label"] += 1
+            left = whole - placed
+            plan.left.append((person, r, left if money_out else -left))
         plan.persons.add(person_id)
         plan.rows.add(r.id)
 
@@ -279,7 +288,7 @@ def _plan_person(plan: Plan, person, rows: list[_Row], anchors: list, expectatio
         plan.persons.add(person_id)
         items.append(_Item(ref, anchor[0], direction, abs(anchor[1]), (1, len(plan.actions))))
 
-    _walk(plan, person_id, items, pending)
+    _walk(plan, person, items, pending)
 
 
 def planned(conn: sqlite3.Connection, *, person_id: int | None = None) -> Plan:
@@ -518,6 +527,24 @@ STEP = conversion.Step(name=NAME, apply=_apply, is_applied=_is_applied, invarian
 # --- the command --------------------------------------------------------------------
 
 
+def _report_left(plan: Plan) -> None:
+    """Each row left with money to label, and the total per person: the
+    amount net worth moves by until each is labelled (the spec's Σ
+    unplaced; a part left on money out was counted owed to the household)."""
+    if not plan.left:
+        return
+    print("money left to label, row by row (money out +, money in -):")
+    totals: dict = {}
+    for person, r, left in sorted(plan.left, key=lambda x: (x[1].day, x[1].id)):
+        print(f"  {r.day}  {r.text}  {person['name']}  {_amount(left, r.currency, signed=True)} left of "
+              f"{_amount(r.amount, r.currency, signed=True)}")
+        key = (person["name"], person["id"], r.currency)
+        totals[key] = totals.get(key, 0) + left
+    print("total left to label, per person:")
+    for (name, _, currency), total in sorted(totals.items()):
+        print(f"  {name}  {_amount(total, currency, signed=True)}")
+
+
 def _report_plan(plan: Plan) -> None:
     c = plan.counts
     print(f"persons: {len(plan.persons)}")
@@ -525,6 +552,7 @@ def _report_plan(plan: Plan) -> None:
     print(f"expectations: {c['expectations']} (opening figures: {c['openings']})")
     print(f"set-offs: {c['set_offs']}")
     print(f"{_counted(c['left_to_label'], 'row', 'rows')} with money left to label")
+    _report_left(plan)
     print(f"rows in another currency: {c['other_currency']}")
     print(f"rows before 1 Jan 2026: {c['before_start']}")
     if c["before_opening"]:
@@ -626,7 +654,7 @@ def main(argv: list[str]) -> int:
 
     print(f"step {report['step']}: {report['status']}")
     if report["backup"]:
-        # Counts only: a name or an amount is never printed.
+        # Counts, and the rows left to label: no other name or amount.
         print(f"backup: {report['backup']}")
         print(f"rows before: {report['before']['rows']}")
         print(f"rows after:  {report['after']['rows']}")

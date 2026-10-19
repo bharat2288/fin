@@ -129,3 +129,81 @@ def test_plan_on_a_book_with_no_file_writes_nothing(tmp_path, capsys):
     assert code == 1
     assert "no database at" in out
     assert list(tmp_path.iterdir()) == []
+
+
+# --- the rows left to label, listed (Σ unplaced) ---------------------------------
+
+
+def jay_pays_back_more(path: Path) -> None:
+    """FROM JAY S$ 100.00 in on 1 Mar (a loan from him), then TO JAY S$ 500.00
+    out on 5 Mar: S$ 100.00 sets off, S$ 400.00 is left on the 5 Mar row."""
+    conn = open_book(path)
+    savings = _account(conn, "Everyday savings", "bank")
+    jay = _account(conn, "Jay", "person")
+    _row(conn, savings, "2026-03-01", "FROM JAY", -10000, jay)
+    _row(conn, savings, "2026-03-05", "TO JAY", 50000, jay)
+    conn.commit()
+    conn.close()
+
+
+LISTED = "money left to label, row by row (money out +, money in -):"
+TOTALS = "total left to label, per person:"
+
+
+def test_plan_lists_each_row_left_to_label_and_the_total_per_person(book, capsys):
+    jay_pays_back_more(book)
+
+    code, out = plan(book, capsys)
+
+    assert code == 0, out
+    lines = out.splitlines()
+    assert "1 row with money left to label" in lines
+    at = lines.index(LISTED)
+    assert lines[at + 1:at + 4] == [
+        "  2026-03-05  TO JAY  Jay  SGD +400.00 left of SGD +500.00",
+        TOTALS,
+        "  Jay  SGD +400.00",
+    ]
+
+
+def test_plan_totals_each_person_on_their_own(book, capsys):
+    seeded(book)  # Dev: S$ 100.00 left on the 1 Jun row, money in
+    jay_pays_back_more(book)
+
+    code, out = plan(book, capsys)
+
+    lines = out.splitlines()
+    assert "2 rows with money left to label" in lines
+    at = lines.index(LISTED)
+    assert lines[at + 1:at + 6] == [
+        "  2026-03-05  TO JAY  Jay  SGD +400.00 left of SGD +500.00",
+        "  2026-06-01  FROM DEV  Dev  SGD -100.00 left of SGD -600.00",
+        TOTALS,
+        "  Dev  SGD -100.00",
+        "  Jay  SGD +400.00",
+    ]
+
+
+def test_the_step_itself_lists_the_rows_left_to_label(book, capsys):
+    jay_pays_back_more(book)
+
+    code = convert_expect_back.main([str(book)])
+    out = capsys.readouterr().out
+
+    assert code == 0, out
+    assert "  2026-03-05  TO JAY  Jay  SGD +400.00 left of SGD +500.00" in out
+    assert "  Jay  SGD +400.00" in out
+
+
+def test_with_nothing_left_to_label_no_list_is_printed(book, capsys):
+    conn = open_book(book)
+    savings = _account(conn, "Everyday savings", "bank")
+    kim = _account(conn, "Kim", "person")
+    _row(conn, savings, "2026-02-02", "TO KIM", 10000, kim)
+    conn.commit()
+    conn.close()
+
+    code, out = plan(book, capsys)
+
+    assert "0 rows with money left to label" in out
+    assert LISTED not in out and TOTALS not in out

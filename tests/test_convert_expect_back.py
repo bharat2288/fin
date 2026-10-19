@@ -234,7 +234,10 @@ def test_case_40_a_loan_with_a_partial_repayment(book, capsys):
     assert backups(book) == [f"ledger.db.pre-expect-back-{date.today():%Y%m%d}.bak"]
 
 
-def test_case_40_the_step_prints_counts_only(book, capsys):
+def test_case_40_the_step_prints_counts_and_names_only_the_rows_left_to_label(book, capsys):
+    # The review's ruling over case 40's "counts only": the operator reads
+    # Σ unplaced, so each row left with money to label is listed, with its
+    # person and amount. Nothing else names a person or an amount.
     seeded(book)
 
     code, out = run(book, capsys)
@@ -244,10 +247,13 @@ def test_case_40_the_step_prints_counts_only(book, capsys):
     assert "rows converted: 8" in out
     assert "expectations: 5 (opening figures: 1)" in out
     assert "set-offs: 4" in out
+    listed = ["  2026-06-01  FROM DEV  Dev  SGD -100.00 left of SGD -600.00", "  Dev  SGD -100.00"]
+    assert all(line in out.splitlines() for line in listed)
+    rest = "\n".join(line for line in out.splitlines() if line not in listed)
     for name in ("Ravi", "Sam", "Parents", "Dev", "Lena", "TRANSFER", "PAYNOW"):
-        assert name not in out
-    for amount in ("2,000", "2000", "200000", "1,500", "5,000", "500000"):
-        assert amount not in out
+        assert name not in rest
+    for amount in ("2,000", "2000", "200000", "1,500", "5,000", "500000", "100.00", "600.00"):
+        assert amount not in rest
 
 
 def test_case_40a_rows_set_by_hand_convert(book, capsys):
@@ -301,6 +307,7 @@ def test_case_43_more_back_than_lent_leaves_the_rest_to_label(book, capsys):
     # The S$ 100.00 left stays on the 1 Jun row as its own part to label.
     assert own(book, ids["dev_in_1"]) == -10000
     assert "1 row with money left to label" in out
+    assert "  2026-06-01  FROM DEV  Dev  SGD -100.00 left of SGD -600.00" in out
 
 
 def test_case_43a_dev_continued_ties_to_the_old_line(book, capsys):
