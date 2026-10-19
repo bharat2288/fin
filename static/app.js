@@ -592,8 +592,16 @@ document.addEventListener('DOMContentLoaded', render);
 
 // One handler for every [data-act]: the views write plain HTML.
 const ACT = {};
+/** The [data-act] element a click lands on, or null: a link inside an acting row (a name that opens its page) is the
+ *  link's own click, so the row handler never sees it. A link that is itself the [data-act] element still acts. */
+function actTarget(target) {
+    const el = target.closest('[data-act]');
+    if (!el) return null;
+    const a = target.closest('a[href]');
+    return a && a !== el && el.contains(a) ? null : el;
+}
 document.addEventListener('click', e => {
-    const el = e.target.closest('[data-act]');
+    const el = actTarget(e.target);
     if (!el) return;
     const fn = ACT[el.dataset.act];
     if (!fn) return;
@@ -1427,6 +1435,11 @@ ACT['qi-rows'] = el => { if (toggleRowDetail(el)) qiShown.add(el.dataset.key); e
 /** One row in a money lane: a transfer, a merchant's rows with no type and
  *  no guess, or a missed bill (Pick a type and Check each row draw their own).
  *  One outline action; a missed bill's Open Bills is a link on its meta. */
+/** A card's title; an untyped card whose row has a merchant links it to that merchant's page. */
+function queueTitleHTML(card, title = card.title) {
+    const svc = card.kind === 'untyped' && card.rows[0]?.service_id;
+    return svc ? pageLink('merchant', svc, title) : esc(title);
+}
 async function queueCardHTML(card) {
     const n = card.rows.length;
     if (n) queueGroups.set(card.key, card.rows);
@@ -1443,7 +1456,7 @@ async function queueCardHTML(card) {
     const links = (card.actions || []).filter(a => a.href).map(a => ` · <a class="link" href="${a.href}">${esc(a.label)}</a>`).join('');
     const act = own ? `<button type="button" class="btn sm" data-act="${own.act}"${data(own)}>${esc(guess.actions && /^This was/.test(own.label) ? 'Something else' : own.label)}</button>` : '';
     return `<article class="qi qi--${card.kind}">
-        <div class="qi__w"><p class="qi__t">${esc(title)}${row ? rowMark(row.id) : ''}</p><p class="qi__m">${qiMeta(card, meta)}${links}</p></div>
+        <div class="qi__w"><p class="qi__t">${queueTitleHTML(card, title)}${row ? rowMark(row.id) : ''}</p><p class="qi__m">${qiMeta(card, meta)}${links}</p></div>
         <div class="qi__amt num">${esc(sumByCurrency([card], c => c.amount))}</div>
         <div class="qi__act">${act}</div>
         ${guess.html ? `<div class="qi__more q-guess">${guess.html}${guess.actions ? `<div class="q-guess__act">${guess.actions}</div>` : ''}</div>` : ''}
@@ -3841,6 +3854,10 @@ async function checkEachRowOn(s, past) {
 const MP_PAGE = 50;
 const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false, month: null };
 ACT['merchant-page'] = el => { location.hash = `#/books/merchant/${el.dataset.id}`; };
+/** The merchant page's Account cell: the account's name opens its page. */
+function mpAccountCell(x) {
+    return x.account_id ? pageLink('account', x.account_id, x.account_name || '') : esc(x.account_name || '');
+}
 async function viewMerchant(id) {
     if (merchantPage.id !== id) Object.assign(merchantPage, { id, page: 1, ticks: new Set(), book: '', month: null });
     const mp = merchantPage;
@@ -3865,7 +3882,7 @@ async function viewMerchant(id) {
         const on = mp.ticks.has(x.id), when = esc(day(x.date)), minor = toMinor(x.amount_sgd, x.currency);
         const mark = x.not_checked ? tag('notchecked', 'not checked') : x.cat_source === 'manual' ? `<span class="handset">${icon('pencil-simple')}hand-set</span>` : '';
         return `<tr${on ? ' class="is-ticked"' : ''} data-tx="${x.id}"><td class="k"><label class="tick"><input type="checkbox" data-change="mp-tick" data-tx="${x.id}"${on ? ' checked' : ''} aria-label="Tick the ${when} row"></label></td>
-            <td class="num dt">${when}</td><td class="ac">${esc(x.account_name || '')}</td>
+            <td class="num dt">${when}</td><td class="ac">${mpAccountCell(x)}</td>
             <td class="stext">${esc(x.description)}${rowMark(x.id)}</td>
             <td class="r num am">${minor == null || minor < 0 ? rowAmount(minor, x.currency) : esc(money(minor, x.currency))}</td>
             <td class="ty"><select class="sel sel--quiet" data-change="mp-type" data-tx="${x.id}" aria-label="Type for the ${when} row"${off}>${typeOptions(r.types, x.type_id)}</select></td>
@@ -4842,6 +4859,24 @@ function labelledBy(found, details) {
     return found.cat_source ? (LABEL_SOURCE_WORDS[found.cat_source] || 'the rules') : 'not yet';
 }
 
+/** The row sheet's line under the figure: direction, date and the account, which opens its page. */
+function rowSheetSubHTML(found, minor) {
+    const account = found.account_name ? ' · ' + (found.account_id ? pageLink('account', found.account_id, found.account_name) : esc(found.account_name)) : '';
+    return `${minor > 0 ? 'Money out' : 'Money in'} · ${esc(day(found.date))}${account}`;
+}
+/** The row sheet's facts. The type opens its page only for a row that has one (`label` is the plain words otherwise);
+ *  a row with no merchant shows "none yet", unlinked. */
+function rowFactsHTML(found, label, by) {
+    const typed = found.type_id && found.display_type && found.flow_type !== 'review' ? pageLink('type', found.type_id, found.display_type) : label;
+    return `<dl class="facts">
+            <div><dt>Book</dt><dd>${esc(found.book || '—')}</dd></div>
+            <div><dt>Type</dt><dd>${typed}${notCheckedTag(found)}</dd></div>
+            ${found.other_side_name ? `<div><dt>Other side</dt><dd>${esc(found.other_side_name)}</dd></div>` : ''}
+            <div><dt>Merchant</dt><dd>${found.service_name && found.service_id ? pageLink('merchant', found.service_id, found.service_name) : '<span class="muted">none yet</span>'}</dd></div>
+            <div><dt>Labelled by</dt><dd>${esc(by)}</dd></div>
+        </dl>`;
+}
+
 // One row: its amount, its facts, its note, the one-off toggle, "This was…", and its history.
 ACT.row = el => openRowSheet(Number(el.dataset.tx));
 async function openRowSheet(txId, opts = {}) {
@@ -4861,14 +4896,8 @@ async function openRowSheet(txId, opts = {}) {
         : `<button class="link" data-act="resolve" data-tx="${found.id}">Change what this was…</button>`;
     sheetBody().innerHTML = `<div class="row-figure-block">
             <div class="row-figure num">${esc(money(-minor, found.currency, { signed: true }))}</div>
-            <p class="row-figure-sub">${minor > 0 ? 'Money out' : 'Money in'} · ${esc(day(found.date))}${found.account_name ? ' · ' + esc(found.account_name) : ''}</p></div>
-        <dl class="facts">
-            <div><dt>Book</dt><dd>${esc(found.book || '—')}</dd></div>
-            <div><dt>Type</dt><dd>${label}${notCheckedTag(found)}</dd></div>
-            ${found.other_side_name ? `<div><dt>Other side</dt><dd>${esc(found.other_side_name)}</dd></div>` : ''}
-            <div><dt>Merchant</dt><dd>${found.service_name ? `<a class="link" href="#/books/merchant/${found.service_id}">${esc(found.service_name)}</a>` : '<span class="muted">none yet</span>'}</dd></div>
-            <div><dt>Labelled by</dt><dd>${esc(labelledBy(found, held.details))}</dd></div>
-        </dl>
+            <p class="row-figure-sub">${rowSheetSubHTML(found, minor)}</p></div>
+        ${rowFactsHTML(found, label, labelledBy(found, held.details))}
         <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off <span class="muted small">(Spending can leave it out)</span></label>
         <label class="field"><span>Note</span><textarea id="row-note">${esc(found.notes || '')}</textarea></label>
         <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}</div>
