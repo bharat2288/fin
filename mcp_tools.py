@@ -107,24 +107,26 @@ _READS = [
     ),
     Tool(
         "spending_cards",
-        "One month's spending figures: household spending (Household book, household-owned "
+        "One month's spending figures, net of refunds; a refund counts in the month it "
+        "arrives; S$ accounts only: household spending (Household book, household-owned "
         "accounts), each company's costs paid from household accounts, loan principal repaid, "
         "and what is held out waiting for review (money out and in apart), against the "
-        "three-month average.",
+        "three-month average. Each book's <book>_out is its money out and <book>_back the "
+        "refunds that came back, the two parts the net is made of.",
         _schema({"ref_month": _MONTH, "book": _S, "account_id": _I, "exclude_one_off": _B}),
         False,
         _get("/api/dashboard/stat-cards", "ref_month", "book", "account_id", "exclude_one_off"),
     ),
     Tool(
         "spending_by_type",
-        "Spending totals by type over a date range, for one book or all.",
+        "Spending totals by type over a date range, for one book or all: net of refunds; a refund counts in the month it arrives; S$ accounts only.",
         _schema({"start": _DAY, "end": _DAY, "book": _S, "exclude_one_off": _B, "group_parent": _B}),
         False,
         _get("/api/dashboard/types", "start", "end", "book", "exclude_one_off", "group_parent"),
     ),
     Tool(
         "spending_by_month",
-        "Spending by type per month (or week or quarter) over a date range.",
+        "Spending by type per month (or week or quarter) over a date range: net of refunds; a refund counts in the month it arrives; S$ accounts only.",
         _schema({"start": _DAY, "end": _DAY, "book": _S, "granularity": _S, "group_parent": _B}),
         False,
         _get("/api/dashboard/monthly", "start", "end", "book", "granularity", "group_parent"),
