@@ -496,10 +496,11 @@ def test_the_money_the_preview_moves_is_what_the_books_figures_move_month_by_mon
 
 def test_the_merchant_sheet_the_queue_and_chat_give_one_preview(client, conn, indigo_book):
     svc = indigo_book["svc"]
-    # The Queue's row: IndigoAir's, with no type yet (No type › Pick a type).
-    untaught = indigo_book["book"].row("INDIGOAIR 6E NEW", 41000, "2026-10-03", svc=svc)
-    conn.execute("UPDATE transactions SET type_id = NULL, type_source = NULL WHERE id = ?", (untaught,))
-    conn.commit()
+    # The Queue's row: no merchant and no type yet (No type › Pick a type,
+    # IndigoAir picked). It is the row being taught, not a past row: a row
+    # of IndigoAir's waiting for a type is one the sheet counts and Apply
+    # labels (fin-surfaces 54's fix), while teaching labels it itself.
+    untaught = indigo_book["book"].row("INDIGOAIR 6E NEW", 41000, "2026-10-03")
     home = tf.type_id(conn, "Home")
     before, history_before = state(conn), entries(client)
 
@@ -512,7 +513,7 @@ def test_the_merchant_sheet_the_queue_and_chat_give_one_preview(client, conn, in
     numbers = ("count", "checked", "chosen", "money", "months", "left_out", "examples", "others", "change")
     assert {k: queue_said[k] for k in numbers} == {k: sheet_said[k] for k in numbers}
     # A type change: the 2 rows whose book is chosen have their type from the
-    # merchant, so they are reached too; the new row with no type is not counted.
+    # merchant, so they are reached too; the row being taught is not counted.
     assert (sheet_said["count"], sheet_said["checked"], sheet_said["chosen"]) == (25, 6, 0)
     assert state(conn) == before and entries(client) == history_before    # three asks, nothing written
 

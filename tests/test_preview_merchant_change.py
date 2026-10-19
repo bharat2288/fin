@@ -360,23 +360,75 @@ def test_a_merchant_answer_that_is_not_apply_or_only_new_is_refused(client, conn
     assert every_row(conn) == before and merchant_label(conn, indigo["svc"])[0] == "Household"
 
 
-def test_a_row_with_no_type_is_given_the_merchants_and_never_counted(client, conn, statement):
-    """A row that waits for a type is not relabelled by a new default but
-    labelled: the sheet gives it the type whatever the answer, as before the
-    preview, and the preview counts only rows that carry a label."""
+@pytest.fixture
+def grocer(conn, statement):
+    """Sample Grocer (Household · Shopping): two rows waiting for a type,
+    one typed from the merchant."""
     svc = merchant(conn, "Sample Grocer", "Household", "Shopping")
     untyped = [add_row(conn, statement, "SAMPLE GROCER", 900, service_id=svc, type_name=None) for _ in range(2)]
     typed = add_row(conn, statement, "SAMPLE GROCER", 1200, service_id=svc, type_name="Shopping")
+    return {"svc": svc, "untyped": untyped, "typed": typed}
+
+
+def test_a_row_with_no_type_is_a_past_row_apply_labels_and_the_preview_counts(client, conn, grocer):
+    """The judge (spec 24, Deepened): the preview's count is the rows Apply
+    changes. A row waiting for a type inherits its merchant's label (as the
+    sheet gave it before the preview), so Apply labels it and the preview
+    counts it, as a rule's preview counts a row with no label (case 16)."""
     groceries = type_id(conn, "Groceries")
+    p = preview_of(client, grocer["svc"], {"type_id": groceries})["preview"]
+    assert (p["count"], p["checked"], p["chosen"]) == (3, 0, 0)
+    before = every_row(conn)
 
-    p = preview_of(client, svc, {"type_id": groceries})["preview"]
-    assert p["count"] == 1
-
-    resp = client.put(f"/api/services/{svc}", json={"type_id": groceries, "past": "only_new"})
+    resp = client.put(f"/api/services/{grocer['svc']}",
+                      json={"type_id": groceries, "past": "apply", "token": p["token"]})
 
     assert resp.status_code == 200, resp.get_json()
-    assert set(labels(conn, untyped).values()) == {("Household", groceries, "merchant", "merchant")}
-    assert labels(conn, [typed])[typed] == ("Household", type_id(conn, "Shopping"), "merchant", "checked")
+    assert resp.get_json()["recategorized"] == 3
+    assert len(changed(before, every_row(conn))) == p["count"]
+    assert set(labels(conn, grocer["untyped"]).values()) == {("Household", groceries, "merchant", "merchant")}
+
+
+def test_only_new_rows_leaves_a_row_with_no_type_waiting(client, conn, grocer):
+    """Only new rows leaves every past row's value (spec 24, the preview):
+    a row with no type keeps none, and waits in No type as it did."""
+    groceries = type_id(conn, "Groceries")
+    before = labels(conn, grocer["untyped"])
+
+    resp = client.put(f"/api/services/{grocer['svc']}", json={"type_id": groceries, "past": "only_new"})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert labels(conn, grocer["untyped"]) == before
+    assert labels(conn, [grocer["typed"]])[grocer["typed"]] == (
+        "Household", type_id(conn, "Shopping"), "merchant", "checked")
+
+
+def test_case_11_a_row_with_no_book_or_type_is_counted_and_apply_changes_what_it_counted(client, conn, indigo):
+    """IndigoAir's 25 past rows and one more waiting in No type, with no
+    book and no type: Apply gives it the book, so the preview counts 24 and
+    Apply changes those 24."""
+    waiting = add_row(conn, indigo["statement"], "INDIGOAIR 6E 2210", 41000, service_id=indigo["svc"],
+                      book=None, type_name=None, day="2026-10-10")
+    p = preview_of(client, indigo["svc"], {"book": "Moom"})["preview"]
+    assert (p["count"], p["checked"], p["chosen"]) == (24, 6, 2)
+    before = every_row(conn)
+
+    resp = client.put(f"/api/services/{indigo['svc']}", json={"book": "Moom", "past": "apply", "token": p["token"]})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert len(changed(before, every_row(conn))) == p["count"] == 24
+    assert labels(conn, [waiting])[waiting] == ("Moom", None, "merchant", None)
+
+
+def test_case_11_only_new_rows_leaves_a_row_waiting_in_no_type_as_it_was(client, conn, indigo):
+    waiting = add_row(conn, indigo["statement"], "INDIGOAIR 6E 2210", 41000, service_id=indigo["svc"],
+                      book=None, type_name=None, day="2026-10-10")
+    before = every_row(conn)
+
+    resp = client.put(f"/api/services/{indigo['svc']}", json={"book": "Moom", "past": "only_new"})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert every_row(conn)[waiting] == before[waiting]
 
 
 def test_teaching_a_merchants_first_type_over_rows_with_none_asks_nothing(client, conn, statement):

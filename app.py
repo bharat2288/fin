@@ -1672,13 +1672,12 @@ def _reflowed(conn, p, flow_ctx) -> dict:
     return sets
 
 
-def _write_plan(conn, plan, answer: str | None, fill: bool = True) -> tuple[int, int]:
+def _write_plan(conn, plan, answer: str | None) -> tuple[int, int]:
     """The plan the preview counted, as answered: apply writes each row's new
     values (its sources as they were; a rule's rows with their flow worked
-    out again); only_new marks each kept field checked, values left. With
-    `fill`, a row with no type is given the merchant's whatever the answer
-    (the sheet, as before the preview; the Queue's own backfill does it for
-    teaching). Returns (rows whose label changed, rows marked checked)."""
+    out again); only_new marks each kept field checked, values left. Nothing
+    else is written, so the preview's count is the rows Apply changes.
+    Returns (rows whose label changed, rows marked checked)."""
     relabelled = checked = 0
     flow_ctx = None
     for p in plan.rows:
@@ -1691,8 +1690,6 @@ def _write_plan(conn, plan, answer: str | None, fill: bool = True) -> tuple[int,
             relabelled += _write_label(conn, p.held, sets)
         elif answer == relabel_preview.ONLY_NEW:
             checked += _write_label(conn, p.held, p.only_new)
-    if fill:
-        relabelled += sum(_write_label(conn, held, label) for held, label in plan.fills)
     return relabelled, checked
 
 
@@ -2976,7 +2973,8 @@ def api_resolve_transaction():
                 (book, type_id) != (svc["book"], svc["type_id"])
             ):
                 moved = {f: v for f, v in (("book", book), ("type_id", type_id)) if v != svc[f]}
-                merchant_plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id})
+                merchant_plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id},
+                                                                 teaching=True)
             if pattern and apply_scope in {"rule", "service_default"}:
                 reach = relabel_preview.wording_reach(conn, pattern, match_type, service_id if svc else None)
                 if reach.others:
@@ -2995,7 +2993,7 @@ def api_resolve_transaction():
                     "UPDATE services SET book = ?, type_id = ? WHERE id = ?",
                     (book, type_id, service_id),
                 )
-                _write_plan(conn, merchant_plan, past_rows, fill=False)
+                _write_plan(conn, merchant_plan, past_rows)
             if not svc:
                 conn.execute(
                     "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
@@ -4535,7 +4533,7 @@ def api_rules_create():
                 (proposed["pattern"], proposed["service_id"], book_override, type_override_id,
                  proposed["match_type"], proposed["priority"], min_minor, max_minor),
             ).lastrowid
-            recategorized, checked = _write_plan(conn, plan, past, fill=False)
+            recategorized, checked = _write_plan(conn, plan, past)
             conn.commit()
         except Exception as e:
             app.logger.warning("Failed to create rule: %s", e)
@@ -4610,7 +4608,7 @@ def api_rules_update(rule_id):
                 f"UPDATE merchant_rules SET {', '.join(f'{c} = ?' for c in proposed)} WHERE id = ?",
                 (*proposed.values(), rule_id),
             )
-            recategorized, checked = _write_plan(conn, plan, past, fill=False)
+            recategorized, checked = _write_plan(conn, plan, past)
             conn.commit()
         finally:
             invalidate_rules_cache()
@@ -4640,7 +4638,7 @@ def api_rules_delete(rule_id):
             return refused
         try:
             conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
-            recategorized, checked = _write_plan(conn, plan, past, fill=False)
+            recategorized, checked = _write_plan(conn, plan, past)
             conn.commit()
         finally:
             invalidate_rules_cache()
@@ -4683,7 +4681,7 @@ def api_rules_drift_apply():
         if plan.count and past is None:
             return jsonify({"error": relabel_preview.drift_asked(plan),
                             "preview": relabel_preview.summary(conn, plan)}), 409
-        recategorized, _ = _write_plan(conn, plan, past, fill=False)
+        recategorized, _ = _write_plan(conn, plan, past)
         conn.commit()
     return jsonify({"success": True, "recategorized": recategorized})
 
