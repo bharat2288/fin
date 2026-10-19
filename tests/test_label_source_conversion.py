@@ -100,11 +100,15 @@ class Book:
                 "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, 'sample.csv')",
                 key,
             ).lastrowid
+        # The one mark, on a book that still holds it (a book made new holds
+        # only the two sources, retire_single_mark.py).
+        marked = "cat_source" in {r[1] for r in self.conn.execute("PRAGMA table_info(transactions)")}
         return self.conn.execute(
             "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id,"
-            " service_id, cat_source, flow_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f" service_id, flow_type{', cat_source' if marked else ''})"
+            f" VALUES (?, ?, ?, ?, ?, ?, ?, ?{', ?' if marked else ''})",
             (self.statements[key], day, description, amount_minor, book,
-             self.types[type_name] if type_name else None, service_id, source, flow),
+             self.types[type_name] if type_name else None, service_id, flow, *([source] if marked else [])),
         ).lastrowid
 
 
@@ -415,10 +419,12 @@ def test_the_converted_book_records_both_sources_in_its_history(todays):
 
 
 def test_every_column_of_the_converted_book_is_in_its_three_history_triggers(todays):
+    """Every column but the one mark, which the next step drops (personal-
+    ledger 51): the triggers are schema.sql's, which no longer name it."""
     conversion.run_step(todays, convert_label_source.STEP)
     conn = open_book(todays)
     try:
-        wanted = [r[1] for r in conn.execute("PRAGMA table_info(transactions)")]
+        wanted = [r[1] for r in conn.execute("PRAGMA table_info(transactions)") if r[1] != "cat_source"]
         for op in ("insert", "update", "delete"):
             sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
                                (f"history_transactions_{op}",)).fetchone()[0]

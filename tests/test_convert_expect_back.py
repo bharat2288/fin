@@ -58,9 +58,13 @@ def _row(conn, account_id: int, day: str, description: str, amount_minor: int, p
     statement_id = held[0] if held else conn.execute(
         "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, 'sample.csv')",
         (account_id, first)).lastrowid
+    # Set by hand: a book from before the label source carries the old single
+    # mark, one after it the two sources the review label writes.
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+    by_hand = ("book_source, type_source", "'chosen', 'chosen'") if "book_source" in columns         else ("cat_source", "'manual'")
     return conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, "
-        "flow_type_manual, other_side_id, cat_source) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')",
+        f"flow_type_manual, other_side_id, {by_hand[0]}) VALUES (?, ?, ?, ?, ?, ?, ?, {by_hand[1]})",
         (statement_id, day, description, amount_minor, flow, manual, person_id)).lastrowid
 
 

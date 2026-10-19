@@ -3,7 +3,9 @@
 First match wins:
 - `last`: the operator's last hand-set choice for this merchant on this
   account: the most recent hand-set row (by date, then id) of the same
-  merchant on the same account, other than the row itself;
+  merchant on the same account, other than the row itself. A row is hand-set
+  when the operator checked or chose its book or its type
+  (label_source.looked_at_sql);
 - `account`: the account's owner, when it is a company and not Household;
 - `type`: the book the row's type proposes (book_type.proposed_book), the
   row's own type else its merchant's. None means the type asks (Software &
@@ -20,6 +22,7 @@ from __future__ import annotations
 import sqlite3
 
 import book_type
+import label_source
 
 LAST = "last"
 ACCOUNT = "account"
@@ -59,7 +62,7 @@ def book_prefills(conn: sqlite3.Connection, tx_ids) -> dict[int, dict]:
         for h in conn.execute(
             "SELECT t.id, t.service_id, s.account_id, COALESCE(t.book, ?) AS book"
             " FROM transactions t JOIN statements s ON s.id = t.statement_id"
-            f" WHERE t.cat_source = 'manual' AND t.service_id IN ({','.join('?' * len(chunk))})"
+            f" WHERE {label_source.looked_at_sql('t')} AND t.service_id IN ({','.join('?' * len(chunk))})"
             " ORDER BY t.date DESC, t.id DESC",
             (book_type.DEFAULT_BOOK, *chunk),
         ):

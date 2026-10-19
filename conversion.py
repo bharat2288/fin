@@ -62,8 +62,10 @@ CHAIN = (
     # change-history, which makes the records it writes.
     ("expect-back", "convert_expect_back"),
     # Personal-ledger 24: a source for a row's book and for its type, filled
-    # from cat_source. After expect-back, one conversion at a time.
+    # from the row's one mark. After expect-back, one conversion at a time.
     ("label-source", "convert_label_source"),
+    # Personal-ledger 51: the one mark dropped (contract), once nothing reads it.
+    ("retire-single-mark", "retire_single_mark"),
 )
 
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
@@ -116,6 +118,20 @@ def added_after(step_name: str) -> dict[str, set[str]]:
     for _, module_name in CHAIN[names.index(step_name) + 1:]:
         for table, columns in getattr(importlib.import_module(module_name), "ADDS_COLUMNS", {}).items():
             later.setdefault(table, set()).update(columns)
+    return later
+
+
+def retired_after(step_name: str) -> dict[str, tuple[tuple[str, str], ...]]:
+    """The columns, per table, that the steps after `step_name` in the chain
+    drop (each module's RETIRES_COLUMNS: (column, declaration) pairs).
+    schema.sql no longer declares them, so a step that rebuilds a table from
+    schema.sql keeps those a book still has, as declared there: the step
+    that drops them drops them."""
+    names = [name for name, _ in CHAIN]
+    later: dict[str, tuple[tuple[str, str], ...]] = {}
+    for _, module_name in CHAIN[names.index(step_name) + 1:]:
+        for table, columns in getattr(importlib.import_module(module_name), "RETIRES_COLUMNS", {}).items():
+            later[table] = later.get(table, ()) + tuple(columns)
     return later
 
 
@@ -274,8 +290,10 @@ class Step:
                  it reads the data itself, so it stays true for a database
                  restored from a backup or created fresh in the new shape.
                  A step whose work the operator's own acts can later undo
-                 row by row (expect-back) records that it ran instead
-                 (record_applied, inside apply) and reads that (recorded).
+                 row by row, or leave looking undone (expect-back,
+                 label-source, retire-single-mark), records that it ran
+                 instead (record_applied, inside apply) and reads that
+                 (recorded), never what is left in the rows.
     invariant  — given the measurements before and after, returns a list of
                  problems (empty when it holds). Defaults to `unchanged`.
     measure    — reads the database and returns the measurements the

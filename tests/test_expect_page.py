@@ -380,10 +380,10 @@ def _ten_times(conn, s):
     pay_stmt = o.book.statements[(o.book.savings, "2026-10")]
     people = list(o.people.values())
     for i in range(650):
-        out = conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, cat_source) "
-                           "VALUES (?, ?, ?, ?, 'expense', 'auto')", (stmt, f"2026-10-{1 + i % 28:02d}", f"SAMPLE DINNER {i}", 30000)).lastrowid
-        pay = conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, cat_source) "
-                           "VALUES (?, ?, ?, ?, 'review', 'auto')", (pay_stmt, f"2026-10-{1 + i % 28:02d}", f"PAYNOW FROM SAMPLE {i}", -30000)).lastrowid
+        out = conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
+                           "VALUES (?, ?, ?, ?, 'expense')", (stmt, f"2026-10-{1 + i % 28:02d}", f"SAMPLE DINNER {i}", 30000)).lastrowid
+        pay = conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
+                           "VALUES (?, ?, ?, ?, 'review')", (pay_stmt, f"2026-10-{1 + i % 28:02d}", f"PAYNOW FROM SAMPLE {i}", -30000)).lastrowid
         e1 = conn.execute("INSERT INTO expectation (row_id, direction, amount_minor, currency) VALUES (?, 'back', 20000, 'SGD')",
                           (out,)).lastrowid
         e2 = conn.execute("INSERT INTO expectation (person_id, opening_date, direction, amount_minor, currency) "

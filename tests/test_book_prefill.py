@@ -54,7 +54,7 @@ def changes(conn) -> int:
 def test_case_9_a_company_card_prefills_its_company(client, conn, cards):
     air = merchant(conn, "Sample Air", "Household", "Travel")
     tx = row(conn, cards["moom"], "SAMPLE AIR 312-1", 1180.0, book="Household", type_name="Travel",
-             service_id=air, cat_source="service_default")
+             service_id=air, mark="service_default")
 
     assert prefill(client, tx)[tx] == {
         "book": "Moom", "reason": "account", "account": "Moom card", "account_kind": "card"}
@@ -63,7 +63,7 @@ def test_case_9_a_company_card_prefills_its_company(client, conn, cards):
 def test_case_10_no_history_on_a_household_card_gives_the_types_book(client, conn, cards):
     skin = merchant(conn, "Sample Skin", "Household", "Health & Beauty")
     tx = row(conn, cards["you"], "SAMPLE SKIN 1", 60.0, book="Household", type_name="Health & Beauty",
-             service_id=skin, cat_source="service_default")
+             service_id=skin, mark="service_default")
     ads = row(conn, cards["you"], "SAMPLE ADS 1", 90.0, type_name="Advertising")
     tool = row(conn, cards["you"], "SAMPLE TOOL 1", 20.0, type_name="Software & AI tools")
 
@@ -88,9 +88,9 @@ def test_a_row_with_no_type_takes_its_merchants_type_and_one_with_neither_has_no
 def test_case_11_history_on_the_account_beats_the_account(client, conn, cards):
     skin = merchant(conn, "Sample Skin", "Household", "Health & Beauty")
     row(conn, cards["moom"], "SAMPLE SKIN 1", book="Household", type_name="Health & Beauty",
-        service_id=skin, cat_source="manual", day="2026-08-02")
+        service_id=skin, mark="manual", day="2026-08-02")
     nxt = row(conn, cards["moom"], "SAMPLE SKIN 2", book="Household", type_name="Health & Beauty",
-              service_id=skin, cat_source="service_default", day="2026-09-02")
+              service_id=skin, mark="service_default", day="2026-09-02")
 
     assert prefill(client, nxt)[nxt] == {
         "book": "Household", "reason": "last", "account": "Moom card", "account_kind": "card"}
@@ -103,15 +103,15 @@ def test_case_6_the_last_choice_on_that_card_prefills_a_new_row(client, conn, ca
     # Mili's card went Moom last time; your card went Household; an older
     # Mili's card row went Kalesh, and a later one on her card is not hand-set.
     row(conn, cards["mili"], "SAMPLE AIR 1", book="Kalesh", type_name="Travel", service_id=air,
-        cat_source="manual", day="2026-07-01")
+        mark="manual", day="2026-07-01")
     row(conn, cards["mili"], "SAMPLE AIR 2", book="Moom", type_name="Travel", service_id=air,
-        cat_source="manual", day="2026-09-09")
+        mark="manual", day="2026-09-09")
     row(conn, cards["mili"], "SAMPLE AIR 3", book="Household", type_name="Travel", service_id=air,
-        cat_source="service_default", day="2026-09-20")
+        mark="service_default", day="2026-09-20")
     row(conn, cards["you"], "SAMPLE AIR 4", book="Household", type_name="Travel", service_id=air,
-        cat_source="manual", day="2026-09-25")
+        mark="manual", day="2026-09-25")
     new = row(conn, cards["mili"], "SAMPLE AIR 312-1112223", 1180.0, book="Household", type_name="Travel",
-              service_id=air, cat_source="service_default", day="2026-10-03")
+              service_id=air, mark="service_default", day="2026-10-03")
 
     assert prefill(client, new)[new] == {
         "book": "Moom", "reason": "last", "account": "Sample Vantage 7436 (MK)", "account_kind": "card"}
@@ -120,9 +120,9 @@ def test_case_6_the_last_choice_on_that_card_prefills_a_new_row(client, conn, ca
 def test_last_is_by_date_then_id_and_never_the_row_itself(client, conn, cards):
     air = merchant(conn, "Sample Air", "Household", "Travel")
     first = row(conn, cards["mili"], "SAMPLE AIR 1", book="Kalesh", type_name="Travel", service_id=air,
-                cat_source="manual", day="2026-09-09")
+                mark="manual", day="2026-09-09")
     second = row(conn, cards["mili"], "SAMPLE AIR 2", book="Moom", type_name="Travel", service_id=air,
-                 cat_source="manual", day="2026-09-09")
+                 mark="manual", day="2026-09-09")
 
     got = prefill(client, first, second)
 
@@ -134,7 +134,7 @@ def test_last_is_by_date_then_id_and_never_the_row_itself(client, conn, cards):
 def test_another_merchants_history_is_not_this_ones(client, conn, cards):
     air = merchant(conn, "Sample Air", "Household", "Travel")
     other = merchant(conn, "Other Air", "Household", "Travel")
-    row(conn, cards["mili"], "OTHER AIR 1", book="Moom", type_name="Travel", service_id=other, cat_source="manual")
+    row(conn, cards["mili"], "OTHER AIR 1", book="Moom", type_name="Travel", service_id=other, mark="manual")
     tx = row(conn, cards["mili"], "SAMPLE AIR 1", book="Household", type_name="Travel", service_id=air)
 
     assert (prefill(client, tx)[tx]["reason"]) == "type"
@@ -157,7 +157,7 @@ def test_the_read_opens_no_change_entry_and_never_waits_on_a_write(client, conn,
 
     air = merchant(conn, "Sample Air", "Household", "Travel")
     tx = row(conn, cards["you"], "SAMPLE AIR 312-1", 100.0, book="Household", type_name="Travel",
-             service_id=air, cat_source="service_default")
+             service_id=air, mark="service_default")
     seq = lambda: conn.execute(  # noqa: E731
         "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'change_entries'), 0)").fetchone()[0]
     before = seq()
@@ -189,7 +189,7 @@ def test_case_24_thirteen_hundred_rows_in_one_read(client, conn, cards):
         statement = (cards["you"], cards["mili"], cards["moom"])[i % 3]
         ids.append(row(conn, statement, f"SAMPLE AIR {i}", type_name="Travel", service_id=svc,
                        book=("Moom" if i % 7 == 0 else "Household"),
-                       cat_source=("manual" if i % 5 == 0 else "service_default"),
+                       mark=("manual" if i % 5 == 0 else "service_default"),
                        day=f"2026-{1 + i % 9:02d}-{1 + i % 28:02d}"))
 
     fresh = merchant(conn, "Fresh Air", "Household", "Travel")

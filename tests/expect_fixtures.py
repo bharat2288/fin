@@ -80,7 +80,7 @@ def row(conn: sqlite3.Connection, book: Book, account_id: int, day: str, descrip
         book.statements[(account_id, month)] = statement_id
     row_id = conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id, "
-        "flow_type, other_side_id, cat_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'auto')",
+        "flow_type, other_side_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (statement_id, day, description, amount_minor, book_name,
          type_id(conn, type_name) if type_name else None, flow, other_side),
     ).lastrowid

@@ -347,7 +347,7 @@ def _label_for(conn, description: str, amount_minor: int) -> dict:
         if type_id is not None:
             if found["book"] is None:
                 book_source = label_source.WORDING
-            found.update(book=found["book"] or book, type_id=type_id, cat_source="fallback")
+            found.update(book=found["book"] or book, type_id=type_id)
             type_source = label_source.WORDING
     found["book_source"] = label_source.given(found["book"], book_source or label_source.MERCHANT)
     found["type_source"] = label_source.given(found["type_id"], type_source or label_source.MERCHANT)
@@ -1461,34 +1461,27 @@ def api_loan_interest():
 
 # ---------------------------------------------------------------------------
 # A row's label and its sources (personal-ledger 24): every write of a row's
-# book or type goes through _write_label, which keeps cat_source in step.
+# book or type goes through _write_label.
 # ---------------------------------------------------------------------------
 
 # The columns a label write may set; nothing else is ever named in its SQL.
 _LABEL_COLUMNS = frozenset({
-    "book", "type_id", "service_id", "book_source", "type_source", "cat_source", "flow_type",
+    "book", "type_id", "service_id", "book_source", "type_source", "flow_type",
     "other_side_id", "flow_type_manual",
 })
 # What a label write reads of a row first.
 _LABEL_HELD = ("t.id, t.description, t.amount_minor, t.book, t.type_id, t.service_id, "
-               "t.book_source, t.type_source, t.cat_source, t.flow_type, t.flow_type_manual, t.other_side_id")
+               "t.book_source, t.type_source, t.flow_type, t.flow_type_manual, t.other_side_id")
 
 
 def _write_label(conn, held, sets: dict) -> bool:
-    """Write `sets` to the row `held` (as _LABEL_HELD reads it), with
-    cat_source in step when a source changes (unless `sets` names it).
-    Returns whether anything changed."""
+    """Write `sets` to the row `held` (as _LABEL_HELD reads it). Returns
+    whether anything changed."""
     if not set(sets) <= _LABEL_COLUMNS:
         raise ValueError(f"not a label column: {sorted(set(sets) - _LABEL_COLUMNS)}")
-    named = "cat_source" in sets
     sets = {k: v for k, v in sets.items() if held[k] != v}
     if not sets:
         return False
-    if {"book_source", "type_source"} & set(sets) and not named:
-        sets["cat_source"] = label_source.mark(
-            sets.get("book_source", held["book_source"]), sets.get("type_source", held["type_source"]),
-            held["cat_source"],
-        )
     conn.execute(
         f"UPDATE transactions SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
         (*sets.values(), held["id"]),
@@ -1497,13 +1490,12 @@ def _write_label(conn, held, sets: dict) -> bool:
 
 
 def _source(held, column: str) -> str | None:
-    """A held row's source for one field, as label_source reads it: its own,
-    or what the old mark says for a field that has a value and none (expand);
-    none for an empty field."""
+    """A held row's source for one field, as label_source reads it; none
+    for an empty field with no source."""
     field = next(f for f, c in label_source.FIELDS.items() if c == column)
     if held[field] is None and held[column] is None:
         return None
-    return label_source.source_of(held[column], held["cat_source"])
+    return label_source.source_of(held[column])
 
 
 def _accept_past(conn, where: str, params: tuple) -> int:
@@ -2584,7 +2576,7 @@ def api_transactions():
                 t.amount_foreign, t.currency_foreign,
                 {book_expr("t")} as book,
                 t.type_id, ty.name as type, tp.name as parent_type,
-                t.cat_source, t.book_source, t.type_source, t.book as own_book,
+                t.book_source, t.type_source, t.book as own_book,
                 t.is_one_off, COALESCE(t.flow_type, 'expense') as flow_type, t.flow_type_manual,
                 t.notes,
                 t.other_side_id, oa.name as other_side_name,
@@ -3056,8 +3048,8 @@ def api_resolve_transaction():
                 # The rows the rule now labels take its label: from the rule
                 # for the field it overrides, from the merchant for the other.
                 # A field chosen or worked out keeps its own, as every later
-                # change leaves it (spec 24; an empty field reads the row's
-                # old mark, as the rule preview reads it), and a checked one
+                # change leaves it (spec 24; an empty field reads its own
+                # source, as the rule preview reads it), and a checked one
                 # stays checked; a row with no field to reach keeps its
                 # merchant too (fin-surfaces 54).
                 given = {"book": (book, taught[0]), "type_id": (type_id, taught[1])}
@@ -3066,7 +3058,7 @@ def api_resolve_transaction():
                 ).fetchall():
                     reached = [
                         (field, column) for field, column in label_source.FIELDS.items()
-                        if label_source.reachable(held[column], held["cat_source"])
+                        if label_source.reachable(held[column])
                     ]
                     if not reached:
                         continue
@@ -3083,18 +3075,12 @@ def api_resolve_transaction():
             # flow_type override is independent of the label (ADR v2):
             #   - if caller supplies flow_type, set it + mark flow_type_manual=1
             #   - otherwise leave a hand-set flow alone and re-derive the rest
-            tx_cat_source = {
-                "transaction": "manual",
-                "rule": "rule_override",
-                "service_default": "service_default",
-            }.get(apply_scope, "manual")
             tx_row = conn.execute(
                 f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
             ).fetchone()
-            label = (book, type_id, service_id, tx_cat_source,
+            label = (book, type_id, service_id,
                      *_resolved_sources(tx_row, apply_scope, book, type_id, merchant_book))
-            written = ("UPDATE transactions SET book = ?, type_id = ?, service_id = ?, cat_source = ?, "
-                       "book_source = ?, type_source = ?")
+            written = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, book_source = ?, type_source = ?"
             if flow_type is not None:
                 conn.execute(
                     f"{written}, flow_type = ?, flow_type_manual = 1 WHERE id = ?",
@@ -3441,7 +3427,7 @@ _PREVIEW_ROW_FACTS = (
     "date", "description", "amount_sgd", "amount_foreign", "currency_foreign", "account", "statement",
 )
 _CONFIRM_ROW_CHOICES = (
-    "book", "type_id", "service_id", "flow_type", "other_side_id", "_skip", "is_one_off", "cat_source",
+    "book", "type_id", "service_id", "flow_type", "other_side_id", "_skip", "is_one_off",
 )
 PREVIEW_NOT_OPEN = "This preview is no longer open. Upload the statement again."
 PREVIEW_MISMATCH = "The import does not match its preview; nothing was imported. Upload the statement again."
@@ -3673,7 +3659,6 @@ def api_import_upload():
                     "type_name": type_names.get(type_id) if type_id else None,
                     "service_id": svc_id,
                     "service_name": svcs.get(svc_id) if svc_id else None,
-                    "cat_source": found["cat_source"],
                     # A mixed merchant: recognised, given its default type,
                     # and flagged for a look each time.
                     "review_each_time": found["review_each_time"],
@@ -3813,8 +3798,9 @@ def api_import_confirm():
     account, currency and statement tie lines, and each row's date,
     description, amount, foreign amount and currency, account and statement.
     Whatever a request sends for those is ignored. From each row it takes
-    only: book, type_id, service_id, flow_type, other_side_id, _skip,
-    is_one_off and cat_source; and new_services and new_rules.
+    only: book, type_id, service_id, flow_type, other_side_id, _skip and
+    is_one_off; and new_services and new_rules. Each field's source is what
+    the rules give it now, or chosen (_imported_sources).
 
     Expects JSON body (the preview's groups echoed back with choices made):
     {
@@ -3825,7 +3811,7 @@ def api_import_confirm():
                 "transactions": [
                     {"book": "Household", "type_id": 5, "service_id": null,
                      "flow_type": "expense", "other_side_id": null,
-                     "_skip": false, "is_one_off": false, "cat_source": "rule",
+                     "_skip": false, "is_one_off": false,
                      ...the row's facts may be echoed back and are ignored}, ...
                 ]
             }, ...
@@ -4066,8 +4052,8 @@ def api_import_confirm():
                             "INSERT INTO transactions "
                             "(statement_id, date, description, amount_minor, amount_foreign, "
                             "currency_foreign, book, type_id, service_id, "
-                            "is_one_off, cat_source, flow_type, other_side_id, book_source, type_source) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "is_one_off, flow_type, other_side_id, book_source, type_source) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 statement_id,
                                 tx["date"],
@@ -4079,9 +4065,6 @@ def api_import_confirm():
                                 tx.get("type_id") or None,
                                 tx.get("service_id"),
                                 1 if tx.get("is_one_off") else 0,
-                                # in step: a value the rules do not give is manual
-                                "manual" if label_source.CHOSEN in (book_source, type_source)
-                                else tx.get("cat_source"),
                                 tx_flow,
                                 tx.get("other_side_id"),
                                 book_source,
@@ -4908,16 +4891,17 @@ def api_review_label(tx_id: int):
             return jsonify({"error": why}), 400
 
         # Everything asked for is there: the label, in one transaction. Saying
-        # what it was is a deliberate act: the book and the type it gives are
-        # each chosen, an empty field has no source, and the flow is set by
-        # hand (personal-ledger 50). cat_source stays `manual`, in step.
+        # what it was is a deliberate act: the book and the type are each
+        # chosen, one it leaves empty too (a movement, a gift received's
+        # book), so no merchant or rule fills it later (spec 24, case 7), and
+        # the flow is set by hand (personal-ledger 50). With the single mark
+        # retired (personal-ledger 51) the field's own source is the one
+        # place that says so.
         held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
-        book_source = label_source.given(book, label_source.CHOSEN)
-        type_source = label_source.given(type_id, label_source.CHOSEN)
+        book_source = type_source = label_source.CHOSEN
         _write_label(conn, held, {
             "flow_type": flow_name, "flow_type_manual": 1, "other_side_id": other_side,
             "book": book, "type_id": type_id, "book_source": book_source, "type_source": type_source,
-            "cat_source": label_source.mark(book_source, type_source, "manual"),
         })
         # A row that now names a loan, or no longer does, changes what was paid.
         loan_interest.derive(conn)

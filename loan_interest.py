@@ -9,8 +9,8 @@ Where the derived rows live: on the loan account itself, under a statement
 record named DERIVED_STATEMENT and dated the period's closing figure. They are
 on no bank account or card, so they are in no statement's tie and no bank
 balance. They are not rows of the loan's own statement either: every row under
-a DERIVED_STATEMENT record is marked cat_source = DERIVED, and nothing adds them
-up as the loan's rows. A loan's balance is its figure and the instalments naming
+a DERIVED_STATEMENT record has its book and its type worked out
+(label_source.DERIVED), and nothing adds them up as the loan's rows. A loan's balance is its figure and the instalments naming
 it since, less the interest dated since (`interest_between`): between two
 figures what is owed falls by the principal repaid, as the principal card says.
 
@@ -34,8 +34,6 @@ import flow
 import label_source
 
 LOAN = "loan"
-# The mark a derived row carries where a row says where its label came from.
-DERIVED = "derived"
 # The name of the statement record derived rows sit under.
 DERIVED_STATEMENT = "derived: loan interest"
 # What derived interest is filed under.
@@ -156,9 +154,9 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
             tuple(r) for r in conn.execute(
                 "SELECT s.statement_date, t.date, t.amount_minor, t.description "
                 + _DERIVED_FROM
-                + "AND l.id = ? AND t.cat_source = ? AND t.flow_type = ? AND t.book = ? "
-                "AND t.type_id = ?",
-                (*_DERIVED_PARAMS, loan, DERIVED, FLOW, BOOK, type_id),
+                + "AND l.id = ? AND t.book_source = ? AND t.type_source = ? AND t.flow_type = ? "
+                "AND t.book = ? AND t.type_id = ?",
+                (*_DERIVED_PARAMS, loan, label_source.DERIVED, label_source.DERIVED, FLOW, BOOK, type_id),
             )
         )
         total_held = conn.execute(
@@ -190,9 +188,9 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
             # Worked out, in both fields (label_source): nothing later reaches it.
             conn.execute(
                 "INSERT INTO transactions (statement_id, date, description, amount_minor, "
-                "flow_type, book, type_id, cat_source, book_source, type_source)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (statement_ids[period_end], day, description, amount, FLOW, BOOK, type_id, DERIVED,
+                "flow_type, book, type_id, book_source, type_source)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (statement_ids[period_end], day, description, amount, FLOW, BOOK, type_id,
                  label_source.DERIVED, label_source.DERIVED),
             )
         changed += 1

@@ -115,7 +115,7 @@ def test_case_9_chosen_by_claude_in_chat_and_checked_by_you_read_from_the_histor
 def test_case_9_a_field_chosen_before_the_history_began_and_one_from_the_merchant(client, conn, statement):
     svc = merchant(conn, "IndigoAir", "Household", "Travel")
     tx = row(conn, statement, "INDIGOAIR 6E 0042", service_id=svc, book="Moom",
-             sources=("chosen", "merchant"), cat_source="manual")
+             sources=("chosen", "merchant"))
 
     found = shown(client, tx)
 
@@ -132,13 +132,10 @@ def test_case_9_a_field_chosen_before_the_history_began_and_one_from_the_merchan
 @needs_node
 def test_the_other_sources_each_read_in_words(client, conn, statement):
     svc = merchant(conn, "IndigoAir", "Household", "Travel")
-    by_rule = row(conn, statement, "INDIGOAIR 6E 0043", service_id=svc, sources=("merchant", "rule"),
-                  cat_source="rule_override")
-    by_wording = row(conn, statement, "PAYNOW SAMPLE STALL", sources=("wording", "wording"),
-                     cat_source="fallback")
-    worked = row(conn, statement, "SAMPLE LOAN INTEREST", sources=("derived", "derived"), cat_source="derived")
-    untyped = row(conn, statement, "SAMPLE UNKNOWN 0001", type_name=None, sources=("merchant", None),
-                  cat_source="auto")
+    by_rule = row(conn, statement, "INDIGOAIR 6E 0043", service_id=svc, sources=("merchant", "rule"))
+    by_wording = row(conn, statement, "PAYNOW SAMPLE STALL", sources=("wording", "wording"))
+    worked = row(conn, statement, "SAMPLE LOAN INTEREST", sources=("derived", "derived"))
+    untyped = row(conn, statement, "SAMPLE UNKNOWN 0001", type_name=None, sources=("merchant", None))
 
     def words(tx):
         return [text(li) for li in re.findall(r"<li>.*?</li>", _node("sourceLinesHTML(DATA.f)", f=shown(client, tx)))]
@@ -156,7 +153,7 @@ def _facts(found, details):
         "const tag = (k, t) => `<tag ${k}>${t}</tag>`;", "function todayIso() { return '2026-10-20'; }",
         _const("MONTHS"), _function("esc"), _function("when"), _const("pageLinkKinds"), _function("pageLink"),
         _function("notCheckedTag"), _function("whoName"), _const("SKIP_FIELDS"), _function("changedFields"),
-        _const("LABEL_SOURCE_WORDS"), _const("LABEL_FIELDS"), _function("labelledBy"), _function("rowFactsHTML"),
+        _const("LABEL_FIELDS"), _function("labelledBy"), _function("rowFactsHTML"),
         f"const DATA = {json.dumps({'found': found, 'details': details})};",
         "console.log(JSON.stringify(rowFactsHTML(DATA.found, 'Travel', labelledBy(DATA.found, DATA.details))));"])
     out = subprocess.run([NODE, "-"], input=code, capture_output=True, text=True, encoding="utf-8",
@@ -181,7 +178,7 @@ def test_case_9_the_row_sheet_says_each_fields_source_not_the_old_single_mark(cl
     chose = mcp_tools.call("set_label", {"tx_id": tx, "book": "Household"}, actor=CHAT_ACTOR)
     assert chose["ok"], chose
     found = shown(client, tx)
-    assert found["sources"]["book"] == "chosen" and found["cat_source"] == "manual"
+    assert found["sources"]["book"] == "chosen"
 
     facts = text(_facts(found, _details(client, tx)))
 
@@ -194,7 +191,7 @@ def test_a_row_with_no_book_or_type_still_says_who_labelled_it(client, conn, sta
     """A row with neither field (a transfer) has no source line, so its facts
     keep the line saying who labelled it and when."""
     tx = row(conn, statement, "SAMPLE TRANSFER OUT", book=None, type_name=None, flow="transfer",
-             sources=(None, None), cat_source="auto")
+             sources=(None, None))
     put = client.put(f"/api/transactions/{tx}", json={"notes": "to savings"})
     assert put.status_code == 200
     found = shown(client, tx)
@@ -226,7 +223,7 @@ def test_a_hand_set_label_from_before_the_sources_reads_its_entry(client, conn, 
     row's hand-set mark in it is what set the field."""
     svc = merchant(conn, "IndigoAir", "Household", "Travel")
     tx = row(conn, statement, "INDIGOAIR 6E 0044", service_id=svc, book="Moom",
-             sources=("chosen", "checked"), cat_source="manual")
+             sources=("chosen", "checked"))
     before = {"id": tx, "book": "Household", "cat_source": "service_default"}
     after = {"id": tx, "book": "Moom", "cat_source": "manual"}
     conn.execute("INSERT INTO change_entries (at, via, actor, summary, open)"
@@ -249,11 +246,11 @@ def test_a_list_of_rows_carries_sources_but_not_who_set_them(client, conn, indig
     assert "set_by" not in listed[0]
 
 
-def test_a_field_with_no_source_of_its_own_reads_the_old_mark(client, conn, statement):
-    """Expand: a writer not yet switched writes cat_source alone; its
-    hand-set label is shown chosen, not from the merchant."""
-    tx = row(conn, statement, "SAMPLE TRANSFER IN", sources=(None, None), cat_source="manual")
-    assert shown(client, tx)["sources"] == {"book": "chosen", "type": "chosen"}
+def test_a_field_with_a_value_and_no_source_of_its_own_reads_from_the_merchant(client, conn, statement):
+    """The single mark retired (personal-ledger 51): a field no writer gave a
+    source reads as a row with no mark read, from the merchant."""
+    tx = row(conn, statement, "SAMPLE TRANSFER IN", sources=(None, None))
+    assert shown(client, tx)["sources"] == {"book": "merchant", "type": "merchant"}
 
 
 # --- the merchant page's tags match the row's sources, every combination ----------------------
@@ -267,7 +264,6 @@ def test_the_merchant_page_tags_match_the_rows_sources_for_every_combination(cli
     svc = merchant(conn, "IndigoAir", "Household", "Travel")
     combos = list(itertools.product(SOURCES, SOURCES))
     made = {row(conn, statement, f"INDIGOAIR 6E {n:04d}", service_id=svc, sources=pair,
-                cat_source="manual" if set(pair) - {"merchant"} else "service_default",
                 day=f"2026-09-{10 + n:02d}"): pair
             for n, pair in enumerate(combos)}
 

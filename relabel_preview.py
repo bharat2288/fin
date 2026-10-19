@@ -38,8 +38,7 @@ ask. Both rule previews, the rule's and the taught wording's, rank rules by
 the one match order, db.match_order.
 
 This module reads; the routes write the plan through app._write_label, so
-every write keeps cat_source in step and lands in the route's one change
-entry.
+every write lands in the route's one change entry.
 """
 
 from __future__ import annotations
@@ -69,7 +68,7 @@ _OVERRIDE_OF = {"book": "book_override", "type_id": "type_override_id"}
 # What the plan reads of a row: the columns app._write_label reads of `held`,
 # then what the summary needs (the account's currency and the row's own part).
 _HELD = ("t.id, t.date, t.description, t.amount_minor, t.book, t.type_id, t.service_id, "
-         "t.book_source, t.type_source, t.cat_source, t.flow_type, t.flow_type_manual, t.other_side_id, "
+         "t.book_source, t.type_source, t.flow_type, t.flow_type_manual, t.other_side_id, "
          "COALESCE(a.currency, 'SGD') AS currency")
 _FROM = ("transactions t LEFT JOIN statements st ON st.id = t.statement_id "
          "LEFT JOIN accounts a ON a.id = st.account_id")
@@ -127,7 +126,7 @@ def _source(held, field_name: str) -> str | None:
     column = label_source.FIELDS[field_name]
     if held[field_name] is None and held[column] is None:
         return None
-    return label_source.source_of(held[column], held["cat_source"])
+    return label_source.source_of(held[column])
 
 
 def _own_rule(held, service_id: int, conn):
@@ -463,7 +462,7 @@ def _rule_key(rule):
     the change is not the change's to relabel."""
     if rule is None:
         return None
-    return (rule["id"], rule["service_id"], *db.rule_label(rule)[:2], label_source.rule_sources(rule))
+    return (rule["id"], rule["service_id"], *db.rule_label(rule), label_source.rule_sources(rule))
 
 
 def _given(rule, description: str | None, conn, fallback) -> dict:
@@ -472,7 +471,7 @@ def _given(rule, description: str | None, conn, fallback) -> dict:
     service_id = book = type_id = book_source = type_source = None
     if rule is not None:
         service_id = rule["service_id"]
-        book, type_id, _ = db.rule_label(rule)
+        book, type_id = db.rule_label(rule)
         book_source, type_source = label_source.rule_sources(rule)
     if type_id is None:
         wording_book, wording_type = fallback(description, conn)
@@ -577,9 +576,10 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
         after = db.pick_rule(after_rules, held["description"] or "", held["amount_minor"])
         sources = {f: _source(held, f) for f in label_source.FIELDS}
         # A field's mark as the rules' re-run reads it: an empty field reads
-        # the row's old mark, so a row named by hand on the review list (a
-        # movement, income) with no book or type is not the rules' to take.
-        marks = {f: label_source.source_of(held[c], held["cat_source"]) for f, c in label_source.FIELDS.items()}
+        # its own source, so a row named by hand on the review list (a
+        # movement, income) with no book or type, its fields chosen, is not
+        # the rules' to take.
+        marks = {f: label_source.source_of(held[c]) for f, c in label_source.FIELDS.items()}
         reachable = {f: label_source.reachable(m) for f, m in marks.items()}
         if held_rule is not None and before is not None and before["id"] == rule_id and any(reachable.values()):
             labelled += 1
@@ -695,7 +695,7 @@ def drift(conn: sqlite3.Connection, fallback) -> Plan:
     a value other than what the winning rule (or the wording, `fallback`)
     gives now, or, every field being from fin, its merchant is not the
     rule's. A checked or chosen field is never counted and never written;
-    an empty field reads the row's old mark, as the rule preview reads it.
+    an empty field reads its own source, as the rule preview reads it.
     Apply writes what the rules give, each field taking the source that
     gives it, its flow worked out again, in one change; there is no Only new
     rows (Leave them writes nothing). Transfers and card payments are not
@@ -711,13 +711,13 @@ def drift(conn: sqlite3.Connection, fallback) -> Plan:
     cursor.row_factory = None
     read = cursor.execute(
         "SELECT t.id, t.description, t.amount_minor, t.service_id, t.book, t.book_source, t.type_id,"
-        " t.type_source, t.cat_source FROM transactions t"
+        " t.type_source FROM transactions t"
         " WHERE COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')"
         f" AND {label_source.from_fin_sql('t')}").fetchall()
     from_fin, source_of = label_source.FROM_FIN, label_source.source_of
     by_rule: dict = {}                     # what a rule that gives a type gives every row it wins
     writes_of: dict[int, dict] = {}
-    for tx_id, description, amount_minor, service_id, book, book_source, type_id, type_source, mark in read:
+    for tx_id, description, amount_minor, service_id, book, book_source, type_id, type_source in read:
         rule = winner.of(description, amount_minor)
         key = rule["id"] if rule is not None and (rule["type_override_id"] or rule["type_id"]) else None
         found = by_rule.get(key) if key is not None else None
@@ -728,7 +728,7 @@ def drift(conn: sqlite3.Connection, fallback) -> Plan:
         sets, differs, kept = {}, False, False
         for field_name, column, value, source in (("book", "book_source", book, book_source),
                                                   ("type_id", "type_source", type_id, type_source)):
-            if source_of(source, mark) not in from_fin:
+            if source_of(source) not in from_fin:
                 kept = True
                 continue
             differs = differs or found[field_name] != value

@@ -431,7 +431,7 @@ def test_the_drift_apply_preserves_flow_type_manual_rows(client, conn):
     tx_id, _, _ = _seed_one_tx(conn)
     # Manually override flow_type
     conn.execute(
-        "UPDATE transactions SET flow_type = 'transfer', flow_type_manual = 1, cat_source = 'manual' WHERE id = ?",
+        "UPDATE transactions SET flow_type = 'transfer', flow_type_manual = 1, book_source = 'chosen', type_source = 'chosen' WHERE id = ?",
         (tx_id,),
     )
     conn.commit()
@@ -471,8 +471,8 @@ def test_the_drift_apply_recomputes_flow_type_on_the_rows_a_rule_relabels(client
     )
     stmt = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, cat_source) "
-        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ REBATE', -2000, 'income', 'auto')",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
+        "VALUES (?, '2025-04-15', 'OBSCURE CREDIT ADJ REBATE', -2000, 'income')",
         (stmt,),
     )
     tx_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]

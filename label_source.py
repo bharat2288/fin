@@ -2,7 +2,7 @@
 
 Personal-ledger 24 (ADR-008): a row's book and its type each say where they
 came from, one of book_type.SOURCES. This module is the one helper every
-writer and every query that once read `cat_source` reads:
+writer and every query that once read the row's one mark reads:
 
 - **reachable by a later change**: from the merchant, a rule or the wording,
   and checked. Never chosen, never worked out;
@@ -20,9 +20,11 @@ and the sources the writers set, each field on its own:
 - a later change reaching a field: a checked field stays checked, one from
   fin takes the source that gave its new value.
 
-`cat_source`, the one mark a row carried before, is still written in step
-(expand): `mark` gives it from the two sources, so nothing that still reads
-it changes. A contract step (personal-ledger 51) retires it.
+The one mark a row carried before the two sources (RETIRED_MARK) is retired
+(personal-ledger 51): no writer sets it and no query reads it. A field with a
+value and no source reads as from the merchant, as a row with no mark read
+then; the contract step (retire_single_mark.py) wrote every other reading an
+empty source had into the field before it dropped the mark.
 """
 
 from __future__ import annotations
@@ -45,24 +47,13 @@ LOOKED_AT = (CHECKED, CHOSEN)
 # What a later change leaves alone.
 KEPT = (CHOSEN, DERIVED)
 
-# The old single mark, from the two sources, first match wins: any field the
-# operator looked at is `manual` (as every hand write once marked the row),
-# then worked out, the wording, a rule, the merchant.
-_MARKS = (
-    (LOOKED_AT, "manual"),
-    ((DERIVED,), "derived"),
-    ((WORDING,), "fallback"),
-    ((RULE,), "rule_override"),
-    ((MERCHANT,), "service_default"),
-)
-
-# How the old mark reads for a field with a value and no source of its own,
-# during the expand step only: rows no switched writer has given a source
-# (the demo seed, a refund link's write) still carry cat_source alone, and a
-# hand-set label must not become reachable for that. The label-source step reads the
-# same marks the same way. Retired with cat_source (personal-ledger 51).
-_SOURCE_OF_MARK = {"manual": CHOSEN, "derived": DERIVED, "rule_override": RULE, "fallback": WORDING}
-_MARK_COLUMN = "cat_source"
+# The column that held the one mark, retired (personal-ledger 51). Its one
+# name: the contract step drops it, fin will not start on a book that still
+# holds it (db), and the change history recorded before the label-source step
+# carries it in a row's before and after (_set_it reads it there).
+RETIRED_MARK = "cat_source"
+# What a field with no source reads as: a row with no mark read so.
+NO_SOURCE = MERCHANT
 
 _ALIAS = re.compile(r"[a-z]\w*")
 
@@ -81,24 +72,20 @@ def _column(alias: str, field: str) -> str:
     return f"{alias}.{FIELDS[field]}" if alias else FIELDS[field]
 
 
-def source_of(source: str | None, cat_source: str | None) -> str:
-    """A field's source as the helpers read it: its own, or for a field with
-    none, what the row's old mark says (expand)."""
-    if source is not None:
-        return source
-    return _SOURCE_OF_MARK.get(cat_source or "auto", MERCHANT)
+def source_of(source: str | None) -> str:
+    """A field's source as the helpers read it: its own, or from the merchant
+    for a field with none."""
+    return NO_SOURCE if source is None else source
 
 
 def _source_sql(alias: str, field: str) -> str:
-    mark = f"{alias}.{_MARK_COLUMN}" if alias else _MARK_COLUMN
-    cases = " ".join(f"WHEN '{m}' THEN '{src}'" for m, src in _SOURCE_OF_MARK.items())
-    return f"COALESCE({_column(alias, field)}, CASE {mark} {cases} ELSE '{MERCHANT}' END)"
+    return f"COALESCE({_column(alias, field)}, '{NO_SOURCE}')"
 
 
-def reachable(source: str | None, cat_source: str | None = None) -> bool:
+def reachable(source: str | None) -> bool:
     """Whether a later change may reach a field with this source (read by
     source_of)."""
-    return source_of(source, cat_source) in REACHABLE
+    return source_of(source) in REACHABLE
 
 
 def reachable_sql(field: str, alias: str = "t") -> str:
@@ -121,6 +108,12 @@ def waits_sql(alias: str = "t") -> str:
     """SQL, the row half of Check each row: neither field checked nor chosen."""
     neither = " AND ".join(f"{_source_sql(alias, field)} NOT IN ({_quoted(LOOKED_AT)})" for field in FIELDS)
     return f"({neither})"
+
+
+def looked_at_sql(alias: str = "t") -> str:
+    """SQL: the operator has looked at a field of the row (checked or chosen
+    either one), what a hand-set row was before the two sources."""
+    return f"NOT {waits_sql(alias)}"
 
 
 def book_varies_sql(alias: str = "t") -> str:
@@ -183,15 +176,6 @@ def rule_sources(rule) -> tuple[str, str]:
     )
 
 
-def mark(book_source: str | None, type_source: str | None, otherwise: str | None = None) -> str | None:
-    """`cat_source` as written in step with the two sources; `otherwise`
-    for a row with neither."""
-    for sources, name in _MARKS:
-        if book_source in sources or type_source in sources:
-            return name
-    return otherwise
-
-
 # --- The marks shown (fin-surfaces 52) ---------------------------------------
 
 # The field names a screen reads a row's two sources by.
@@ -199,15 +183,14 @@ SHOWN = {"book": "book", "type_id": "type"}
 
 
 def shown_sources(tx) -> dict:
-    """A row's two sources as the screens are given them, read by source_of
-    (a field with no source of its own reads the old mark, expand); none for
-    an empty field. `tx` holds the row's raw book, type_id, the two source
-    columns and cat_source."""
+    """A row's two sources as the screens are given them, read by source_of;
+    none for an empty field with no source. `tx` holds the row's raw book,
+    type_id and the two source columns."""
     out = {}
     for field, name in SHOWN.items():
         held = tx[FIELDS[field]]
         has_value = tx[field] is not None or held is not None
-        out[name] = source_of(held, tx["cat_source"]) if has_value else None
+        out[name] = source_of(held) if has_value else None
     return out
 
 
@@ -226,9 +209,9 @@ def _set_it(field: str, source: str, before: dict | None, after: dict) -> bool:
         if before.get(column) != source:
             return True
         return source == CHOSEN and before.get(field) != after.get(field)
-    if source not in LOOKED_AT or after.get(_MARK_COLUMN) != "manual":
+    if source not in LOOKED_AT or after.get(RETIRED_MARK) != "manual":
         return False
-    return before.get(_MARK_COLUMN) != "manual" or before.get(field) != after.get(field)
+    return before.get(RETIRED_MARK) != "manual" or before.get(field) != after.get(field)
 
 
 def set_by(conn, tx_id: int, sources: dict) -> dict:

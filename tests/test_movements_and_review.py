@@ -444,7 +444,7 @@ def test_labelled_spending_takes_its_type_and_counts_as_household_spending(clien
     tx = labelled(client, TRANSFERS[2][1], choice="spending", type_id=spending_type(client, "Education"))
 
     assert what_it_is(tx) == ("expense", None, "Household", "Education")
-    assert (tx["flow_type_manual"], tx["cat_source"]) == (1, "manual")
+    assert (tx["flow_type_manual"], tx["book_source"], tx["type_source"]) == (1, "chosen", "chosen")
     assert household_spend(client) == 12080.75  # 80.25 + 12,000.50, to the cent
     assert len(review_list(client)) == 2
 

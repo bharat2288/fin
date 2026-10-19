@@ -19,6 +19,7 @@ import convert_change_history
 import convert_label_source
 import convert_account_kinds
 import convert_movements
+import retire_single_mark
 import db
 import history
 import money
@@ -122,6 +123,10 @@ def old(tmp_path: Path) -> Path:
     path = tmp_path / "ledger.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(old_schema())
+    # And the columns a later step retires, which a book from then still held.
+    for table, retired in conversion.retired_after("movements").items():
+        for column, declaration in retired:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
     conn.executemany(
         "INSERT INTO accounts (id, name, short_name, type, owner) VALUES (?, ?, ?, ?, ?)",
         [(i, name, name, kind, owner) for i, name, kind, owner in ACCOUNTS],
@@ -136,11 +141,10 @@ def old(tmp_path: Path) -> Path:
     )
     conn.executemany(
         "INSERT INTO transactions (id, statement_id, date, description, amount_minor, flow_type, "
-        "flow_type_manual, service_id, type_id, book, cat_source) VALUES (?, ?, '2026-08-15', ?, ?, ?, ?, ?, ?, ?, ?)",
+        "flow_type_manual, service_id, type_id, book) VALUES (?, ?, '2026-08-15', ?, ?, ?, ?, ?, ?, ?)",
         [
             (i, account, description, money.to_minor(amount), flow, manual, service,
-             900 if typed else None, book,
-             "manual" if manual else "auto")
+             900 if typed else None, book)
             for (i, account, description, amount, flow, manual, service, typed, book), _ in ROWS
         ],
     )
@@ -189,7 +193,7 @@ def test_a_row_with_a_manual_flow_is_never_touched(old):
 def test_nothing_but_the_flow_and_the_other_side_changes(old):
     everything_else = (
         "SELECT id, statement_id, date, description, amount_minor, service_id, type_id, book, "
-        "cat_source, flow_type_manual, is_one_off, notes FROM transactions ORDER BY id"
+        "flow_type_manual, is_one_off, notes FROM transactions ORDER BY id"
     )
     before = query(old, everything_else)
 
@@ -226,7 +230,10 @@ def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
     foreign_keys = "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('transactions') ORDER BY 1, 2"
     # Less the columns a later step adds (convert_label_source.py).
     later = conversion.added_after("movements").get("transactions", set())
-    assert query(old, shape) == [c for c in query(new, shape) if c[0] not in later]
+    # And those a later step drops (retire_single_mark.py), which it still holds.
+    retired = {column for column, _ in conversion.retired_after("movements").get("transactions", ())}
+    assert [c for c in query(old, shape) if c[0] not in retired] == [
+        c for c in query(new, shape) if c[0] not in later]
     assert query(old, foreign_keys) == query(new, foreign_keys)
 
 
@@ -337,6 +344,7 @@ def test_the_app_shows_the_converted_rows_and_their_other_sides(old, started_on)
     # And the change history, and the label sources after it.
     conversion.run_step(old, convert_change_history.STEP)
     conversion.run_step(old, convert_label_source.STEP)
+    conversion.run_step(old, retire_single_mark.STEP)
     client = started_on(old)
 
     waiting = client.get("/api/transactions?flow=review&sort=amount&sort_dir=desc").get_json()["transactions"]

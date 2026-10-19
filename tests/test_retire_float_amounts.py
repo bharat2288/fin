@@ -26,6 +26,7 @@ import convert_printed_statements
 import db
 import history
 import retire_float_amounts
+import retire_single_mark
 
 DAY = date(2026, 3, 14)
 OLD_SCHEMA = Path(__file__).parent / "schema_before_minor_units.sql"
@@ -404,6 +405,9 @@ def test_a_database_through_both_steps_has_the_shape_of_a_new_one(old, tmp_path)
     # Columns a step after these adds (convert_label_source.py) are not
     # there yet: the shape is the new one's without them.
     later = conversion.added_after("printed-statements")
+    # And those a step after these drops (retire_single_mark.py): kept until it does.
+    for table, retired in conversion.retired_after("printed-statements").items():
+        later[table] = set(later.get(table, ())) | {column for column, _ in retired}
 
     def shape(path: Path) -> dict:
         tables = [r[0] for r in query(
@@ -553,6 +557,7 @@ def test_the_app_shows_a_converted_database_the_figures_its_floats_stated(old, s
     # And the change history, and the label sources after it.
     conversion.run_step(old, convert_change_history.STEP)
     conversion.run_step(old, convert_label_source.STEP)
+    conversion.run_step(old, retire_single_mark.STEP)
     client = started_on(old)
 
     rows = {

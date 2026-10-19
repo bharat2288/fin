@@ -114,7 +114,7 @@ def test_the_book_is_ready_for_this_step(tmp_path):
     path = make_book(tmp_path / "ledger.db")
     conn = sqlite3.connect(str(path))
     try:
-        assert conversion.not_applied(conn) == ["vantage-header-label", "change-history", "label-source"]
+        assert conversion.not_applied(conn) == ["vantage-header-label", "change-history"]
     finally:
         conn.close()
 

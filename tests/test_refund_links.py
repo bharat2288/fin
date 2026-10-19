@@ -116,7 +116,7 @@ def test_undoing_the_import_takes_its_refund_link_with_it(client, conn, book):
 def test_a_refund_labelled_by_hand_keeps_its_label(client, conn, book):
     purchase = amazon(conn, book)
     back = refund(conn, book, "2026-08-12", 59000)
-    conn.execute("UPDATE transactions SET book = 'Moom', type_id = ?, cat_source = 'manual' WHERE id = ?",
+    conn.execute("UPDATE transactions SET book = 'Moom', type_id = ?, book_source = 'chosen', type_source = 'chosen' WHERE id = ?",
                  (type_id(conn, "Office"), back))
     conn.commit()
     run(client)

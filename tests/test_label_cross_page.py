@@ -42,7 +42,6 @@ import pytest
 import app as fin_app
 import convert_all
 import db
-import label_source
 import mcp_tools
 import trend_api
 import trend_types_api
@@ -107,10 +106,9 @@ class Book:
         stmt = self.statements[(self.rupee_card if rupee else self.card, day[:7])]
         rid = self.conn.execute(
             "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id,"
-            " service_id, cat_source, flow_type, book_source, type_source)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expense', ?, ?)",
-            (stmt, day, wording, amount_minor, book, type_id, svc,
-             label_source.mark(book_source, type_source, "auto"), book_source, type_source),
+            " service_id, flow_type, book_source, type_source)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 'expense', ?, ?)",
+            (stmt, day, wording, amount_minor, book, type_id, svc, book_source, type_source),
         ).lastrowid
         self.conn.commit()
         return rid
@@ -122,7 +120,7 @@ class Book:
 def state(conn) -> tuple:
     """Every row, merchant and rule, sources included."""
     rows = {r[0]: tuple(r[1:]) for r in conn.execute(
-        "SELECT id, service_id, book, type_id, book_source, type_source, cat_source, flow_type FROM transactions")}
+        "SELECT id, service_id, book, type_id, book_source, type_source, flow_type FROM transactions")}
     merchants = {r[0]: tuple(r[1:]) for r in conn.execute(
         "SELECT id, name, book, type_id, review_each_time FROM services")}
     rules = {r[0]: tuple(r[1:]) for r in conn.execute(

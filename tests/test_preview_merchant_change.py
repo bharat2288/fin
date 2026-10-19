@@ -41,13 +41,12 @@ MONTHS = ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03", "2026-04",
 
 def add_row(conn, statement_id, description, amount_minor, *, service_id, book="Household",
             type_name="Travel", sources=("merchant", "merchant"), day="2026-09-10", flow="expense"):
-    mark = "manual" if {"checked", "chosen"} & set(sources) else "service_default"
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id,"
-        " service_id, cat_source, flow_type, book_source, type_source)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " service_id, flow_type, book_source, type_source)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (statement_id, day, description, amount_minor, book,
-         type_id(conn, type_name) if type_name else None, service_id, mark, flow,
+         type_id(conn, type_name) if type_name else None, service_id, flow,
          sources[0] if book else None, sources[1] if type_name else None),
     )
     conn.commit()
@@ -64,7 +63,7 @@ def labels(conn, ids) -> dict:
 
 def every_row(conn) -> dict:
     return {r[0]: tuple(r[1:]) for r in conn.execute(
-        "SELECT id, book, type_id, service_id, book_source, type_source, cat_source FROM transactions")}
+        "SELECT id, book, type_id, service_id, book_source, type_source FROM transactions")}
 
 
 def merchant_label(conn, svc) -> tuple:
@@ -215,11 +214,10 @@ def amazon(conn, statement):
     shopping = type_id(conn, "Shopping")
     plan = [("merchant", "merchant")] * 172 + [("checked", "checked")] * 40 + [("merchant", "chosen")] * 9
     rows = [(statement, f"2026-{1 + i % 9:02d}-{1 + i % 27:02d}", f"SAMPLE AMZN {i:04d}", 1000 + i, "Household",
-             shopping, svc, "manual" if "merchant" != s[1] or s[0] != "merchant" else "service_default",
-             "expense", s[0], s[1]) for i, s in enumerate(plan)]
+             shopping, svc, "expense", s[0], s[1]) for i, s in enumerate(plan)]
     conn.executemany(
         "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id,"
-        " service_id, cat_source, flow_type, book_source, type_source) VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+        " service_id, flow_type, book_source, type_source) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
     conn.commit()
     return svc
 
@@ -546,9 +544,9 @@ def test_the_preview_runs_within_a_second_over_fifty_thousand_rows(client, conn,
     travel = type_id(conn, "Travel")
     conn.executemany(
         "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id,"
-        " service_id, cat_source, flow_type, book_source, type_source) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        " service_id, flow_type, book_source, type_source) VALUES (?,?,?,?,?,?,?,?,?,?)",
         [(statement, f"20{24 + i % 3}-{1 + i % 12:02d}-{1 + i % 28:02d}", f"SAMPLE VOLUME AIR {i}", 500 + i % 900,
-          "Household", travel, svc, "service_default", "expense",
+          "Household", travel, svc, "expense",
           ("merchant", "checked", "chosen")[i % 3], "merchant") for i in range(50_000)])
     conn.commit()
 
