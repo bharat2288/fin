@@ -51,4 +51,44 @@
 /* ==== end: type ==== */
 
 /* ==== reserved: types ==== */
+/* Types over time (fin-surfaces 47): the book picker and toggle, the legend's link icon,
+   the small multiples. A cell's colour is the line mode's slot class (--tl). */
+.trend-types-page { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.trend-types__bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-5); }
+.trend-types__group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.trend-types__label { color: var(--text-tertiary); font-size: var(--t-ui); }
+.trend-types__card { min-width: 0; }
+.trend-types-pair { display: inline-flex; align-items: center; white-space: nowrap; }
+.trend-types-link { display: inline-flex; align-items: center; justify-content: center; width: var(--ctl-sm); height: var(--ctl-sm);
+    margin-left: -6px; border-radius: 999px; color: var(--text-tertiary); }
+.trend-types-link svg { width: 14px; height: 14px; }
+.trend-types-link:hover { color: var(--accent-ink); background: color-mix(in srgb, var(--text-primary) 5%, transparent); }
+.trend-types-link:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.trend-types { display: flex; flex-direction: column; gap: var(--space-3); }
+.trend-types__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-3); }
+.trend-types__cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: var(--space-3);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-surface);
+    color: var(--text-secondary); text-decoration: none; font-size: var(--t-meta); }
+.trend-types__cell[href]:hover { border-color: var(--border-emphasis); }
+.trend-types__cell[href]:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.trend-types__head { display: flex; justify-content: space-between; gap: var(--space-2); align-items: baseline; }
+.trend-types__name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--text-primary);
+    font-weight: var(--font-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trend-types__name i { width: 10px; height: 10px; border-radius: 3px; background: var(--tl); flex: none; }
+.trend-types__head b { color: var(--text-primary); font-weight: var(--font-semibold); font-variant-numeric: tabular-nums; }
+.trend-types__top, .trend-types__range { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.trend-types__svg { display: block; width: 100%; height: 72px; overflow: visible; }
+.trend-types__base { stroke: var(--border-emphasis); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.trend-types__ln { fill: none; stroke: var(--tl); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round;
+    vector-effect: non-scaling-stroke; }
+.trend-types__ln--est { stroke-dasharray: 3 4; opacity: .85; }
+.trend-types__dot { fill: var(--tl); }
+.trend-types__est { fill: var(--bg-surface); stroke: var(--tl); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.trend-types__empty { margin: 0; color: var(--text-secondary); font-size: var(--t-ui); }
+@media (max-width: 559px) {
+    .trend-types__bar .seg { width: 100%; }
+    .trend-types__bar .seg > button { flex: 1 1 auto; }
+    .trend-types-link { width: var(--tap); height: var(--tap); }
+    .trend-types__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+}
 /* ==== end: types ==== */
