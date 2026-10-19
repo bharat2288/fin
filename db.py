@@ -241,7 +241,10 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
     """Whether the database holds anything the app cannot serve until the
     conversion steps have run: the category tree, float amounts, accounts
     with no owner, rows that cannot name their other side or their printed
-    statement, rows with no flow, or no change history."""
+    statement, rows with no flow, or a change history without every tracked
+    table and its triggers (history.has_shape). The expect-back records
+    (personal-ledger 23) are tracked tables, so a book from before them reads
+    as needing the change-history step again, which makes them."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "transactions" not in tables:
         return False  # a new database
