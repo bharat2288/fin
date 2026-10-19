@@ -159,10 +159,10 @@ def test_empty_shells_draw_nothing_in_any_slot():
     # whichever lanes have filled them since (personal-ledger 34 fills the mark's).
     assert out[:8] == [""] * 8
     # An entry point is absent until its lane fills its shell, then a function
-    # (34 fills openExpectMark, 35 viewExpectation, 37 openLetGo).
-    assert out[8] == "function" and out[9] == "function" and out[11] == "function"
-    assert out[10] == "undefined"
+    # (34 fills openExpectMark, 35 viewExpectation, 36 openBackFor, 37 openLetGo).
+    assert out[8:12] == ["function"] * 4
     assert set(out[12]) <= {"rowActions", "rowPill", "merchantRowAction", "booksSections", "queueStep", "backForFoot"}
+    assert "rowActions" in out[12]  # personal-ledger 36: the row sheet's Back for…
 
 
 @needs_node
