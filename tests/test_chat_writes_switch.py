@@ -56,6 +56,13 @@ def sample_args(tool) -> dict:
 WRITES = [t for t in mcp_tools.TOOLS if t.write and t.name != "turn_off_writes"]
 
 
+def test_the_sweep_covers_the_expect_back_writes():
+    swept = {t.name for t in WRITES}
+
+    assert {"mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go",
+            "not_a_payback"} <= swept
+
+
 # --- the default and the file -------------------------------------------------------
 
 

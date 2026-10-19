@@ -30,11 +30,14 @@ GOLDEN: list[str] = [
     # reads
     "balance_sheet", "spending_cards", "spending_by_type", "spending_by_month", "transactions",
     "review_summary", "accounts", "figures", "merchants", "rules", "types", "books", "flows",
-    "coverage", "rates", "history", "change",
+    "coverage", "rates", "history", "change", "expected_back",
     # writes
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "rerun_rules", "change_merchant", "merge_merchants",
-    "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate", "undo",
+    "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate",
+    # personal-ledger 44: expect back (spec 23 E8)
+    "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
+    "undo",
     # 01's Off switches: chat can turn Claude's writes off, never on.
     "turn_off_writes",
 ]

@@ -24,12 +24,15 @@ ACTOR = "chat:sample-subject"
 READS = [
     "balance_sheet", "spending_cards", "spending_by_type", "spending_by_month", "transactions",
     "review_summary", "accounts", "figures", "merchants", "rules", "types", "books", "flows",
-    "coverage", "rates", "history", "change",
+    "coverage", "rates", "history", "change", "expected_back",
 ]
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "rerun_rules", "change_merchant", "merge_merchants",
-    "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate", "undo",
+    "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate",
+    # personal-ledger 44: expect back (spec 23 E8)
+    "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
+    "undo",
     # 01's Off switches: chat can turn Claude's writes off, never on.
     "turn_off_writes",
 ]
@@ -79,7 +82,10 @@ def test_no_tool_reaches_what_the_ruling_keeps_out():
     for forbidden in ("/api/import", "/api/subscriptions", "/api/suggestions", "/api/accounts/1",
                       "/api/services/bulk-rename", "/api/loan-interest"):
         assert not any(p.startswith(forbidden) for p in paths), forbidden
-    assert not any(p.startswith("/api/transactions/") and p != "/api/transactions/1" for p in paths)
+    # A row's own route, and the three expect-back routes of its (personal-ledger 44).
+    reaches_a_row = {"/api/transactions/1", "/api/transactions/1/expectation",
+                     "/api/transactions/1/set-offs", "/api/transactions/1/not-a-payback"}
+    assert not any(p.startswith("/api/transactions/") and p not in reaches_a_row for p in paths)
 
 
 def test_every_tool_has_a_closed_schema_and_a_description():
