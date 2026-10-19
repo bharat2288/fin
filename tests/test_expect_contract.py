@@ -156,7 +156,8 @@ def test_empty_shells_draw_nothing_in_any_slot():
     })();"""
     out = run_node(code)
     assert out[:8] == [""] * 8
-    assert out[8:12] == ["undefined"] * 4
+    # An entry point is absent until its lane fills its shell, then a function (37 fills openLetGo).
+    assert out[8:11] == ["undefined"] * 3 and out[11] == "function"
     assert out[12] == []
 
 
