@@ -673,6 +673,28 @@ li.empty { list-style: none; margin-top: 8px; }
 .prev-mark { display: inline-block; padding: 1px 6px; border: 1px dashed var(--border-emphasis); border-radius: var(--radius-md);
     font-size: var(--t-cap); font-weight: var(--font-semibold); color: var(--text-secondary); white-space: nowrap; }
 .sheet-body > .link { align-self: flex-start; }
+/* a taught wording that takes another merchant's rows names them: one warning line (fin-surfaces 53) */
+.warnline { display: flex; gap: var(--space-2); align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-xl);
+    background: var(--warn-subtle); color: var(--text-primary); font-size: var(--t-ui); overflow-wrap: anywhere; }
+.warnline > svg { flex: none; width: 16px; height: 16px; margin-top: 2px; color: var(--semantic-warning); }
+/* the rule shown when teaching (fin-surfaces 53): "Recognises INDIGOAIR · 6 rows · change", opening the wording in place
+   with a live count; "recognises INDIGOAIR" under a sure line's merchant */
+.rec { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0;
+    font-size: var(--t-ui); color: var(--text-secondary); overflow-wrap: anywhere; }
+.rec b { color: var(--text-primary); }
+.rec--edit { display: grid; gap: var(--space-1); }
+.rec__row { display: flex; gap: var(--space-2); align-items: center; min-width: 0; }
+.rec__row input { flex: 1 1 auto; min-width: 0; max-width: 360px; }
+.rec__n { font-size: var(--t-meta); color: var(--text-secondary); }
+.rec .warn-word, .rec__n .warn-word { font-weight: var(--font-semibold); }
+.rec-mini { display: block; margin-left: 22px; font-size: var(--t-meta); color: var(--text-tertiary); overflow-wrap: anywhere; }
+.rec-mini b { font-weight: var(--font-semibold); color: var(--text-secondary); }
+.qi__more > .rec { margin-bottom: var(--space-2); }
+#ww-rec[hidden] { display: none; }
+@media (max-width: 720px) {
+    .rec-mini { margin-left: 0; }
+    .rec .link { display: inline-flex; align-items: center; min-height: var(--tap); }
+}
 /* choices inside a sheet: folio's check tiles; the chosen one a whole ink border and a check */
 .choices { display: grid; gap: 8px; }
 .choice { position: relative; display: block; width: 100%; text-align: left; min-height: 52px; padding: 10px 40px 10px 12px; border-radius: var(--radius-xl);

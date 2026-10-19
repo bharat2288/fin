@@ -1719,6 +1719,65 @@ def _write_plan(conn, plan, answer: str | None, fill: bool = True) -> tuple[int,
     return relabelled, checked
 
 
+def _taught_overrides(apply_scope: str, book, type_id, merchant_book) -> dict:
+    """The overrides a rule taught by resolve carries: with a rule override,
+    the type, and the book only where it is not the merchant's; none for the
+    merchant's default."""
+    if apply_scope != "rule":
+        return {"book_override": None, "type_override_id": None}
+    return {"book_override": book if book != merchant_book else None, "type_override_id": type_id}
+
+
+def _write_taken(conn, plan, answer: str | None, service_id: int) -> int:
+    """The rows another merchant held that a taught wording takes
+    (relabel_preview.taking), as answered: apply moves each to the merchant
+    taught with its label, sources as they were; only_new leaves each with
+    its merchant, the fields fin gave checked. Returns the rows written."""
+    written = 0
+    for p in plan.rows:
+        if answer == relabel_preview.APPLY:
+            written += _write_label(conn, p.held, {**p.apply, "service_id": service_id})
+        elif answer == relabel_preview.ONLY_NEW:
+            written += _write_label(conn, p.held, p.only_new)
+    return written
+
+
+@app.route("/api/rules/reach")
+def api_rules_reach():
+    """The rows a wording taught as a merchant's rule would label (the rule
+    shown when teaching, fin-surfaces 53): {pattern, count, only_this,
+    others: [{service_id, name, count}]}. `tx_id`, once or more, is the row
+    or rows being taught (only_this: the wording matches one of them and no
+    other row); `service_id`, or
+    `service_name` for one fin holds by that name, is the merchant taught
+    (others: the rows another merchant holds that it would take, a chosen
+    field's row left out). The count is the preview's (relabel_preview);
+    it writes nothing."""
+    pattern = (request.args.get("pattern") or "").strip()
+    match_type = request.args.get("match_type") or "contains"
+    if not pattern:
+        return jsonify({"error": "Say the wording the rule recognises"}), 400
+    if match_type not in relabel_preview.MATCH_TYPES:
+        return jsonify({"error": f"match_type must be one of {', '.join(relabel_preview.MATCH_TYPES)}"}), 400
+    pattern_error = _rule_pattern_error(pattern)
+    if pattern_error:
+        return jsonify({"error": pattern_error}), 400
+    tx_ids = request.args.getlist("tx_id", type=int)
+    service_id = request.args.get("service_id", type=int)
+    name = (request.args.get("service_name") or "").strip()
+    with get_db() as conn:
+        if service_id is None and name:
+            found = conn.execute("SELECT id FROM services WHERE UPPER(name) = ?", (name.upper(),)).fetchone()
+            service_id = found[0] if found else None
+        reach = relabel_preview.wording_reach(conn, pattern, match_type, service_id)
+        return jsonify({
+            "pattern": reach.pattern,
+            "count": reach.count,
+            "only_this": reach.only(tx_ids),
+            "others": reach.others_named(relabel_preview.kept),
+        })
+
+
 @app.route("/api/services/<int:svc_id>", methods=["PUT"])
 def api_services_update(svc_id):
     """Update a service. A change of its book or type that would relabel
@@ -2914,36 +2973,53 @@ def api_resolve_transaction():
                 if book is None:
                     book = svc["book"]
                 book = _book_or_proposed(conn, book, type_id)
-                # Service-default resolution can update the merchant's default,
-                # and then its past rows go through the preview, as the
-                # merchant sheet's do (fin-surfaces 21): without past_rows
-                # nothing is written and the preview comes back. Before any
-                # write, so a refusal leaves the book as it was.
-                if apply_scope == "service_default" and (
-                    (book, type_id) != (svc["book"], svc["type_id"])
-                ):
-                    moved = {f: v for f, v in (("book", book), ("type_id", type_id)) if v != svc[f]}
-                    plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id})
-                    refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
-                    if refused is not None:
-                        return refused
-                    conn.execute(
-                        "UPDATE services SET book = ?, type_id = ? WHERE id = ?",
-                        (book, type_id, service_id),
-                    )
-                    _write_plan(conn, plan, past_rows, fill=False)
                 merchant_book = book if apply_scope == "service_default" else svc["book"]
             else:
                 # Create new service — the type is required
                 if not type_id:
                     return jsonify({"error": "type_id required for new service"}), 400
                 book = _book_or_proposed(conn, book, type_id)
+                merchant_book = book
+
+            # Service-default resolution can update the merchant's default,
+            # and then its past rows go through the preview, as the merchant
+            # sheet's do (fin-surfaces 21); so does a wording that would take
+            # rows another merchant holds (fin-surfaces 53). Without past_rows
+            # nothing is written and the preview comes back, one question for
+            # both. Before any write, so a refusal leaves the book as it was.
+            merchant_plan = taken_plan = None
+            if svc and apply_scope == "service_default" and (
+                (book, type_id) != (svc["book"], svc["type_id"])
+            ):
+                moved = {f: v for f, v in (("book", book), ("type_id", type_id)) if v != svc[f]}
+                merchant_plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id})
+            if pattern and apply_scope in {"rule", "service_default"}:
+                reach = relabel_preview.wording_reach(conn, pattern, match_type, service_id if svc else None)
+                if reach.others:
+                    shown_name = conn.execute(
+                        "SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()[0] if svc else service_name
+                    taken_plan = relabel_preview.taking(
+                        conn, reach, shown_name, {"book": book, "type_id": type_id},
+                        label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book)))
+            plan = relabel_preview.joined(merchant_plan, taken_plan)
+            if plan is not None:
+                refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
+                if refused is not None:
+                    return refused
+            if merchant_plan is not None:
+                conn.execute(
+                    "UPDATE services SET book = ?, type_id = ? WHERE id = ?",
+                    (book, type_id, service_id),
+                )
+                _write_plan(conn, merchant_plan, past_rows, fill=False)
+            if not svc:
                 conn.execute(
                     "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
                     (service_name, book, type_id),
                 )
                 service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                merchant_book = book
+            if taken_plan is not None:
+                _write_taken(conn, taken_plan, past_rows, service_id)
 
             # The setting, as taught: Check each row, or Every row the same.
             # A merchant fin already held, newly set to check each row, has
@@ -2968,12 +3044,9 @@ def api_resolve_transaction():
                 ).fetchone()
                 # A rule override carries the type, and the book only where it
                 # is not the merchant's.
-                override_type_id = type_id if apply_scope == "rule" else None
-                override_book = (
-                    book if apply_scope == "rule" and book != merchant_book else None
-                )
-                taught = label_source.rule_sources(
-                    {"book_override": override_book, "type_override_id": override_type_id})
+                overrides = _taught_overrides(apply_scope, book, type_id, merchant_book)
+                override_type_id, override_book = overrides["type_override_id"], overrides["book_override"]
+                taught = label_source.rule_sources(overrides)
                 if not rule_exists:
                     conn.execute(
                         "INSERT INTO merchant_rules (pattern, service_id, book_override, "
