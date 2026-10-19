@@ -4721,8 +4721,9 @@ def _typed_as(conn, kind: str, name: str) -> int:
 
 @app.route("/api/review/<int:tx_id>/label", methods=["POST"])
 def api_review_label(tx_id: int):
-    """Say what a waiting transfer was. Writes the choice's flow and its other
-    side as a manual label, which no rule and no re-run changes afterwards.
+    """Say what a waiting transfer was. Writes the choice's flow (set by hand)
+    and its other side, and its book and type each chosen, so no merchant
+    change, rule or re-run reaches them afterwards.
 
     Body: choice, and what the choice asks for (see /api/review):
         spending        type_id; book where the type proposes none
@@ -4787,12 +4788,18 @@ def api_review_label(tx_id: int):
         if why:
             return jsonify({"error": why}), 400
 
-        # Everything asked for is there: the label, in one transaction.
-        conn.execute(
-            "UPDATE transactions SET flow_type = ?, flow_type_manual = 1, other_side_id = ?, "
-            "book = ?, type_id = ?, cat_source = 'manual' WHERE id = ?",
-            (flow_name, other_side, book, type_id, tx_id),
-        )
+        # Everything asked for is there: the label, in one transaction. Saying
+        # what it was is a deliberate act: the book and the type it gives are
+        # each chosen, an empty field has no source, and the flow is set by
+        # hand (personal-ledger 50). cat_source stays `manual`, in step.
+        held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
+        book_source = label_source.given(book, label_source.CHOSEN)
+        type_source = label_source.given(type_id, label_source.CHOSEN)
+        _write_label(conn, held, {
+            "flow_type": flow_name, "flow_type_manual": 1, "other_side_id": other_side,
+            "book": book, "type_id": type_id, "book_source": book_source, "type_source": type_source,
+            "cat_source": label_source.mark(book_source, type_source, "manual"),
+        })
         # A row that now names a loan, or no longer does, changes what was paid.
         loan_interest.derive(conn)
         conn.commit()
