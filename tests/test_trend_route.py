@@ -514,6 +514,38 @@ def test_case_36_five_percent_exactly_is_named_and_just_under_is_an_other(client
     assert table["others"] == {"count": 1, "net": 490, "share_pct": 5}  # 4.9%, shown rounded
 
 
+def _three_marts(conn):
+    card = tf.account(conn, "Everyday card")
+    held = statements(conn, card, "2026-08", "2026-09")
+    for name, amount, month in (("Big Mart", 9_010, "2026-08"), ("Corner Mart", 500, "2026-09"),
+                                ("Tiny Mart", 490, "2026-09")):
+        svc = merchant(conn, name, "Groceries")
+        tf.row(conn, held[month], name.upper(), amount, service_id=svc,
+               type_name="Groceries", day=f"{month}-04")
+    return tf.type_id(conn, "Groceries")
+
+
+def test_case_25_a_bar_narrows_the_merchants_table_to_its_months(client, conn):
+    groceries = _three_marts(conn)
+    table = ok(client, subject="type", id=groceries, span="12M", months="2026-09")["merchants"]
+    assert table["net"] == 990
+    assert [(r["name"], r["net"], r["share_pct"]) for r in table["rows"]] == [("Corner Mart", 500, 51), ("Tiny Mart", 490, 49)]
+    assert table["others"] is None
+
+
+def test_case_25_a_quarter_narrows_the_table_to_all_its_months(client, conn):
+    groceries = _three_marts(conn)
+    table = ok(client, subject="type", id=groceries, span="12M", months="2026-08,2026-09")["merchants"]
+    assert table["net"] == 10_000
+
+
+def test_months_outside_the_span_are_refused(client, conn):
+    groceries = _three_marts(conn)
+    for bad in ("2027-01", "2026-13", "Sep"):
+        status, body = get(client, subject="type", id=groceries, span="12M", months=bad)
+        assert status == 400 and "months" in body["error"], (bad, body)
+
+
 def test_a_merchant_answer_carries_no_merchants_table(client, conn):
     grab = seed_grab(conn)
     assert "merchants" not in ok(client, subject="merchant", id=grab, span="12M")

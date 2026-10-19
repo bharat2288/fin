@@ -78,7 +78,7 @@ def _view():
         with get_db() as conn:
             body = trend(conn, args.get("subject"), args.get("id"), span=args.get("span"),
                          to=args.get("to"), stack=args.get("stack"), book=args.get("book"),
-                         today=_today())
+                         narrow=args.get("months"), today=_today())
     except trend_span.SpanError as refused:
         return jsonify({"error": str(refused)}), refused.status
     return jsonify(body)
@@ -333,6 +333,17 @@ def _few(facts: list, sgd: dict, first: str | None, last: str | None) -> dict | 
             "net": by_book[0]["net"] if len(by_book) == 1 else None, "books": by_book}
 
 
+def _narrowed(months, plan) -> list[str] | None:
+    """The months a type's merchants table is narrowed to, or None for the span."""
+    if months is None:
+        return None
+    asked = [m.strip() for m in str(months).split(",") if m.strip()]
+    in_span = {m for b in plan["buckets"] for m in b["months"]}
+    if not asked or any(m not in in_span for m in asked):
+        raise trend_span.SpanError("months must be months of the span, as YYYY-MM")
+    return sorted(set(asked))
+
+
 def _merchants(nets: dict, book: str, book_net: int, paid_in: dict, ids: dict) -> dict:
     """Merchants in a type for one book and span, largest first: every one at
     5% of the book's net or more named, the rest one "N others" line, each of
@@ -357,9 +368,12 @@ def _merchants(nets: dict, book: str, book_net: int, paid_in: dict, ids: dict) -
 
 
 def trend(conn: sqlite3.Connection, kind, ref, *, span=None, to=None, stack=None,
-          book=None, today: datetime.date) -> dict:
+          book=None, narrow=None, today: datetime.date) -> dict:
     """R1's answer for a merchant or a type. Raises trend_span.SpanError
-    (status 400, or 404 for a subject no longer in fin) with the reason."""
+    (status 400, or 404 for a subject no longer in fin) with the reason.
+
+    narrow (the months= query, 'YYYY-MM,...' within the span) narrows a type's merchants table to
+    the months of a bar that was clicked (case 25); the chart keeps the span."""
     ref, other = _checked(kind, ref, span, to, stack, today)
     try:
         where, subject = trend_series._subject(conn, (kind, ref))
@@ -433,11 +447,18 @@ def trend(conn: sqlite3.Connection, kind, ref, *, span=None, to=None, stack=None
         "empty": None if in_span else {"last_date": max((f["last_date"] for f in facts), default=None)},
     }
     if kind == "type":
+        narrowed = _narrowed(narrow, plan)
+        table_facts = [f for f in in_span if narrowed is None or f["row_month"] in narrowed]
+        table_nets = nets if narrowed is None else _span_nets(sgd, narrowed)
         paid_in: dict = {}
-        for f in in_span:
+        for f in table_facts:
             if f["row_currency"] != TOTAL:
                 paid_in.setdefault((f["row_book"], f["service_name"]), f["row_currency"])
         chosen = book if book is not None else (names[0] if names else None)
-        answer["merchants"] = None if not in_span else _merchants(
-            nets, chosen, next(b["net"] for b in books if b["book"] == chosen), paid_in, ids)
+        if not in_span:
+            answer["merchants"] = None
+        else:
+            book_net = (next(b["net"] for b in books if b["book"] == chosen) if narrowed is None
+                        else sum(table_nets.get(chosen, {}).values()))
+            answer["merchants"] = _merchants(table_nets, chosen, book_net, paid_in, ids)
     return answer
