@@ -181,6 +181,15 @@ function rowAmount(minor, cur) {
     if (minor < 0) return `${dirTag('in')} <span class="num">${esc(money(-minor, cur))}</span>`;
     return `${dirTag('out')} <span class="num">${esc(money(minor, cur))}</span>`;
 }
+/** A row with part of it expected back or placed (personal-ledger 23), once
+ *  switched: its amount struck, then what it counts, both from the payload
+ *  (counted_minor), never worked out here, and the pill saying why in the
+ *  server's words ("S$ 200 expected back"). The renderers call it only when
+ *  counted_minor differs from the amount. */
+function struckAmount(row) {
+    const cur = row.currency || 'SGD';
+    return `<s class="muted">${esc(money(Math.abs(row.amount_minor), cur))}</s> <span class="num">${esc(money(Math.abs(row.counted_minor), cur))}</span>${row.expect_pill ? ` ${tag('yours', row.expect_pill)}` : ''}`;
+}
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const LONG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 function day(iso, { year = true } = {}) {
@@ -667,8 +676,11 @@ function rowItem(row, kind) {
     const cur = row.currency || 'SGD';
     const minor = toMinor(row.amount_sgd, cur);
     const lane = minor < 0 ? 'in' : 'out';
+    // What the row has left to label: the payload's counted figure (its own
+    // part once expect back is switched on), its amount until then.
+    const left = row.counted_minor ?? minor;
     const base = {
-        key: `${kind}-${row.id}`, kind, lane, row, currency: cur, amount: Math.abs(minor), signed: minor,
+        key: `${kind}-${row.id}`, kind, lane, row, currency: cur, amount: Math.abs(left), signed: left,
         title: row.description,
         meta: `${day(row.date)} · ${row.account_name || ''}`,
     };
@@ -3006,8 +3018,9 @@ function acctRowLabel(row) {
 function acctRowTr(row) {
     const minor = toMinor(row.amount_sgd, row.currency);
     const cur = row.currency || 'SGD';
-    const inCell = minor !== null && minor < 0 ? esc(money(-minor, cur)) : '';
-    const outCell = minor !== null && minor >= 0 ? esc(money(minor, cur)) : '';
+    const struck = row.counted_minor != null && row.counted_minor !== row.amount_minor;
+    const inCell = minor !== null && minor < 0 ? (struck ? struckAmount(row) : esc(money(-minor, cur))) : '';
+    const outCell = minor !== null && minor >= 0 ? (struck ? struckAmount(row) : esc(money(minor, cur))) : '';
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num row-date">${esc(day(row.date, { year: false }))}</td>
         <td class="row-desc">${esc(row.description)}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${row.book && row.book !== 'Household' ? ` <span class="small muted">· ${esc(row.book)}</span>` : ''}</td>
@@ -3179,7 +3192,7 @@ function rowTr(row, { account = true, book = false } = {}) {
         <td class="num">${esc(day(row.date, { year: false }))}</td>
         <td>${esc(row.description)}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
         <td>${label}${book || (row.book && row.book !== 'Household') ? ` <span class="small muted">· ${esc(row.book || '')}</span>` : ''}${notCheckedTag(row)}</td>
-        <td class="r">${rowAmount(minor, row.currency)}</td></tr>`;
+        <td class="r">${row.counted_minor != null && row.counted_minor !== row.amount_minor ? `${dirTag(minor < 0 ? 'in' : 'out')} ${struckAmount(row)}` : rowAmount(minor, row.currency)}</td></tr>`;
 }
 ACT['figure-fix'] = async el => {
     const amount = prompt('The corrected figure (what is owed for a loan):', (Math.abs(Number(el.dataset.amount)) / 100).toFixed(2));
@@ -3279,9 +3292,10 @@ function spendRowTr(row) {
     const label = row.display_type ? (row.type_id ? pageLink('type', row.type_id, row.display_type) : esc(row.display_type)) : tag('nofig', 'no type');
     const what = row.service_id ? pageLink('merchant', row.service_id, row.description) : esc(row.description);
     const account = row.account_id ? pageLink('account', row.account_id, row.account_name || '') : esc(row.account_name || '');
+    const struck = row.counted_minor != null && row.counted_minor !== row.amount_minor;
     const amount = minor < 0
-        ? `<span class="sl-refund">${icon('arrow-circle-down')}refund</span> <span class="num sl-back">${esc(money(-minor, row.currency))} back</span>`
-        : `<span class="num">${esc(money(minor, row.currency))}</span>`;
+        ? `<span class="sl-refund">${icon('arrow-circle-down')}refund</span> ${struck ? struckAmount(row) : `<span class="num sl-back">${esc(money(-minor, row.currency))} back</span>`}`
+        : struck ? struckAmount(row) : `<span class="num">${esc(money(minor, row.currency))}</span>`;
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
         <td>${what}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${account}</div></td>
@@ -3951,7 +3965,7 @@ async function viewMerchant(id) {
         return `<tr${on ? ' class="is-ticked"' : ''} data-tx="${x.id}"><td class="k"><label class="tick"><input type="checkbox" data-change="mp-tick" data-tx="${x.id}"${on ? ' checked' : ''} aria-label="Tick the ${when} row"></label></td>
             <td class="num dt">${when}</td><td class="ac">${mpAccountCell(x)}</td>
             <td class="stext">${esc(x.description)}${rowMark(x.id)}${window.expectRowPill?.(x) || ''}</td>
-            <td class="r num am">${minor == null || minor < 0 ? rowAmount(minor, x.currency) : esc(money(minor, x.currency))}</td>
+            <td class="r num am">${x.counted_minor != null && x.counted_minor !== x.amount_minor ? `${minor < 0 ? dirTag('in') + ' ' : ''}${struckAmount(x)}` : minor == null || minor < 0 ? rowAmount(minor, x.currency) : esc(money(minor, x.currency))}</td>
             <td class="ty"><select class="sel sel--quiet" data-change="mp-type" data-tx="${x.id}" aria-label="Type for the ${when} row"${off}>${typeOptions(r.types, x.type_id)}</select></td>
             <td class="bk"><select class="sel sel--quiet" data-change="mp-book" data-tx="${x.id}" aria-label="Book for the ${when} row"${off}>${bookOptions(r.books, x.book, 'Choose book')}</select></td>
             <td class="st">${mark}${window.expectMerchantRowAction?.(x) || ''}</td></tr>`;

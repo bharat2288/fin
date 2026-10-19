@@ -28,6 +28,7 @@ import book_type
 import card_balance
 import chat_writes
 import db
+import expect_back
 import flow
 import history
 import loan_interest
@@ -86,6 +87,59 @@ CHECKABLE_ROWS = (
     " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL)"
 )
 NOT_CHECKED_ROWS = f"(COALESCE(svc.review_each_time, 0) = 1 AND {CHECKABLE_ROWS})"
+
+
+# Expect back (personal-ledger 23, ticket 30). A row whose own part is 0 (all
+# of it expected back, or wholly placed against what is) is accounted for: it
+# leaves the review list, the untyped and check-each-row lists and the Queue,
+# whatever its flow, and its flow is left as it was. Behind the gate
+# (expect_back.SWITCHED): with it off each of these is its old text exactly.
+def _left_to_label(predicate: str) -> str:
+    """`predicate` narrowed to rows not accounted for, once switched."""
+    if not expect_back.SWITCHED:
+        return predicate
+    return f"({predicate} AND {expect_back.own_sql('t')} != 0)"
+
+
+def _untyped_rows() -> str:
+    return _left_to_label(UNTYPED_ROWS)
+
+
+def _not_checked_rows() -> str:
+    return f"(COALESCE(svc.review_each_time, 0) = 1 AND {_left_to_label(CHECKABLE_ROWS)})"
+
+
+def _waiting_rows() -> tuple[str, list]:
+    """Which rows wait for review, and its parameters: the transfers with no
+    label. Once switched, those with something left of their own, and also a
+    movement naming a person that is partly placed or expected, with money
+    left on it to label (the conversion's excess, case 43)."""
+    if not expect_back.SWITCHED:
+        return "t.flow_type = ?", [flow.REVIEW]
+    on_record = ("(EXISTS (SELECT 1 FROM set_off so WHERE so.payment_row_id = t.id)"
+                 " OR EXISTS (SELECT 1 FROM expectation e WHERE e.row_id = t.id))")
+    person = "EXISTS (SELECT 1 FROM accounts o WHERE o.id = t.other_side_id AND o.type = 'person')"
+    return (_left_to_label(f"(t.flow_type = ? OR (t.flow_type = ? AND {person} AND {on_record}))"),
+            [flow.REVIEW, flow.MOVEMENT])
+
+
+def _parts_pill(amount_minor: int, expected_minor: int, placed_minor: int, waiting_minor: int,
+                currency: str) -> str | None:
+    """What a row's pill says of its parts, once switched: 'S$ 200 expected
+    back', 'S$ 5,000 to pay back', 'S$ 40 set off', 'S$ 100 waiting for its
+    row'; None for a row with nothing on it, or with the gate off."""
+    if not expect_back.SWITCHED:
+        return None
+    words = []
+    if expected_minor:
+        words.append(f"{expect_back.short(abs(expected_minor), currency)} "
+                     f"{'to pay back' if amount_minor < 0 else 'expected back'}")
+    against = abs(placed_minor) - waiting_minor
+    if against:
+        words.append(f"{expect_back.short(against, currency)} set off")
+    if waiting_minor:
+        words.append(f"{expect_back.short(waiting_minor, currency)} waiting for its row")
+    return " · ".join(words) or None
 
 
 def _requested_book(args) -> str | None:
@@ -1415,7 +1469,7 @@ def _merchants(conn, svc_id: int | None = None) -> list[dict]:
                 AND COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')) as txn_count,
                (SELECT COUNT(*) FROM merchant_rules mr WHERE mr.service_id = s.id) as rule_count,
                (SELECT COUNT(*) FROM transactions t WHERE t.service_id = s.id
-                AND """ + CHECKABLE_ROWS + """) as rows_to_check
+                AND """ + _left_to_label(CHECKABLE_ROWS) + """) as rows_to_check
         FROM services s
         """ + _TYPE_JOINS.format(owner="s") + f"""
         {one}
@@ -1627,7 +1681,8 @@ def api_services_book_varies(svc_id):
             return jsonify({"error": "This merchant is no longer in fin"}), 404
         books = conn.execute(
             f"SELECT {book_expr()} AS book, COUNT(*) AS n FROM transactions t WHERE t.service_id = ?"
-            " AND t.cat_source = 'manual' AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')"
+            " AND " + _left_to_label("t.cat_source = 'manual'") +
+            " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')"
             f" AND {book_expr()} != ? GROUP BY 1",
             (svc_id, svc["book"]),
         ).fetchall()
@@ -1762,16 +1817,19 @@ def _waiting_sides(conn, filters: str = "", params: tuple | list = ()) -> dict:
     as positive figures. `count` is both sides together and `net_minor` is
     money out less money in. `filters` narrows them by the row (t) or its
     statement (s). Every waiting row is counted; the totals are of the rows
-    on SGD accounts."""
+    on SGD accounts. Once switched, the rows are _waiting_rows' and each adds
+    what it has left of its own, never what is expected or placed on it."""
+    rows, rows_params = _waiting_rows()
+    own = expect_back.own_sql("t")
     row = conn.execute(
         "SELECT "
         "SUM(CASE WHEN t.amount_minor < 0 THEN 0 ELSE 1 END), "
-        f"SUM(CASE WHEN t.amount_minor >= 0 AND {_SGD_ACCOUNT} THEN t.amount_minor ELSE 0 END), "
+        f"SUM(CASE WHEN t.amount_minor >= 0 AND {_SGD_ACCOUNT} THEN {own} ELSE 0 END), "
         "SUM(CASE WHEN t.amount_minor < 0 THEN 1 ELSE 0 END), "
-        f"SUM(CASE WHEN t.amount_minor < 0 AND {_SGD_ACCOUNT} THEN -t.amount_minor ELSE 0 END) "
+        f"SUM(CASE WHEN t.amount_minor < 0 AND {_SGD_ACCOUNT} THEN -{own} ELSE 0 END) "
         "FROM transactions t "
-        f"LEFT JOIN statements s ON t.statement_id = s.id WHERE t.flow_type = ? {filters}",
-        [flow.REVIEW, *params],
+        f"LEFT JOIN statements s ON t.statement_id = s.id WHERE {rows} {filters}",
+        [*rows_params, *params],
     ).fetchone()
     out_count, out_minor, in_count, in_minor = (value or 0 for value in row)
     return {
@@ -2215,8 +2273,14 @@ def api_transactions():
             flow.checked_flow(flow_filter)
         except flow.UnknownFlow as e:
             return jsonify({"error": str(e)}), 400
-        filters += " AND COALESCE(t.flow_type, 'expense') = ?"
-        params.append(flow_filter)
+        if flow_filter == flow.REVIEW:
+            # The review list lists exactly what the waiting count counts.
+            rows_waiting, waiting_params = _waiting_rows()
+            filters += f" AND {rows_waiting}"
+            params.extend(waiting_params)
+        else:
+            filters += " AND COALESCE(t.flow_type, 'expense') = ?"
+            params.append(flow_filter)
 
     # tx_id: one row, as a row's own sheet reads it.
     tx_id = request.args.get("tx_id", type=int)
@@ -2227,7 +2291,7 @@ def api_transactions():
     # look=each: the rows waiting in the Queue's Check each row step (not
     # checked yet). look=mixed is its name from before the words changed.
     if request.args.get("look") in ("each", "mixed"):
-        filters += f" AND {NOT_CHECKED_ROWS}"
+        filters += f" AND {_not_checked_rows()}"
 
     # service_id: one merchant's rows, as its page reads them.
     service_id = request.args.get("service_id", type=int)
@@ -2245,7 +2309,7 @@ def api_transactions():
         conds = []
         if UNTYPED_FILTER in type_list:
             type_list.remove(UNTYPED_FILTER)
-            conds.append(UNTYPED_ROWS)
+            conds.append(_untyped_rows())
         if type_list:
             placeholders = ",".join("?" * len(type_list))
             conds.append(
@@ -2265,6 +2329,9 @@ def api_transactions():
         filters += " AND t.date <= ?"
         params.append(chart_end)
 
+    # expense_only: the spending and refund rows. A row all of whose amount
+    # is expected back stays in it, reading S$ 0 with its pill (case 2): what
+    # the list's sums add is each row's counted_minor, never the bare amount.
     if request.args.get("expense_only") == "true":
         filters += " AND t.flow_type IN ('expense', 'refund')"
 
@@ -2292,7 +2359,8 @@ def api_transactions():
         "type": "ty.name",
         "service": "svc.name",
         "account": "a.name",
-        "amount": "t.amount_minor",
+        # By what each row counts: its own part once switched.
+        "amount": expect_back.own_sql("t"),
     }
     order_col = valid_sorts.get(sort_col, "t.date")
     if sort_dir not in ("ASC", "DESC"):
@@ -2327,13 +2395,17 @@ def api_transactions():
                 t.service_id,
                 svc.name as service_name,
                 COALESCE(svc.review_each_time, 0) as review_each_time,
-                CASE WHEN {NOT_CHECKED_ROWS} THEN 1 ELSE 0 END as not_checked
+                CASE WHEN {_not_checked_rows()} THEN 1 ELSE 0 END as not_checked,
+                rp.expected_minor, rp.placed_minor, rp.own_minor,
+                (SELECT COALESCE(SUM(so.amount_minor), 0) FROM set_off so
+                 WHERE so.payment_row_id = t.id AND so.expectation_id IS NULL) as waiting_minor
             FROM transactions t
             {type_joins}
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
             JOIN accounts a ON s.account_id = a.id
             LEFT JOIN accounts oa ON t.other_side_id = oa.id
+            JOIN row_parts rp ON rp.row_id = t.id
             WHERE 1=1 {filters}
             ORDER BY {order_col} {sort_dir}, t.date DESC
             LIMIT ? OFFSET ?
@@ -2346,7 +2418,14 @@ def api_transactions():
         tx = dict(r)
         # The amount in the account's own currency, which `currency` names:
         # the key is the old one, and holds rupees for a rupee account.
-        tx["amount_sgd"] = money.from_minor(tx.pop("amount_minor"), tx["currency"])
+        tx["amount_sgd"] = money.from_minor(tx["amount_minor"], tx["currency"])
+        # Its parts (spec 23): what is expected and placed on it, and its own
+        # part, each in whole minor units with the row's sign. counted_minor
+        # is what a sum of rows adds: the own part once switched, the amount
+        # until then. The pill words them; the client works nothing out.
+        tx["counted_minor"] = tx["own_minor"] if expect_back.SWITCHED else tx["amount_minor"]
+        tx["expect_pill"] = _parts_pill(tx["amount_minor"], tx["expected_minor"], tx["placed_minor"],
+                                        tx.pop("waiting_minor"), tx["currency"])
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])
         tx["not_checked"] = bool(tx["not_checked"])
         if tx.get("account_name"):
@@ -3028,7 +3107,7 @@ def api_queue_guesses():
             LEFT JOIN services svc ON t.service_id = svc.id
             JOIN statements s ON t.statement_id = s.id
             JOIN accounts a ON s.account_id = a.id
-            WHERE {UNTYPED_ROWS} AND {_expense_visibility_filter('svc')}
+            WHERE {_untyped_rows()} AND {_expense_visibility_filter('svc')}
             ORDER BY t.amount_minor DESC, t.id
         """).fetchall()
         held = suggest.stored_answers(conn) if on else {}
@@ -4570,7 +4649,7 @@ def api_review_suggestion(tx_id: int):
             "a.name AS other_name, ty.name AS type_name, p.name AS parent_name "
             "FROM transactions t LEFT JOIN accounts a ON a.id = t.other_side_id "
             "LEFT JOIN types ty ON ty.id = t.type_id LEFT JOIN types p ON p.id = ty.parent_id "
-            "WHERE t.id != ? AND t.flow_type_manual = 1 AND t.flow_type != ? "
+            f"WHERE t.id != ? AND {_left_to_label('t.flow_type_manual = 1')} AND t.flow_type != ? "
             "AND UPPER(TRIM(t.description)) = UPPER(TRIM(?)) AND (t.amount_minor < 0) = (? < 0) "
             "ORDER BY t.date DESC, t.id DESC LIMIT ?",
             (tx_id, flow.REVIEW, tx["description"], tx["amount_minor"], REVIEW_GUESS_LOOK_BACK),
