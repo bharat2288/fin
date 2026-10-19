@@ -1,10 +1,12 @@
 // Expect back (personal-ledger 23): the Queue's Back for… step on Money in (D6), in the queueStep slot.
 //
-// Filled by personal-ledger 41 (42 adds the waiting offer's card). First in the Money in lane's
-// body, a "Back for…" step draws:
+// Filled by personal-ledger 41 and 42. First in the Money in lane's body, a "Back for…" step draws:
 //   - each money-in row the lane read (GET /api/queue/paybacks) found a match for: one best match
 //     with the server's reason chips, ✓ Set off, Another… (the Back for… drawer) and Not a payback;
 //     two or more that tie, a ✓ for each;
+//   - each payment left waiting for its row that the lane read found rows for (personal-ledger
+//     42): "Expect back S$ 100 and set Lena's S$ 100 against it?" with a ✓ per row, nearest
+//     first as the server ranked them, and Another… (personal-ledger 40's attach-by-hand drawer);
 //   - each refund two purchases fit (GET /api/refund-links/asks, personal-ledger 38's read):
 //     "Refund of which … order?" with a ✓ per purchase that writes the hand link; and the
 //     "keep it, or To pay back?" ask (personal-ledger 43's, drawn from its fixture shape).
@@ -12,7 +14,8 @@
 // beside its This was…. Nothing links without a tap.
 //
 // ✓ Set off posts Back for…'s own route (POST /api/transactions/<id>/set-offs), the hand link
-// refund_link_api's (POST /api/refund-links); Not a payback POSTs /api/transactions/<id>/not-a-payback.
+// refund_link_api's (POST /api/refund-links), a waiting offer's ✓ the attach route
+// (POST /api/set-offs/<id>/attach); Not a payback POSTs /api/transactions/<id>/not-a-payback.
 // Each is one change, undone from the toast or from Changes. Every figure and every reason comes
 // from the server's payload (tests/fixtures/expect/), never a formula here.
 //
@@ -40,6 +43,11 @@
                 amount: Expect.setoff.amountText(p.left_minor, p.currency), open_minor: suggestion.open_minor }],
             waiting: null,
         };
+    }
+
+    /** The request a waiting offer's ✓ sends: attach the waiting set-off to that row. */
+    function attachRequest(offer, r) {
+        return { row_id: Number(r.id) };
     }
 
     /** The hand link a refund ask's ✓ writes. */
@@ -101,6 +109,30 @@
         return itemHTML(p.description, `${shortDay(p.date)} · ${p.account_name || ''}`, short(p.left_minor, p.currency), ask);
     }
 
+    /** One waiting set-off with the rows that have come in for it. The server offers only
+     *  rows with room for the whole waiting amount, so the expectation is that amount. */
+    function waitingHTML(w) {
+        const p = w.payment, id = Number(w.set_off_id), amt = short(w.amount_minor, w.currency);
+        const whose = w.person ? `${esc(w.person.name)}'s ${esc(amt)}` : `the ${esc(amt)} waiting`;
+        const question = `<p class="xb-q-sug__t">Expect back ${esc(amt)} and set ${whose} against it?</p>`;
+        const rowWords = r => `${esc(r.description)}, ${esc(shortDay(r.date))} · ${esc(short(r.amount_minor, r.currency))}`;
+        const tick = (r, words) => `<button type="button" class="btn sm subtle" data-act="xb-q-attach" data-so="${id}" data-row="${Number(r.id)}">${words}</button>`;
+        const another = `<button type="button" class="btn sm" data-xb-waiting="${id}">Another…</button>`;
+        let ask;
+        if (w.rows.length === 1) {
+            const r = w.rows[0];
+            ask = `<div class="xb-q-sug"><p class="xb-q-sug__t">Its row: <b>${rowWords(r)}</b>?</p>${question}
+                <div class="xb-q-acts">${tick(r, `✓ Set it against ${esc(r.description)}`)}${another}</div></div>`;
+        } else {
+            const n = COUNTS[w.rows.length] || String(w.rows.length);
+            ask = `<div class="xb-q-sug"><p class="xb-q-sug__t">Its row, one of these? ${n} fit:</p>${question}
+                <div class="xb-q-acts">${w.rows.map(r => tick(r, `✓ ${rowWords(r)}`)).join('')}</div>
+                <div class="xb-q-acts">${another}</div></div>`;
+        }
+        const who = w.person ? ` · ${w.person.name}` : '';
+        return itemHTML(p.description, `${shortDay(p.date)} · ${p.account_name || ''} · waiting for its row${who}`, amt, ask);
+    }
+
     function whichHTML(a) {
         const r = a.refund;
         const ticks = a.purchases.map(p => `<button type="button" class="btn sm subtle" data-act="xb-q-refund" data-refund="${Number(r.id)}" data-purchase="${Number(p.id)}" data-day="${esc(shortDay(p.date))}">✓ ${esc(shortDay(p.date))} · ${esc(short(p.amount_minor, p.currency))}</button>`).join('');
@@ -119,9 +151,11 @@
         return itemHTML(r.description, `${shortDay(r.date)} · ${r.account_name || ''}`, short(Math.abs(r.amount_minor), r.currency), ask);
     }
 
-    /** The step: every payback with a suggestion, then every refund ask; '' when there is none. */
+    /** The step: every payback with a suggestion, every waiting payment with a row, then every
+     *  refund ask; '' when there is none. */
     function stepHTML(lane, asks) {
         const cards = (lane.paybacks || []).filter(p => p.suggestions.length).map(paybackHTML)
+            .concat((lane.waiting_offers || []).filter(w => w.rows.length).map(waitingHTML))
             .concat((asks || []).map(a => a.kind === 'paid_back' ? paidBackHTML(a) : a.kind === 'which' ? whichHTML(a) : '').filter(Boolean));
         if (!cards.length) return '';
         return `<section class="step xb-q-step" aria-label="Back for…">
@@ -129,7 +163,7 @@
             <div class="step-b">${cards.join('')}</div></section>`;
     }
 
-    Expect.queue = { setOffRequest, handLinkRequest, answerRequest, merchantWord, plainIds, backForButton, stepHTML };
+    Expect.queue = { setOffRequest, attachRequest, handLinkRequest, answerRequest, merchantWord, plainIds, backForButton, stepHTML };
 
     // --- the slot --------------------------------------------------------------------------
 
@@ -175,6 +209,19 @@
         const r = await send('POST', `/api/transactions/${tx}/set-offs`, setOffRequest(pb, s));
         if (!r.ok) { el.disabled = false; toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); rerender(); return; }
         toast(Expect.setoff.doneToast(r.data, [s.title], 'back'), { undo: r.change });
+        refreshFrame();
+        rerender();
+    };
+    ACT['xb-q-attach'] = async el => {
+        const id = Number(el.dataset.so), rowId = Number(el.dataset.row);
+        const w = (shown.waiting_offers || []).find(v => v.set_off_id === id);
+        const r = w && w.rows.find(v => v.id === rowId);
+        if (!r) return;
+        el.disabled = true;
+        const res = await send('POST', `/api/set-offs/${id}/attach`, attachRequest(w, r));
+        if (!res.ok) { el.disabled = false; toast(res.data.error || 'That did not work; nothing was changed', { bad: true }); rerender(); return; }
+        const x = res.data.expectation, rest = res.data.waiting;
+        toast(`${r.description}: ${short(x.amount_minor, x.currency)} expected back, closed at once${rest ? `; ${short(rest.amount_minor, rest.currency)} still waits` : ''}.`, { undo: res.change });
         refreshFrame();
         rerender();
     };
