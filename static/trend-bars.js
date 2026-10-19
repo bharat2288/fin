@@ -9,8 +9,9 @@
 //
 // payload is R1's shape (GET /api/trend), or an account's balances read put through
 // Trend.bars.fromBalances for its money in / money out bars. opts:
-//   books     the books showing (default: every book in payload.books)
-//   onNarrow  (months, label, bucket) when a bar or segment narrows the rows
+//   books     the books showing (default: payload.books_on, which the card sends, else every book)
+//   onMonth   (months, label, bucket) when a bar or segment narrows the rows; months is always
+//             a list, a quarter's three or a month's one (the card's contract, shared with 'line')
 //   onImport  () when a hatched segment, or the hover's Import, is pressed
 //   onFetch   (month) when the hover's Fetch is pressed (the no-rate month)
 //   width, height  the drawing size in px (default: el's width, 220)
@@ -58,7 +59,8 @@
         const keyOrder = (payload.stack_keys || []).map(k => k.key);
         const labels = Object.fromEntries((payload.stack_keys || []).map(k => [k.key, k.label || k.key]));
         const bookLines = payload.books || [];
-        const visible = opts.books && opts.books.length ? opts.books.slice() : bookLines.map(b => b.book);
+        const visible = opts.books && opts.books.length ? opts.books.slice()
+            : payload.books_on && payload.books_on.length ? payload.books_on.slice() : bookLines.map(b => b.book);
         const shown = new Set(visible);
         const buckets = payload.buckets || [];
         const factor = payload.line_factor || (buckets.some(isQuarter) ? 3 : 1);
@@ -252,7 +254,7 @@
             if (a.kind === 'import') {
                 if (opts.onImport) opts.onImport();
                 else if (typeof location !== 'undefined') location.hash = '#/books/import';
-            } else if (a.kind === 'narrow' && opts.onNarrow) opts.onNarrow(a.months, a.label, b);
+            } else if (a.kind === 'narrow' && opts.onMonth) opts.onMonth(a.months, a.label, b);
         }
         function show(i, evt) {
             const b = m.buckets[i];

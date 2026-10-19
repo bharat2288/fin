@@ -369,7 +369,7 @@ def test_draw_writes_an_svg_and_calls_back_on_click():
       querySelector() { return { hidden: true, innerHTML: '', style: {}, textContent: '' }; } };
     const seen = [];
     const p = """ + json.dumps(fixture("trend_merchant")) + r""";
-    window.Trend.modes.bars(el, p, { onNarrow: (months, label) => seen.push(['narrow', months, label]),
+    window.Trend.modes.bars(el, p, { onMonth: (months, label) => seen.push(['narrow', months, label]),
                                      onImport: () => seen.push(['import']) });
     const target = (b, s) => ({ closest: sel => sel === '[data-seg]' && s !== undefined ? { dataset: { b: String(b), seg: String(s) } }
                                      : sel === '[data-b]' ? { dataset: { b: String(b) } } : null });
@@ -381,3 +381,14 @@ def test_draw_writes_an_svg_and_calls_back_on_click():
     assert out["svg"] is True
     assert out["seen"][0] == ["narrow", ["2026-09"], "September 2026"]
     assert out["seen"][1] == ["import"]
+
+def test_the_card_hides_a_book_through_books_on():
+    # The card (trend.js) passes the view with books_on and no opts.books; a book the
+    # card has hidden must not be drawn.
+    p = fixture("trend_merchant")
+    shown = [b["book"] for b in p["books"]]
+    assert len(shown) > 1
+    p["books_on"] = shown[:1]
+    m = model(p)
+    keys = {s["key"] for b in m["buckets"] for s in b["segments"] if not s.get("placeholder")}
+    assert keys and all(shown[0] in k or k == shown[0] for k in keys), keys
