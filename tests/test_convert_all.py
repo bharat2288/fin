@@ -90,8 +90,10 @@ def test_the_command_runs_every_step_in_order(old, capsys):
     assert f"all {len(STEP_NAMES)} steps applied" in out
     assert "rows moved to the balance account: 1" in out
     # Each step that did work wrote its backup first; one with nothing to do
-    # (this database has no row the movements step reclassifies) wrote none.
-    assert len(backups(old)) == out.count(": applied") >= len(STEP_NAMES) - 1
+    # (this database has no row the movements step reclassifies, and no
+    # person for the expect-back step to convert) wrote none.
+    assert len(backups(old)) == out.count(": applied") >= len(STEP_NAMES) - 2
+    assert "step expect-back: already-applied" in out
     conn = sqlite3.connect(str(old))
     try:
         assert conversion.not_applied(conn) == []
