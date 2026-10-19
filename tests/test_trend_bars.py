@@ -242,17 +242,6 @@ def test_case_25_the_type_page_bar_narrows_too():
     assert sep["click"]["months"] == ["2026-09"]
 
 
-def test_case_25_the_account_in_out_bar_narrows_to_its_month():
-    m = _node("const p = window.Trend.bars.fromBalances(" + json.dumps(fixture("balances_sgd")) + ");"
-              "console.log(JSON.stringify(window.Trend.bars.model(p, {})));")
-    sep = bucket(m, "2026-09")
-    assert sep["click"]["months"] == ["2026-09"]
-    bal = fixture("balances_sgd")["months"]
-    sep_row = next(r for r in bal if r["month"] == "2026-09")
-    assert seg(sep, "in")["y1"] == sep_row["in"] and seg(sep, "out")["y0"] == -sep_row["out"]
-    assert seg(sep, "out")["click"]["months"] == ["2026-09"]
-
-
 # ---------------------------------------------------------------------------
 # Cases 26, 27: rupees in S$ at the month-end rate
 # ---------------------------------------------------------------------------

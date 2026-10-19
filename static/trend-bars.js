@@ -7,8 +7,8 @@
 // and tested under node. draw(el, payload, opts) only turns that model into SVG; it is
 // registered as the 'bars' mode and adds no figure of its own.
 //
-// payload is R1's shape (GET /api/trend), or an account's balances read put through
-// Trend.bars.fromBalances for its money in / money out bars. opts:
+// payload is R1's shape (GET /api/trend). An account's money in / out bars are the line
+// mode's (trend-line.js), under its balance line. opts:
 //   books     the books showing (default: payload.books_on, which the card sends, else every book)
 //   onMonth   (months, label, bucket) when a bar or segment narrows the rows; months is always
 //             a list, a quarter's three or a month's one (the card's contract, shared with 'line')
@@ -150,27 +150,6 @@
             avg_monthly: avgMonthly, books: visible };
     }
 
-    /** An account's balances read (R3) as bars: money in up, money out down, per month. */
-    function fromBalances(p) {
-        const cur = p.cur || (p.account && p.account.currency) || 'SGD';
-        return {
-            subject: { kind: 'account', id: p.account && p.account.id, name: p.account && p.account.name },
-            span: p.span, to: p.to, stack: 'flow', currency: cur,
-            buckets: (p.months || []).map(m => ({
-                key: m.month, label: `${MONTHS[Number(m.month.slice(5, 7)) - 1].slice(0, 3)} ${m.month.slice(0, 4)}`,
-                months: [m.month], so_far: Boolean(m.so_far), missing: m.missing ? { account: [m.month] } : {},
-                no_rate: false, rate: null,
-                by: {
-                    in: { book: 'account', spent: m.in, back: 0, net: m.in, inr_minor: null, hover: `Money in ${money(m.in, cur)}` },
-                    out: { book: 'account', spent: 0, back: 0, net: -m.out, inr_minor: null, hover: `Money out ${money(m.out, cur)}` },
-                },
-            })),
-            books: [{ book: 'account', avg: null }],
-            stack_keys: [{ key: 'in', label: 'Money in', id: null }, { key: 'out', label: 'Money out', id: null }],
-            stack_options: [], left_out: [], few: null, empty: null,
-        };
-    }
-
     // ---- the drawing ------------------------------------------------------------------
 
     let seq = 0;
@@ -299,6 +278,6 @@
     }
 
     window.Trend = window.Trend || {};
-    window.Trend.bars = { model, fromBalances, draw, monthsLabel };
+    window.Trend.bars = { model, draw, monthsLabel };
     if (typeof window.Trend.registerMode === 'function') window.Trend.registerMode('bars', draw);
 })();
