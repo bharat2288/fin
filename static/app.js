@@ -562,7 +562,32 @@ async function render() {
 function afterRender(fn) { $('#view').__after = fn; }
 function rerender() { render(); }
 
-window.addEventListener('hashchange', () => { closeSheet(); render(); window.scrollTo(0, 0); });
+// ROUTE MEMORY begin
+// Leaving a route saves its scroll and open sections for this session; Back restores them after render.
+// A history entry is tagged with state once it has been reached, so a traversal (Back) arrives carrying
+// the tag and a fresh link click does not: only a traversal restores, a click starts at the top.
+const routeMemory = new Map();
+function rememberRoute(hash) {
+    routeMemory.set(hash, { y: window.scrollY, open: [...document.querySelectorAll('#view details')].map(d => d.open) });
+}
+function recallRoute(hash) {
+    const seen = routeMemory.get(hash);
+    if (!seen) { window.scrollTo(0, 0); return; }
+    document.querySelectorAll('#view details').forEach((d, i) => { d.open = !!seen.open[i]; });
+    window.scrollTo(0, seen.y);
+}
+window.addEventListener('hashchange', async e => {
+    const left = String(e.oldURL || '');
+    rememberRoute(left.includes('#') ? left.slice(left.indexOf('#')) : '');
+    const back = !!(history.state && history.state.finBack);
+    try { history.replaceState({ finBack: true }, ''); } catch { /* a tag that cannot be set only costs the restore */ }
+    closeSheet();
+    if (!back) window.scrollTo(0, 0);
+    await render();
+    if (back) recallRoute(location.hash);
+});
+document.addEventListener('DOMContentLoaded', () => { try { history.replaceState({ finBack: true }, ''); } catch { /* as above */ } });   // the entry the page opened on
+// ROUTE MEMORY end
 document.addEventListener('DOMContentLoaded', render);
 
 // One handler for every [data-act]: the views write plain HTML.
