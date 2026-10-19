@@ -529,6 +529,35 @@ def test_case_18_only_new_rows_moves_all_32_and_keeps_their_labels_the_30_checke
     assert grab_food["food"] not in every_merchant(conn)
 
 
+def test_a_merge_counts_a_row_with_no_type_and_only_new_rows_leaves_it_waiting(client, conn, grab_food, statement):
+    """A Grab Food row waiting for a type: Apply gives it Grab's type, so
+    the preview counts it; Only new rows moves it and leaves its labels."""
+    waiting = add_row(conn, statement, "SAMPLE GRABFOOD 2210", 700, service_id=grab_food["food"],
+                      book=None, type_name=None)
+    p = previewed(client.post(f"/api/services/{grab_food['food']}/merge", json={"target_id": grab_food["grab"]}))
+    assert p["count"] == 31
+
+    resp = client.post(f"/api/services/{grab_food['food']}/merge",
+                       json={"target_id": grab_food["grab"], "past": "only_new", "token": p["token"]})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert held(conn, [waiting])[waiting] == (grab_food["grab"], None, None, None, None)
+
+
+def test_a_merge_apply_relabels_the_rows_its_preview_counted(client, conn, grab_food, statement):
+    waiting = add_row(conn, statement, "SAMPLE GRABFOOD 2210", 700, service_id=grab_food["food"],
+                      book=None, type_name=None)
+    p = previewed(client.post(f"/api/services/{grab_food['food']}/merge", json={"target_id": grab_food["grab"]}))
+
+    resp = client.post(f"/api/services/{grab_food['food']}/merge",
+                       json={"target_id": grab_food["grab"], "past": "apply", "token": p["token"]})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["merged"]["relabelled"] == p["count"] == 31
+    # An empty book reads as Household, Grab's own: only the type is given.
+    assert held(conn, [waiting])[waiting] == (grab_food["grab"], None, type_id(conn, "Transport"), None, "merchant")
+
+
 def test_case_19_undo_of_a_merge_restores_the_merchant_its_rule_and_rows(client, conn, grab_food):
     before = book_state(conn)
     resp = client.post(f"/api/services/{grab_food['food']}/merge",
@@ -742,3 +771,29 @@ def test_the_rule_sheet_its_delete_and_the_merge_go_through_the_preview():
     assert "sendPreviewed('DELETE', `/api/rules/" in act("rule-delete")
     assert "sendPreviewed('POST', `/api/services/${el.dataset.id}/merge`" in act("merchant-merge")
     assert "Re-run every rule to apply a change" not in APP_JS
+
+
+@needs_node
+def test_a_merge_from_the_merged_merchants_page_lands_on_the_one_it_merged_into():
+    """Merging from the merged-away merchant's own page goes to the page of
+    the merchant it merged into: its own page is gone, and drawing it again
+    asks the server for a merchant no longer there (a 404 in the console,
+    build rule 21). From anywhere else the page is drawn again."""
+    code = "\n".join([r"""
+let drawn = 0;
+const location = { hash: '' };
+function rerender() { drawn += 1; }
+""", _function("afterMerge"), r"""
+location.hash = '#/books/merchant/182';
+afterMerge(182, 171);
+const fromItsPage = [location.hash, drawn];
+location.hash = '#/books/lists/merchants';
+afterMerge(182, 171);
+console.log(JSON.stringify({ fromItsPage, fromLists: [location.hash, drawn] }));
+"""])
+    got = _node(code)
+    assert got["fromItsPage"] == ["#/books/merchant/171", 0]
+    assert got["fromLists"] == ["#/books/lists/merchants", 1]
+    start = APP_JS.index("ACT['merchant-merge'] =")
+    merge = APP_JS[start:APP_JS.index("\n};", start) + 3]       # the handler alone
+    assert "afterMerge(" in merge and "rerender()" not in merge

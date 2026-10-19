@@ -12,8 +12,6 @@ A **plan** is what the preview saw and what each answer writes:
   Apply writes (the new values; each source as it was: from the merchant
   stays from the merchant, checked stays checked) and what Only new rows
   writes instead (the kept field checked, its value left);
-- `fills`: rows with no type yet, given the merchant's label: they carry no
-  label to change, so the preview does not count them;
 - `chosen`: the rows left alone because a field the change sets is chosen;
 - `token`: a stamp of the merchant's and its rules' state, the rows' labels
   and the change itself. An answer carrying another token is refused: the
@@ -97,7 +95,6 @@ class Plan:
     subject: dict
     change: dict                       # {field: (from, to)} for a merchant's own book and type
     rows: list[Planned] = field(default_factory=list)
-    fills: list[tuple[sqlite3.Row, dict]] = field(default_factory=list)   # (row, the label it is given)
     chosen: int = 0
     token: str = ""
     called: str = ""                   # what changed, as a refusal names it ("IndigoAir", "The rule INDIGO")
@@ -172,16 +169,18 @@ def _stamp(*parts) -> str:
 
 
 def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
-                    leave_out: set[int] | frozenset = frozenset()) -> Plan:
+                    leave_out: set[int] | frozenset = frozenset(), teaching: bool = False) -> Plan:
     """The plan for a merchant's new book or type ({field: value}, the
     fields that change): each of its rows (but `leave_out`) whose field a
     later change may reach, not set by a rule and not overridden by the row's
     own rule, and whose value differs. A row whose field the change sets is
-    chosen is left alone and counted apart. A row with no type yet carries no
-    label to change: it waits for one, so it is given the merchant's
-    (`fills`), not counted, and the merchant sheet writes it whatever the
-    answer, as before the preview. (A typed row with no book reads as the
-    default book, and moving it is counted.)"""
+    chosen is left alone and counted apart. A row waiting for a type takes
+    its merchant's label as every row that inherits it does: Apply labels
+    it, Only new rows leaves it waiting, and the preview counts it, so the
+    count is the rows Apply changes (spec 24, Deepened). Only when
+    `teaching` (resolve, from the Queue) is a row with no type left out: the
+    teach labels the rows it matches itself (its backfill, as before the
+    preview). (An empty book reads as the default book.)"""
     merchant = conn.execute(
         "SELECT id, name, book, type_id, review_each_time FROM services WHERE id = ?", (service_id,)
     ).fetchone()
@@ -206,7 +205,7 @@ def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
     # otherwise change.
     overriding = [r for r in rules if any(r[_OVERRIDE_OF[f]] is not None for f in label)]
     for held in held_rows:
-        if held["id"] in leave_out or not label:
+        if held["id"] in leave_out or not label or (teaching and held["type_id"] is None):
             continue
         reached, kept = {}, False
         for field_name, value in label.items():
@@ -224,9 +223,7 @@ def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
             own = _own_rule(held, service_id, conn)
             if own is not None:
                 reached = {f: v for f, v in reached.items() if own[_OVERRIDE_OF[f]] is None}
-        if reached and held["type_id"] is None:
-            plan.fills.append((held, _writes(reached)[0]))
-        elif reached:
+        if reached:
             checked = any(source == label_source.CHECKED for _, source in reached.values())
             plan.rows.append(Planned(held, *_writes(reached), checked=checked))
         elif kept:
@@ -408,7 +405,7 @@ def joined(first: Plan | None, second: Plan | None) -> Plan | None:
     if first is None or second is None:
         return first or second
     plan = Plan(subject=first.subject, change=dict(first.change), rows=first.rows + second.rows,
-                fills=first.fills + second.fills, chosen=first.chosen + second.chosen,
+                chosen=first.chosen + second.chosen,
                 called=first.called, doing=first.doing)
     plan.wording, plan.moves_to = second.wording, second.moves_to
     plan.names, plan.others = second.names, second.others
