@@ -16,6 +16,7 @@ import app as fin_app
 import book_type
 import conversion
 import convert_change_history
+import convert_label_source
 import convert_account_kinds
 import convert_movements
 import db
@@ -105,10 +106,13 @@ def dump(path: Path) -> str:
 
 
 def old_schema() -> str:
-    """Today's schema without the column this step adds."""
+    """Today's schema without the column this step adds, nor those a later
+    step adds (conversion.added_after)."""
+    later = conversion.added_after("movements").get("transactions", set())
     lines = history.without_history(db.SCHEMA_PATH.read_text()).splitlines()
-    kept = [line for line in lines if not line.strip().startswith("other_side_id ")]
-    assert len(kept) == len(lines) - 1
+    kept = [line for line in lines if not line.strip().startswith("other_side_id ")
+            and line.strip().split(" ", 1)[0] not in later]
+    assert len(kept) == len(lines) - 1 - len(later)
     return "\n".join(kept)
 
 
@@ -220,7 +224,9 @@ def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
 
     shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('transactions')"
     foreign_keys = "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('transactions') ORDER BY 1, 2"
-    assert query(old, shape) == query(new, shape)
+    # Less the columns a later step adds (convert_label_source.py).
+    later = conversion.added_after("movements").get("transactions", set())
+    assert query(old, shape) == [c for c in query(new, shape) if c[0] not in later]
     assert query(old, foreign_keys) == query(new, foreign_keys)
 
 
@@ -328,8 +334,9 @@ def test_the_app_will_not_start_on_a_database_from_before_the_step(old, started_
 def test_the_app_shows_the_converted_rows_and_their_other_sides(old, started_on):
     convert(old)
 
-    # And the change history, the last step of the chain.
+    # And the change history, and the label sources after it.
     conversion.run_step(old, convert_change_history.STEP)
+    conversion.run_step(old, convert_label_source.STEP)
     client = started_on(old)
 
     waiting = client.get("/api/transactions?flow=review&sort=amount&sort_dir=desc").get_json()["transactions"]

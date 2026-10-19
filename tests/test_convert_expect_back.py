@@ -479,8 +479,10 @@ def test_a_book_from_before_expect_back_converts_and_starts(tmp_path, monkeypatc
     assert conversion.run_step(path, convert_expect_back.STEP)["status"] == "already-applied"
 
 
-def test_the_step_goes_last_in_the_chain():
-    assert conversion.CHAIN[-1] == ("expect-back", "convert_expect_back")
+def test_the_step_goes_after_change_history_and_before_label_source_in_the_chain():
+    names = [name for name, _ in conversion.CHAIN]
+    assert conversion.CHAIN[names.index("expect-back")] == ("expect-back", "convert_expect_back")
+    assert names.index("change-history") < names.index("expect-back") < names.index("label-source")
     assert conversion.chain_step("convert_expect_back") is convert_expect_back.STEP
 
 

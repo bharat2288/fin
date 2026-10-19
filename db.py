@@ -247,7 +247,9 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
     as needing the change-history step again, which makes them; and a person's
     loan rows or opening figure not yet converted into expectations reads as
     needing the expect-back step (convert_expect_back.py), checked here by
-    name, last, once the shape it reads is there."""
+    name, last, once the shape it reads is there; and rows with no book or
+    type source columns read as needing the label-source step
+    (convert_label_source.py)."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "transactions" not in tables:
         return False  # a new database
@@ -267,6 +269,7 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
         is not None
         or not history.has_shape(conn)
         or _expect_back_pending(conn)
+        or not {"book_source", "type_source"} <= tx_cols
     )
 
 

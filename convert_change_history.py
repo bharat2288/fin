@@ -22,6 +22,8 @@ import db
 import history
 
 
+STEP_NAME = "change-history"
+
 _CREATE_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS (\w+) \(.*?\n\);", re.DOTALL)
 
 
@@ -34,8 +36,31 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
     return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
+def _added_later() -> dict[str, set[str]]:
+    """The columns a later step of the chain adds: a book reaching this step
+    has none of them yet, and that step puts the full triggers in place when
+    it adds them."""
+    return conversion.added_after(STEP_NAME)
+
+
+def _not_yet_added(conn: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
+    """The columns a later step adds that this book does not have yet."""
+    present = _tables(conn)
+    out = {}
+    for table, columns in _added_later().items():
+        if table not in present:
+            continue
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        missing = tuple(sorted(c for c in columns if c not in have))
+        if missing:
+            out[table] = missing
+    return out
+
+
 def _refusal(conn: sqlite3.Connection) -> str | None:
-    """A tracked table that exists without a column its triggers record."""
+    """A tracked table that exists without a column its triggers record,
+    other than one a later step of the chain adds."""
+    later = _added_later()
     declared = sqlite3.connect(":memory:")
     try:
         declared.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
@@ -45,7 +70,7 @@ def _refusal(conn: sqlite3.Connection) -> str | None:
                 continue
             wanted = [r[1] for r in declared.execute(f"PRAGMA table_info({table})")]
             have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-            missing = [c for c in wanted if c not in have]
+            missing = [c for c in wanted if c not in have and c not in later.get(table, ())]
             if missing:
                 return f"{table} has no {', '.join(missing)}; the history records every column"
     finally:
@@ -60,12 +85,12 @@ def _apply(conn: sqlite3.Connection) -> None:
     for table in history.TRACKED:
         if table not in present:
             conn.execute(declared[table])
-    for statement in history.schema_statements():
+    for statement in history.schema_statements(leave_out=_not_yet_added(conn)):
         conn.execute(statement)
 
 
 STEP = conversion.Step(
-    name="change-history", apply=_apply, is_applied=history.has_shape, refusal=_refusal
+    name=STEP_NAME, apply=_apply, is_applied=history.has_shape, refusal=_refusal
 )
 
 
