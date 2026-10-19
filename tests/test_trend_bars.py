@@ -429,3 +429,36 @@ def test_stacked_by_book_the_tones_follow_the_books_and_there_is_no_key():
     sep = bucket(model(p), "2026-09")
     assert [(s["key"], s["tone"]) for s in sep["segments"]] == [("Household", "c1"), ("Larkspur", "c2")]
     assert _node(f"console.log(JSON.stringify(window.Trend.bars.key({json.dumps(p)})))") == []
+
+
+# ---------------------------------------------------------------------------
+# Walk finding (390): on 12M bars the forced last tick sat beside the one before it
+# and the two read "SepOct"; "Nov 25" and "Jan 26" touched too. Ticks are 11px
+# monospace (0.6em a character), so their widths are known without a browser.
+# ---------------------------------------------------------------------------
+
+def drawn_ticks(payload, width):
+    svg = _node(r"""
+    const el = { clientWidth: """ + str(width) + r""", innerHTML: '', style: {},
+      addEventListener() {}, querySelector() { return { hidden: true, innerHTML: '', style: {} }; } };
+    window.Trend.modes.bars(el, """ + json.dumps(payload) + r""", {});
+    console.log(JSON.stringify(el.innerHTML));""")
+    return [(float(x), t) for x, t in re.findall(r'<text class="trend-bars__tick[^"]*" x="([^"]+)"[^>]*>([^<]*)</text>', svg)]
+
+
+def test_bar_ticks_never_run_together_at_phone_width_and_the_last_bar_keeps_its_tick():
+    p = fixture("trend_merchant")
+    for width in (330, 350, 450, 640, 1200):
+        ticks = drawn_ticks(p, width)
+        texts = [t for _, t in ticks]
+        assert texts[-1].startswith("Oct"), (width, texts)
+        # July is missing for Household: its tick, in the warning colour, is never thinned out.
+        assert any(t.startswith("Jul") and t.endswith("⧗") for t in texts), (width, texts)
+        # The first tick carries its year, and so does the first one of 2026.
+        assert re.search(r" 2[56]$", texts[0]), (width, texts)
+        assert next(t for t in texts if not t.startswith(("Nov", "Dec"))).split(" ")[1] == "26", (width, texts)
+        for (xa, a), (xb, b) in zip(ticks, ticks[1:]):
+            assert xb - xa >= (len(a) + len(b)) * 6.6 / 2 + 2, (width, a, b, texts)
+    # Wide enough, every month keeps its tick, the year on November and on January.
+    assert [t for _, t in drawn_ticks(p, 1200)] == [
+        "Nov 25", "Dec", "Jan 26", "Feb", "Mar", "Apr", "May", "Jun", "Jul ⧗", "Aug", "Sep", "Oct"]
