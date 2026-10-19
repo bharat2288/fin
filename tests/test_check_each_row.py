@@ -43,9 +43,9 @@ def expedia(conn, statement) -> tuple[int, list[int]]:
     1 the operator set by hand to Moom."""
     svc = merchant(conn, "Sample Travelsite", "Household", "Travel")
     txs = [row(conn, statement, "SAMPLE TRAVELSITE BKG", 100.0 + i, book="Household", type_name="Travel",
-               service_id=svc, cat_source="service_default", day=f"2026-03-1{i}") for i in range(3)]
+               service_id=svc, mark="service_default", day=f"2026-03-1{i}") for i in range(3)]
     txs.append(row(conn, statement, "SAMPLE TRAVELSITE BKG", 300.0, book="Moom", type_name="Travel",
-                   service_id=svc, cat_source="manual", day="2026-03-20"))
+                   service_id=svc, mark="manual", day="2026-03-20"))
     return svc, txs
 
 
@@ -142,7 +142,7 @@ def test_off_leaves_untyped_rows_and_rows_of_other_merchants_alone(client, conn,
     conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (other,))
     conn.commit()
     theirs = row(conn, statement, "SAMPLE BAZAAR", 12.0, book="Household", type_name="Shopping",
-                 service_id=other, cat_source="service_default")
+                 service_id=other, mark="service_default")
     client.post(f"/api/services/{svc}/check-each-row", json={"on": True, "past": "leave"})
 
     assert waiting(client) == [theirs]
@@ -160,7 +160,7 @@ def test_case_6_a_new_row_of_a_check_each_row_merchant_counts_in_its_usual_book_
     found = db.match_merchant("SAMPLE AIRWAYS 312-1112223 MUMBAI", conn, 118000)
     assert (found["book"], found["service_id"], found["review_each_time"]) == ("Household", svc, True)
     tx = row(conn, statement, "SAMPLE AIRWAYS 312-1112223 MUMBAI", 1180.0, book=found["book"],
-             type_name="Travel", service_id=svc, cat_source=found["cat_source"])
+             type_name="Travel", service_id=svc, mark="service_default")
 
     assert label(client, tx) == ("Household", "Travel", "service_default")
     assert shown(client, tx)["not_checked"]
@@ -172,7 +172,7 @@ def test_case_15_a_merchant_flagged_before_this_change_lists_its_rows_unchanged(
     conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (svc,))
     conn.commit()
     txs = [row(conn, statement, "SAMPLE BAZAAR MKTPLACE", amount, book="Household", type_name="Shopping",
-               service_id=svc, cat_source="service_default", day=f"2026-04-1{i}")
+               service_id=svc, mark="service_default", day=f"2026-04-1{i}")
            for i, amount in enumerate((45.90, 219.00, 49.90))]
 
     assert waiting(client) == sorted(txs)
@@ -191,7 +191,7 @@ def amazon(conn, statement) -> tuple[int, list[int]]:
     conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (svc,))
     conn.commit()
     txs = [row(conn, statement, "SAMPLE BAZAAR MKTPLACE", amount, book="Household", type_name="Shopping",
-               service_id=svc, cat_source="service_default", day=f"2026-04-1{i}")
+               service_id=svc, mark="service_default", day=f"2026-04-1{i}")
            for i, amount in enumerate((45.90, 219.00, 49.90))]
     return svc, txs
 

@@ -303,9 +303,9 @@ def test_the_live_count_runs_within_a_second_over_fifty_thousand_rows(client, co
     travel = type_id(conn, "Travel")
     conn.executemany(
         "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id,"
-        " service_id, cat_source, flow_type, book_source, type_source) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        " service_id, flow_type, book_source, type_source) VALUES (?,?,?,?,?,?,?,?,?,?)",
         [(statement, f"20{24 + i % 3}-{1 + i % 12:02d}-{1 + i % 28:02d}", f"SAMPLE VOLUME AIR {i}", 500 + i % 900,
-          "Household", travel, held, "service_default", "expense", "merchant", "merchant") for i in range(50_000)])
+          "Household", travel, held, "expense", "merchant", "merchant") for i in range(50_000)])
     conn.commit()
 
     took = []

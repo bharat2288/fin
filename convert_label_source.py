@@ -15,10 +15,12 @@ fills them from the one mark a row carries today (`cat_source`):
   merchant's winning rule, gives now: the same -> checked; different, or no
   merchant -> chosen.
 
-It changes no book, no type and no `cat_source`, which stays and is still
-written (expand; a contract step retires it). It runs after the expect-back
-step (conversion.CHAIN), and only through the conversion runner, so it sits
-behind a backup, in one transaction, and a second run changes nothing. A mark
+It changes no book, no type and no `cat_source`, which stays for the
+contract step (retire_single_mark.py, personal-ledger 51) to drop. It runs
+after the expect-back step (conversion.CHAIN), and only through the
+conversion runner, so it sits
+behind a backup, in one transaction, and a second run changes nothing: it
+records that it ran (conversion.record_applied) and reads the record. A mark
 it does not know refuses the step, naming it, before anything is written.
 
     python convert_label_source.py <path to database>
@@ -36,6 +38,7 @@ import book_type
 import conversion
 import db
 import history
+import label_source
 
 NAME = "label-source"
 
@@ -69,17 +72,6 @@ def _columns(conn: sqlite3.Connection) -> set[str]:
 
 def has_columns(conn: sqlite3.Connection) -> bool:
     return set(SOURCE_COLUMNS) <= _columns(conn)
-
-
-def _triggers_record_sources(conn: sqlite3.Connection) -> bool:
-    for op in ("insert", "update", "delete"):
-        found = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
-            (f"history_transactions_{op}",),
-        ).fetchone()
-        if found is None or not all(f"'{c}', " in found[0] for c in SOURCE_COLUMNS):
-            return False
-    return True
 
 
 def unknown_marks(conn: sqlite3.Connection) -> dict[str, int]:
@@ -187,6 +179,9 @@ def _apply(conn: sqlite3.Connection) -> None:
     conn.executemany(
         "UPDATE transactions SET book_source = ?, type_source = ? WHERE id = ?", planned(conn)
     )
+    # In the runner's transaction, with the writes: the book is converted for
+    # good, whatever source a writer later leaves unset.
+    conversion.record_applied(conn, NAME)
 
 
 def unsourced(conn: sqlite3.Connection) -> int:
@@ -198,12 +193,18 @@ def unsourced(conn: sqlite3.Connection) -> int:
 
 
 def _is_applied(conn: sqlite3.Connection) -> bool:
-    """The columns are there, the history records them, and every book and
-    type has its source. Read from the data, not the columns alone: a book
-    made new in schema.sql's shape has the columns from its start, and a row
-    written there before every writer sets its sources (personal-ledger 49)
-    reads as this step's to fill."""
-    return has_columns(conn) and _triggers_record_sources(conn) and not unsourced(conn)
+    """Applied once the book records the step ran (personal-ledger 51): a row
+    a writer later leaves without a source, an import, an Undo, is the
+    operator's own book, never a conversion still to run. Before that, only
+    a book whose shape this step can no longer fill (the source columns there
+    and the mark it reads from gone: made new in schema.sql's shape, or past
+    the contract step); never from what its rows hold. A book that has the
+    columns and the mark and no record (filled before the step recorded
+    itself) reads as pending: a run fills only what has no source, and
+    records."""
+    if conversion.recorded(conn, NAME):
+        return True
+    return has_columns(conn) and label_source.RETIRED_MARK not in _columns(conn)
 
 
 def _measure(conn: sqlite3.Connection) -> dict:
@@ -265,7 +266,7 @@ def main(argv: list[str]) -> int:
             counts = report["after"]["sources"][column]
             shown = ", ".join(f"{name} {counts[name]}" for name in book_type.SOURCE_NAMES if counts.get(name))
             print(f"{field} sources: {shown or 'none'}")
-        print("no book, type or mark was changed; cat_source is kept")
+        print("no book, type or mark was changed; the mark is kept for the contract step")
     return 0
 
 

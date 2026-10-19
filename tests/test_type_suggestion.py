@@ -554,8 +554,8 @@ def test_a_confirmed_suggestion_is_the_operators_label_and_the_record_says_it_wa
 
     assert resp.status_code == 200, resp.get_json()
     labelled = shown(client, tx)
-    assert (labelled["book"], labelled["display_type"], labelled["cat_source"]) == (
-        "Household", "Dining", "manual",
+    assert (labelled["book"], labelled["display_type"], labelled["book_source"], labelled["type_source"]) == (
+        "Household", "Dining", "chosen", "chosen",
     )
     stored = answers(client)["LANTERN NOODLE HOUSE"]
     assert (stored["chosen_type"], stored["suggestion_visible"]) == ("Dining", True)
@@ -616,7 +616,7 @@ def test_the_suggestion_never_files_a_row_or_makes_a_merchant_or_a_rule(
     suggestion(client, tx)
 
     after = shown(client, tx)
-    assert (after["type_id"], after["service_id"], after["cat_source"]) == (None, None, "auto")
+    assert (after["type_id"], after["service_id"], after["type_source"]) == (None, None, None)
     assert len(client.get("/api/services").get_json()) == merchants
     assert len(client.get("/api/rules").get_json()) == rules
 

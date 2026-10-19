@@ -18,7 +18,7 @@ import db
 import mcp_tools
 from test_balance_sheet import bring_in
 from test_book_and_type_switch import (  # noqa: F401 (statement is a fixture)
-    merchant, statement, type_id,
+    mark_of, merchant, statement, type_id,
 )
 from test_client_seams import APP_JS, NODE, needs_node
 
@@ -28,16 +28,16 @@ CHAT_ACTOR = "chat:sample-subject"
 
 
 def row(conn, statement_id, description, amount=25.0, *, book="Household", type_name="Travel",
-        service_id=None, sources=("merchant", "merchant"), cat_source="service_default",
+        service_id=None, sources=("merchant", "merchant"),
         day="2026-09-10", flow="expense"):
     """A row as fin holds it after the label-source step: its book and type,
     with a source for each."""
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id,"
-        " service_id, cat_source, flow_type, book_source, type_source)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " service_id, flow_type, book_source, type_source)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (statement_id, day, description, money.exact_minor(amount), book,
-         type_id(conn, type_name) if type_name else None, service_id, cat_source, flow,
+         type_id(conn, type_name) if type_name else None, service_id, flow,
          sources[0] if book else None, sources[1] if type_name else None),
     )
     conn.commit()
@@ -62,7 +62,9 @@ def held(client, tx_id) -> tuple:
 
 
 def mark(client, tx_id) -> str:
-    return shown(client, tx_id)["cat_source"]
+    """The row's two sources in the retired single mark's words."""
+    tx = shown(client, tx_id)
+    return mark_of(tx["book_source"], tx["type_source"])
 
 
 def waiting(client) -> list[int]:
@@ -261,8 +263,8 @@ def test_case_5_chats_set_label_chooses_the_book_and_the_entry_is_via_chat(clien
 
 
 def test_case_6_teaching_the_merchant_gives_both_fields_from_the_merchant(client, conn, statement):
-    tx = row(conn, statement, "SAMPLE STALL 0042", book=None, type_name=None, cat_source="auto")
-    also = row(conn, statement, "SAMPLE STALL 0077", book=None, type_name=None, cat_source="auto")
+    tx = row(conn, statement, "SAMPLE STALL 0042", book=None, type_name=None)
+    also = row(conn, statement, "SAMPLE STALL 0077", book=None, type_name=None)
 
     resp = client.post("/api/transactions/resolve", json={
         "tx_id": tx, "service_name": "Sample Stall", "type_id": type_id(conn, "Dining"),
@@ -280,8 +282,8 @@ def test_case_6_teaching_the_merchant_gives_both_fields_from_the_merchant(client
 ])
 def test_case_6_a_rule_override_taught_gives_the_field_it_sets_from_the_rule(client, conn, statement, book, sources):
     market = merchant(conn, "Sample Market", "Household", "Shopping")
-    tx = row(conn, statement, "SAMPLE MARKET WHOLESALE 0042", book=None, type_name=None, cat_source="auto")
-    also = row(conn, statement, "SAMPLE MARKET WHOLESALE 0077", book=None, type_name=None, cat_source="auto")
+    tx = row(conn, statement, "SAMPLE MARKET WHOLESALE 0042", book=None, type_name=None)
+    also = row(conn, statement, "SAMPLE MARKET WHOLESALE 0077", book=None, type_name=None)
 
     resp = client.post("/api/transactions/resolve", json={
         "tx_id": tx, "service_id": market, "book": book, "type_id": type_id(conn, "Stock purchases"),
@@ -314,7 +316,7 @@ def test_case_8_not_now_marks_the_past_checked_and_none_waits(client, conn, grab
 def test_case_8_not_now_leaves_a_chosen_field_chosen(client, conn, statement, grab):
     svc, txs = grab
     moom = row(conn, statement, "SAMPLE GRAB RIDE MOOM", book="Moom", type_name="Transport", service_id=svc,
-               sources=("chosen", "merchant"), cat_source="manual")
+               sources=("chosen", "merchant"))
 
     client.post(f"/api/services/{svc}/check-each-row", json={"on": True, "past": "leave"})
 
@@ -323,7 +325,7 @@ def test_case_8_not_now_leaves_a_chosen_field_chosen(client, conn, statement, gr
 
 def test_case_8_teaching_check_each_row_with_not_now_marks_the_merchants_other_rows_checked(client, conn, statement, grab):
     svc, txs = grab
-    new = row(conn, statement, "SAMPLE GRAB RIDE NEW", book=None, type_name=None, cat_source="auto")
+    new = row(conn, statement, "SAMPLE GRAB RIDE NEW", book=None, type_name=None)
 
     resp = client.post("/api/transactions/resolve", json={
         "tx_id": new, "service_id": svc, "check_each_row": True, "past": "leave",
@@ -342,7 +344,7 @@ def test_case_10_book_varies_counts_only_chosen_books_that_differ(client, conn, 
     svc, txs = grab
     other = merchant(conn, "Sample Taxi", "Household", "Transport")
     checked = [row(conn, statement, "SAMPLE TAXI", type_name="Transport", service_id=other,
-                   sources=("checked", "checked"), cat_source="manual") for _ in range(2)]
+                   sources=("checked", "checked")) for _ in range(2)]
     assert checked
 
     resp = client.post("/api/transactions/bulk-label", json={
@@ -357,7 +359,7 @@ def test_case_10_book_varies_counts_only_chosen_books_that_differ(client, conn, 
 def test_case_10_checked_rows_in_another_book_are_not_counted(client, conn, statement):
     taxi = merchant(conn, "Sample Taxi", "Household", "Transport")
     txs = [row(conn, statement, "SAMPLE TAXI", book="Moom", type_name="Transport", service_id=taxi,
-               sources=("checked", "checked"), cat_source="manual") for _ in range(2)]
+               sources=("checked", "checked")) for _ in range(2)]
     assert txs
 
     assert client.get(f"/api/services/{taxi}/book-varies").get_json() == {
@@ -369,10 +371,8 @@ def test_case_10_checked_rows_in_another_book_are_not_counted(client, conn, stat
 
 def test_a_merchants_type_changed_on_its_sheet_reaches_checked_fields_and_leaves_chosen_ones(client, conn, statement, indigo):
     svc, txs = indigo
-    checked = row(conn, statement, "INDIGOAIR 6E", service_id=svc, sources=("checked", "checked"),
-                  cat_source="manual")
-    chosen = row(conn, statement, "INDIGOAIR 6E", service_id=svc, sources=("checked", "chosen"),
-                 cat_source="manual")
+    checked = row(conn, statement, "INDIGOAIR 6E", service_id=svc, sources=("checked", "checked"))
+    chosen = row(conn, statement, "INDIGOAIR 6E", service_id=svc, sources=("checked", "chosen"))
     before = entries(client)
 
     resp = client.put(f"/api/services/{svc}", json={"type_id": type_id(conn, "Transport"), "past": "apply"})
@@ -401,7 +401,7 @@ def test_a_merchants_book_change_leaves_a_book_a_rule_overrides(client, conn, st
     db.invalidate_rules_cache()
     plain = row(conn, statement, "SAMPLE AIR 0042", service_id=svc)
     corp = row(conn, statement, "SAMPLE AIR CORP 0042", book="Kalesh", service_id=svc,
-               sources=("checked", "merchant"), cat_source="manual")
+               sources=("checked", "merchant"))
 
     resp = client.put(f"/api/services/{svc}", json={"book": "Moom", "past": "apply"})
 
@@ -415,9 +415,9 @@ def test_merging_merchants_reaches_checked_fields_and_leaves_chosen_ones(client,
     food = merchant(conn, "Grab Food", "Household", "Dining")
     plain = row(conn, statement, "SAMPLE GRABFOOD 1", type_name="Dining", service_id=food)
     checked = row(conn, statement, "SAMPLE GRABFOOD 2", type_name="Dining", service_id=food,
-                  sources=("checked", "checked"), cat_source="manual")
+                  sources=("checked", "checked"))
     chosen = row(conn, statement, "SAMPLE GRABFOOD 3", book="Moom", type_name="Dining", service_id=food,
-                 sources=("chosen", "chosen"), cat_source="manual")
+                 sources=("chosen", "chosen"))
 
     resp = client.post(f"/api/services/{food}/merge", json={"target_id": grab, "past": "apply"})
 
@@ -440,10 +440,9 @@ def test_a_rule_edit_reaches_checked_fields_and_leaves_chosen_ones(client, conn,
     conn.commit()
     db.invalidate_rules_cache()
     plain = row(conn, statement, "SAMPLE AIR 1", service_id=air)
-    checked = row(conn, statement, "SAMPLE AIR 2", service_id=air, sources=("checked", "checked"),
-                  cat_source="manual")
+    checked = row(conn, statement, "SAMPLE AIR 2", service_id=air, sources=("checked", "checked"))
     chosen = row(conn, statement, "SAMPLE AIR 3", book="Moom", service_id=air,
-                 sources=("chosen", "checked"), cat_source="manual")
+                 sources=("chosen", "checked"))
 
     resp = client.put(f"/api/rules/{rule_id}", json={"type_override_id": type_id(conn, "Transport"),
                                                      "past": "apply"})
@@ -471,9 +470,9 @@ def test_the_drift_count_never_reaches_a_checked_or_a_chosen_field(client, conn,
     conn.commit()
     db.invalidate_rules_cache()
     checked = row(conn, statement, "SAMPLE AIR 2", type_name="Shopping", service_id=air,
-                  sources=("checked", "checked"), cat_source="manual")
+                  sources=("checked", "checked"))
     chosen = row(conn, statement, "SAMPLE AIR 3", book="Moom", type_name="Shopping", service_id=air,
-                 sources=("chosen", "chosen"), cat_source="manual")
+                 sources=("chosen", "chosen"))
 
     assert client.get("/api/rules/drift").get_json()["count"] == 0
     resp = client.post("/api/rules/drift", json={"past": "apply"})
@@ -504,9 +503,9 @@ def test_an_import_gives_each_field_the_source_the_rules_give(client, conn):
     ])
 
     rows = {t["description"]: t for t in client.get("/api/transactions?per_page=50").get_json()["transactions"]}
-    got = {d: (t["book_source"], t["type_source"], t["cat_source"]) for d, t in rows.items()}
-    assert got["SAMPLE CAFE 0042"] == ("merchant", "merchant", "service_default")
-    assert got["SAMPLE MARKET WHOLESALE 9"] == ("merchant", "rule", "rule_override")
+    got = {d: (t["book_source"], t["type_source"]) for d, t in rows.items()}
+    assert got["SAMPLE CAFE 0042"] == ("merchant", "merchant")
+    assert got["SAMPLE MARKET WHOLESALE 9"] == ("merchant", "rule")
     assert got["SAMPLE CORNER STALL"][:2] == (None, None)
 
 
@@ -535,21 +534,3 @@ def test_yes_to_a_row_not_checked_checks_it_as_it_came_in_through_bulk_label():
     assert "act('POST', '/api/transactions/bulk-label', mixedYesBody(row)" in APP_JS
 
 
-# --- the expand step: a label written by a writer not yet switched --------------------------
-
-
-def test_a_hand_set_row_with_no_sources_yet_is_neither_reached_nor_waiting(client, conn, statement, indigo):
-    """The review list's label (personal-ledger 50) still writes cat_source
-    alone: a row it marked manual reads as chosen until then."""
-    svc, _ = indigo
-    by_review = row(conn, statement, "INDIGOAIR 6E", book="Moom", service_id=svc,
-                    sources=(None, None), cat_source="manual")
-    conn.execute("UPDATE transactions SET book_source = NULL, type_source = NULL WHERE id = ?", (by_review,))
-    conn.commit()
-
-    assert by_review not in waiting(client)
-    resp = client.put(f"/api/services/{svc}", json={"book": "Kalesh", "type_id": type_id(conn, "Transport"),
-                                                   "past": "apply"})
-
-    assert resp.status_code == 200
-    assert held(client, by_review) == ("Moom", "Travel", None, None)

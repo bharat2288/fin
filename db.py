@@ -7,6 +7,7 @@ from pathlib import Path
 
 import book_type
 import history
+import label_source
 
 # The book beside the code, as on the laptop; FIN_DB_PATH names another
 # (the Railway volume). Read once, at import.
@@ -249,7 +250,11 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
     needing the expect-back step (convert_expect_back.py), checked here by
     name, last, once the shape it reads is there; and rows with no book or
     type source columns read as needing the label-source step
-    (convert_label_source.py)."""
+    (convert_label_source.py), and rows still holding the one mark those two
+    replaced as needing its retirement (retire_single_mark.py). Each is read
+    from the book's shape, never from what its rows hold, but expect-back's,
+    which reads its record first: nothing the operator does afterwards reads
+    as a conversion still to run."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "transactions" not in tables:
         return False  # a new database
@@ -270,6 +275,7 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
         or not history.has_shape(conn)
         or _expect_back_pending(conn)
         or not {"book_source", "type_source"} <= tx_cols
+        or label_source.RETIRED_MARK in tx_cols
     )
 
 
@@ -447,17 +453,16 @@ def _get_rules(conn: sqlite3.Connection) -> list[dict]:
     return _rules_cache
 
 
-def rule_label(rule) -> tuple[str | None, int | None, str]:
-    """The (book, type_id, provenance) a rule gives a row.
+def rule_label(rule) -> tuple[str | None, int | None]:
+    """The (book, type_id) a rule gives a row.
 
     A rule may override the merchant's type, its book, or both; whatever it
-    does not override is the merchant's default.
+    does not override is the merchant's default. Where each came from is
+    label_source.rule_sources.
     """
-    overrides = rule["type_override_id"] is not None or rule["book_override"] is not None
     return (
         rule["book_override"] or rule["book"],
         rule["type_override_id"] or rule["type_id"],
-        "rule_override" if overrides else "service_default",
     )
 
 
@@ -466,7 +471,6 @@ NO_MATCH = {
     "book": None,
     "type_id": None,
     "service_id": None,
-    "cat_source": None,
     "review_each_time": False,
 }
 
@@ -482,19 +486,18 @@ def match_merchant(
     Amount-conditional rules (min_amount_minor / max_amount_minor) only match if
     the transaction's amount, in whole minor units, falls within the range.
 
-    Returns {book, type_id, service_id, cat_source, review_each_time}; every
+    Returns {book, type_id, service_id, review_each_time}; every
     value is empty when no rule matches. Book and type are the merchant's
     defaults unless the rule overrides them.
     """
     rule = first_rule(description, conn, amount_minor)
     if rule is None:
         return dict(NO_MATCH)
-    book, type_id, cat_source = rule_label(rule)
+    book, type_id = rule_label(rule)
     return {
         "book": book,
         "type_id": type_id,
         "service_id": rule["service_id"],
-        "cat_source": cat_source,
         "review_each_time": bool(rule["review_each_time"]),
     }
 

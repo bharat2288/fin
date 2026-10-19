@@ -140,7 +140,7 @@ def held_merchant(conn, statement) -> tuple[int, int, int, int]:
     two new rows the rule will reach: the one taught and one more."""
     svc = merchant(conn, "Sample Air", "Household", "Travel")
     past = row(conn, statement, "SAMPLE AIR OLD BOOKING", 90.0, book="Household", type_name="Travel",
-               service_id=svc, cat_source="service_default", day="2026-03-01")
+               service_id=svc, mark="service_default", day="2026-03-01")
     tx = row(conn, statement, "SAMPLE AIR 0042", 120.0, day="2026-09-02")
     reached = row(conn, statement, "SAMPLE AIR 0077", 130.0, day="2026-09-05")
     return svc, past, tx, reached
@@ -242,7 +242,7 @@ def test_a_merchant_already_set_to_check_each_row_keeps_its_waiting_rows(client,
     conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (svc,))
     conn.commit()
     old = row(conn, statement, "SAMPLE MART 1", 45.90, book="Household", type_name="Shopping",
-              service_id=svc, cat_source="service_default", day="2026-09-01")
+              service_id=svc, mark="service_default", day="2026-09-01")
     tx = row(conn, statement, "SAMPLE MART 2", 19.0, day="2026-09-03")
 
     resp = client.post("/api/transactions/resolve", json=teach(conn, tx, "Sample Mart", "SAMPLE MART", "Shopping", "Household",
@@ -287,7 +287,7 @@ def test_check_each_row_false_sets_a_check_each_row_merchant_back_to_every_row_t
     conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (svc,))
     conn.commit()
     old = row(conn, statement, "SAMPLE MART 1", 45.90, book="Household", type_name="Shopping",
-              service_id=svc, cat_source="service_default", day="2026-09-01")
+              service_id=svc, mark="service_default", day="2026-09-01")
     tx = row(conn, statement, "SAMPLE MART 2", 19.0, day="2026-09-03")
 
     resp = client.post("/api/transactions/resolve", json=teach(conn, tx, "Sample Mart", "SAMPLE MART", "Shopping", "Household",

@@ -31,6 +31,7 @@ from datetime import date
 import book_type
 import expect_back
 import flow
+import label_source
 import suggest
 
 # How many days before a refund its purchase may be dated.
@@ -168,16 +169,21 @@ def _close(conn: sqlite3.Connection, refund_row_id: int, purchase_row_id: int) -
 
 def _write(conn: sqlite3.Connection, refund: dict, purchase: dict, source: str) -> dict:
     """The link, the purchase's book and type on a refund not labelled by
-    hand (cat_source 'manual'), and the close of what the purchase has open."""
+    hand (neither field checked nor chosen: label_source.waits_sql), and the
+    close of what the purchase has open. A field it fills keeps the source it
+    has; one with none is from the merchant, as it read before (an empty
+    type has none)."""
     link_id = conn.execute(
         "INSERT INTO refund_link (refund_row_id, purchase_row_id, source) VALUES (?, ?, ?)",
         (refund["id"], purchase["id"], source),
     ).lastrowid
     book = purchase["book"] or book_type.DEFAULT_BOOK
     conn.execute(
-        "UPDATE transactions SET book = ?, type_id = ? WHERE id = ? "
-        "AND COALESCE(cat_source, 'auto') != 'manual' AND (book IS NOT ? OR type_id IS NOT ?)",
-        (book, purchase["type_id"], refund["id"], book, purchase["type_id"]),
+        "UPDATE transactions SET book = ?, type_id = ?, book_source = COALESCE(book_source, ?),"
+        " type_source = CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(type_source, ?) END"
+        f" WHERE id = ? AND {label_source.waits_sql('')} AND (book IS NOT ? OR type_id IS NOT ?)",
+        (book, purchase["type_id"], label_source.NO_SOURCE, purchase["type_id"], label_source.NO_SOURCE,
+         refund["id"], book, purchase["type_id"]),
     )
     _close(conn, refund["id"], purchase["id"])
     return link(conn, link_id)

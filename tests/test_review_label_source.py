@@ -45,7 +45,7 @@ def payee(conn):
 def waiting_row(conn, statement, payee):
     """A transfer on the review list: its book from the merchant, no type."""
     return row(conn, statement, TRANSFER, 120.50, book="Household", type_name=None, service_id=payee,
-               sources=("merchant", None), cat_source="service_default", flow="review")
+               sources=("merchant", None), flow="review")
 
 
 def label(client, tx_id, **body):
@@ -88,20 +88,20 @@ def test_case_7_a_gift_given_has_its_book_and_type_chosen(client, conn, waiting_
     assert flow_of(client, waiting_row) == ("expense", 1, None)
 
 
-def test_case_7_a_gift_received_has_its_kind_chosen_and_no_book_source(client, conn, statement):
+def test_case_7_a_gift_received_has_its_kind_chosen_and_its_empty_book_chosen(client, conn, statement):
     tx = row(conn, statement, "INWARD PAYNOW FROM SAMPLE SENDER REF 4410", -500.00, book=None,
-             type_name=None, cat_source="auto", flow="review")
+             type_name=None, flow="review")
 
     resp = label(client, tx, choice="gift")
 
     assert resp.status_code == 200, resp.get_json()
     tx_shown = shown(client, tx)
-    assert (tx_shown["flow_type"], tx_shown["book_source"], tx_shown["type_source"]) == ("income", None, "chosen")
+    assert (tx_shown["flow_type"], tx_shown["book_source"], tx_shown["type_source"]) == ("income", "chosen", "chosen")
 
 
 def test_case_7_income_has_its_kind_chosen(client, conn, statement):
     tx = row(conn, statement, "INWARD PAYNOW FROM SAMPLE TENANT REF 4411", -3100.00, book=None,
-             type_name=None, cat_source="auto", flow="review")
+             type_name=None, flow="review")
     rental = conn.execute("SELECT id FROM types WHERE kind = 'income' AND name = 'Rental'").fetchone()[0]
 
     resp = label(client, tx, choice="income", income_kind_id=rental)
@@ -110,11 +110,13 @@ def test_case_7_income_has_its_kind_chosen(client, conn, statement):
     assert (shown(client, tx)["type_id"], shown(client, tx)["type_source"]) == (rental, "chosen")
 
 
-# --- a movement: no book or type, so no source ------------------------------------------------
+# --- a movement: no book or type, each chosen empty (personal-ledger 51) ------------------------
 
 
-def test_a_spending_label_changed_to_a_movement_leaves_no_source_on_the_emptied_fields(
+def test_a_spending_label_changed_to_a_movement_chooses_the_emptied_fields(
         client, conn, waiting_row):
+    """With the single mark retired, a field said empty by hand is chosen
+    itself, so no merchant or rule fills it later."""
     company = account(conn, "Sample Venture", "company")
     label(client, waiting_row, choice="spending", type_id=type_id(conn, "Dining"))
 
@@ -122,9 +124,9 @@ def test_a_spending_label_changed_to_a_movement_leaves_no_source_on_the_emptied_
 
     assert resp.status_code == 200, resp.get_json()
     tx = shown(client, waiting_row)
-    assert (tx["type_id"], tx["book_source"], tx["type_source"]) == (None, None, None)
+    assert (tx["type_id"], tx["book_source"], tx["type_source"]) == (None, "chosen", "chosen")
     assert flow_of(client, waiting_row) == ("movement", 1, company)
-    assert mark(client, waiting_row) == "manual"  # the flow is still set by hand
+    assert mark(client, waiting_row) == "manual"
 
 
 # --- a later merchant or rule change never reaches it ----------------------------------------

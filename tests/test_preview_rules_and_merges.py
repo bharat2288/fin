@@ -58,14 +58,12 @@ def add_row(conn, statement_id, description, amount_minor=4000, *, service_id=No
     merchant has no book, no type and no source."""
     if service_id is None and sources == ("merchant", "merchant"):
         book, type_name = None, None
-    mark = "manual" if {"checked", "chosen"} & set(sources) else "service_default"
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_minor, book, type_id,"
-        " service_id, cat_source, flow_type, book_source, type_source)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expense', ?, ?)",
+        " service_id, flow_type, book_source, type_source)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, 'expense', ?, ?)",
         (statement_id, day, description, amount_minor, book,
          type_id(conn, type_name) if type_name else None, service_id,
-         mark if service_id is not None or book or type_name else "auto",
          sources[0] if book else None, sources[1] if type_name else None),
     )
     conn.commit()
@@ -82,7 +80,7 @@ def held(conn, ids) -> dict:
 
 def every_row(conn) -> dict:
     return {r[0]: tuple(r[1:]) for r in conn.execute(
-        "SELECT id, book, type_id, service_id, book_source, type_source, cat_source, flow_type"
+        "SELECT id, book, type_id, service_id, book_source, type_source, flow_type"
         " FROM transactions")}
 
 
@@ -364,10 +362,11 @@ def test_case_16_apply_labels_the_nine_and_undo_takes_the_rule_away(client, conn
 
 def test_a_rule_added_leaves_a_row_named_by_hand_with_no_book_or_type(client, conn, rides, statement):
     """A row the operator named on the review list (a movement) has no book
-    or type, only its hand-set mark: a rule never takes it."""
+    or type, each chosen empty (personal-ledger 51): a rule never takes it."""
     named = conn.execute(
-        "INSERT INTO transactions (statement_id, date, description, amount_minor, cat_source, flow_type,"
-        " flow_type_manual) VALUES (?, '2026-09-01', 'SAMPLE TAXI FLEET TRANSFER', 90000, 'manual', 'movement', 1)",
+        "INSERT INTO transactions (statement_id, date, description, amount_minor, book_source, type_source,"
+        " flow_type, flow_type_manual) VALUES (?, '2026-09-01', 'SAMPLE TAXI FLEET TRANSFER', 90000,"
+        " 'chosen', 'chosen', 'movement', 1)",
         (statement,)).lastrowid
     conn.commit()
     body = {"pattern": "TAXI", "service_id": rides["taxi"], "priority": 1}

@@ -71,7 +71,7 @@ def listed(client, query: str = "") -> list[dict]:
 
 def derived(client) -> list[dict]:
     """The derived interest rows, oldest first, as the transaction list shows them."""
-    rows = [t for t in listed(client) if t["cat_source"] == "derived"]
+    rows = [t for t in listed(client) if t["book_source"] == "derived"]
     return sorted(rows, key=lambda t: t["date"])
 
 

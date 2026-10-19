@@ -277,7 +277,7 @@ def test_the_book_move_count_does_not_count_rows_accounted_for(client, conn, sto
     svc = merchant(conn, "Harbour Grill", book="Moom")
     for r in (story.harbour, story.golden):
         file_under(conn, r, svc)
-        conn.execute("UPDATE transactions SET book = 'Household', cat_source = 'manual' WHERE id = ?", (r,))
+        conn.execute("UPDATE transactions SET book = 'Household', book_source = 'chosen', type_source = 'chosen' WHERE id = ?", (r,))
     conn.commit()
     assert client.get(f"/api/services/{svc}/book-varies").get_json()["moved"] == 2
     mark(conn, story.harbour, 30000, names=(story.people["Jay"],))

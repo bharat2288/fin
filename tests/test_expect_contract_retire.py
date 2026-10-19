@@ -76,7 +76,7 @@ def converted(conn, story):
     b, ravi = story.book, story.people["Ravi"]
     out = row(conn, b, b.savings, "2026-06-03", "TRANSFER TO RAVI", 200000, flow="movement", other_side=ravi)
     back = row(conn, b, b.savings, "2026-08-15", "PAYNOW FROM RAVI", -50000, flow="movement", other_side=ravi)
-    conn.execute("UPDATE transactions SET flow_type_manual = 1, cat_source = 'manual' WHERE id IN (?, ?)",
+    conn.execute("UPDATE transactions SET flow_type_manual = 1, book_source = 'chosen', type_source = 'chosen' WHERE id IN (?, ?)",
                  (out, back))
     conn.commit()
     loan = mark(conn, out, 200000, names=(ravi,), source="converted")
@@ -167,7 +167,7 @@ def _labelled_alike(conn, story, description: str, other_side: int, n: int = 3) 
     for day in range(1, n + 1):
         made = row(conn, b, b.savings, f"2026-07-{day:02d}", description, -10000, flow="movement",
                    other_side=other_side)
-        conn.execute("UPDATE transactions SET flow_type_manual = 1, cat_source = 'manual' WHERE id = ?", (made,))
+        conn.execute("UPDATE transactions SET flow_type_manual = 1, book_source = 'chosen', type_source = 'chosen' WHERE id = ?", (made,))
     conn.commit()
     return row(conn, b, b.savings, "2026-07-20", description, -10000, flow="review")
 

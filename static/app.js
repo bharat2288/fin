@@ -4735,7 +4735,7 @@ function importPreviewHTML(p) {
 }
 /** The choices a confirm may carry for one previewed row (app.py
  *  _CONFIRM_ROW_CHOICES); its facts stay on the server. */
-const IMPORT_CHOICES = ['book', 'type_id', 'service_id', 'flow_type', 'other_side_id', '_skip', 'is_one_off', 'cat_source'];
+const IMPORT_CHOICES = ['book', 'type_id', 'service_id', 'flow_type', 'other_side_id', '_skip', 'is_one_off'];
 function importChoices(t) {
     const out = {};
     IMPORT_CHOICES.forEach(k => { if (k in t) out[k] = t[k]; });
@@ -4798,8 +4798,8 @@ function dayHeading(iso) {
     return iso ? day(iso) : 'Earlier';
 }
 
-// A field's source is shown by fin-surfaces 52's marks, not as a changed field (as cat_source).
-const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'book_source', 'type_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
+// A field's source is shown by fin-surfaces 52's marks, not as a changed field.
+const SKIP_FIELDS = new Set(['id', 'created_at', 'book_source', 'type_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
 const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'kind', is_one_off: 'one-off', notes: 'note',
     amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'check each row',
     exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement' };
@@ -5302,11 +5302,12 @@ async function openTimeline(table, rowId, opts) {
     sheetBody().innerHTML = await timelineHTML(table, rowId, opts);
 }
 
-const LABEL_SOURCE_WORDS = { manual: 'by hand', service_default: 'its merchant', rule_override: 'a rule', fallback: 'its wording', derived: 'worked out from figures', auto: 'the rules' };
 const LABEL_FIELDS = ['type_id', 'service_id', 'flow_type', 'book'];
 /** Who labelled a row and when, from its own history (walk C8.2); '' for a
  *  row whose book or type has a source, which sourceLinesHTML says per field
- *  (spec 24: one line per field on the row sheet). */
+ *  (spec 24: one line per field on the row sheet). With neither and no label
+ *  change in its history: by hand when its kind was set by hand, not yet for
+ *  a row still waiting or untyped, else the rules, which worked out its kind. */
 function labelledBy(found, details) {
     if (found.sources && (found.sources.book || found.sources.type)) return '';
     for (const d of details) {
@@ -5314,7 +5315,9 @@ function labelledBy(found, details) {
         const c = d.changes.find(x => x.table === 'transactions' && x.row_id === found.id && x.op === 'update');
         if (c && changedFields(c).some(k => LABEL_FIELDS.includes(k))) return `${whoName(d)}${d.undoes ? ', by an undo' : ''}, ${when(d.at)}`;
     }
-    return found.cat_source ? (LABEL_SOURCE_WORDS[found.cat_source] || 'the rules') : 'not yet';
+    if (found.flow_type_manual) return 'by hand';
+    const waiting = found.flow_type === 'review' || (!found.type_id && ['expense', 'refund'].includes(found.flow_type));
+    return waiting ? 'not yet' : 'the rules';
 }
 
 /** A history time's day in the viewer's own time: "12 Oct 2026". */

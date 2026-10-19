@@ -105,7 +105,8 @@ def _rebuild(conn: sqlite3.Connection, table: str, retired: str, body: str) -> N
         if column not in old_columns:
             body = re.sub(rf"\n[ \t]+{re.escape(column)}[ \t][^\n]*", "", body)
     conn.execute(f"CREATE TABLE {new} ({body}\n)")
-    for column, declaration in RETIRED_LATER.get(table, ()):
+    # The columns a later step drops (here, and those the chain declares).
+    for column, declaration in (*RETIRED_LATER.get(table, ()), *conversion.retired_after(STEP_NAME).get(table, ())):
         if column in old_columns:
             conn.execute(f"ALTER TABLE {new} ADD COLUMN {column} {declaration}")
     new_columns = _columns(conn, new)

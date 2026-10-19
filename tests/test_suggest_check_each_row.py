@@ -40,7 +40,7 @@ def rhode(conn, statement) -> tuple[int, list[int]]:
     """Every row the same, Health & Beauty · Household: 4 rows labelled from it."""
     svc = merchant(conn, "Sample Skin", "Household", "Health & Beauty")
     txs = [row(conn, statement, f"SAMPLE SKIN {i}", 40.0 + i, book="Household", type_name="Health & Beauty",
-               service_id=svc, cat_source="service_default", day=f"2026-05-0{i + 1}") for i in range(4)]
+               service_id=svc, mark="service_default", day=f"2026-05-0{i + 1}") for i in range(4)]
     return svc, txs
 
 
@@ -76,7 +76,7 @@ def test_only_hand_set_rows_in_another_book_count(client, conn, statement, rhode
     svc, txs = rhode
     move(client, txs[0], "Household")
     row(conn, statement, "SAMPLE SKIN STUDIO", 70.0, book="Moom", type_name="Health & Beauty",
-        service_id=svc, cat_source="rule_override")
+        service_id=svc, mark="rule_override")
     move(client, txs[1], "Moom")
 
     assert varies(client, svc) == {"suggest": False, "moved": 1, "to_book": "Moom"}
@@ -141,7 +141,7 @@ def test_no_for_one_merchant_leaves_another_asked(client, conn, statement, rhode
     svc, _ = rhode
     spa = merchant(conn, "Sample Spa", "Household", "Health & Beauty")
     spa_rows = [row(conn, statement, f"SAMPLE SPA {i}", 30.0, book="Household", type_name="Health & Beauty",
-                    service_id=spa, cat_source="service_default") for i in range(2)]
+                    service_id=spa, mark="service_default") for i in range(2)]
     client.post(f"/api/services/{svc}/book-varies/decline")
 
     for tx in spa_rows:
