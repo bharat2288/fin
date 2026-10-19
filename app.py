@@ -1720,11 +1720,12 @@ def api_dashboard_stat_cards():
     Respects: book, exclude_one_off, account_id
 
     The cards:
-      household, household_rows   spending and refunds in the Household book,
-                                  on accounts the household owns, archived
-                                  or not, hidden merchants included (ruling
-                                  6). No company's row and no row waiting
-                                  for review is in it.
+      household, household_rows   spending net of refunds in the Household
+                                  book (a refund counts in the month it
+                                  arrives), on accounts the household owns,
+                                  archived or not, hidden merchants included
+                                  (ruling 6). No company's row and no row
+                                  waiting for review is in it.
       held_out_count, _total      the month's transfers waiting for review:
                                   what the household figure is held short of.
                                   _total is money out less money in;
@@ -1732,10 +1733,11 @@ def api_dashboard_stat_cards():
                                   held_out_in_count, _in_total state the two
                                   sides apart, each as a positive figure.
       moom, kalesh                each company's costs paid from accounts the
-                                  household owns. Beside the headline, never
-                                  added into it.
-      <book>_out, _back, _out_rows,  each book's card split as Spending shows
-      _back_rows, avg_<book>_out     it: money out, refunds back beside it.
+                                  household owns, net of refunds. Beside the
+                                  headline, never added into it.
+      <book>_out, _back, _out_rows,  the breakdown of each book's net card
+      _back_rows, avg_<book>_out     (the chip reads it): money out, and the
+                                     refunds back that came off it.
       <book>_missing                 no row in the month and an account that
                                      carried the book's rows has no statement
                                      for it: not a real zero.
@@ -1820,8 +1822,8 @@ def api_dashboard_stat_cards():
         for _ in companies
     )
 
-    # Each book's card split the way Spending shows it: money out, and money
-    # back in refunds (a negative row) kept beside it, never taken off.
+    # The breakdown of each book's net card: money out, and money back in
+    # refunds (a negative row), the part of the net that came off it.
     side_sums = "".join(
         f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN amount_minor ELSE 0 END), "
         f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN -amount_minor ELSE 0 END), "
