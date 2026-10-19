@@ -98,13 +98,26 @@ def seed(conn) -> dict:
 @pytest.fixture
 def book(tmp_path, monkeypatch, capsys) -> Path:
     """A book in today's shape, before the step: fin starts on it empty and
-    every step of the chain is run on it, then the people's rows are written."""
+    every step of the chain is run on it, its record that expect-back ran is
+    taken away, then the people's rows are written."""
     path = tmp_path / "ledger.db"
     monkeypatch.setattr(db, "DB_PATH", path)
     db.init_db()
     assert convert_all.main([str(path)]) == 0
     capsys.readouterr()
+    before_the_step(path)
     return path
+
+
+def before_the_step(path: Path) -> None:
+    """Take away the book's record that expect-back ran, as on a book (or a
+    backup) from before the step: fin records it on a new book as it starts."""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("DELETE FROM conversion_steps WHERE step = 'expect-back'")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def open_book(path: Path) -> sqlite3.Connection:
@@ -403,12 +416,15 @@ def lane(temp_db):
     return {"savings": savings, "Ravi": ravi, "out": out, "back": back, "path": temp_db}
 
 
-def test_case_44_an_outside_write_leaves_the_step_planned_and_fin_will_not_start(lane):
+def test_case_44_a_backup_from_before_the_step_leaves_it_planned_and_fin_will_not_start(lane):
+    # A row labelled outside the app, on a book with no record that the step
+    # ran: a backup restored from before it.
     conn = open_book(lane["path"])
     conn.execute("UPDATE transactions SET flow_type = 'movement', other_side_id = ?, flow_type_manual = 1 "
                  "WHERE id = ?", (lane["Ravi"], lane["out"]))
     conn.commit()
     conn.close()
+    before_the_step(lane["path"])
 
     with pytest.raises(db.DatabaseNotConverted, match="expect-back"):
         db.init_db()
@@ -423,6 +439,164 @@ def test_case_44_an_outside_write_leaves_the_step_planned_and_fin_will_not_start
     assert convert_all.main([str(lane["path"])]) == 0
     db.init_db()
     assert expectations(lane["path"]) == [(lane["out"], "back", 200000, "converted", str(lane["Ravi"]))]
+
+
+# --- 44 (after the conversion): the operator's own acts never reopen it -----------------
+#
+# The step records that it ran, in the transaction its writes are in. After
+# that, an Unlink, an Undo of the mark or a person figure entered or deleted
+# leaves the book converted: fin still starts, and a second run of the chain
+# re-creates nothing the operator took away.
+
+
+@pytest.fixture
+def app_client(book):
+    """The Flask test client on the step's book (the `book` fixture points fin at it)."""
+    import app as fin_app
+
+    fin_app.app.config["TESTING"] = True
+    with fin_app.app.test_client() as client:
+        yield client
+
+
+@pytest.fixture
+def converted_book(book, capsys) -> dict:
+    """Cases 40-43b, converted. Returns the ids by name."""
+    ids = seeded(book)
+    code, out = run(book, capsys)
+    assert code == 0, out
+    return ids
+
+
+def still_converted(path: Path, capsys) -> None:
+    """fin starts, the step reads as applied, and the chain skips it."""
+    db.init_db()  # no DatabaseNotConverted
+    conn = open_book(path)
+    try:
+        assert convert_expect_back.STEP.is_applied(conn)
+        assert not db._needs_converting(conn)
+        assert "expect-back" not in conversion.not_applied(conn)
+    finally:
+        conn.close()
+    before = dump(path)
+    assert convert_all.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "step expect-back: already-applied" in out, out
+    assert dump(path) == before
+
+
+def test_the_step_records_that_it_ran_and_a_book_before_it_reads_as_pending(book, capsys):
+    seeded(book)
+    conn = open_book(book)
+    try:
+        assert not conversion.recorded(conn, "expect-back")
+        assert not convert_expect_back.STEP.is_applied(conn)
+        assert db._needs_converting(conn)
+    finally:
+        conn.close()
+
+    assert run(book, capsys)[0] == 0
+
+    assert query(book, "SELECT step FROM conversion_steps") == [("expect-back",)]
+
+
+def test_a_row_written_straight_into_a_converted_book_is_not_converted_again(converted_book, book, capsys):
+    # The cost of the record: such a row cannot be told apart from one the
+    # operator unlinked. Restoring a backup from before the step is the way
+    # to bring rows the step should convert.
+    conn = open_book(book)
+    _row(conn, converted_book["savings"], "2026-09-09", "TO RAVI LATER", 10000, converted_book["Ravi"])
+    conn.commit()
+    conn.close()
+    made = expectations(book)
+
+    still_converted(book, capsys)
+    assert expectations(book) == made
+
+
+def test_unlinking_a_converted_set_off_leaves_the_book_converted(converted_book, book, app_client, capsys):
+    ids = converted_book
+    [(set_off_id,)] = query(book, "SELECT id FROM set_off WHERE payment_row_id = ?", (ids["ravi_in"],))
+
+    resp = app_client.delete(f"/api/set-offs/{set_off_id}")
+
+    assert resp.status_code == 200, resp.get_json()
+    left = set_offs(book)
+    assert (ids["ravi_in"], ids["ravi_out"], 50000, "converted") not in left
+    still_converted(book, capsys)
+
+
+def test_a_rerun_after_unlink_recreates_no_set_off(converted_book, book, app_client, capsys):
+    ids = converted_book
+    [(set_off_id,)] = query(book, "SELECT id FROM set_off WHERE payment_row_id = ?", (ids["ravi_in"],))
+    assert app_client.delete(f"/api/set-offs/{set_off_id}").status_code == 200
+    left, made = set_offs(book), expectations(book)
+
+    code, out = run(book, capsys)
+
+    assert code == 0, out
+    assert "already-applied" in out
+    assert set_offs(book) == left
+    assert expectations(book) == made
+
+
+def test_undoing_the_mark_on_a_converted_expectation_leaves_the_book_converted(
+        converted_book, book, app_client, capsys):
+    ids = converted_book
+    [(sam,)] = query(book, "SELECT id FROM expectation WHERE row_id IS NULL AND person_id = ?", (ids["Sam"],))
+
+    resp = app_client.delete(f"/api/expectations/{sam}")
+
+    assert resp.status_code == 200, resp.get_json()
+    still_converted(book, capsys)
+    # The opening figure the operator took away is not made again.
+    assert not [x for x in expectations(book) if x[0] == f"opening:{ids['Sam']}"]
+
+
+def test_a_person_figure_entered_after_the_conversion_leaves_the_book_converted(
+        converted_book, book, app_client, capsys):
+    ids = converted_book
+
+    resp = app_client.post("/api/anchors", json={"account_id": ids["Lena"], "amount": "250.00",
+                                                 "date": "2026-09-01"})
+
+    assert resp.status_code in (200, 201), resp.get_json()
+    still_converted(book, capsys)
+    assert not [x for x in expectations(book) if x[0] == f"opening:{ids['Lena']}"]
+
+
+def test_a_person_figure_entered_from_chat_leaves_the_book_converted(converted_book, book, capsys):
+    import mcp_tools
+
+    ids = converted_book
+
+    answer = mcp_tools.call("enter_figure", {"account_id": ids["Lena"], "amount": "250.00", "date": "2026-09-01"},
+                            actor="chat:sample-subject")
+
+    assert answer["ok"], answer
+    still_converted(book, capsys)
+
+
+def test_a_person_figure_deleted_after_the_conversion_leaves_the_book_converted(book, app_client, capsys):
+    conn = open_book(book)
+    savings = _account(conn, "Everyday savings", "bank")
+    kim = _account(conn, "Kim", "person")
+    # Kim's figure on 1 Mar leaves out the 2 Feb row; deleting the figure
+    # would bring that row into the old line's scope.
+    _row(conn, savings, "2026-02-02", "TO KIM", 5000, kim)
+    _row(conn, savings, "2026-04-04", "FROM KIM", -10000, kim)
+    figure = conn.execute("INSERT INTO anchors (account_id, date, amount, source) "
+                          "VALUES (?, '2026-03-01', 10000, 'supplied')", (kim,)).lastrowid
+    conn.commit()
+    conn.close()
+    assert run(book, capsys)[0] == 0
+    made = expectations(book)
+
+    resp = app_client.delete(f"/api/anchors/{figure}")
+
+    assert resp.status_code == 200, resp.get_json()
+    still_converted(book, capsys)
+    assert expectations(book) == made
 
 
 def test_a_book_from_before_expect_back_converts_and_starts(tmp_path, monkeypatch, capsys):

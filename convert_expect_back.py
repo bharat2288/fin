@@ -37,9 +37,17 @@ records planned. A person with more than one anchor cannot be converted: the
 step is refused, rolled back, its backup kept.
 
 Since the contract (ticket 47) no route labels a row "a loan to a person",
-so nothing converts at label time: a row naming a person written outside the
-app (a restored backup, a direct write) leaves this step planned, and fin
-will not start until it runs.
+so nothing converts at label time. The step records that it ran
+(conversion.record_applied), in the runner's transaction with its writes,
+and once recorded it reads as applied for good: an Unlink of a converted
+set-off, an Undo of a converted mark, or a person figure entered or deleted
+afterwards is the operator's own act, and neither keeps fin from starting nor
+is redone by a second run. A book with no record whose rows naming a person
+are unconverted (a backup restored from before the step) leaves the step
+planned, and fin will not start until it runs. fin records the step itself
+when it starts on a book with nothing left for it to convert. A row naming a
+person written straight into a converted book is no longer told apart from
+one the operator unlinked: neither is converted again.
 
 It runs through the conversion runner, last in the chain. It prints counts
 only, never a name or an amount.
@@ -457,14 +465,32 @@ def _apply(conn: sqlite3.Connection) -> None:
     if plan.refusals:
         return  # the invariant names them; the runner rolls back
     _write(conn, plan)
+    # In the runner's transaction, with the writes: the book is converted
+    # for good, whatever the operator later unlinks, undoes or enters.
+    conversion.record_applied(conn, NAME)
 
 
 def _is_applied(conn: sqlite3.Connection) -> bool:
+    """Applied once the book records the step ran (it is never planned again:
+    an Unlink, an Undo of the mark or a person figure afterwards is the
+    operator's own act, not a conversion still to run); before that, when
+    nothing is planned (a new book, or one whose people have no rows)."""
+    if conversion.recorded(conn, NAME):
+        return True
     try:
         plan = planned(conn)
     except sqlite3.Error:
         return False  # a shape without the records: change-history has not run
     return not plan.actions and not plan.refusals
+
+
+def record_if_applied(conn: sqlite3.Connection) -> None:
+    """Record the step as run on a book that has nothing left for it to
+    convert, so that what the operator does afterwards never reads as a
+    conversion still to run. fin calls it as it starts, once every step reads
+    as applied. Writes nothing to a book the step still has work on."""
+    if not conversion.recorded(conn, NAME) and _is_applied(conn):
+        conversion.record_applied(conn, NAME)
 
 
 STEP = conversion.Step(name=NAME, apply=_apply, is_applied=_is_applied, invariant=_invariant, measure=_measure)
