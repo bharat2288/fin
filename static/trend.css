@@ -1,5 +1,32 @@
 /* trend.css: shell (fin-surfaces 23). Blocks below are reserved; each page fills its own. */
 
+/* ==== renderer: the trend card (fin-surfaces 36) ==== */
+.trend-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.trend-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
+.trend-stack { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.trend-label { color: var(--text-tertiary); font-size: var(--t-ui); }
+.trend-legend { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.trend-book[disabled] { cursor: default; opacity: 0.85; }
+.trend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none;
+    background: var(--text-tertiary); box-shadow: 0 0 0 1px var(--bg-surface); }
+.trend-plot { min-width: 0; overflow-x: auto; }
+.trend-summary { display: flex; flex-direction: column; gap: var(--space-1); }
+.trend-sum-line { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.trend-tail, .trend-left-out, .trend-note { margin: 0; color: var(--text-tertiary); font-size: var(--t-ui); }
+.trend-change { font-weight: var(--font-semibold); }
+.trend-change.trend-rise { color: var(--semantic-warning); }
+.trend-change.trend-fall { color: var(--semantic-success); }
+.trend-norate { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.trend-norate li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
+    color: var(--text-secondary); font-size: var(--t-ui); }
+.trend-norate .btn svg { width: 14px; height: 14px; }
+@media (max-width: 560px) {
+    .trend-controls { gap: var(--space-2); }
+    .trend-controls .seg { width: 100%; }
+    .trend-controls .seg > button { flex: 1 1 auto; }
+}
+/* ==== end: renderer ==== */
+
 /* ==== reserved: merchant ==== */
 /* ==== end: merchant ==== */
 
