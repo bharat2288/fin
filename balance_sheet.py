@@ -34,9 +34,9 @@ owed negative. A row's amount is positive for money out.
 
 A person is no balance on the sheet (personal-ledger 23, the switch): what is
 lent to or owed to a person is the expectations named for them, in Expect
-back's sections. _counterparty_line still works out a person's old line (the
-same sum, from the movement rows naming the person), which the expect-back
-conversion proves its records against; the sheet no longer lists it.
+back's sections. Since the contract the sheet reads no person anchor at all
+(the anchors are kept): the expect-back conversion works out a person's old
+line itself (convert_expect_back.old_line), to prove its records against.
 
 An account kept in another currency (the rupee account) shows its balance in
 its own currency and, beside it, its value in SGD at the saved rate for the
@@ -486,30 +486,31 @@ def _rests_on(anchor, as_at: date, month: str) -> dict:
 
 
 def _counterparty_line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -> dict:
-    """A company's or a person's line: the household's money in it, and what
-    that is made of. The sheet lists companies only; a person's line is
-    worked out for the expect-back conversion, which proves its records
-    against it (persons left the sheet at the switch).
+    """A company's line: the household's money in it, and what that is made
+    of. A person has no line (persons left the sheet at the switch, and since
+    the contract their anchors are not read here): ValueError.
 
     The balance is the opening figure if there is one (the latest figure on or
     before the day), plus the rows dated after it up to the day, on accounts
     the household owns: paid for it, plus capital, less paid back. With no
     figure the rows are counted from the day the sheet starts. Only a company
-    that is a book has rows paid for it; a person has movements alone.
+    that is a book has rows paid for it.
 
     A row on an account kept in another currency than this one's is not
     counted, and the line says how many: amounts in two currencies are never
     added as if they were one.
     """
     kind = account["type"]
+    if kind not in COUNTERPARTIES[2]:
+        raise ValueError(f"no counterparty line for an account of kind {kind}")
     currency = account["currency"] or TOTAL_CURRENCY
     upto = as_at.isoformat()
     anchor = _anchor_before(conn, account["id"], upto, inclusive=True)
     after = anchor["date"] if anchor is not None else (START - timedelta(days=1)).isoformat()
-    # The book whose spending is this company's costs; a person, or a company
-    # that is no book, has none.
+    # The book whose spending is this company's costs; a company that is no
+    # book has none.
     name = account["name"]
-    is_book = kind == "company" and name in book_type.BOOK_NAMES and name != book_type.DEFAULT_BOOK
+    is_book = name in book_type.BOOK_NAMES and name != book_type.DEFAULT_BOOK
     book = name if is_book else None
 
     flows = ", ".join("?" for _ in PAID_FOR_FLOWS)
@@ -551,11 +552,7 @@ def _counterparty_line(conn: sqlite3.Connection, account, as_at: date, month: st
         return anchors.format_amount(amount, currency)
 
     parts = [f"opening {shown(opening)}"] if opening is not None else []
-    if kind == "company":
-        parts += [f"paid for it {shown(paid_for)}", f"capital {shown(capital)}"]
-    else:
-        parts.append(f"lent {shown(capital)}")
-    parts.append(f"paid back {shown(paid_back)}")
+    parts += [f"paid for it {shown(paid_for)}", f"capital {shown(capital)}", f"paid back {shown(paid_back)}"]
 
     if not count:
         since = None

@@ -286,13 +286,13 @@ _WRITES = [
         "label_review",
         "Say what a transfer waiting for review was. choice: spending (type_id; book where the "
         "type proposes none), gift, own_account (account_id), company (account_id), "
-        "loan_to_person (account_id, or person: a name; a new name creates the person), "
-        "loan_repayment (account_id of a loan), income (income_kind_id).",
-        {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I,
-         "person": _S, "income_kind_id": _I},
+        "loan_repayment (account_id of a loan), income (income_kind_id). A person is no "
+        "movement's other side: money lent to or owed to a person is mark_expect_back on the row "
+        "(direction back on money out, pay on money in), named for them.",
+        {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I, "income_kind_id": _I},
         ("tx_id", "choice"),
         lambda a: ("POST", f"/api/review/{int(a['tx_id'])}/label",
-                   _pick(a, "choice", "type_id", "book", "account_id", "person", "income_kind_id")),
+                   _pick(a, "choice", "type_id", "book", "account_id", "income_kind_id")),
     ),
     _w(
         "enter_figure",
@@ -371,7 +371,8 @@ _WRITES = [
     ),
     _w(
         "add_company_or_person",
-        "Add a company or a person, so movements can name them as their other side.",
+        "Add a company (so movements can name it as their other side) or a person (to name on "
+        "what is expected back or to pay back).",
         {"kind": {"type": "string", "enum": ["company", "person"]}, "name": _S},
         ("kind", "name"),
         lambda a: ("POST", "/api/accounts", _account_body(a)),

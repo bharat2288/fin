@@ -143,11 +143,10 @@ def test_the_review_label_allows_labelling_the_own_part(client, conn, story, jay
     entry_id = int(resp.headers["X-Fin-Change"])
     assert client.post(f"/api/history/{entry_id}/undo").status_code == 200
     assert flow_of(conn, story.jay_0412) == ("review", None, "Household")
-    # Income, or a person's movement, likewise.
+    # Income likewise. (A person's movement is no label since the contract:
+    # tests/test_expect_contract_retire.py.)
     salary = conn.execute("SELECT id FROM types WHERE kind = 'income' ORDER BY id").fetchone()[0]
     assert label(client, story.jay_0412, choice="income", income_kind_id=salary).status_code == 200
-    resp = label(client, story.jay_0412, choice="loan_to_person", account_id=story.people["Jay"])
-    assert resp.status_code == 200, resp.get_json()
 
 
 def test_the_review_label_names_each_set_off_of_a_row(client, conn, story):
