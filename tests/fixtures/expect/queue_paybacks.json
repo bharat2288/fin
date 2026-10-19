@@ -1,0 +1,108 @@
+{
+  "paybacks": [
+    {
+      "payment": {
+        "id": 201,
+        "description": "PAYNOW FROM JAY TAN 0412",
+        "date": "2026-10-10",
+        "account_name": "Everyday savings",
+        "amount_minor": -12000,
+        "currency": "SGD",
+        "left_minor": 12000
+      },
+      "suggestions": [
+        {
+          "expectation_id": 1,
+          "title": "HARBOUR GRILL",
+          "date": "2026-10-02",
+          "open_minor": 20000,
+          "currency": "SGD",
+          "reasons": [
+            "Jay is named on it",
+            "8 days after",
+            "S$ 120 ≤ S$ 200 open"
+          ]
+        }
+      ]
+    },
+    {
+      "payment": {
+        "id": 206,
+        "description": "PAYNOW FROM KIM L 7781",
+        "date": "2026-10-09",
+        "account_name": "Everyday savings",
+        "amount_minor": -7000,
+        "currency": "SGD",
+        "left_minor": 7000
+      },
+      "suggestions": [
+        {
+          "expectation_id": 2,
+          "title": "KLOOK TRAVEL",
+          "date": "2026-09-28",
+          "open_minor": 18000,
+          "currency": "SGD",
+          "reasons": [
+            "Kim is named on it",
+            "11 days after",
+            "S$ 70 ≤ S$ 180 open"
+          ]
+        },
+        {
+          "expectation_id": 1,
+          "title": "HARBOUR GRILL",
+          "date": "2026-10-02",
+          "open_minor": 20000,
+          "currency": "SGD",
+          "reasons": [
+            "Kim is named on it",
+            "7 days after",
+            "S$ 70 ≤ S$ 200 open"
+          ]
+        }
+      ]
+    },
+    {
+      "payment": {
+        "id": 207,
+        "description": "INWARD PAYNOW 9921",
+        "date": "2026-10-07",
+        "account_name": "Everyday savings",
+        "amount_minor": -4500,
+        "currency": "SGD",
+        "left_minor": 4500
+      },
+      "suggestions": []
+    }
+  ],
+  "waiting_offers": [
+    {
+      "set_off_id": 16,
+      "person": {
+        "account_id": 33,
+        "name": "Lena"
+      },
+      "amount_minor": 10000,
+      "currency": "SGD",
+      "payment": {
+        "id": 203,
+        "description": "PAYNOW FROM LENA 2210",
+        "date": "2026-10-17",
+        "account_name": "Everyday savings",
+        "amount_minor": -10000,
+        "currency": "SGD",
+        "left_minor": 10000
+      },
+      "rows": [
+        {
+          "id": 302,
+          "description": "COLD STORAGE",
+          "date": "2026-10-21",
+          "account_name": "Everyday card",
+          "amount_minor": 26000,
+          "currency": "SGD"
+        }
+      ]
+    }
+  ]
+}

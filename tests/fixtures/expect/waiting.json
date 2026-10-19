@@ -1,0 +1,123 @@
+{
+  "request": {
+    "person_id": 33,
+    "note": "for the BBQ, when it is charged"
+  },
+  "response": {
+    "set_off": {
+      "id": 16,
+      "payment_row_id": 203,
+      "expectation_id": null,
+      "date": "2026-10-17",
+      "amount_minor": 10000,
+      "currency": "SGD",
+      "exp_amount_minor": null,
+      "exp_currency": null,
+      "rate": null,
+      "rate_date": null,
+      "rate_month_ended": null,
+      "source": "hand",
+      "person": {
+        "account_id": 33,
+        "name": "Lena"
+      },
+      "note": "for the BBQ, when it is charged",
+      "state": "waiting"
+    },
+    "payment": {
+      "id": 203,
+      "amount_minor": -10000,
+      "currency": "SGD",
+      "expected_minor": 0,
+      "placed_minor": -10000,
+      "own_minor": 0,
+      "left_minor": 0
+    }
+  },
+  "attach_request": {
+    "row_id": 301
+  },
+  "attach_response": {
+    "expectation": {
+      "id": 10,
+      "direction": "back",
+      "amount_minor": 8000,
+      "currency": "SGD",
+      "note": null,
+      "source": "hand",
+      "made_at": "2026-10-19 09:00:00",
+      "day": "2026-10-21",
+      "names": [
+        {
+          "account_id": 33,
+          "name": "Lena"
+        }
+      ],
+      "set_off_minor": 8000,
+      "let_go_minor": 0,
+      "open_minor": 0,
+      "state": "closed",
+      "row": {
+        "id": 301,
+        "date": "2026-10-21",
+        "description": "COLD STORAGE",
+        "account_id": 12,
+        "account_name": "Everyday card",
+        "amount_minor": 8000,
+        "currency": "SGD",
+        "book": "Household",
+        "type_id": 10,
+        "display_type": "Groceries"
+      },
+      "opening": null
+    },
+    "placed": {
+      "id": 16,
+      "payment_row_id": 203,
+      "expectation_id": 10,
+      "date": "2026-10-17",
+      "amount_minor": 8000,
+      "currency": "SGD",
+      "exp_amount_minor": 8000,
+      "exp_currency": "SGD",
+      "rate": null,
+      "rate_date": null,
+      "rate_month_ended": null,
+      "source": "hand",
+      "person": {
+        "account_id": 33,
+        "name": "Lena"
+      },
+      "note": "for the BBQ, when it is charged",
+      "state": "placed"
+    },
+    "waiting": {
+      "id": 17,
+      "payment_row_id": 203,
+      "expectation_id": null,
+      "date": "2026-10-17",
+      "amount_minor": 2000,
+      "currency": "SGD",
+      "exp_amount_minor": null,
+      "exp_currency": null,
+      "rate": null,
+      "rate_date": null,
+      "rate_month_ended": null,
+      "source": "hand",
+      "person": {
+        "account_id": 33,
+        "name": "Lena"
+      },
+      "note": "for the BBQ, when it is charged",
+      "state": "waiting"
+    },
+    "row": {
+      "id": 301,
+      "amount_minor": 8000,
+      "currency": "SGD",
+      "expected_minor": 8000,
+      "placed_minor": 0,
+      "own_minor": 0
+    }
+  }
+}

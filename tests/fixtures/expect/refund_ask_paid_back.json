@@ -1,0 +1,84 @@
+{
+  "asks": [
+    {
+      "kind": "paid_back",
+      "refund_link_id": 42,
+      "refund": {
+        "id": 404,
+        "description": "KLOOK TRAVEL REFUND",
+        "date": "2026-10-25",
+        "account_name": "Everyday card",
+        "amount_minor": -3000,
+        "currency": "SGD"
+      },
+      "purchase": {
+        "id": 102,
+        "description": "KLOOK TRAVEL",
+        "date": "2026-09-28",
+        "account_name": "Everyday card",
+        "amount_minor": 18000,
+        "currency": "SGD"
+      },
+      "expectation_id": 2,
+      "names": [
+        {
+          "account_id": 32,
+          "name": "Kim"
+        }
+      ],
+      "own_minor": 0,
+      "open_minor": 0,
+      "rest_minor": 3000,
+      "answers": [
+        "keep",
+        "pay_back"
+      ]
+    }
+  ],
+  "answer_request": {
+    "answer": "pay_back"
+  },
+  "answer_response": {
+    "expectation": {
+      "id": 11,
+      "direction": "pay",
+      "amount_minor": 3000,
+      "currency": "SGD",
+      "note": null,
+      "source": "hand",
+      "made_at": "2026-10-19 09:00:00",
+      "day": "2026-10-25",
+      "names": [
+        {
+          "account_id": 32,
+          "name": "Kim"
+        }
+      ],
+      "set_off_minor": 0,
+      "let_go_minor": 0,
+      "open_minor": 3000,
+      "state": "open",
+      "row": {
+        "id": 404,
+        "date": "2026-10-25",
+        "description": "KLOOK TRAVEL REFUND",
+        "account_id": 12,
+        "account_name": "Everyday card",
+        "amount_minor": -3000,
+        "currency": "SGD",
+        "book": "Household",
+        "type_id": 8,
+        "display_type": "Entertainment"
+      },
+      "opening": null
+    },
+    "row": {
+      "id": 404,
+      "amount_minor": -3000,
+      "currency": "SGD",
+      "expected_minor": -3000,
+      "placed_minor": 0,
+      "own_minor": 0
+    }
+  }
+}

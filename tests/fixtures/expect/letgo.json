@@ -1,0 +1,55 @@
+{
+  "request": {
+    "became": "gift",
+    "to_id": 32,
+    "type_id": null
+  },
+  "request_mine": {
+    "became": "mine",
+    "to_id": null,
+    "type_id": null
+  },
+  "request_pay": {
+    "became": "gift",
+    "to_id": null,
+    "type_id": 51
+  },
+  "response": {
+    "let_go": {
+      "id": 21,
+      "expectation_id": 1,
+      "amount_minor": 2000,
+      "currency": "SGD",
+      "became": "gift",
+      "book": "Household",
+      "type_id": 40,
+      "display_type": "Gifts & Donations",
+      "to": {
+        "account_id": 32,
+        "name": "Kim"
+      },
+      "counts_on": "2026-10-19",
+      "made_at": "2026-10-19 09:00:00"
+    },
+    "expectation": {
+      "id": 1,
+      "amount_minor": 20000,
+      "currency": "SGD",
+      "open_minor": 0,
+      "state": "let_go"
+    },
+    "open_before_minor": 2000
+  },
+  "undo_response": {
+    "expectation": {
+      "id": 1,
+      "amount_minor": 20000,
+      "currency": "SGD",
+      "open_minor": 2000,
+      "state": "partly_back"
+    }
+  },
+  "refusal": {
+    "error": "nothing open on KLOOK TRAVEL"
+  }
+}

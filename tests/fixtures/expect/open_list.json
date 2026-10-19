@@ -1,0 +1,194 @@
+{
+  "direction": "back",
+  "near": "2026-10-10",
+  "payment": {
+    "id": 201,
+    "amount_minor": -12000,
+    "currency": "SGD",
+    "expected_minor": 0,
+    "placed_minor": 0,
+    "own_minor": -12000,
+    "description": "PAYNOW FROM JAY TAN 0412",
+    "date": "2026-10-10",
+    "left_minor": 12000,
+    "sender": {
+      "wording": "JAY TAN",
+      "person": null
+    }
+  },
+  "items": [
+    {
+      "id": 1,
+      "direction": "back",
+      "amount_minor": 20000,
+      "currency": "SGD",
+      "note": null,
+      "source": "hand",
+      "made_at": "2026-10-19 09:00:00",
+      "day": "2026-10-02",
+      "names": [
+        {
+          "account_id": 31,
+          "name": "Jay"
+        },
+        {
+          "account_id": 32,
+          "name": "Kim"
+        }
+      ],
+      "set_off_minor": 0,
+      "let_go_minor": 0,
+      "open_minor": 20000,
+      "state": "open",
+      "row": {
+        "id": 101,
+        "date": "2026-10-02",
+        "description": "HARBOUR GRILL",
+        "account_id": 11,
+        "account_name": "Rewards card",
+        "amount_minor": 30000,
+        "currency": "SGD",
+        "book": "Household",
+        "type_id": 7,
+        "display_type": "Dining"
+      },
+      "opening": null
+    },
+    {
+      "id": 2,
+      "direction": "back",
+      "amount_minor": 18000,
+      "currency": "SGD",
+      "note": "concert tickets",
+      "source": "hand",
+      "made_at": "2026-10-19 09:00:00",
+      "day": "2026-09-28",
+      "names": [
+        {
+          "account_id": 32,
+          "name": "Kim"
+        }
+      ],
+      "set_off_minor": 0,
+      "let_go_minor": 0,
+      "open_minor": 18000,
+      "state": "open",
+      "row": {
+        "id": 102,
+        "date": "2026-09-28",
+        "description": "KLOOK TRAVEL",
+        "account_id": 12,
+        "account_name": "Everyday card",
+        "amount_minor": 18000,
+        "currency": "SGD",
+        "book": "Household",
+        "type_id": 8,
+        "display_type": "Entertainment"
+      },
+      "opening": null
+    },
+    {
+      "id": 3,
+      "direction": "back",
+      "amount_minor": 6400,
+      "currency": "SGD",
+      "note": null,
+      "source": "hand",
+      "made_at": "2026-10-19 09:00:00",
+      "day": "2026-09-21",
+      "names": [
+        {
+          "account_id": 31,
+          "name": "Jay"
+        },
+        {
+          "account_id": 33,
+          "name": "Lena"
+        }
+      ],
+      "set_off_minor": 0,
+      "let_go_minor": 0,
+      "open_minor": 6400,
+      "state": "open",
+      "row": {
+        "id": 103,
+        "date": "2026-09-21",
+        "description": "GOLDEN VILLAGE",
+        "account_id": 12,
+        "account_name": "Everyday card",
+        "amount_minor": 9600,
+        "currency": "SGD",
+        "book": "Household",
+        "type_id": 8,
+        "display_type": "Entertainment"
+      },
+      "opening": null
+    },
+    {
+      "id": 4,
+      "direction": "back",
+      "amount_minor": 62000,
+      "currency": "SGD",
+      "note": null,
+      "source": "hand",
+      "made_at": "2026-10-19 09:00:00",
+      "day": "2026-06-28",
+      "names": [
+        {
+          "account_id": 33,
+          "name": "Lena"
+        }
+      ],
+      "set_off_minor": 58000,
+      "let_go_minor": 0,
+      "open_minor": 4000,
+      "state": "partly_back",
+      "row": {
+        "id": 104,
+        "date": "2026-06-28",
+        "description": "AIRBNB",
+        "account_id": 11,
+        "account_name": "Rewards card",
+        "amount_minor": 124000,
+        "currency": "SGD",
+        "book": "Household",
+        "type_id": 9,
+        "display_type": "Travel"
+      },
+      "opening": null
+    },
+    {
+      "id": 5,
+      "direction": "back",
+      "amount_minor": 200000,
+      "currency": "SGD",
+      "note": null,
+      "source": "converted",
+      "made_at": "2026-10-19 09:00:00",
+      "day": "2026-06-03",
+      "names": [
+        {
+          "account_id": 34,
+          "name": "Ravi"
+        }
+      ],
+      "set_off_minor": 50000,
+      "let_go_minor": 0,
+      "open_minor": 150000,
+      "state": "partly_back",
+      "row": {
+        "id": 105,
+        "date": "2026-06-03",
+        "description": "PAYNOW TO RAVI",
+        "account_id": 13,
+        "account_name": "Everyday savings",
+        "amount_minor": 200000,
+        "currency": "SGD",
+        "book": "Household",
+        "type_id": null,
+        "display_type": null
+      },
+      "opening": null
+    }
+  ]
+}

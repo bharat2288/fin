@@ -1,0 +1,107 @@
+{
+  "as_at": "2026-10-19",
+  "expectation": {
+    "id": 1,
+    "direction": "back",
+    "amount_minor": 20000,
+    "currency": "SGD",
+    "note": null,
+    "source": "hand",
+    "made_at": "2026-10-19 09:00:00",
+    "day": "2026-10-02",
+    "names": [
+      {
+        "account_id": 31,
+        "name": "Jay"
+      },
+      {
+        "account_id": 32,
+        "name": "Kim"
+      }
+    ],
+    "set_off_minor": 18000,
+    "let_go_minor": 0,
+    "open_minor": 2000,
+    "state": "partly_back",
+    "row": {
+      "id": 101,
+      "date": "2026-10-02",
+      "description": "HARBOUR GRILL",
+      "account_id": 11,
+      "account_name": "Rewards card",
+      "amount_minor": 30000,
+      "currency": "SGD",
+      "book": "Household",
+      "type_id": 7,
+      "display_type": "Dining"
+    },
+    "opening": null
+  },
+  "own_minor": 10000,
+  "age_days": 17,
+  "back_pct": 90,
+  "lines": [
+    {
+      "kind": "marked",
+      "id": 1,
+      "date": "2026-10-02",
+      "amount_minor": 20000,
+      "currency": "SGD",
+      "actions": [
+        "undo_mark"
+      ]
+    },
+    {
+      "kind": "set_off",
+      "id": 11,
+      "date": "2026-10-10",
+      "person": "Jay",
+      "amount_minor": 12000,
+      "currency": "SGD",
+      "payment": {
+        "id": 201,
+        "description": "PAYNOW FROM JAY TAN 0412",
+        "amount_minor": -12000,
+        "currency": "SGD"
+      },
+      "elsewhere": [],
+      "actions": [
+        "unlink"
+      ]
+    },
+    {
+      "kind": "set_off",
+      "id": 12,
+      "date": "2026-10-15",
+      "person": "Kim",
+      "amount_minor": 6000,
+      "currency": "SGD",
+      "payment": {
+        "id": 202,
+        "description": "PAYNOW FROM KIM L 7781",
+        "amount_minor": -7000,
+        "currency": "SGD"
+      },
+      "elsewhere": [
+        {
+          "expectation_id": 2,
+          "title": "KLOOK TRAVEL",
+          "amount_minor": 1000,
+          "currency": "SGD"
+        }
+      ],
+      "actions": [
+        "unlink"
+      ]
+    },
+    {
+      "kind": "open",
+      "amount_minor": 2000,
+      "currency": "SGD",
+      "name": null,
+      "actions": [
+        "let_go"
+      ]
+    }
+  ]
+}

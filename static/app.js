@@ -531,6 +531,8 @@ const ROUTES = [
     [/^\/books\/import$/, 'books', () => viewImport()],
     [/^\/changes$/, 'changes', () => viewChanges()],
 ];
+// Expect back's page (personal-ledger 23): expect-page.js fills window.viewExpectation; until then the route draws nothing.
+registerRoute(/^\/books\/expectation\/(\d+)$/, m => window.viewExpectation?.(Number(m[1])) ?? '');
 /** New pages add their route here, so ROUTES stays this file's and a page exists only once its file loads. */
 function registerRoute(pattern, view) { ROUTES.push([pattern, 'books', view]); }
 window.registerRoute = registerRoute;
@@ -1777,9 +1779,10 @@ async function laneHTML(lane, list, { books, ask, empty }) {
             <div class="step-b" id="q-sec-${key}"${open ? '' : ' hidden'}>${s.k === 'mixed' ? `<p class="step-note">${EACH_NOTE}</p>` : ''}${drawn.join('')}
                 ${more > 0 ? `<div class="q-show"><button type="button" class="btn sm ghost" data-act="queue-more" data-lane="${key}">Show ${more} more</button></div>` : ''}</div></section>`;
     }));
+    const xb = lane === 'in' ? (await window.expectQueueStep?.(list)) || '' : '';
     return `<section class="card q-lane" id="lane-${lane}" aria-labelledby="lh-${lane}">
         <header class="lane-h">${dirSquare(lane)}<h2 id="lh-${lane}">${lane === 'out' ? 'Money out' : 'Money in'}</h2><span class="sub">${list.length} to do · ${plural(rows, 'row')}</span></header>
-        <div class="lane-body">${list.length ? sections.join('') : `<p class="lane-empty">${esc(empty)}</p>`}</div></section>`;
+        <div class="lane-body">${xb}${list.length ? sections.join('') : `<p class="lane-empty">${esc(empty)}</p>`}</div></section>`;
 }
 ACT['q-fold'] = el => {
     const open = el.getAttribute('aria-expanded') !== 'true';
@@ -2844,7 +2847,7 @@ async function viewSheet() {
         ${cc && cc.minor ? `<p class="card-foot">Currency change since ${esc(day(cc.from))}: <b class="num">${esc(money(cc.minor, 'SGD', { signed: true }))}</b></p>` : ''}
         ${cc && cc.minor === null && cc.note ? `<p class="card-foot">${tag('nofig', 'currency change not worked out')} ${esc(dateWords(cc.note))}
             ${[...new Set((cc.lines || []).map(l => l.currency).filter(Boolean))].map(c => `<button class="btn sm" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay(sheet.as_at))}">${esc(c)} rate</button>`).join(' ')}</p>` : ''}
-    </section>
+    </section>${window.expectBooksSections?.(sheet) || ''}
     ${monthCheckHTML(sheet)}`;
 }
 ACT['needs-look'] = el => { S.needsLook = el.dataset.on === '1'; rerender(); };
@@ -3007,7 +3010,7 @@ function acctRowTr(row) {
     const outCell = minor !== null && minor >= 0 ? esc(money(minor, cur)) : '';
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num row-date">${esc(day(row.date, { year: false }))}</td>
-        <td class="row-desc">${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${row.book && row.book !== 'Household' ? ` <span class="small muted">· ${esc(row.book)}</span>` : ''}</td>
+        <td class="row-desc">${esc(row.description)}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${row.book && row.book !== 'Household' ? ` <span class="small muted">· ${esc(row.book)}</span>` : ''}</td>
         <td class="row-label">${acctRowLabel(row)}</td>
         <td class="r num row-in">${inCell}</td><td class="r num row-out">${outCell}</td></tr>`;
 }
@@ -3174,7 +3177,7 @@ function rowTr(row, { account = true, book = false } = {}) {
     const label = flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
-        <td>${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
+        <td>${esc(row.description)}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
         <td>${label}${book || (row.book && row.book !== 'Household') ? ` <span class="small muted">· ${esc(row.book || '')}</span>` : ''}${notCheckedTag(row)}</td>
         <td class="r">${rowAmount(minor, row.currency)}</td></tr>`;
 }
@@ -3281,7 +3284,7 @@ function spendRowTr(row) {
         : `<span class="num">${esc(money(minor, row.currency))}</span>`;
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
-        <td>${what}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${account}</div></td>
+        <td>${what}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${account}</div></td>
         <td>${label}${notCheckedTag(row)}</td>
         <td class="r">${amount}</td></tr>`;
 }
@@ -3947,11 +3950,11 @@ async function viewMerchant(id) {
         const mark = x.not_checked ? tag('notchecked', 'not checked') : x.cat_source === 'manual' ? `<span class="handset">${icon('pencil-simple')}hand-set</span>` : '';
         return `<tr${on ? ' class="is-ticked"' : ''} data-tx="${x.id}"><td class="k"><label class="tick"><input type="checkbox" data-change="mp-tick" data-tx="${x.id}"${on ? ' checked' : ''} aria-label="Tick the ${when} row"></label></td>
             <td class="num dt">${when}</td><td class="ac">${mpAccountCell(x)}</td>
-            <td class="stext">${esc(x.description)}${rowMark(x.id)}</td>
+            <td class="stext">${esc(x.description)}${rowMark(x.id)}${window.expectRowPill?.(x) || ''}</td>
             <td class="r num am">${minor == null || minor < 0 ? rowAmount(minor, x.currency) : esc(money(minor, x.currency))}</td>
             <td class="ty"><select class="sel sel--quiet" data-change="mp-type" data-tx="${x.id}" aria-label="Type for the ${when} row"${off}>${typeOptions(r.types, x.type_id)}</select></td>
             <td class="bk"><select class="sel sel--quiet" data-change="mp-book" data-tx="${x.id}" aria-label="Book for the ${when} row"${off}>${bookOptions(r.books, x.book, 'Choose book')}</select></td>
-            <td class="st">${mark}</td></tr>`;
+            <td class="st">${mark}${window.expectMerchantRowAction?.(x) || ''}</td></tr>`;
     }).join('');
     const notChecked = each ? s.rows_to_check : 0;
     return `<div class="mp">${mpCrumbs()}
@@ -4490,6 +4493,7 @@ function changeWords(first, ctx, { rows = 1, subject = null } = {}) {
     const acct = esc(accountOf(c, ctx) || 'an account');
     if (c.table === 'statements' && c.op === 'insert') return `imported the ${acct} statement of ${esc(day(a.statement_date))}`;
     if (c.table === 'statements' && c.op === 'delete') return `took out the ${acct} statement of ${esc(day(b.statement_date))}`;
+    const xw = window.expectChangeWords?.(c, ctx, { rows, subject }); if (xw) return xw;  // expect back's seven tables (expect-mark.js)
     const many = rows > 1;
     if (many && !first.same_change) return '';
     if (c.table === 'transactions') {
@@ -4943,6 +4947,10 @@ function rowFactsHTML(found, label, by) {
 
 // One row: its amount, its facts, its note, the one-off toggle, "This was…", and its history.
 ACT.row = el => openRowSheet(Number(el.dataset.tx));
+// Expect back's reserved entry points (personal-ledger 23): a button with one of these data-acts opens a drawer an expect-*.js shell fills.
+ACT['expect-mark'] = el => window.openExpectMark?.(Number(el.dataset.tx), el);
+ACT['back-for'] = el => window.openBackFor?.(Number(el.dataset.tx), el);
+ACT['let-go'] = el => window.openLetGo?.(Number(el.dataset.id), el);
 async function openRowSheet(txId, opts = {}) {
     openSheet('A row', '<p class="loading">Loading…</p>', { eyebrow: 'One row' });
     const found = (await get(`/api/transactions?tx_id=${txId}`, { fresh: true })).transactions[0];
@@ -4964,7 +4972,7 @@ async function openRowSheet(txId, opts = {}) {
         ${rowFactsHTML(found, label, labelledBy(found, held.details))}
         <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off <span class="muted small">(Spending can leave it out)</span></label>
         <label class="field"><span>Note</span><textarea id="row-note">${esc(found.notes || '')}</textarea></label>
-        <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}</div>
+        <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}${window.expectRowActions?.(found) || ''}</div>
         <h3 class="history-head">Its own history</h3><div id="row-history"><p class="loading">Loading…</p></div>`;
     $('#row-history').innerHTML = await timelineHTML('transactions', txId, opts, held);
     if (opts.blocker) $('#row-history .blocker')?.scrollIntoView({ block: 'center' });

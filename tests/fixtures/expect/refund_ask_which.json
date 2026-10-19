@@ -1,0 +1,48 @@
+{
+  "asks": [
+    {
+      "kind": "which",
+      "refund": {
+        "id": 401,
+        "description": "AMAZON.SG REFUND",
+        "date": "2026-10-08",
+        "account_name": "Rewards card",
+        "amount_minor": -9000,
+        "currency": "SGD"
+      },
+      "purchases": [
+        {
+          "id": 402,
+          "description": "AMAZON.SG",
+          "date": "2026-09-20",
+          "account_name": "Rewards card",
+          "amount_minor": 14000,
+          "currency": "SGD",
+          "left_minor": 14000
+        },
+        {
+          "id": 403,
+          "description": "AMAZON.SG",
+          "date": "2026-09-24",
+          "account_name": "Rewards card",
+          "amount_minor": 9000,
+          "currency": "SGD",
+          "left_minor": 9000
+        }
+      ]
+    }
+  ],
+  "hand_link_request": {
+    "refund_row_id": 401,
+    "purchase_row_id": 403
+  },
+  "hand_link_response": {
+    "refund_link": {
+      "id": 41,
+      "refund_row_id": 401,
+      "purchase_row_id": 403,
+      "source": "hand",
+      "made_at": "2026-10-19 09:00:00"
+    }
+  }
+}

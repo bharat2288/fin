@@ -1,0 +1,24 @@
+{
+  "response": {
+    "removed": {
+      "expectation_id": 2,
+      "row_id": 102
+    },
+    "row": {
+      "id": 102,
+      "amount_minor": 18000,
+      "currency": "SGD",
+      "expected_minor": 0,
+      "placed_minor": 0,
+      "own_minor": 18000
+    },
+    "spending_change": {
+      "month": "2026-09",
+      "minor": 18000,
+      "currency": "SGD"
+    }
+  },
+  "refusal": {
+    "error": "Can't undo the mark yet: Jay's S$ 120 and Kim's S$ 60 are set against it. Unlink those first."
+  }
+}

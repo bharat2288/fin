@@ -1,0 +1,140 @@
+{
+  "request": {
+    "placements": [
+      {
+        "expectation_id": 1,
+        "amount": "60.00"
+      },
+      {
+        "expectation_id": 2,
+        "amount": "10.00"
+      }
+    ],
+    "waiting": null
+  },
+  "response": {
+    "payment": {
+      "id": 202,
+      "amount_minor": -7000,
+      "currency": "SGD",
+      "expected_minor": 0,
+      "placed_minor": -7000,
+      "own_minor": 0,
+      "left_minor": 0
+    },
+    "set_offs": [
+      {
+        "id": 12,
+        "payment_row_id": 202,
+        "expectation_id": 1,
+        "date": "2026-10-15",
+        "amount_minor": 6000,
+        "currency": "SGD",
+        "exp_amount_minor": 6000,
+        "exp_currency": "SGD",
+        "rate": null,
+        "rate_date": null,
+        "rate_month_ended": null,
+        "source": "hand",
+        "person": null,
+        "note": null,
+        "state": "placed"
+      },
+      {
+        "id": 14,
+        "payment_row_id": 202,
+        "expectation_id": 2,
+        "date": "2026-10-15",
+        "amount_minor": 1000,
+        "currency": "SGD",
+        "exp_amount_minor": 1000,
+        "exp_currency": "SGD",
+        "rate": null,
+        "rate_date": null,
+        "rate_month_ended": null,
+        "source": "hand",
+        "person": null,
+        "note": null,
+        "state": "placed"
+      }
+    ],
+    "expectations": [
+      {
+        "id": 1,
+        "amount_minor": 20000,
+        "currency": "SGD",
+        "open_minor": 2000,
+        "state": "partly_back"
+      },
+      {
+        "id": 2,
+        "amount_minor": 18000,
+        "currency": "SGD",
+        "open_minor": 17000,
+        "state": "partly_back"
+      }
+    ],
+    "learnt": null
+  },
+  "learnt_example": {
+    "wording": "JAY TAN",
+    "person": {
+      "account_id": 31,
+      "name": "Jay"
+    }
+  },
+  "cross_currency": {
+    "request": {
+      "placements": [
+        {
+          "expectation_id": 6,
+          "amount": "90.00"
+        }
+      ],
+      "waiting": null
+    },
+    "response": {
+      "payment": {
+        "id": 205,
+        "amount_minor": -9000,
+        "currency": "SGD",
+        "expected_minor": 0,
+        "placed_minor": -9000,
+        "own_minor": 0,
+        "left_minor": 0
+      },
+      "set_offs": [
+        {
+          "id": 15,
+          "payment_row_id": 205,
+          "expectation_id": 6,
+          "date": "2026-09-22",
+          "amount_minor": 9000,
+          "currency": "SGD",
+          "exp_amount_minor": 580645,
+          "exp_currency": "INR",
+          "rate": "0.0155",
+          "rate_date": "2026-09-30",
+          "rate_month_ended": true,
+          "source": "hand",
+          "person": null,
+          "note": null,
+          "state": "placed"
+        }
+      ],
+      "expectations": [
+        {
+          "id": 6,
+          "amount_minor": 600000,
+          "currency": "INR",
+          "open_minor": 19355,
+          "state": "partly_back"
+        }
+      ],
+      "learnt": null
+    }
+  },
+  "refusal": {
+    "error": "AIRBNB has S$ 40.00 open"
+  }
+}

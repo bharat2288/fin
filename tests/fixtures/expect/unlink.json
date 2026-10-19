@@ -1,0 +1,28 @@
+{
+  "response": {
+    "removed": {
+      "set_off_id": 12,
+      "expectation_id": 1,
+      "payment_row_id": 202
+    },
+    "payment": {
+      "id": 202,
+      "amount_minor": -7000,
+      "currency": "SGD",
+      "expected_minor": 0,
+      "placed_minor": -1000,
+      "own_minor": -6000,
+      "left_minor": 6000
+    },
+    "expectation": {
+      "id": 1,
+      "amount_minor": 20000,
+      "currency": "SGD",
+      "open_minor": 8000,
+      "state": "partly_back"
+    }
+  },
+  "refusal": {
+    "error": "let go since; undo the let-go first"
+  }
+}
