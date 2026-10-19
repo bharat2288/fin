@@ -169,12 +169,14 @@
     }
     function full(m) { const [y, n] = m.split('-').map(Number); return `${MONTH_FULL[n - 1]} ${y}`; }
     function sign(cur) { return String(money(0, cur)).split(' ')[0]; }
-    function short(v, cur) {
+    /** An axis figure, compact, with the sign after the symbol as money()
+     *  places it ("S$ −250"); `signed` marks a rise "S$ +1K" too. */
+    function short(v, cur, signed = false) {
         const d = cur === 'JPY' ? 0 : 2;
         const major = v / Math.pow(10, d);
         const txt = new Intl.NumberFormat(cur === 'INR' ? 'en-IN' : 'en-US',
             { notation: 'compact', maximumFractionDigits: 1 }).format(Math.abs(major));
-        return `${v < 0 ? '−' : ''}${sign(cur)} ${txt}`;
+        return `${sign(cur)} ${v < 0 ? '−' : (signed && v > 0 ? '+' : '')}${txt}`;
     }
     function f1(v) { return Number(v).toFixed(1); }
 
@@ -210,17 +212,21 @@
         if (m.empty) {
             top = `<p class="trend-line__empty">${esc(m.empty)}</p>`;
         } else {
-            const H = phone ? 170 : 200, sc = m.scale, y = v => T + (sc.hi - v) / (sc.hi - sc.lo) * (H - T - B);
+            // The ⧗ marks take the top row (baseline MT) and the end label the one beneath it:
+            // the plot starts at PT, so a last point at the top of the scale puts its label
+            // (10px above the point) clear of the marks.
+            const MT = 11, PT = 34;
+            const H = phone ? 170 : 200, sc = m.scale, y = v => PT + (sc.hi - v) / (sc.hi - sc.lo) * (H - PT - B);
             let s = `<defs>${hatchDef(id)}</defs>`;
             ticks(sc).forEach(v => { s += `<line class="trend-line__grid" x1="${g.L}" x2="${f1(width - g.R)}" y1="${f1(y(v))}" y2="${f1(y(v))}"/>`
                 + `<text class="trend-line__y" x="${g.L - 6}" y="${f1(y(v) + 4)}" text-anchor="end">${esc(short(v, m.cur))}</text>`; });
             m.gaps.forEach(gp => {
                 const a = idx[gp.months[0]], b = idx[gp.months[gp.months.length - 1]];
-                s += `<rect class="trend-line__gap" x="${f1(g.L + a * g.bw + 1)}" y="${T}" width="${f1((b - a + 1) * g.bw - 2)}" height="${H - T - B}" rx="3"><title>${esc(gp.note)}</title></rect>`;
+                s += `<rect class="trend-line__gap" x="${f1(g.L + a * g.bw + 1)}" y="${PT}" width="${f1((b - a + 1) * g.bw - 2)}" height="${H - PT - B}" rx="3"><title>${esc(gp.note)}</title></rect>`;
             });
             m.missing.forEach(x => { const k = idx[x];
-                s += `<rect x="${f1(g.L + k * g.bw + 2)}" y="${T}" width="${f1(Math.max(1, g.bw - 4))}" height="${H - T - B}" rx="3" fill="url(#${id})"/>`
-                    + `<text class="trend-line__miss" x="${f1(g.x(k))}" y="${T - 4}" text-anchor="middle">⧗</text>`; });
+                s += `<rect x="${f1(g.L + k * g.bw + 2)}" y="${PT}" width="${f1(Math.max(1, g.bw - 4))}" height="${H - PT - B}" rx="3" fill="url(#${id})"/>`
+                    + `<text class="trend-line__miss" x="${f1(g.x(k))}" y="${MT}" text-anchor="middle">⧗</text>`; });
             m.solid.forEach(run => { s += `<path class="trend-line__ln trend-line--bal" d="${pathOf(run, idx, g, y, values)}"/>`; });
             m.dashed.forEach(run => { s += `<path class="trend-line__ln trend-line__ln--est trend-line--bal" d="${pathOf(run, idx, g, y, values)}"/>`; });
             m.points.forEach((p, k) => {
@@ -229,10 +235,12 @@
                 else if (n <= 12 || k === n - 1 || values[k + 1] === null) s += `<circle class="trend-line__dot trend-line--bal" cx="${f1(g.x(k))}" cy="${f1(y(p.value))}" r="3"/>`;
             });
             const last = m.points.map((p, k) => [p, k]).filter(([p]) => p.value !== null && !p.estimate).pop();
-            if (last) s += `<text class="trend-line__val" x="${f1(g.x(last[1]))}" y="${f1(y(last[0].value) - 10)}" text-anchor="end">${esc(money(last[0].value, m.cur))}</text>`;
+            // Whole rupees without paise ("₹ 5,20,000"), as the head, summary and hover word it.
+            const endText = v => { const t = money(v, m.cur); return m.cur === 'INR' && Number.isInteger(v) && v % 100 === 0 ? t.replace(/\.00$/, '') : t; };
+            if (last) s += `<text class="trend-line__val" x="${f1(g.x(last[1]))}" y="${f1(y(last[0].value) - 10)}" text-anchor="end">${esc(endText(last[0].value))}</text>`;
             s += xLabels(m.months, g, H - B + 15, phone);
-            m.months.forEach((x, k) => { s += `<rect class="trend-line__hit" data-k="${k}" x="${f1(g.L + k * g.bw)}" y="${T}" width="${f1(g.bw)}" height="${H - T - B}"/>`; });
-            top = `<svg class="trend-line__svg" viewBox="0 0 ${width} ${H}" height="${H}" role="img" aria-label="Balance at each month end">${s}</svg>`;
+            m.months.forEach((x, k) => { s += `<rect class="trend-line__hit" data-k="${k}" x="${f1(g.L + k * g.bw)}" y="${PT}" width="${f1(g.bw)}" height="${H - PT - B}"/>`; });
+            top =`<svg class="trend-line__svg" viewBox="0 0 ${width} ${H}" height="${H}" role="img" aria-label="Balance at each month end">${s}</svg>`;
         }
         const notes = m.gaps.map(gp => `<p class="trend-line__note">${esc(label(gp.months[0], 0))}${gp.months.length > 1 ? ' to ' + esc(label(gp.months[gp.months.length - 1], 0)) : ''}: ${esc(gp.note)}</p>`).join('');
         // Money in up, money out down, from one baseline: its own chart, its own scale.
@@ -240,7 +248,7 @@
         const gap = Math.max(2, g.bw * 0.3), w = Math.max(1, g.bw - gap);
         let b = `<defs>${hatchDef(id + 'b')}</defs>`;
         [mx, 0, -mx].forEach(v => { b += `<line class="${v ? 'trend-line__grid' : 'trend-line__base'}" x1="${g.L}" x2="${f1(width - g.R)}" y1="${f1(y2(v))}" y2="${f1(y2(v))}"/>`
-            + `<text class="trend-line__y" x="${g.L - 6}" y="${f1(y2(v) + 4)}" text-anchor="end">${v ? esc((v > 0 ? '+' : '') + short(v, m.cur)) : '0'}</text>`; });
+            + `<text class="trend-line__y" x="${g.L - 6}" y="${f1(y2(v) + 4)}" text-anchor="end">${v ? esc(short(v, m.cur, true)) : '0'}</text>`; });
         m.bars.forEach((bar, k) => {
             const bx = f1(g.L + k * g.bw + gap / 2), cls = bar.hatched ? ' trend-line__bar--hatched' : (bar.so_far ? ' trend-line__bar--so-far' : '');
             const fill = bar.hatched ? ` style="fill:url(#${id}b)"` : '';
@@ -295,9 +303,10 @@
             if (lastK !== undefined && (coloured(l) || l.picked) && !l.dim) {
                 p += `<circle class="trend-line__dot" cx="${f1(g.x(lastK))}" cy="${f1(y(values[lastK]))}" r="4"/>`;
                 if (!phone) {
-                    // End labels never sit on each other: a label too close to one drawn is nudged down.
+                    // End labels never sit on each other: a label too close to one drawn is nudged
+                    // down, a whole line box apart (12px labels, 15px each).
                     let ly = y(values[lastK]);
-                    labelled.slice().sort((a, b) => a - b).forEach(o => { if (Math.abs(o - ly) < 13) ly = o + 13; });
+                    labelled.slice().sort((a, b) => a - b).forEach(o => { if (Math.abs(o - ly) < 15) ly = o + 15; });
                     labelled.push(ly);
                     p += `<text class="trend-line__end" x="${f1(g.x(lastK) + 9)}" y="${f1(ly + 4)}">${esc(l.name)}</text>`;
                 }

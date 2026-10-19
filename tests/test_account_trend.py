@@ -18,8 +18,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import datetime
+
 import pytest
 
+import account_balances_api
+from test_balances_route import rupee_savings  # noqa: F401  (a fixture)
+
+R3_TODAY = datetime.date(2026, 10, 19)
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 FIXTURES = ROOT / "tests" / "fixtures" / "trend"
@@ -234,16 +240,52 @@ def test_the_page_reads_the_remembered_span_and_a_chip_reads_the_new_one():
 
 # --- case 29: a rupee account opens in ₹ with the switch; S$ has none ---------
 
-def test_case_29_a_rupee_account_opens_in_rupees_and_its_switch_shows_sgd_at_the_rate():
-    got = run(show(32) + """
+@pytest.fixture
+def rupee_r3(client, rupee_savings, monkeypatch):
+    """R3's own answers for test_balances_route's Rupee savings (Sep 2026
+    month end ₹ 5,20,000, rates 0.0155), in ₹ and in S$, keyed by the URL the
+    page asks: the S$ figures the switch draws are the server's, never the
+    client's. Longer URLs first, as the stand-in get() matches a prefix."""
+    monkeypatch.setattr(account_balances_api, "today", lambda: R3_TODAY)
+    base = f"/api/accounts/{rupee_savings}/balances"
+    answers = {}
+    for query in ("?span=12M&cur=SGD", "?span=12M&cur=INR", "?span=2Y&cur=SGD", "?span=12M"):
+        got = client.get(base + query)
+        assert got.status_code == 200, got.get_json()
+        answers[base + query] = got.get_json()
+    return rupee_savings, base, answers
+
+
+def test_case_29_a_rupee_account_opens_in_rupees_and_its_switch_shows_sgd_at_the_rate(rupee_r3):
+    account_id, base, answers = rupee_r3
+    got = run(show(account_id) + """
       const inr = text(section);
       pressCard(section, 'cur', 'SGD');
+      await new Promise(r => setTimeout(r, 0));
       out({ inr, sgd: text(section) });
-    """, answers={INR: load("balances_inr")})
+    """, answers=answers)
     assert "Balance ₹ 5,20,000, 30 Sep 2026" in got["inr"]
     assert "in ₹ 62,400 · out ₹ 48,750" in got["inr"]
-    assert "S$ 8,060.00" in got["sgd"] and "at 0.0155" in got["sgd"]
+    assert "Balance S$ 8,060.00, 30 Sep 2026" in got["sgd"]
+    assert "Balance S$ 8,060.00 on 30 Sep 2026 at 0.0155 · in S$ 967.20 · out S$ 755.62" in got["sgd"]
     assert "S$ at each month's end-of-month rate" in got["sgd"]
+    assert "₹ 8,060" not in got["sgd"]
+
+
+def test_the_switch_asks_r3_for_cur_sgd_and_a_span_chip_keeps_the_currency(rupee_r3):
+    account_id, base, answers = rupee_r3
+    got = run(show(account_id) + """
+      pressCard(section, 'cur', 'SGD');
+      await new Promise(r => setTimeout(r, 0));
+      pressCard(section, 'span', '2Y');
+      await new Promise(r => setTimeout(r, 0));
+      pressCard(section, 'cur', 'SGD');
+      await new Promise(r => setTimeout(r, 0));
+      out({ urls });
+    """, answers=answers)
+    # Opening asks in the account's own currency; the switch asks R3 for S$, the
+    # chip keeps S$, and pressing the currency already shown asks nothing.
+    assert got["urls"] == [base + "?span=12M", base + "?span=12M&cur=SGD", base + "?span=2Y&cur=SGD"]
 
 
 def test_case_29_an_sgd_account_has_no_switch():

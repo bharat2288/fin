@@ -267,6 +267,26 @@ def test_case_44_a_type_below_zero_dips_below_the_axis():
     assert m["scale"]["zero"] is True
 
 
+def _y_labels(out):
+    return re.findall(r'<text class="trend-line__y"[^>]*>([^<]*)</text>', out)
+
+
+def test_the_axis_puts_the_sign_after_the_symbol_as_the_house_formatter_does():
+    # Review finding: money() writes "S$ −560.00" (kept on purpose, ticket 37); the
+    # line's axis wrote "−S$ 250". The axis keeps the house placement, "S$ −250".
+    p = load("trend_types")
+    g = next(t for t in p["types"] if t["name"] == "Groceries")
+    next(x for x in g["points"] if x["month"] == "2026-08")["net"] = -46000
+    below = [label for label in _y_labels(svg(p)) if "−" in label]
+    assert below, "the scale reaches below zero, so the axis has a negative label"
+    assert all(re.fullmatch(r"S\$ −\d[\d.,]*K?", label) for label in below), below
+
+    # The account's money in / out axis is signed both ways, the same placement.
+    signed = [label for label in _y_labels(svg(load("balances_sgd"))) if "+" in label or "−" in label]
+    assert any("+" in label for label in signed) and any("−" in label for label in signed), signed
+    assert all(re.fullmatch(r"S\$ [+−]\d[\d.,]*K?", label) for label in signed), signed
+
+
 def test_the_drawing_has_no_unknown_figures_at_both_widths():
     for name, state in (("balances_sgd", {}), ("balances_inr", {}), ("trend_types", {"picked": 8, "off": [9]})):
         for width in (1366, 390):
@@ -290,3 +310,45 @@ def test_case_29_the_rupee_hover_names_the_rate_day_and_drops_whole_paise():
     assert "Money in ₹ 62,400 " in tip and "Money out ₹ 48,750 " in tip
     assert "Rate 0.0155 (30 Sep 2026)" in tip
     assert "2026-09-30" not in tip and ".00" not in tip
+
+
+def test_case_29_the_rupee_balance_lines_end_label_drops_whole_paise():
+    # Walk finding: the balance line's end label read "₹ 5,20,000.00" while the head,
+    # summary and hover read "₹ 5,20,000".
+    out = svg(load("balances_inr"))
+    ends = re.findall(r'<text class="trend-line__val"[^>]*>([^<]*)</text>', out)
+    assert ends == ["₹ 5,20,000"]
+    # An S$ account keeps its cents.
+    assert re.findall(r'<text class="trend-line__val"[^>]*>([^<]*)</text>', svg(load("balances_sgd"))) == ["S$ 55,000.00"]
+
+
+def test_case_39_end_labels_of_lines_ending_close_together_do_not_overlap():
+    # Walk finding (1366): Dining / Groceries and Travel / Education ended close together and
+    # their 12px end labels overlapped by 2px: the nudge kept them 13px apart, less than a
+    # label's own line box (12px x 1.25 = 15px).
+    p = load("trend_types")
+    ends = {"Dining": 50000, "Groceries": 49000, "Travel": 48000, "Education": 47500}
+    for t in p["types"]:
+        if t["name"] in ends:
+            next(x for x in t["points"] if x["month"] == "2026-10")["net"] = ends[t["name"]]
+    ys = sorted(float(y) for y in re.findall(r'<text class="trend-line__end" x="[^"]*" y="([^"]*)"', svg(p)))
+    assert len(ys) == 4
+    assert all(b - a >= 15 for a, b in zip(ys, ys[1:])), ys
+
+
+def test_case_32_the_missing_mark_never_sits_on_the_balance_lines_end_label():
+    # Walk finding (390, Everyday savings): July's ⧗ sat on the "S$ 55,000.00" end label,
+    # a 7 x 7 px overlap: the label rides 10px above the last point, and at the top of the
+    # scale that is the ⧗ row. 11px text spans about 10px above its baseline and 3px below.
+    p = load("balances_sgd")
+    # The check book's months: S$ 900.00 a month up to S$ 55,000.00, the top of the scale.
+    for x, v in zip(p["months"][2:7], (4780000, 4870000, 4960000, 5050000, 5140000)):
+        x["balance"] = v
+    assert model(p)["scale"]["hi"] == 5500000
+    for width in (390, 1366):
+        out = svg(p, width=width)
+        top = out.split("</svg>")[0]
+        val = [float(v) for v in re.findall(r'<text class="trend-line__val" x="[^"]*" y="([^"]*)"', top)]
+        miss = [float(v) for v in re.findall(r'<text class="trend-line__miss" x="[^"]*" y="([^"]*)"', top)]
+        assert val and miss, (width, val, miss)
+        assert all(v - 10 >= g + 3 for v in val for g in miss), (width, val, miss)
