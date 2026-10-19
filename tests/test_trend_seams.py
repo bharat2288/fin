@@ -1,5 +1,5 @@
 """The server seams the trend pages build on (fin-surfaces 22): scope.py holds
-the scope SQL, the trend blueprint registers no route yet, and
+the scope SQL, the trend blueprint carries only the trend routes, and
 /api/transactions can list hidden merchants on request. Every figure here is
 invented."""
 
@@ -40,12 +40,17 @@ def test_get_db_closes_its_connection(temp_db):
     assert closed
 
 
-def test_trend_blueprint_is_registered_and_serves_nothing():
+def test_trend_blueprint_is_registered_and_serves_only_the_trend_routes():
+    """The blueprint carries R1-R3 (spec 15, Server routes) as their lanes land,
+    and nothing else."""
+    import re
     import trend_routes
     assert fin_app.app.blueprints[trend_routes.bp.name] is trend_routes.bp
-    served = [r.rule for r in fin_app.app.url_map.iter_rules()
+    served = [r for r in fin_app.app.url_map.iter_rules()
               if r.endpoint.startswith(trend_routes.bp.name + ".")]
-    assert served == []
+    allowed = re.compile(r"^/api/trend$|^/api/trend/types$|^/api/accounts/<[^>]+>/balances$")
+    assert all(allowed.match(r.rule) and r.methods - {"HEAD", "OPTIONS"} == {"GET"}
+               for r in served), [r.rule for r in served]
 
 
 def test_route_modules_exist_and_none_imports_app():
