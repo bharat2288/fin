@@ -34,7 +34,8 @@ def _const(name):
 
 
 def _node(code):
-    out = subprocess.run([NODE, "-e", code], capture_output=True, text=True, timeout=30, check=True)
+    # The script goes in on stdin: on Windows a long -e argument passes the command-line limit.
+    out = subprocess.run([NODE, "-"], input=code, capture_output=True, text=True, timeout=30, check=True, encoding="utf-8")
     return json.loads(out.stdout)
 
 
