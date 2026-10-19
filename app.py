@@ -41,6 +41,9 @@ import screens
 import suggest
 import tie
 import trend_routes
+import expect_routes
+import refund_links
+from person import checked_name as checked_person_name, create_person, find_person
 from scope import _HOUSEHOLD_ACCOUNT, _SGD_ACCOUNT, _TYPE_JOINS, book_expr
 from missing import missing_months
 from db import first_rule, get_connection, get_db, init_db, invalidate_rules_cache, match_merchant, rule_label
@@ -54,6 +57,7 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config.update(LOCAL_DEV=False, BACKUP_STORE=None)
 app.wsgi_app = access_gate.RequireGateIdentity(app.wsgi_app, app.config)
 app.register_blueprint(trend_routes.bp)
+app.register_blueprint(expect_routes.bp)
 
 
 def format_type_display(parent: str | None, child: str | None) -> str:
@@ -539,6 +543,7 @@ _CHANGE_SUMMARIES = {
     "api_subscriptions_enrich": "Filled in subscriptions",
     "api_history_undo": "Undid a change",
 }
+_CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
 
 
 def _caller() -> tuple[str, str]:
@@ -3633,6 +3638,8 @@ def api_import_confirm():
             pairing.match_pairs(conn)
             # Rows that name a loan change what was paid between its figures.
             loan_interest.derive(conn)
+            # Refunds this import brought in link to their purchases, in this change.
+            refund_links.link_on_import(conn)
 
             # Update batch_imports record
             result_summary = {
@@ -4299,19 +4306,13 @@ def api_review_label(tx_id: int):
                     raise review.LabelRefused("income_kind_id is required: one of the income kinds")
                 type_id = kind_id
             elif choice.asks == review.ASKS_PERSON and data.get("account_id") is None:
-                person = data.get("person")
-                person = person.strip() if isinstance(person, str) else ""
-                if not person:
-                    raise review.LabelRefused("person is required: who the money was lent to")
-                held = conn.execute(
-                    "SELECT id FROM accounts WHERE UPPER(name) = ? AND type = ? AND owner = ? "
-                    "ORDER BY id LIMIT 1",
-                    (person.upper(), "person", account_kind.HOUSEHOLD),
-                ).fetchone()
-                if held:
-                    other_side = held["id"]
-                else:
-                    new_person = person
+                try:
+                    name = checked_person_name(data.get("person"))
+                except ValueError:
+                    raise review.LabelRefused("person is required: who the money was lent to") from None
+                other_side = find_person(conn, name)
+                if other_side is None:
+                    new_person = name
             else:
                 other_side = _label_account(conn, choice, data.get("account_id"), tx["account_id"])
         except (UnknownLabel, BookNeeded, review.LabelRefused) as e:
@@ -4320,10 +4321,7 @@ def api_review_label(tx_id: int):
         # Everything asked for is there: the person's account, then the label,
         # in one transaction.
         if new_person is not None:
-            other_side = conn.execute(
-                "INSERT INTO accounts (name, short_name, type, owner) VALUES (?, ?, ?, ?)",
-                (new_person, new_person, account_kind.checked_kind("person"), account_kind.HOUSEHOLD),
-            ).lastrowid
+            other_side = create_person(conn, new_person)
         conn.execute(
             "UPDATE transactions SET flow_type = ?, flow_type_manual = 1, other_side_id = ?, "
             "book = ?, type_id = ?, cat_source = 'manual' WHERE id = ?",

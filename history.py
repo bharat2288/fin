@@ -32,6 +32,14 @@ TRACKED = (
     "rates",
     "statements",
     "subscriptions",
+    # Expect back (personal-ledger 23; expect_back.py).
+    "expectation",
+    "expectation_name",
+    "set_off",
+    "let_go",
+    "refund_link",
+    "sender_wording",
+    "dismissal",
 )
 
 # Where a change came from.
@@ -326,7 +334,9 @@ def _write_back(conn: sqlite3.Connection, entry_id: int) -> None:
 def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     """Undo an entry inside the open entry `undo_entry_id`, and commit.
     Refused, changing nothing, when the entry is unknown, still open, already
-    undone, or a later entry changed one of its rows."""
+    undone, or a later entry changed one of its rows; and, naming it, when it
+    would leave an expect-back record pointing at nothing or broken
+    (expect_back.refusal_to_undo, expect_back.invariant_check)."""
     r = conn.execute("SELECT * FROM change_entries WHERE id = ?", (entry_id,)).fetchone()
     if r is None or r["open"]:
         raise UndoRefused("no such change")
@@ -338,11 +348,25 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
             f"a later change touched the same rows: change {later['id']} "
             f"({later['summary'] or 'no summary'}, {later['at']}). Undo that one first."
         )
+    # The expect-back records link rows to rows and to each other, so a change
+    # can be undone without touching a later change's rows and still break
+    # them (spec 23, E0): refused by name before writing, and checked again
+    # after writing back, before the commit. Imported here: expect_back reads
+    # the balance sheet, which this module must not load at import.
+    import expect_back
+
+    dangling = expect_back.refusal_to_undo(conn, entry_id)
+    if dangling:
+        raise UndoRefused(dangling)
     try:
         _write_back(conn, entry_id)
     except sqlite3.IntegrityError:
         conn.rollback()
         raise UndoRefused("undoing this change would break a link between rows; nothing was changed") from None
+    broken = expect_back.invariant_check(conn, entry_id)
+    if broken:
+        conn.rollback()
+        raise UndoRefused(broken)
     conn.execute(
         "UPDATE change_entries SET undoes = ?, summary = ? WHERE id = ?",
         (entry_id, f"Undid: {r['summary'] or 'change ' + str(entry_id)}", undo_entry_id),
