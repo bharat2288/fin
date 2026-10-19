@@ -1,3 +1,24 @@
 /* Expect back: the Queue's Back for… step on Money in (D6), in the queueStep slot.
-   A shell from personal-ledger 26, filled by personal-ledger 41 and 42. Every class here is prefixed .xb-
-   (tests/test_expect_contract.py), so no rule reaches a page it was not written for. */
+   Filled by personal-ledger 41 (the mockup's Queue screen, variant A), and 42 after it. Every class
+   here is prefixed .xb- (tests/test_expect_contract.py), so no rule reaches a page it was not
+   written for. The step and its lines reuse the lane's own .step / .qi grid from styles.css. */
+
+.xb-q-fold { cursor: default; }
+
+.xb-q-sug { display: grid; gap: var(--space-2); margin-top: var(--space-2); padding: 10px 12px;
+    border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--accent-pop-subtle) 45%, var(--bg-surface)); }
+.xb-q-sug__t { margin: 0; font-size: var(--t-ui); color: var(--text-primary); }
+.xb-q-sug__t b { font-weight: 700; }
+
+.xb-q-open { display: inline-flex; align-items: center; padding: 0 8px; border-radius: 999px;
+    background: var(--accent-pop-subtle); color: var(--accent-pop); font-size: var(--t-meta);
+    font-weight: 700; line-height: 20px; white-space: nowrap; }
+
+.xb-q-why { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; font-size: var(--t-meta); color: var(--text-tertiary); }
+.xb-q-why span + span::before { content: "·"; margin-right: 8px; color: var(--border-emphasis); }
+
+.xb-q-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 720px) {
+    .xb-q-acts > * { flex: 1 1 auto; }   /* buttons share the line on a phone */
+}
