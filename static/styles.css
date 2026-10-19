@@ -641,6 +641,12 @@ li.empty { list-style: none; margin-top: 8px; }
 .sheet--center .sheet-body { flex: 0 1 auto; padding: 0 var(--space-5) var(--space-4); }
 .sheet--center .sheet-foot { flex-wrap: wrap; align-items: center; padding: var(--space-4) var(--space-5); }
 /* ==== reserved: home-net ==== */
+/* Home's book tiles are net of refunds: a month that nets below zero hangs under the axis,
+   short and in the warning colour, so it reads as a mark and not as a small positive month. */
+.home-bars.has-neg { margin-bottom: 16px; }
+.home-bars.has-neg > span.is-neg { height: calc(var(--h) * 0.3); min-height: 3px; border-radius: 0 0 3px 3px;
+    transform: translateY(calc(100% + 1px)); background: color-mix(in srgb, var(--semantic-warning) 70%, var(--bg-surface)); }
+.home-bars.has-neg > span.is-neg.is-current { background: var(--text-primary); }
 /* ==== end: home-net ==== */
 
 /* kit (from folio): the one confirm. The ask, what changes old → new, what it does; Cancel left, the commit right */

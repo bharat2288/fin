@@ -1054,12 +1054,17 @@ async function homeGuesses(items) {
     return out;
 }
 
-/** A book's twelve months as small bars, on its own scale; the tile's month dark. */
+/** A book's twelve months as small bars, on its own scale; the tile's month dark.
+ *  The months are net of refunds: one that nets below zero hangs under the axis. */
 function homeBars(values, months, current, cls) {
     const top = Math.max(...values.map(v => Math.abs(v)), 0);
-    return `<div class="home-bars ${cls}" role="img" aria-label="Twelve months, each on this book's own scale">${values.map((v, i) => {
+    const hasNeg = values.some(v => v < 0);
+    const label = `Twelve months, each on this book's own scale${hasNeg ? '; a month below zero hangs under the line' : ''}`;
+    return `<div class="home-bars ${cls}${hasNeg ? ' has-neg' : ''}" role="img" aria-label="${esc(label)}">${values.map((v, i) => {
         const h = top ? Math.max(2, Math.round(Math.abs(v) / top * 100)) : 2;
-        return `<span class="${months[i] === current ? 'is-current' : ''}${v ? '' : ' is-zero'}" style="--h:${h}%" title="${esc(monthName(months[i], { short: true }))}"></span>`;
+        const name = monthName(months[i], { short: true });
+        const title = v < 0 ? `${name}, below zero: ${money(v, 'SGD')}` : name;
+        return `<span class="${months[i] === current ? 'is-current' : ''}${v ? '' : ' is-zero'}${v < 0 ? ' is-neg' : ''}" style="--h:${h}%" title="${esc(title)}"></span>`;
     }).join('')}</div>`;
 }
 function homeVsAverage(minor, avgMinor, months) {
@@ -1069,6 +1074,51 @@ function homeVsAverage(minor, avgMinor, months) {
     const p = Math.round((minor - avgMinor) / Math.abs(avgMinor) * 100);
     if (p === 0) return `<span class="home-vs" title="${span}">same as its recent average ${esc(money(avgMinor, 'SGD'))}</span>`;
     return `<span class="home-vs" title="The recent average is ${span}"><span aria-hidden="true">${p > 0 ? '▲' : '▼'}</span>${Math.abs(p)}% ${p > 0 ? 'above' : 'below'} its recent average ${esc(money(avgMinor, 'SGD'))}</span>`;
+}
+
+/** One Home tile: the eyebrow, the label, the figure, the average line, the
+ *  body, twelve small bars and the foot. The bars are the card's history. */
+function homeTile(cards, months, { cls, eyebrow, label, minor, avg, body, values, href, act, book, foot }) {
+    return `<a class="home-tile ${cls}" href="${href}"${act ? ` data-act="${act}" data-book="${esc(book)}" data-month="${esc(cards.ref_month)}"` : ''}>
+        <span class="home-tile__eyebrow">${esc(eyebrow)}</span>
+        <span class="home-tile__label">${esc(label)}</span>
+        <span class="home-tile__fig num">${esc(money(minor, 'SGD'))}</span>
+        ${avg}
+        <span class="home-tile__body">${body}</span>
+        ${values.length ? homeBars(values, months, cards.ref_month, cls) : ''}
+        <span class="home-tile__foot">${esc(foot)} ${icon('caret-right')}</span></a>`;
+}
+/** Home's book tiles, one per declared book, from stat-cards' payload. The
+ *  figure is the month net of refunds, as the rest of fin counts it; the chip
+ *  names what the refunds came to. A month with no statement in is marked,
+ *  not a zero. A company's tile is the part of its costs the household's own
+ *  accounts paid, and says so. */
+function homeBookTiles(cards, books) {
+    const hist = cards.history || [];
+    const months = hist.map(h => h.month);
+    const tiles = [];
+    books.forEach((b, i) => {
+        const key = b.name.toLowerCase();
+        if (!(key in cards)) return;
+        const minor = toMinor(cards[key] ?? 0);
+        const values = hist.map(h => toMinor(h[key] ?? 0));
+        const backMinor = toMinor(cards[`${key}_back`] || 0);
+        const back = backMinor ? `<span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}after ${esc(money(backMinor, 'SGD'))} refunds</span>` : '';
+        const missing = cards[`${key}_missing`];
+        const avg = missing
+            ? `<span class="tag stale">${icon('warning')}no statement for ${esc(monthName(cards.ref_month, { short: true }))}</span>`
+            : homeVsAverage(minor, toMinor(cards[`avg_${key}`] ?? 0), cards.avg_months || 3);
+        const go = missing ? { href: '#/books/import', foot: 'Import the statement' } : { act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows' };
+        const outRows = cards[`${key}_out_rows`] ?? (i === 0 ? cards.household_rows : 0) ?? 0;
+        if (i === 0) {
+            tiles.push(homeTile(cards, months, { cls: 'is-household', eyebrow: 'Household', label: `${b.name} spending`, minor, avg, values, ...go,
+                body: `${plural(outRows, 'row')} out${back ? ` · ${back}` : ''}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
+        } else {
+            tiles.push(homeTile(cards, months, { cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, ...go,
+                body: `Costs paid from household accounts${back ? ` · ${back}` : ''}. Not household spending; it moves ${esc(b.name)}’s company balance.` }));
+        }
+    });
+    return tiles;
 }
 
 async function viewHome() {
@@ -1100,40 +1150,9 @@ async function viewHome() {
     // figure with its own twelve months; never added.
     const hist = cards.history || [];
     const months = hist.map(h => h.month);
-    const tile = ({ cls, eyebrow, label, minor, avg, body, values, href, act, book, foot }) => `<a class="home-tile ${cls}" href="${href}"${act ? ` data-act="${act}" data-book="${esc(book)}" data-month="${esc(cards.ref_month)}"` : ''}>
-        <span class="home-tile__eyebrow">${esc(eyebrow)}</span>
-        <span class="home-tile__label">${esc(label)}</span>
-        <span class="home-tile__fig num">${esc(money(minor, 'SGD'))}</span>
-        ${avg}
-        <span class="home-tile__body">${body}</span>
-        ${values.length ? homeBars(values, months, cards.ref_month, cls) : ''}
-        <span class="home-tile__foot">${esc(foot)} ${icon('caret-right')}</span></a>`;
-    const tiles = [];
-    // Money out is the figure, as Spending shows it; refunds sit beside it,
-    // never taken off. A month with no statement in is marked, not a zero.
-    r.books.forEach((b, i) => {
-        const key = b.name.toLowerCase();
-        if (!(key in cards)) return;
-        const minor = toMinor(cards[`${key}_out`] ?? cards[key] ?? 0);
-        const values = hist.map(h => toMinor(h[`out_${key}`] ?? h[key] ?? 0));
-        const backMinor = toMinor(cards[`${key}_back`] || 0);
-        const back = backMinor ? `<span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}back ${esc(money(backMinor, 'SGD'))}</span> in refunds, not taken off` : '';
-        const missing = cards[`${key}_missing`];
-        const avg = missing
-            ? `<span class="tag stale">${icon('warning')}no statement for ${esc(monthName(cards.ref_month, { short: true }))}</span>`
-            : homeVsAverage(minor, toMinor(cards[`avg_${key}_out`] ?? cards[`avg_${key}`] ?? 0), cards.avg_months || 3);
-        const go = missing ? { href: '#/books/import', foot: 'Import the statement' } : { act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows' };
-        const outRows = cards[`${key}_out_rows`] ?? (i === 0 ? cards.household_rows : 0) ?? 0;
-        if (i === 0) {
-            tiles.push(tile({ cls: 'is-household', eyebrow: 'Household', label: `${b.name} spending`, minor, avg, values, ...go,
-                body: `${plural(outRows, 'row')} out${back ? ` · ${back}` : ''}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
-        } else {
-            tiles.push(tile({ cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, ...go,
-                body: `${back ? `Money out · ${back}. ` : ''}Paid from our accounts. Not household spending; it moves ${esc(b.name)}’s company balance.` }));
-        }
-    });
+    const tiles = homeBookTiles(cards, r.books);
     const loanValues = hist.map(h => toMinor(h.loan_principal || 0));
-    tiles.push(tile({ cls: 'is-movement', eyebrow: 'Movement, not spending', label: 'Loan principal repaid', minor: toMinor(cards.loan_principal), values: loanValues, href: '#/books', foot: 'See the loans',
+    tiles.push(homeTile(cards, months, { cls: 'is-movement', eyebrow: 'Movement, not spending', label: 'Loan principal repaid', minor: toMinor(cards.loan_principal), values: loanValues, href: '#/books', foot: 'See the loans',
         avg: toMinor(cards.loan_instalments) ? '' : '<span class="home-vs">no instalment seen this month</span>',
         body: `What the loans fell by: instalments ${esc(money(toMinor(cards.loan_instalments), 'SGD'))} less interest ${esc(money(toMinor(cards.loan_interest), 'SGD'))}. Still the household’s money.` }));
     const tilesCard = `<section class="card home-tiles">
