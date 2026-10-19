@@ -3273,15 +3273,29 @@ function spendFilterFields(sp, r) {
 /** A spending row: no money-out pill (every row here is money out); a refund says so. */
 function spendRowTr(row) {
     const minor = toMinor(row.amount_sgd, row.currency);
-    const label = row.display_type ? esc(row.display_type) : tag('nofig', 'no type');
+    const label = row.display_type ? (row.type_id ? pageLink('type', row.type_id, row.display_type) : esc(row.display_type)) : tag('nofig', 'no type');
+    const what = row.service_id ? pageLink('merchant', row.service_id, row.description) : esc(row.description);
+    const account = row.account_id ? pageLink('account', row.account_id, row.account_name || '') : esc(row.account_name || '');
     const amount = minor < 0
         ? `<span class="sl-refund">${icon('arrow-circle-down')}refund</span> <span class="num sl-back">${esc(money(-minor, row.currency))} back</span>`
         : `<span class="num">${esc(money(minor, row.currency))}</span>`;
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
-        <td>${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${esc(row.account_name || '')}</div></td>
+        <td>${what}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${account}</div></td>
         <td>${label}${notCheckedTag(row)}</td>
         <td class="r">${amount}</td></tr>`;
+}
+
+/** The name cell of a By merchant / By type row: a link to its page where it has one (a merchant by its id, a type by its id,
+ *  or, folded into its parent, the parent's), plain text where it has none (a row with no merchant, "No type"). */
+function spendGroupNameCell(g, view, fold, types) {
+    if (view !== 'type') {
+        const row = g.list.find(x => x.service_id && x.service_name === g.name);
+        return row ? pageLink('merchant', row.service_id, g.name) : esc(g.name);
+    }
+    if (g.name === 'No type') return tag('nofig', 'No type');
+    const id = fold ? types.find(t => t.name === g.name && !t.parent_id)?.id : g.list[0]?.type_id;
+    return id ? pageLink('type', id, g.name) : esc(g.name);
 }
 
 async function viewSpending() {
@@ -3383,7 +3397,7 @@ async function viewSpending() {
             const keyOf = sp.view === 'type' ? typeKey : row => row.service_name || row.description;
             const groups = groupRows(b.all, keyOf);
             const noun = sp.view === 'type' ? 'Type' : 'Merchant';
-            const nameCell = g => g.name === 'No type' ? tag('nofig', 'No type') : esc(g.name);
+            const nameCell = g => spendGroupNameCell(g, sp.view, fold, r.types);
             const whole = sgd(b.by);   // the tile's figure: every share is of it
             content = groups.length ? `<div class="table-wrap"><table class="t sl-groups"><thead><tr><th>${noun}</th><th class="r">Rows</th><th class="r">Net</th><th class="r desk-only">Share</th></tr></thead><tbody>
                 ${groups.slice(0, 60).map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
