@@ -161,8 +161,11 @@ def test_back_for_is_offered_on_money_in_and_on_a_movement_out_only():
     out = run(f"{json.dumps(rows)}.map(r => window.expectRowActions(r))")
     assert 'data-act="back-for"' in out[0] and 'data-tx="201"' in out[0] and "Back for…" in out[0]
     assert 'data-act="back-for"' in out[1] and 'data-tx="202"' in out[1]
-    assert out[2:] == ["", "", "", ""]
+    # Other lanes fill the same slot (34 adds Expect some back… on money out), so only
+    # Back for… is looked for here.
+    assert all('data-act="back-for"' not in o for o in out[2:])
 
 
 def test_the_drawer_and_its_entry_point_are_defined():
-    assert run("[typeof window.openBackFor, Object.keys(window.Expect.slots)]") == ["function", ["rowActions"]]
+    typ, slots = run("[typeof window.openBackFor, Object.keys(window.Expect.slots)]")
+    assert typ == "function" and "rowActions" in slots  # 34 fills other slots too
