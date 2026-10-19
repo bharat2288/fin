@@ -20,6 +20,11 @@ Rulings this module carries:
   already off; no tool turns it on: only the operator, in fin's app.
 - A change over MANY_ROWS that stands on the operator's agreed count is
   recorded as asked first (history.record_asked), so Changes can say so.
+- Expect back (personal-ledger 23, E8): seven write tools (mark_expect_back, undo_mark,
+  set_off, unlink_set_off, let_go, undo_let_go, not_a_payback) are thin wrappers over the
+  routes the app's drawers call, and expected_back reads the open list and an item's page;
+  Claude does what the app does, one change each, stamped as the chat's, under the switch.
+  A let-go must name mine or a gift: there is no default.
 - No tool imports a statement, changes or deletes an imported row, edits an
   account other than adding a company or a person, sends merchants to the
   type-suggestion service, runs a conversion or touches subscriptions.
@@ -93,6 +98,13 @@ def _get(path: str, *names: str):
 
 # --- reads -------------------------------------------------------------------
 
+
+def _expected_back_request(a: dict) -> tuple[str, str, dict | None]:
+    if a.get("expectation_id") is not None:
+        return "GET", f"/api/expectations/{int(a['expectation_id'])}", {}
+    return "GET", "/api/expectations", _pick(a, "direction", "person", "currency", "near", "payment")
+
+
 _READS = [
     Tool(
         "balance_sheet",
@@ -107,8 +119,8 @@ _READS = [
     ),
     Tool(
         "spending_cards",
-        "One month's spending figures, net of refunds; a refund counts in the month it "
-        "arrives; S$ accounts only: household spending (Household book, household-owned "
+        "One month's spending figures, net of refunds and of what is expected back; a refund "
+        "counts in the month it arrives; S$ accounts only: household spending (Household book, household-owned "
         "accounts), each company's costs paid from household accounts, loan principal repaid, "
         "and what is held out waiting for review (money out and in apart), against the "
         "three-month average. Each book's <book>_out is its money out and <book>_back the "
@@ -119,14 +131,14 @@ _READS = [
     ),
     Tool(
         "spending_by_type",
-        "Spending totals by type over a date range, for one book or all: net of refunds; a refund counts in the month it arrives; S$ accounts only.",
+        "Spending totals by type over a date range, for one book or all: net of refunds and of what is expected back; a refund counts in the month it arrives; S$ accounts only.",
         _schema({"start": _DAY, "end": _DAY, "book": _S, "exclude_one_off": _B, "group_parent": _B}),
         False,
         _get("/api/dashboard/types", "start", "end", "book", "exclude_one_off", "group_parent"),
     ),
     Tool(
         "spending_by_month",
-        "Spending by type per month (or week or quarter) over a date range: net of refunds; a refund counts in the month it arrives; S$ accounts only.",
+        "Spending by type per month (or week or quarter) over a date range: net of refunds and of what is expected back; a refund counts in the month it arrives; S$ accounts only.",
         _schema({"start": _DAY, "end": _DAY, "book": _S, "granularity": _S, "group_parent": _B}),
         False,
         _get("/api/dashboard/monthly", "start", "end", "book", "granularity", "group_parent"),
@@ -134,7 +146,10 @@ _READS = [
     Tool(
         "transactions",
         "Rows, newest first unless sorted: date, the bank's description, amount, account, "
-        "book, type, flow, other side, merchant, note. Filter by date range, month, account, "
+        "book, type, flow, other side, merchant, note; and the row's parts in whole minor units "
+        "of its account's currency (amount_minor; expected_minor: what is expected back or to "
+        "pay back on it; placed_minor: what it has set off against others; own_minor: what is "
+        "left of its own, which is what spending or income counts). Filter by date range, month, account, "
         "book, types (comma-separated ids), flow (e.g. review, movement, expense), or search text.",
         _schema({
             "start": _DAY, "end": _DAY, "month": _MONTH, "account_id": _I, "book": _S,
@@ -220,6 +235,21 @@ _READS = [
         _schema({"entry_id": _I}, ("entry_id",)),
         False,
         lambda a: ("GET", f"/api/history/{int(a['entry_id'])}", None),
+    ),
+    Tool(
+        "expected_back",
+        "What is expected back from people, or to pay back to them (an expectation sits on one "
+        "row). Give expectation_id alone for one item's page: its amount, what is set off, what "
+        "is open, and its lines, each with the id the write tools take (a set-off's id for "
+        "unlink_set_off); the filters are then ignored. Otherwise the open items (something still open, nothing let go), "
+        "oldest first, each with id, row, amount, open_minor, names and age; filters: direction "
+        "back (yours, held by others) or pay (owed by the household); person (an account id); "
+        "currency; near (a day, nearest first); payment (a money row's id: what that payment "
+        "can be set off against).",
+        _schema({"expectation_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]},
+                 "person": _I, "currency": _S, "near": _DAY, "payment": _I}),
+        False,
+        lambda a: _expected_back_request(a),
     ),
 ]
 
@@ -366,6 +396,89 @@ _WRITES = [
         {"currency": _S, "date": _DAY, "rate": _S},
         ("currency", "date", "rate"),
         lambda a: ("PUT", "/api/rates", _pick(a, "currency", "date", "rate")),
+    ),
+    _w(
+        "mark_expect_back",
+        "Expect some of a row back (direction back, on money out: a dinner paid for others) or "
+        "mark money in as to pay back (direction pay: a loan from family, a friend who paid "
+        "first). Give all: true for the whole row, or amount (text in whole units of the row's "
+        "currency, e.g. \"200.00\") for a part; names: person account ids; new_names: names "
+        "of people not yet in fin (found or made); note. The part expected back stops being "
+        "spending at once. Marking a row that is already marked edits its mark; undo_mark "
+        "removes it (this is not the undo tool).",
+        {"tx_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]}, "all": _B,
+         "amount": _S, "names": {"type": "array", "items": _I},
+         "new_names": {"type": "array", "items": _S}, "note": _S},
+        ("tx_id", "direction"),
+        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/expectation",
+                   _pick(a, "direction", "all", "amount", "names", "new_names", "note")),
+    ),
+    _w(
+        "undo_mark",
+        "Remove the mark on an expectation (expectation_id from expected_back): the row counts "
+        "whole again. Refused, naming what is set against it, until those are unlinked; refused "
+        "after a let-go until that is undone. This is not the undo tool (that takes a change).",
+        {"expectation_id": _I},
+        ("expectation_id",),
+        lambda a: ("DELETE", f"/api/expectations/{int(a['expectation_id'])}", None),
+    ),
+    _w(
+        "set_off",
+        "Set a payment (a money row, tx_id) off against what is expected back: placements, each "
+        "{expectation_id, amount} with amount text in whole units of the payment's currency; "
+        "one request places the payment against several items, all or none. What is left of "
+        "the payment stays its own to label. waiting {person_id?, note?, amount?} leaves that "
+        "much of the payment (all that is left without amount) waiting for its row, as money "
+        "that arrived before its purchase; with a waiting part, placements may be empty. "
+        "Money in sets off expected back; money out sets off to pay back. Never income or spending.",
+        {"tx_id": _I,
+         "placements": {"type": "array", "items": {
+             "type": "object", "properties": {"expectation_id": _I, "amount": _S},
+             "required": ["expectation_id", "amount"], "additionalProperties": False}},
+         "waiting": {"type": "object", "properties": {"person_id": _I, "note": _S, "amount": _S},
+                     "additionalProperties": False}},
+        ("tx_id",),
+        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/set-offs",
+                   {"placements": a.get("placements", []), **_pick(a, "waiting")}),
+    ),
+    _w(
+        "unlink_set_off",
+        "Unlink one set-off (set_off_id from an expectation's page in expected_back): the "
+        "payment's part returns to the payment and the item's open amount to the item. A "
+        "waiting set-off unlinks too, and the payment returns to its own. Refused after a "
+        "let-go until that is undone.",
+        {"set_off_id": _I},
+        ("set_off_id",),
+        lambda a: ("DELETE", f"/api/set-offs/{int(a['set_off_id'])}", None),
+    ),
+    _w(
+        "let_go",
+        "Let the whole open rest of an expectation go (the operator's call: ask before using "
+        "it). became must be named, with no default: mine (it was the household's spending "
+        "after all: counted in the row's book and type, type_id when the row has none) or "
+        "gift (Gifts & Donations, to_id the person it went to, if any). On an item to pay "
+        "back only gift is offered, and type_id is the income type it counts as. Counted on "
+        "today.",
+        {"expectation_id": _I, "became": {"type": "string", "enum": ["mine", "gift"]},
+         "to_id": _I, "type_id": _I},
+        ("expectation_id", "became"),
+        lambda a: ("POST", f"/api/expectations/{int(a['expectation_id'])}/let-go",
+                   _pick(a, "became", "to_id", "type_id")),
+    ),
+    _w(
+        "undo_let_go",
+        "Undo a let-go: the open rest is open again. (This is not the undo tool.)",
+        {"expectation_id": _I},
+        ("expectation_id",),
+        lambda a: ("DELETE", f"/api/expectations/{int(a['expectation_id'])}/let-go", None),
+    ),
+    _w(
+        "not_a_payback",
+        "Say a money-in row is not a payback: it is not suggested for set-off again and stays "
+        "a row to label.",
+        {"tx_id": _I},
+        ("tx_id",),
+        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/not-a-payback", {}),
     ),
     _w(
         "undo",
