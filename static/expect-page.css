@@ -1,3 +1,38 @@
 /* Expect back: the expectation's page (D3): window.viewExpectation, for #/books/expectation/<id>.
-   A shell from personal-ledger 26, filled by personal-ledger 35. Every class here is prefixed .xb-
-   (tests/test_expect_contract.py), so no rule reaches a page it was not written for. */
+   Filled by personal-ledger 35, after the mockup's one-item screen (23-mockup-expect-back.html).
+   Every class here is prefixed .xb- (tests/test_expect_contract.py), so no rule reaches a page it
+   was not written for; the page's crumbs, head, card and buttons are fin's own. */
+
+.xb-page__card { padding: 0; overflow: hidden; }
+.xb-page__head { padding: 16px 20px 12px; }
+.xb-page__head h2 { margin: 0; }
+.xb-page__sub { margin: 4px 0 0; color: var(--text-secondary); }
+.xb-page__note { margin-top: 4px; color: var(--text-tertiary); }
+
+/* The meter: back, let go, still open. Never colour alone: the head says each figure in words. */
+.xb-meter { display: flex; height: 8px; margin: 0 20px 16px; border-radius: 4px; background: var(--bg-raised, var(--border-subtle)); overflow: hidden; }
+.xb-meter i { display: block; height: 100%; }
+.xb-meter__back { background: var(--k-in); }
+.xb-meter__gone { background: var(--text-tertiary); opacity: .45; }
+.xb-meter__open { background: repeating-linear-gradient(135deg, var(--accent-pop) 0 2px, transparent 2px 6px); opacity: .7; }
+
+/* The history lines: day, words, amount, action. */
+.xb-hist { display: grid; }
+.xb-hl { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto auto; gap: 12px; align-items: center;
+         padding: 10px 20px; border-top: 1px solid var(--border-subtle); color: var(--text-secondary); }
+.xb-hl b { color: var(--text-primary); }
+.xb-hl__words { min-width: 0; overflow-wrap: anywhere; }
+.xb-hl__sub { color: var(--text-tertiary); }
+.xb-hl__num { text-align: right; color: var(--text-primary); font-weight: 600; white-space: nowrap; }
+.xb-hl__act { display: flex; justify-content: flex-end; }
+.xb-hl__act:empty { display: none; }
+.xb-hl--open { background: color-mix(in srgb, var(--accent-pop-subtle) 40%, transparent); }
+.xb-hl--open .xb-hl__words { color: var(--text-primary); font-weight: 600; }
+
+@media (max-width: 640px) {
+    .xb-page__head { padding: 14px 16px 10px; }
+    .xb-meter { margin: 0 16px 14px; }
+    .xb-hl { grid-template-columns: minmax(0, 1fr) auto; padding: 10px 16px; }
+    .xb-hl__day { grid-column: 1 / -1; font-size: var(--t-cap, 12px); color: var(--text-tertiary); }
+    .xb-hl__act { grid-column: 1 / -1; justify-content: flex-start; }
+}
