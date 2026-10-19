@@ -9,9 +9,11 @@ registers this module with the others. No module here imports app.py.
   expect/open_list.json). A read: it writes nothing and fetches nothing.
 - POST /api/transactions/<id>/set-offs   one Back for... request: every
   placement of one payment, all written or none, as one change. What is not
-  placed stays on the payment as its own part, to label. A wording of the
-  sender is learnt when exactly one name on the ticked items matches it.
-- DELETE /api/set-offs/<id>              Unlink one set-off, as one change.
+  placed stays on the payment as its own part, to label, or waits for its row
+  when the request carries a waiting part (waiting_api, ticket 40). A wording
+  of the sender is learnt when exactly one name on the ticked items matches it.
+- DELETE /api/set-offs/<id>              Unlink one set-off, as one change;
+  on a waiting set-off this is Un-wait.
 
 Every guard (the payment's remainder, each item's open amount and state) is
 read inside the transaction that writes, under the change history's write
@@ -47,6 +49,7 @@ import expect_back
 import money
 import placement_rate
 import rates
+import waiting_api
 from expect_back import Refused
 
 # endpoint (without the blueprint's "expect." prefix) -> what the change did
@@ -57,7 +60,6 @@ SUMMARIES: dict[str, str] = {
 
 NO_PLACEMENTS = "tick at least one item to set this payment off against"
 BAD_PLACEMENT = "each placement names an expectation and an amount"
-NOTHING_YET_LATER = "Nothing yet is not open yet: place the payment, or leave the rest on it"
 BAD_PREVIEW = "preview is true or left out"
 
 # Words a bank puts before the sender's name, and nothing else: a learnt
@@ -293,15 +295,18 @@ def _set_offs(conn: sqlite3.Connection, set_off_ids, month_ended: dict[int, bool
     out = []
     for i in ids:
         r = found[i]
+        waiting = r["expectation_id"] is None
         out.append({
             "id": r["id"], "payment_row_id": r["payment_row_id"], "expectation_id": r["expectation_id"],
             "date": r["date"], "amount_minor": r["amount_minor"], "currency": r["currency"],
-            "exp_amount_minor": r["item_amount_minor"], "exp_currency": r["exp_currency"] or r["currency"],
+            # A waiting set-off has no expectation yet, so no amount in one.
+            "exp_amount_minor": None if waiting else r["item_amount_minor"],
+            "exp_currency": None if waiting else (r["exp_currency"] or r["currency"]),
             "rate": r["rate"], "rate_date": r["rate_date"],
             "rate_month_ended": None if r["rate"] is None else month_ended[i],
             "source": r["source"],
             "person": {"account_id": r["person_id"], "name": r["person_name"]} if r["person_id"] else None,
-            "note": r["note"], "state": "waiting" if r["expectation_id"] is None else "placed",
+            "note": r["note"], "state": "waiting" if waiting else "placed",
         })
     return out
 
@@ -401,17 +406,22 @@ def _convert(conn: sqlite3.Connection, p: dict, payment: dict, placed_on: str) -
 
 
 def set_off_payment(conn: sqlite3.Connection, tx_id: int, placements, waiting=None) -> dict:
-    """Write one Back for... request: every placement, or none. Nothing here
-    commits; the route does, once every placement is written, and rolls back
-    on any refusal."""
+    """Write one Back for... request: every placement, and the waiting part
+    when it carries one, or none of it. A waiting part ({person_id?, note?,
+    amount?}) leaves the rest of the payment (or the amount it names) waiting
+    for its row, in the same change; with one, the request may place nothing.
+    Nothing here commits; the route does, once everything is written, and
+    rolls back on any refusal."""
     _begin(conn)
     payment = _payment(conn, tx_id)
-    if waiting is not None:
-        raise Refused(NOTHING_YET_LATER)
     why = expect_back.refusal_to_mark(conn, tx_id, _own_direction(payment))
     if why:
         raise Refused(why)
-    wanted = _checked_placements(conn, placements, payment["currency"])
+    part = waiting_api.checked_waiting(conn, waiting, payment["currency"]) if waiting is not None else None
+    if part is not None and placements == []:
+        wanted = []
+    else:
+        wanted = _checked_placements(conn, placements, payment["currency"])
     cur, left = payment["currency"], payment["left_minor"]
     if left == 0:
         raise Refused(f"{_short(0, cur)} left on this payment")
@@ -439,13 +449,17 @@ def set_off_payment(conn: sqlite3.Connection, tx_id: int, placements, waiting=No
             rate=rate["rate"], rate_date=rate["date"])
         made.append(set_off_id)
         month_ended[set_off_id] = not rate["running"]
+    waiting_id = waiting_api.wait(conn, tx_id, part) if part is not None else None
     learnt = _learn(conn, payment, [p["expectation_id"] for p in wanted])
-    return {
+    out = {
         "payment": _parts(_payment(conn, tx_id)),
         "set_offs": _set_offs(conn, made, month_ended),
         "expectations": [_brief(conn, p["expectation_id"]) for p in wanted],
         "learnt": learnt,
     }
+    if part is not None:
+        out["waiting"] = _set_offs(conn, [waiting_id], {})[0]
+    return out
 
 
 def unlink(conn: sqlite3.Connection, set_off_id: int) -> dict:
@@ -456,6 +470,7 @@ def unlink(conn: sqlite3.Connection, set_off_id: int) -> dict:
     if found is None:
         raise NotFound("no such set-off")
     payment_row_id, expectation_id = found
+    waiting_api.name_unwait(conn, set_off_id)
     expect_back.delete_set_off(conn, set_off_id)
     return {
         "removed": {"set_off_id": set_off_id, "expectation_id": expectation_id, "payment_row_id": payment_row_id},
@@ -498,8 +513,9 @@ def api_back_for(tx_id: int):
 
 
 def api_set_off(tx_id: int):
-    """POST {placements: [{expectation_id, amount, open_minor?}], waiting: null,
-    preview?: true}: set one payment off against every ticked item, as one
+    """POST {placements: [{expectation_id, amount, open_minor?}], waiting: null
+    | {person_id?, note?, amount?}, preview?: true}: set one payment off against
+    every ticked item, and leave the rest waiting for its row when asked, as one
     change. amount is decimal text in the payment's currency; open_minor, when
     the drawer sends it, is what it showed open, so a change made since is
     named as such. preview: answer as the write would, and write nothing."""
