@@ -17,6 +17,16 @@ no source the reading whatever it is. Every field then reads the same source
 after the drop as before; a field that is empty and read from the merchant
 stays without a source.
 
+One field is left out: the empty type of a spending row. That row waits in
+the Queue for a type, and a source is empty when the field is (spec 24, the
+field source), so it keeps the source it holds, none, and a later rule or
+merchant type still reaches it. A hand-set mark on it said the operator had
+looked at the row, never that the type was to stay empty. A movement's empty
+type (any row that is not spending) is the operator's choice, and keeps the
+mark's reading, chosen. The invariant states both: every field reads as
+before, but a waiting spending row's empty type, which holds the same source
+as before.
+
 It changes no book, no type and no amount. It runs after the label-source
 step (conversion.CHAIN), only through the conversion runner, so it sits
 behind a backup, in one transaction. It records that it ran
@@ -81,19 +91,29 @@ def _reading(source: str | None, mark: str | None) -> str:
     return EXPAND_READING.get(mark or _NO_MARK, label_source.NO_SOURCE)
 
 
+def _waits_for_type(row, field: str) -> bool:
+    """The field is the empty type of a spending row: the row waits for a
+    type, and the field keeps the source it holds."""
+    return (field == "type_id" and row["type_id"] is None
+            and (row["flow_type"] or convert_label_source.SPENDING_FLOWS[0]) in convert_label_source.SPENDING_FLOWS)
+
+
 def planned(conn: sqlite3.Connection) -> list[tuple[str | None, str | None, int]]:
     """(book source, type source, row id) for every row with a field whose
     source the mark alone gives: a field with a value and no source, or an
-    empty one that read other than from the merchant."""
+    empty one that read other than from the merchant, but a spending row's
+    empty type (_waits_for_type)."""
     out = []
     for row in conn.execute(
-        f"SELECT id, book, type_id, book_source, type_source, {MARK} AS mark FROM transactions"
+        f"SELECT id, book, type_id, flow_type, book_source, type_source, {MARK} AS mark FROM transactions"
         " WHERE book_source IS NULL OR type_source IS NULL ORDER BY id"
     ).fetchall():
         sources, wanted = [], False
         for field, column in label_source.FIELDS.items():
             held, reading = row[column], _reading(None, row["mark"])
-            if held is None and (row[field] is not None or reading != label_source.NO_SOURCE):
+            if _waits_for_type(row, field):
+                sources.append(held)
+            elif held is None and (row[field] is not None or reading != label_source.NO_SOURCE):
                 sources.append(reading)
                 wanted = True
             else:
@@ -133,17 +153,20 @@ def _is_applied(conn: sqlite3.Connection) -> bool:
 def _measure(conn: sqlite3.Connection) -> dict:
     """The runner's measure, and each row's book, type and the source each
     field reads as (_reading while the book holds the mark, label_source
-    after it)."""
+    after it); for a spending row's empty type, the source it holds
+    (_waits_for_type: the step writes none there)."""
     marked = has_mark(conn)
     mark = MARK if marked else "NULL"
     readings = {}
     for r in conn.execute(
-        f"SELECT id, book, type_id, book_source, type_source, {mark} AS mark FROM transactions"
+        f"SELECT id, book, type_id, flow_type, book_source, type_source, {mark} AS mark FROM transactions"
     ):
         if marked:
             book_reads, type_reads = _reading(r["book_source"], r["mark"]), _reading(r["type_source"], r["mark"])
         else:
             book_reads, type_reads = label_source.source_of(r["book_source"]), label_source.source_of(r["type_source"])
+        if _waits_for_type(r, "type_id"):
+            type_reads = r["type_source"]
         readings[r["id"]] = (r["book"], r["type_id"], book_reads, type_reads)
     return {
         **conversion.measure(conn),
@@ -162,7 +185,8 @@ def _invariant(before: dict, after: dict) -> list[str]:
     problems = conversion.unchanged(before, after)
     moved = sum(1 for i, read in before["readings"].items() if after["readings"].get(i) != read)
     if moved:
-        problems.append(f"{moved} rows changed their book, their type or the source a field reads as")
+        problems.append(f"{moved} rows changed their book, their type, the source a field reads as,"
+                        " or the source a spending row waiting for a type holds")
     if after["unsourced"]:
         problems.append(f"{after['unsourced']} rows with a book or a type have no source for it")
     if after["has_mark"]:

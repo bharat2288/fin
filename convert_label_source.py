@@ -13,7 +13,10 @@ fills them from the one mark a row carries today (`cat_source`):
 - `derived` -> worked out;
 - `manual` -> each field is compared with what its merchant, or its
   merchant's winning rule, gives now: the same -> checked; different, or no
-  merchant -> chosen.
+  merchant -> chosen. A spending row's empty book reads as the default book
+  everywhere, so it is compared as that book; an empty type has nothing to
+  compare and gets no source (a spending row waiting for a type stays
+  reachable; retire_single_mark keeps it so).
 
 It changes no book, no type and no `cat_source`, which stays for the
 contract step (retire_single_mark.py, personal-ledger 51) to drop. It runs
@@ -55,6 +58,8 @@ _MANUAL = "manual"
 KNOWN_MARKS = (*_DIRECT, _RULE_OVERRIDE, _MANUAL)
 # A row with no mark carries the column's default.
 _NO_MARK = "auto"
+# The flows whose rows are spending (app.UNTYPED_ROWS reads the same two).
+SPENDING_FLOWS = ("expense", "refund")
 
 _TRIGGER_NAME = re.compile(r"CREATE TRIGGER IF NOT EXISTS (history_transactions_(?:insert|update|delete)) ")
 
@@ -84,10 +89,30 @@ def unknown_marks(conn: sqlite3.Connection) -> dict[str, int]:
     ).fetchall())
 
 
-def _same_book(value: str, offered: str | None) -> bool:
-    """A book equals the one offered; a merchant with no book offers the book
-    an empty book reads as."""
-    return value == (offered or book_type.DEFAULT_BOOK)
+def _same_book(value: str | None, offered: str | None) -> bool:
+    """A book equals the one offered, each empty one read as the book it reads
+    as everywhere: a row with no book is the default book's, and a merchant
+    with no book offers it."""
+    return (value or book_type.DEFAULT_BOOK) == (offered or book_type.DEFAULT_BOOK)
+
+
+def _spending(row) -> bool:
+    """A spending or refund row (a row with no flow reads as spending), whose
+    book is read as the default book when it has none."""
+    return (row["flow_type"] or SPENDING_FLOWS[0]) in SPENDING_FLOWS
+
+
+def _book_wanted(row) -> bool:
+    """Whether the row's book needs a source from this step: a book with no
+    source; and a hand-set spending row's empty book, which reads as the
+    default book and is compared as it (case 32's rule), never left for the
+    mark's reading, chosen, to fill (retire_single_mark). Any other empty book
+    gets none here: the field is empty."""
+    if row["book_source"] is not None:
+        return False
+    if row["book"] is not None:
+        return True
+    return (row["cat_source"] or _NO_MARK) == _MANUAL and _spending(row)
 
 
 def _own_rule(conn: sqlite3.Connection, row) -> dict | None:
@@ -130,12 +155,14 @@ def _sources(conn: sqlite3.Connection, row, merchants: dict) -> tuple[str, str]:
 
 def planned(conn: sqlite3.Connection) -> list[tuple[str | None, str | None, int]]:
     """(book source, type source, row id) for every row with a book or a type
-    that has no source for it yet. A source already held is kept."""
+    that has no source for it yet, and every hand-set spending row whose book
+    is empty (_book_wanted). A source already held is kept."""
     conn.row_factory = sqlite3.Row
     held = "book_source, type_source" if has_columns(conn) else "NULL AS book_source, NULL AS type_source"
     rows = conn.execute(
-        f"SELECT id, description, amount_minor, book, type_id, service_id, cat_source, {held}"
-        " FROM transactions WHERE book IS NOT NULL OR type_id IS NOT NULL ORDER BY id"
+        f"SELECT id, description, amount_minor, book, type_id, service_id, flow_type, cat_source, {held}"
+        " FROM transactions WHERE book IS NOT NULL OR type_id IS NOT NULL OR COALESCE(cat_source, ?) = ?"
+        " ORDER BY id", (_NO_MARK, _MANUAL),
     ).fetchall()
     merchants = {r["id"]: (r["book"], r["type_id"])
                  for r in conn.execute("SELECT id, book, type_id FROM services")}
@@ -144,7 +171,7 @@ def planned(conn: sqlite3.Connection) -> list[tuple[str | None, str | None, int]
     try:
         out = []
         for row in rows:
-            book_wanted = row["book"] is not None and row["book_source"] is None
+            book_wanted = _book_wanted(row)
             type_wanted = row["type_id"] is not None and row["type_source"] is None
             if not (book_wanted or type_wanted):
                 continue
