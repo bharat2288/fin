@@ -423,11 +423,14 @@ def test_one_item_twice_in_a_request_is_refused(client, conn, book):
             "HARBOUR GRILL is ticked twice", before)
 
 
-def test_a_waiting_part_is_not_taken_by_this_route_yet(client, conn, book):
-    before = snapshot(conn)
-    refused(client, conn, place(client, book.lena_2210, (book.ids["airbnb"], "40.00"),
-                                waiting={"amount": "20.00", "person_id": book.people["Lena"]}),
-            "Nothing yet is not open yet: place the payment, or leave the rest on it", before)
+def test_a_waiting_part_rides_the_same_request(client, conn, book):
+    """Ticket 40 opened the waiting part (tests/test_expect_waiting.py holds its cases)."""
+    resp = place(client, book.lena_2210, (book.ids["airbnb"], "40.00"),
+                 waiting={"amount": "20.00", "person_id": book.people["Lena"]})
+    assert resp.status_code == 200, resp.get_json()
+    out = resp.get_json()
+    assert (out["waiting"]["state"], out["waiting"]["amount_minor"]) == ("waiting", 2000)
+    assert out["payment"]["left_minor"] == 0
 
 
 def test_a_payment_the_wrong_way_round_is_refused(client, conn, book):
