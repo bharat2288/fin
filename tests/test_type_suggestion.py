@@ -961,7 +961,8 @@ def test_g3_a_row_a_rule_already_matches_produces_no_request(client, conn, state
         (type_id(conn, "Dining"),),
     ).lastrowid
     conn.commit()
-    made = client.post("/api/rules", json={"pattern": "LANTERN NOODLE", "service_id": known})
+    made = client.post("/api/rules", json={"pattern": "LANTERN NOODLE", "service_id": known,
+                                            "past": "only_new"})
     assert made.status_code in (200, 201), made.get_json()
 
     prepared = client.post("/api/suggestions/prepare").get_json()

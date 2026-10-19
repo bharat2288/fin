@@ -415,20 +415,35 @@ def invalidate_rules_cache() -> None:
     _rules_cache = None
 
 
+def load_rules(conn: sqlite3.Connection) -> list[dict]:
+    """Every rule in match order, read now (not the cache): priority, then
+    the longest pattern, then the oldest rule. Each with its merchant's
+    default book and type and its Check each row flag."""
+    rows = conn.execute(
+        "SELECT mr.id, mr.pattern, mr.match_type, "
+        "       mr.priority, mr.min_amount_minor, mr.max_amount_minor, "
+        "       mr.service_id, mr.book_override, mr.type_override_id, "
+        "       s.book, s.type_id, s.review_each_time "
+        "FROM merchant_rules mr "
+        "JOIN services s ON mr.service_id = s.id"
+    ).fetchall()
+    return sorted((dict(r) for r in rows), key=match_order)
+
+
+def match_order(rule) -> tuple:
+    """A rule's place in match order (a priority left empty reads as 0; a
+    rule not yet added, id None, after every rule it ties with). One key, so
+    the rules fin holds and the rules a proposed change would leave sort
+    alike."""
+    return (-(rule["priority"] or 0), -len(rule["pattern"]),
+            rule["id"] is None, rule["id"] or 0)
+
+
 def _get_rules(conn: sqlite3.Connection) -> list[dict]:
     """Return cached rules list, loading from DB on first call or after invalidation."""
     global _rules_cache
     if _rules_cache is None:
-        rows = conn.execute(
-            "SELECT mr.id, mr.pattern, mr.match_type, "
-            "       mr.priority, mr.min_amount_minor, mr.max_amount_minor, "
-            "       mr.service_id, mr.book_override, mr.type_override_id, "
-            "       s.book, s.type_id, s.review_each_time "
-            "FROM merchant_rules mr "
-            "JOIN services s ON mr.service_id = s.id "
-            "ORDER BY mr.priority DESC, LENGTH(mr.pattern) DESC"
-        ).fetchall()
-        _rules_cache = [dict(r) for r in rows]
+        _rules_cache = load_rules(conn)
     return _rules_cache
 
 
@@ -492,8 +507,15 @@ def first_rule(
     """The rule that labels a description, the first in match order
     (priority, then the longest pattern), or None when no rule knows it.
     Its "id" is the merchant_rules row."""
-    desc_upper = description.upper()
-    for rule in _get_rules(conn):
+    return pick_rule(_get_rules(conn), description, amount_minor)
+
+
+def pick_rule(rules: list[dict], description: str, amount_minor: int | None = None) -> dict | None:
+    """The first of `rules` (in match order) that labels a description, as
+    first_rule picks among the rules fin holds: the preview asks it of the
+    rules as a proposed change would leave them."""
+    desc_upper = (description or "").upper()
+    for rule in rules:
         pattern = rule["pattern"].upper()
         match_type = rule["match_type"]
         if match_type == "exact":

@@ -24,8 +24,18 @@ checked count, the chosen count, for a book change the money moved per book
 pair in S$ at fin's saved month-end rates (fin-surfaces 15's rule: the
 latest saved rate on or before the month end, not before its first day; a
 rupee row converts) and the months it touches, the newest three examples,
-and the rows another merchant holds (none for a merchant's own change; rules
-and merges, fin-surfaces 50, fill it).
+and the rows another merchant holds (a rule's change and a taught wording
+name them; none for a merchant's own change or a merge).
+
+Four ways to a plan: merchant_change (a merchant's book or type, fin-surfaces
+49), merge_change and rule_change (a merge; a rule added, edited or deleted,
+fin-surfaces 50), and taking (the rows another merchant holds that a wording
+taught from the Queue would take, fin-surfaces 53). A rule change's rows are
+those whose winning rule, after the change, differs from before, or whose
+label from that rule changes: the winner is asked of the rules as the change
+would leave them (db.pick_rule), never of the cache, so nothing is written to
+ask. Both rule previews, the rule's and the taught wording's, rank rules by
+the one match order, db.match_order.
 
 This module reads; the routes write the plan through app._write_label, so
 every write keeps cat_source in step and lands in the route's one change
@@ -77,22 +87,27 @@ class Planned:
     apply: dict
     only_new: dict
     checked: bool = False              # a field the change reaches is checked
+    reflow: bool = False               # Apply works its flow out again (a rule's new merchant)
 
 
 @dataclass
 class Plan:
     subject: dict
-    change: dict                       # {field: (from, to)} for the merchant itself
+    change: dict                       # {field: (from, to)} for a merchant's own book and type
     rows: list[Planned] = field(default_factory=list)
     fills: list[tuple[sqlite3.Row, dict]] = field(default_factory=list)   # (row, the label it is given)
     chosen: int = 0
     token: str = ""
+    called: str = ""                   # what changed, as a refusal names it ("IndigoAir", "The rule INDIGO")
+    doing: str = ""                    # the change in words ("Saving the rule INDIGO"); none for a merchant's
+    words: list[dict] | None = None    # the change lines, when not a merchant's book and type (a rule)
+    others: list[dict] = field(default_factory=list)   # rows another merchant holds, by merchant
+    extra: dict = field(default_factory=dict)          # what one kind of change adds to the preview
     # A taught wording that takes another merchant's rows (fin-surfaces 53):
-    # the wording, the merchant they move to, and the rows' merchants.
+    # the wording, the merchant they move to, and the rows' merchants' names.
     wording: str | None = None
     moves_to: str | None = None
     names: dict[int, str] = field(default_factory=dict)
-    others: list[dict] = field(default_factory=list)
 
     @property
     def count(self) -> int:
@@ -173,6 +188,7 @@ def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
     plan = Plan(
         subject={"kind": "merchant", "id": merchant["id"], "name": merchant["name"]},
         change={f: (merchant[f], v) for f, v in label.items()},
+        called=merchant["name"],
     )
     rules = conn.execute(
         "SELECT id, pattern, match_type, priority, min_amount_minor, max_amount_minor, book_override,"
@@ -259,11 +275,6 @@ class Reach:
         return sorted(out, key=lambda o: (-o["count"], o["name"]))
 
 
-def _rank(rule) -> tuple:
-    """A rule's place in match order (db._get_rules): priority, then length."""
-    return (rule["priority"] or 0, len(rule["pattern"]))
-
-
 def _wins_amount(rule, amount_minor) -> bool:
     """Whether a rule's amount limits let a row's amount through, as
     db.first_rule reads them."""
@@ -302,10 +313,11 @@ def wording_reach(conn: sqlite3.Connection, pattern: str, match_type: str = "con
     merchant fin does not hold yet). Teaching inserts the rule, or re-points
     the rule fin already has for that wording (its priority, limits and
     match kept, as resolve does): a row is reached when its wording matches
-    and the taught rule would win it, by db.first_rule's order (priority,
-    then the longest wording; an existing rule wins a tie). A row another
-    rule wins is not reached, so rows a longer or higher rule holds are
-    never taken."""
+    and the taught rule would win it, in fin's one match order
+    (db.match_order: priority, then the longest wording, then the oldest
+    rule; a wording not yet a rule after every rule it ties with), the order
+    the rule preview (rule_change) asks too. A row another rule wins is not
+    reached, so rows a longer or higher rule holds are never taken."""
     pattern = pattern.strip()
     existing = conn.execute(
         "SELECT id, pattern, match_type, priority, min_amount_minor, max_amount_minor FROM merchant_rules"
@@ -319,9 +331,10 @@ def wording_reach(conn: sqlite3.Connection, pattern: str, match_type: str = "con
     # LIKE's own wildcards in a wording are matched by _matches below.
     candidates = conn.execute(
         f"SELECT {_HELD} FROM {_FROM} WHERE {like}", (taught["pattern"].upper(),)).fetchall()
-    # Only a rule that ranks with the taught one or above can win a row from
-    # it: the rest are never asked (db.first_rule's order: its cached rule list, read once).
-    stronger = _Stronger([r for r in db._get_rules(conn) if r["id"] != taught["id"] and _rank(r) >= _rank(taught)])
+    # Only a rule before the taught one in match order can win a row from
+    # it: the rest are never asked (the rules read now, as rule_change reads them).
+    place = db.match_order(taught)
+    stronger = _Stronger([r for r in db.load_rules(conn) if r["id"] != taught["id"] and db.match_order(r) < place])
     for held in candidates:
         if not _matches(taught, held["description"]) or not _wins_amount(taught, held["amount_minor"]):
             continue
@@ -354,7 +367,7 @@ def taking(conn: sqlite3.Connection, reach: Reach, name: str, label: dict, sourc
     new rows leaves each with its merchant, the fields fin gave checked. A
     row with a field chosen or worked out stays as it is, counted apart. The
     merchant's id is the route's to add: a new one has none yet."""
-    plan = Plan(subject={"kind": "merchant", "id": reach.service_id, "name": name}, change={})
+    plan = Plan(subject={"kind": "merchant", "id": reach.service_id, "name": name}, change={}, called=name)
     plan.wording = reach.pattern
     plan.moves_to = name
     for svc in reach.others:
@@ -393,10 +406,226 @@ def joined(first: Plan | None, second: Plan | None) -> Plan | None:
     if first is None or second is None:
         return first or second
     plan = Plan(subject=first.subject, change=dict(first.change), rows=first.rows + second.rows,
-                fills=first.fills + second.fills, chosen=first.chosen + second.chosen)
+                fills=first.fills + second.fills, chosen=first.chosen + second.chosen,
+                called=first.called, doing=first.doing)
     plan.wording, plan.moves_to = second.wording, second.moves_to
     plan.names, plan.others = second.names, second.others
     plan.token = _stamp(first.token, second.token)
+    return plan
+
+
+def _accept_all(held) -> dict:
+    """Only new rows when the row's merchant changes (a merge) or would
+    have (a rule): each field fin gave is checked, its value left."""
+    out = {}
+    for field_name, column in label_source.FIELDS.items():
+        accepted = label_source.accepted(_source(held, field_name))
+        if accepted is not None:
+            out[column] = accepted
+    return out
+
+
+def merge_change(conn: sqlite3.Connection, source_id: int, target_id: int) -> Plan:
+    """The plan for merging one merchant into another: its rows move to the
+    target whatever the answer (the route moves them), and those the
+    target's book and type would relabel are the preview's rows, as for a
+    merchant's own change (merchant_change: a chosen field stays, a field a
+    rule override sets is the rule's, and the rules move with the rows).
+    Only new rows keeps their book and type, each field from fin checked:
+    they are the target's now, but not by its default."""
+    target = conn.execute("SELECT id, name, book, type_id FROM services WHERE id = ?", (target_id,)).fetchone()
+    if target is None:
+        raise LookupError("This merchant is no longer in fin")
+    plan = merchant_change(conn, source_id, {"book": target["book"], "type_id": target["type_id"]})
+    for planned in plan.rows:
+        planned.only_new = _accept_all(planned.held)
+    source_name = plan.subject["name"]
+    plan.subject = {"kind": "merge", "id": source_id, "name": source_name,
+                    "into": {"id": target["id"], "name": target["name"]}}
+    plan.doing = f"Merging {source_name} into {target['name']}"
+    plan.token = _stamp(plan.token, tuple(target))
+    return plan
+
+
+# What a rule change may set, as the rule routes take it (merchant_rules' columns).
+RULE_FIELDS = ("pattern", "match_type", "service_id", "book_override", "type_override_id", "priority",
+               "min_amount_minor", "max_amount_minor")
+_RULE_WORDS = {"pattern": "Wording", "match_type": "Match", "service_id": "Merchant",
+               "book_override": "Book of its own", "type_override_id": "Type of its own",
+               "priority": "Priority", "min_amount_minor": "Only from", "max_amount_minor": "Only up to"}
+_MATCH_WORDS = {"contains": "contains", "startswith": "starts with", "exact": "exactly"}
+_NEW_RULE = {"id": None, "pattern": "", "match_type": "contains", "priority": 0, "min_amount_minor": None,
+             "max_amount_minor": None, "service_id": None, "book_override": None, "type_override_id": None}
+
+
+def _rule_key(rule):
+    """What a winning rule gives a row: which rule, its merchant, its label
+    and the label's sources. A row whose key is the same before and after
+    the change is not the change's to relabel."""
+    if rule is None:
+        return None
+    return (rule["id"], rule["service_id"], *db.rule_label(rule)[:2], label_source.rule_sources(rule))
+
+
+def _given(rule, description: str | None, conn, fallback) -> dict:
+    """What a winning rule (or none), then the wording, give a row: as
+    app._label_for gives it, for a rule list the change would leave."""
+    service_id = book = type_id = book_source = type_source = None
+    if rule is not None:
+        service_id = rule["service_id"]
+        book, type_id, _ = db.rule_label(rule)
+        book_source, type_source = label_source.rule_sources(rule)
+    if type_id is None:
+        wording_book, wording_type = fallback(description, conn)
+        if wording_type is not None:
+            if book is None:
+                book_source = label_source.WORDING
+            book, type_id, type_source = book or wording_book, wording_type, label_source.WORDING
+    return {"service_id": service_id, "book": book, "type_id": type_id,
+            "book_source": label_source.given(book, book_source or label_source.MERCHANT),
+            "type_source": label_source.given(type_id, type_source or label_source.MERCHANT)}
+
+
+def _rule_words(conn, field_name: str, value, types: dict[int, str]) -> str:
+    if field_name == "match_type":
+        return _MATCH_WORDS.get(value, value)
+    if field_name == "service_id":
+        found = conn.execute("SELECT name FROM services WHERE id = ?", (value,)).fetchone()
+        return found["name"] if found else "no merchant"
+    if field_name == "book_override":
+        return value or "the merchant’s"
+    if field_name == "type_override_id":
+        return types.get(value, "the merchant’s") if value is not None else "the merchant’s"
+    if field_name == "priority":
+        return str(value or 0)
+    if field_name in ("min_amount_minor", "max_amount_minor"):
+        return "none" if value is None else f"S$ {value / 100:,.2f}"
+    return str(value)
+
+
+def _held_rows(conn, ids: list[int]) -> list[sqlite3.Row]:
+    found = []
+    for i in range(0, len(ids), 900):
+        part = ids[i:i + 900]
+        found += conn.execute(f"SELECT {_HELD} FROM {_FROM} WHERE t.id IN ({','.join('?' * len(part))})",
+                              part).fetchall()
+    found.sort(key=lambda r: (r["date"] or "", r["id"]), reverse=True)
+    return found
+
+
+def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | None, fallback) -> Plan:
+    """The plan for a rule added (rule_id None), edited (`proposed`: the
+    RULE_FIELDS that change) or deleted (`proposed` None).
+
+    Its rows are those whose winning rule, after the change, differs from
+    before, or whose label from that rule changes, and whose label would
+    then change: each field a later change may reach takes what the new
+    winner gives (or the wording, `fallback`: app._paynow_fallback_label),
+    a checked field staying checked and not emptied, as a re-run of the rules
+    writes it. So a rule's priority and amount limits are honoured, and a
+    row another rule wins is not touched. A row with no rule left loses its
+    merchant and waits in the Queue. Only new rows keeps each value, the
+    fields that would change checked (both, where the merchant would). A row
+    whose every field the change would reach is chosen is left alone and
+    counted apart."""
+    rules = db.load_rules(conn)
+    held_rule = None
+    if rule_id is not None:
+        held_rule = next((r for r in rules if r["id"] == rule_id), None)
+        if held_rule is None:
+            raise LookupError("This rule is no longer in fin")
+    after_rule = None
+    if proposed is not None:
+        after_rule = {**(held_rule or _NEW_RULE), **proposed}
+        merchant = conn.execute("SELECT book, type_id, review_each_time FROM services WHERE id = ?",
+                                (after_rule["service_id"],)).fetchone()
+        if merchant is None:
+            raise LookupError("This merchant is no longer in fin")
+        after_rule.update(dict(merchant))
+    after_rules = sorted([r for r in rules if r["id"] != rule_id] + ([after_rule] if after_rule else []),
+                         key=db.match_order)
+    shown = after_rule or held_rule
+    names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM services")}
+    verb = "add" if held_rule is None else "delete" if after_rule is None else "edit"
+    plan = Plan(
+        subject={"kind": "rule", "id": rule_id, "name": shown["pattern"], "verb": verb,
+                 "merchant": {"id": shown["service_id"], "name": names.get(shown["service_id"])}},
+        change={},
+        called="The rules" if held_rule is None else f"The rule {held_rule['pattern']}",
+        doing={"add": "Adding", "edit": "Saving", "delete": "Deleting"}[verb] + f" the rule {shown['pattern']}",
+    )
+    types = _names(conn)
+    if verb == "edit":
+        plan.words = [{"field": f, "label": _RULE_WORDS[f], "from": _rule_words(conn, f, held_rule[f], types),
+                       "to": _rule_words(conn, f, after_rule[f], types)}
+                      for f in RULE_FIELDS if f in proposed and proposed[f] != held_rule[f]]
+    elif verb == "add":
+        plan.words = [{"field": "rule", "label": "New rule", "from": None, "to": after_rule["pattern"]}]
+    else:
+        plan.words = [{"field": "rule", "label": "Rule", "from": held_rule["pattern"], "to": None}]
+
+    # Only a row the rule matches, as it was or as it would be, can have its
+    # winner change; the rest are not read.
+    versions = [r for r in (held_rule, after_rule) if r is not None]
+    ids = [r["id"] for r in conn.execute(
+        "SELECT id, description FROM transactions WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')")
+        if any(_matches(v, r["description"]) for v in versions)]
+    held_rows = _held_rows(conn, ids)
+    others: dict[int, int] = {}
+    labelled = unheld = 0
+    for held in held_rows:
+        before = db.pick_rule(rules, held["description"] or "", held["amount_minor"])
+        after = db.pick_rule(after_rules, held["description"] or "", held["amount_minor"])
+        sources = {f: _source(held, f) for f in label_source.FIELDS}
+        # A field's mark as the rules' re-run reads it: an empty field reads
+        # the row's old mark, so a row named by hand on the review list (a
+        # movement, income) with no book or type is not the rules' to take.
+        marks = {f: label_source.source_of(held[c], held["cat_source"]) for f, c in label_source.FIELDS.items()}
+        reachable = {f: label_source.reachable(m) for f, m in marks.items()}
+        if held_rule is not None and before is not None and before["id"] == rule_id and any(reachable.values()):
+            labelled += 1
+        if _rule_key(before) == _rule_key(after):
+            continue
+        found = _given(after, held["description"], conn, fallback)
+        sets, reached, kept, chosen = {"service_id": found["service_id"]}, [], False, False
+        for field_name, column in label_source.FIELDS.items():
+            source = sources[field_name]
+            if not reachable[field_name]:
+                kept, chosen = True, chosen or marks[field_name] == label_source.CHOSEN
+                continue
+            if source == label_source.CHECKED and found[field_name] is None:
+                kept = True
+                continue                            # a checked value is not emptied
+            sets[field_name] = found[field_name]
+            sets[column] = label_source.reached(source, found[field_name], found[column])
+            reached.append(field_name)
+        if kept and found["service_id"] is None:
+            del sets["service_id"]                  # a row keeping a field keeps its merchant
+        if not reached:
+            plan.chosen += chosen and (found["service_id"] != held["service_id"]
+                                       or any(found[f] != held[f] for f in label_source.FIELDS))
+            continue
+        writes = {k: v for k, v in sets.items() if held[k] != v}
+        if not writes:
+            continue
+        moves = "service_id" in writes
+        marked = [f for f in reached if moves or f in writes or label_source.FIELDS[f] in writes]
+        only_new = {}
+        for field_name in marked:
+            accepted = label_source.accepted(sources[field_name])
+            if accepted is not None and accepted != held[label_source.FIELDS[field_name]]:
+                only_new[label_source.FIELDS[field_name]] = accepted
+        plan.rows.append(Planned(held, writes, only_new, reflow=True,
+                                 checked=any(sources[f] == label_source.CHECKED for f in marked)))
+        if held["service_id"] is None:
+            unheld += 1
+        elif moves and held["service_id"] != shown["service_id"]:
+            others[held["service_id"]] = others.get(held["service_id"], 0) + 1
+    plan.others = [{"service_id": i, "name": names.get(i), "count": n} for i, n in
+                   sorted(others.items(), key=lambda kv: (-kv[1], names.get(kv[0]) or ""))]
+    plan.extra = {"unheld": unheld, "labelled": labelled}
+    plan.token = _stamp("rule", rule_id, sorted((proposed or {}).items()),
+                        [tuple(sorted(r.items())) for r in rules], [tuple(h) for h in held_rows])
     return plan
 
 
@@ -435,13 +664,20 @@ def _month_end(month: str) -> str:
     return f"{month}-{calendar.monthrange(year, number)[1]:02d}"
 
 
+def _book_moves(planned: Planned) -> bool:
+    """Whether Apply moves the row to another book (an empty book reads as
+    the default book)."""
+    return "book" in planned.apply and not label_source.same("book", planned.apply["book"] or book_type.DEFAULT_BOOK,
+                                                             planned.held["book"])
+
+
 def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict], dict]:
     """The money moved per book pair, in S$ at the saved month-end rates;
     what could not be valued; the months touched."""
-    # A row a taught wording moves to its merchant keeps its book when the
-    # merchant's is the same: no money moves for it.
-    moving = [p for p in plan.rows if "book" in p.apply
-              and (p.held["book"] or book_type.DEFAULT_BOOK) != (p.apply["book"] or book_type.DEFAULT_BOOK)]
+    # A row whose book Apply leaves as it is moves no money: a merchant's
+    # book change, or a row a taught wording moves to a merchant whose book
+    # is its own (fin-surfaces 53).
+    moving = [p for p in plan.rows if _book_moves(p)]
     own = _parts(conn, [p.held["id"] for p in moving])
     sums: dict = {}
     months: set[str] = set()
@@ -469,61 +705,93 @@ def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict]
     return money_moved, left_out, span
 
 
+def _row_words(merchant: str | None, book, type_id, with_book: bool, types: dict[int, str]) -> str:
+    """A row's label as a preview of its merchant names it: its merchant and
+    type, with its book where `with_book` ("no merchant" for a row with
+    neither)."""
+    if merchant is None and type_id is None:
+        return "no merchant"
+    parts = [merchant or "no merchant"]
+    if with_book:
+        parts.append(_word("book", book, types))
+    parts.append(_word("type_id", type_id, types))
+    return " · ".join(parts)
+
+
+def _example(conn, plan: Plan, p: Planned, types: dict[int, str], names: dict[int, str] | None) -> dict:
+    """One example row, now → after, as the preview's kind of change reads
+    it: a merchant's own book or type (and a merge) by those fields; a rule's
+    rows by merchant and type, with the book where Apply moves it; a row a
+    taught wording takes from another merchant by merchant and type ("Air
+    India · Transport → IndigoAir · Travel", fin-surfaces 53)."""
+    held = p.held
+    out = {"id": held["id"], "date": held["date"], "amount_minor": held["amount_minor"], "currency": held["currency"]}
+    after = {k: p.apply.get(k, held[k]) for k in ("service_id", "book", "type_id")}
+    if plan.moves_to is not None and held["service_id"] != plan.subject["id"]:
+        return {**out,
+                "now": _row_words(plan.names.get(held["service_id"], "another merchant"), held["book"],
+                                  held["type_id"], False, types),
+                "after": _row_words(plan.moves_to, after["book"], after["type_id"], False, types),
+                "source": _source(held, "type_id") or _source(held, "book")}
+    if names is None:                                  # a merchant's own book or type, or a merge
+        fields = list(plan.change)
+        shown = {f: p.apply.get(f, held[f]) for f in fields}
+        reached = [f for f in fields if f in p.apply] or fields
+        return {**out, "now": _label_words(fields, {f: held[f] for f in fields}, types),
+                "after": _label_words(fields, shown, types), "source": _source(held, reached[0])}
+    moves = _book_moves(p)
+    name = lambda service_id: names.get(service_id, "no merchant") if service_id is not None else None
+    return {**out,
+            "now": _row_words(name(held["service_id"]), held["book"], held["type_id"], moves, types),
+            "after": _row_words(name(after["service_id"]), after["book"], after["type_id"], moves, types),
+            "source": _source(held, "type_id") or _source(held, "book")}
+
+
 def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
     """The preview: what the drawer shows and chat is told."""
     types = _names(conn)
-    fields = list(plan.change)
-    change = [{"field": f, "from": _word(f, was, types), "to": _word(f, now, types)}
-              for f, (was, now) in plan.change.items()]
-    if plan.wording is not None:
-        change.append({"field": "wording", "from": None, "to": plan.wording})
-    examples = []
-    for p in plan.rows[:EXAMPLES]:
-        held = p.held
-        # A row a taught wording takes from another merchant reads by its
-        # merchant and type: "Air India · Travel → IndigoAir · Travel".
-        taken = plan.moves_to is not None and held["service_id"] != plan.subject["id"]
-        shown = ["type_id"] if taken else fields
-        after = {f: p.apply.get(f, held[f]) for f in shown}
-        now_words = _label_words(shown, {f: held[f] for f in shown}, types)
-        after_words = _label_words(shown, after, types)
-        if taken:
-            now_words = f"{plan.names.get(held['service_id'], 'another merchant')} · {now_words}"
-            after_words = f"{plan.moves_to} · {after_words}"
-        examples.append({
-            "id": held["id"], "date": held["date"], "amount_minor": held["amount_minor"],
-            "currency": held["currency"],
-            "now": now_words,
-            "after": after_words,
-            "source": next((_source(held, f) for f in shown if f in p.apply), _source(held, "type_id")),
-        })
-    checked = sum(1 for p in plan.rows if p.checked)
+    change = plan.words if plan.words is not None else [
+        {"field": f, "from": _word(f, was, types), "to": _word(f, now, types)}
+        for f, (was, now) in plan.change.items()]
+    if plan.wording is not None:                       # a taught wording (fin-surfaces 53)
+        change = [*change, {"field": "wording", "from": None, "to": plan.wording}]
+    names = None
+    if plan.subject["kind"] == "rule":
+        names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM services")}
     out = {
         "subject": plan.subject,
         "change": change,
         "count": plan.count,
-        "checked": checked,
+        "checked": sum(1 for p in plan.rows if p.checked),
         "chosen": plan.chosen,
         "money": None,
         "left_out": [],
         "months": None,
-        "examples": examples,
+        "examples": [_example(conn, plan, p, types, names) for p in plan.rows[:EXAMPLES]],
         "others": list(plan.others),
+        **plan.extra,
         "token": plan.token,
     }
-    if "book" in plan.change:
+    if any(_book_moves(p) for p in plan.rows):
         out["money"], out["left_out"], out["months"] = _money(conn, plan)
     return out
 
 
-def asked(subject_name: str, count: int, answer_key: str = "past") -> str:
+def _rows(count: int) -> str:
+    return f"{count} past row{'' if count == 1 else 's'}"
+
+
+def asked(plan: Plan, answer_key: str = "past") -> str:
     """The refusal a change that reaches past rows answers with, in words."""
-    rows = f"{count} past row{'' if count == 1 else 's'}"
-    return (f"Nothing was saved yet: this changes {rows} of {subject_name}. "
+    if plan.doing:
+        said = f"{plan.doing[0].lower()}{plan.doing[1:]} changes {_rows(plan.count)}"
+    else:
+        said = f"this changes {_rows(plan.count)} of {plan.called}"
+    return (f"Nothing was saved yet: {said}. "
             f"Say whether they change too ({answer_key}: {APPLY}) or only new rows take it "
             f"({answer_key}: {ONLY_NEW}).")
 
 
-def stale(subject_name: str) -> str:
+def stale(plan: Plan) -> str:
     """The refusal of an answer to a preview that no longer holds (case 20)."""
-    return f"{subject_name} changed since this preview; look again"
+    return f"{plan.called} changed since this preview; look again"

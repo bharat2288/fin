@@ -196,7 +196,8 @@ def many(client):
     listed = types if isinstance(types, list) else types["types"]
     type_id = listed[0]["id"]
     client.put(f"/api/services/{svc['id']}", json={"type_id": type_id})
-    rule = client.post("/api/rules", json={"pattern": "SAMPLE GROCER", "service_id": svc["id"]})
+    rule = client.post("/api/rules", json={"pattern": "SAMPLE GROCER", "service_id": svc["id"],
+                                           "past": "only_new"})
     assert rule.status_code == 200, rule.get_json()
     return client
 

@@ -419,7 +419,7 @@ def test_merging_merchants_reaches_checked_fields_and_leaves_chosen_ones(client,
     chosen = row(conn, statement, "SAMPLE GRABFOOD 3", book="Moom", type_name="Dining", service_id=food,
                  sources=("chosen", "chosen"), cat_source="manual")
 
-    resp = client.post(f"/api/services/{food}/merge", json={"target_id": grab})
+    resp = client.post(f"/api/services/{food}/merge", json={"target_id": grab, "past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     assert held(client, plain) == ("Household", "Transport", "merchant", "merchant")
@@ -445,7 +445,8 @@ def test_a_rule_edit_reaches_checked_fields_and_leaves_chosen_ones(client, conn,
     chosen = row(conn, statement, "SAMPLE AIR 3", book="Moom", service_id=air,
                  sources=("chosen", "checked"), cat_source="manual")
 
-    resp = client.put(f"/api/rules/{rule_id}", json={"type_override_id": type_id(conn, "Transport")})
+    resp = client.put(f"/api/rules/{rule_id}", json={"type_override_id": type_id(conn, "Transport"),
+                                                     "past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     assert held(client, plain) == ("Household", "Transport", "merchant", "rule")

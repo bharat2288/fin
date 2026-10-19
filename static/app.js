@@ -4128,15 +4128,35 @@ ACT['past-answer'] = el => {
 // past rows, neither answer focused first. The answer goes back with the
 // preview's token; a token that no longer holds is refused by the server.
 const PREVIEW_FIELD = { book: ['book', 'Book'], type_id: ['type', 'Type'], wording: ['wording', 'Recognises'] };
-/** The drawer's parts for a preview: {eyebrow, title, body, foot}. */
+// A rule's preview (fin-surfaces 50) is titled by what is done to the rule.
+const PREVIEW_TITLE = { add: 'Add the rule', edit: 'Save the rule', delete: 'Delete the rule' };
+/** The drawer's parts for a preview: {eyebrow, title, body, foot}. A
+ *  merchant's book or type, a merge (the merchant line, then each label that
+ *  changes), a rule (its changed fields), or a wording taught from the Queue
+ *  (fin-surfaces 53). The rows another merchant holds, a rule's or a taught
+ *  wording's, are named in one warning line, as mocked (21, screen 2). No See
+ *  all for a rule (its rows sit with several merchants) or for a merchant not
+ *  made yet (it has no page). */
 function previewParts(p) {
     const name = p.subject.name;
-    const words = p.change.map(c => (PREVIEW_FIELD[c.field] || [c.field, c.field]));
-    const only = p.change.length === 1 ? p.change[0] : null;
-    const title = only && only.field === 'wording' ? `Teach ${esc(name)} the wording ${esc(only.to)}?`
+    const kind = p.subject.kind;
+    const fieldLines = p.change.filter(c => c.label || c.from !== c.to);
+    const words = fieldLines.map(c => (c.label ? [c.label.toLowerCase(), c.label] : (PREVIEW_FIELD[c.field] || [c.field, c.field])));
+    const only = fieldLines.length === 1 ? fieldLines[0] : null;
+    const title = kind === 'rule' ? `${PREVIEW_TITLE[p.subject.verb] || 'Save the rule'} ${esc(name)}?`
+        : kind === 'merge' ? `Merge ${esc(name)} into ${esc(p.subject.into.name)}?`
+        : only && only.field === 'wording' ? `Teach ${esc(name)} the wording ${esc(only.to)}?`
         : only ? `Change ${esc(name)}’s ${words[0][0]} to ${esc(only.to)}?` : `Change ${esc(name)}’s ${words.map(w => w[0]).join(' and ')}?`;
-    // A taught wording that takes rows another merchant holds names them (fin-surfaces 53).
-    const others = (p.others || []).length ? `<p class="warnline">${icon('warning')}<span><b>${p.others.map(o => `${plural(o.count, 'row')} now ${esc(o.name)}’s`).join(', ')}</b> would move to ${esc(name)}.</span></p>` : '';
+    const eyebrow = kind === 'rule' ? 'Rule' : kind === 'merge' ? 'Merge' : `${esc(name)} · ${words.map(w => w[0]).join(' and ')}`;
+    const line = (label, from, to) => `<li>${label}: ${[from != null ? `<s>${esc(from)}</s>` : '', to != null ? `<b>${esc(to)}</b>` : ''].filter(Boolean).join(' → ')}</li>`;
+    const lines = [kind === 'merge' ? line('Merchant', name, p.subject.into.name) : '', ...fieldLines.map((c, i) => line(words[i][1], c.from, c.to))].join('');
+    // Where the rows would move: a rule's merchant, or the merchant taught.
+    const movesTo = esc(kind === 'rule' ? (p.subject.merchant ? p.subject.merchant.name : '') : name);
+    const warns = (p.others || []).length ? `<div class="warnline">${icon('info')}<span><b>${p.others.map(o => `${plural(o.count, 'row')} now ${esc(o.name)}’s`).join(', ')}</b> would move to ${movesTo}.</span></div>` : '';
+    const ruleLines = kind !== 'rule' ? '' : [
+        p.unheld ? `<p class="sub">${plural(p.unheld, 'row')} with no merchant yet would become ${movesTo}.</p>` : '',
+        p.subject.verb === 'delete' && p.labelled ? `<p class="sub">${plural(p.labelled, 'row')} ${p.labelled === 1 ? 'is' : 'are'} labelled by this rule.</p>` : '',
+    ].join('');
     const span = m => m.first === m.last ? monthName(m.first, { short: true }) : `${monthName(m.first, { short: true })} – ${monthName(m.last, { short: true })}`;
     const facts = p.money && p.months ? `<div class="prev-facts">
         <div><span class="cap">Moves</span>${p.money.map(m => `<b class="num">${esc(money(m.amount_minor))}</b><span class="sub">${esc(m.from)} → ${esc(m.to)}</span>`).join('')}</div>
@@ -4144,13 +4164,13 @@ function previewParts(p) {
     const leftOut = (p.left_out || []).length ? `<p class="sub">Not in the S$ figure: ${p.left_out.map(x => `${esc(money(x.amount_minor, x.currency))} in ${esc(monthName(x.month, { short: true }))} (${esc(x.reason)})`).join('; ')}.</p>` : '';
     const kept = [p.checked ? `Of them, <b>${p.checked} you checked</b>.` : '', p.chosen ? `<b>${p.chosen} you chose</b> stay as they are.` : ''].filter(Boolean).join(' ');
     const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b>${x.source === 'checked' ? ' <span class="prev-mark">checked</span>' : ''}</td></tr>`);
-    const body = `<ul class="diff">${p.change.map((c, i) => `<li>${words[i][1]}: ${c.from == null ? '' : `<s>${esc(c.from)}</s> → `}<b>${esc(c.to)}</b></li>`).join('')}</ul>
+    const body = `<ul class="diff">${lines}</ul>
         <p class="q">This changes ${plural(p.count, 'past row')}</p>
-        ${others}${facts}${leftOut}${kept ? `<p class="sub">${kept}</p>` : ''}
+        ${warns}${facts}${leftOut}${ruleLines}${kept ? `<p class="sub">${kept}</p>` : ''}
         <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>
-        ${p.subject.id == null ? '' : `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>`}`;
+        ${kind === 'rule' || p.subject.id == null ? '' : `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>`}`;
     const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`;
-    return { eyebrow: `${esc(name)} · ${words.map(w => w[0]).join(' and ')}`, title, body, foot };
+    return { eyebrow, title, body, foot };
 }
 /** Ask the preview: 'apply', 'only_new', or null when it is closed. */
 function askPreview(p) {
@@ -4181,6 +4201,15 @@ function previewedWords(r, done) {
     if (!a || !a.count) return done;
     if (a.past === 'apply') return `${done}, and ${plural(a.count, 'past row')} changed. One change in Changes, with Undo.`;
     return `${done}. Only new rows take it; the ${plural(a.count, 'past row')} keep theirs, marked checked.`;
+}
+/** A previewed write's end: false when the drawer was closed, or the write
+ *  refused (said in a toast); else its toast, with Undo. */
+function previewedDone(r, done) {
+    if (r.cancelled) return false;
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return false; }
+    toast(previewedWords(r, done), { undo: r.change });
+    refreshFrame();
+    return true;
 }
 ACT['each-on'] = async el => {
     const s = await merchantById(Number(el.dataset.id));
@@ -4413,8 +4442,8 @@ ACT['merchant-save'] = async el => {
 ACT['merchant-merge'] = async el => {
     const target = $('#mc-target').value;
     if (!target) { toast('Choose the merchant to merge into', { bad: true }); return; }
-    const r = await act('POST', `/api/services/${el.dataset.id}/merge`, { target_id: Number(target) }, 'Merged');
-    if (r) { closeSheet(); rerender(); }
+    const r = await sendPreviewed('POST', `/api/services/${el.dataset.id}/merge`, { target_id: Number(target) });
+    if (previewedDone(r, 'Merged')) { closeSheet(); rerender(); }
 };
 ACT['merchant-delete'] = async el => {
     if (!confirm('Delete this merchant? You can undo it from Changes.')) return;
@@ -4434,7 +4463,7 @@ ACT.rule = async el => {
         <div class="fields two"><label class="field"><span>Only from (S$)</span><input type="text" inputmode="decimal" id="rl-min" value="${x?.min_amount ?? ''}"></label>
             <label class="field"><span>Only up to (S$)</span><input type="text" inputmode="decimal" id="rl-max" value="${x?.max_amount ?? ''}"></label></div></div>
         ${x ? `<p class="small muted">It labels ${plural(x.rows_labelled ?? 0, 'row')} now.</p>` : ''}
-        <p class="small muted">Rows already labelled by hand keep their labels. Re-run every rule to apply a change to the rows the rules labelled.</p>`,
+        <p class="small muted">A change that reaches past rows is shown first, to apply to them or to new rows only. Rows you chose keep their labels.</p>`,
     { eyebrow: x ? 'Rule' : 'Rules', foot: `${x ? `<button class="btn danger" data-act="rule-delete" data-id="${x.id}">${icon('trash')}Delete</button>` : ''}<button class="btn primary" data-act="rule-save" data-id="${x ? x.id : ''}">Save</button>` });
 };
 ACT['rule-save'] = async el => {
@@ -4442,13 +4471,14 @@ ACT['rule-save'] = async el => {
     if (!v('rl-svc')) { toast('Choose the merchant', { bad: true }); return; }
     const body = { pattern: v('rl-pattern'), match_type: v('rl-match'), service_id: Number(v('rl-svc')), book_override: v('rl-book') || null,
         type_override_id: v('rl-type') ? Number(v('rl-type')) : null, min_amount: v('rl-min') || null, max_amount: v('rl-max') || null };
-    const r = el.dataset.id ? await act('PUT', `/api/rules/${el.dataset.id}`, body, 'Rule saved') : await act('POST', '/api/rules', body, 'Rule added');
-    if (r) { closeSheet(); rerender(); }
+    const r = await sendPreviewed(el.dataset.id ? 'PUT' : 'POST', el.dataset.id ? `/api/rules/${el.dataset.id}` : '/api/rules', body);
+    if (previewedDone(r, el.dataset.id ? 'Rule saved' : 'Rule added')) { closeSheet(); rerender(); }
 };
+// A delete that would relabel past rows asks in the preview; one that would
+// not is done at once, with Undo in its toast.
 ACT['rule-delete'] = async el => {
-    if (!confirm('Delete this rule? You can undo it from Changes.')) return;
-    const r = await act('DELETE', `/api/rules/${el.dataset.id}`, undefined, 'Rule deleted');
-    if (r) { closeSheet(); rerender(); }
+    const r = await sendPreviewed('DELETE', `/api/rules/${el.dataset.id}`, {});
+    if (previewedDone(r, 'Rule deleted')) { closeSheet(); rerender(); }
 };
 ACT['rerun-rules'] = async () => {
     if (!confirm('Re-run every rule on the rows the rules labelled? Rows you labelled by hand are left alone. It is one change in Changes, with Undo.')) return;
