@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import re
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -86,6 +87,12 @@ class Plan:
     fills: list[tuple[sqlite3.Row, dict]] = field(default_factory=list)   # (row, the label it is given)
     chosen: int = 0
     token: str = ""
+    # A taught wording that takes another merchant's rows (fin-surfaces 53):
+    # the wording, the merchant they move to, and the rows' merchants.
+    wording: str | None = None
+    moves_to: str | None = None
+    names: dict[int, str] = field(default_factory=dict)
+    others: list[dict] = field(default_factory=list)
 
     @property
     def count(self) -> int:
@@ -214,6 +221,185 @@ def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
     return plan
 
 
+# --- the rule shown when teaching (fin-surfaces 53) ----------------------------------------
+
+MATCH_TYPES = ("contains", "startswith", "exact")
+
+
+@dataclass
+class Reach:
+    """The rows a wording taught as a merchant's rule would label: every row
+    whose winning rule would then be the taught one (`rows`, newest first),
+    and of them those another merchant holds (`others`: {service_id: rows})."""
+    pattern: str
+    match_type: str
+    service_id: int | None
+    rows: list[sqlite3.Row] = field(default_factory=list)
+    others: dict[int, list[sqlite3.Row]] = field(default_factory=dict)
+    names: dict[int, str] = field(default_factory=dict)
+    taught: dict = field(default_factory=dict)   # the rule as it would be taught
+
+    @property
+    def count(self) -> int:
+        return len(self.rows)
+
+    def only(self, tx_ids) -> bool:
+        """The wording matches one of the rows being taught and no other row
+        (a booking number kept in it, fin-surfaces 19)."""
+        return self.count == 1 and self.rows[0]["id"] in set(tx_ids or ())
+
+    def others_named(self, kept=lambda held: False) -> list[dict]:
+        """The rows another merchant holds that the rule would take, by
+        merchant, most first: those `kept` (a field chosen) left out."""
+        out = []
+        for svc, rows in self.others.items():
+            n = sum(1 for held in rows if not kept(held))
+            if n:
+                out.append({"service_id": svc, "name": self.names.get(svc, "another merchant"), "count": n})
+        return sorted(out, key=lambda o: (-o["count"], o["name"]))
+
+
+def _rank(rule) -> tuple:
+    """A rule's place in match order (db._get_rules): priority, then length."""
+    return (rule["priority"] or 0, len(rule["pattern"]))
+
+
+def _wins_amount(rule, amount_minor) -> bool:
+    """Whether a rule's amount limits let a row's amount through, as
+    db.first_rule reads them."""
+    low, high = rule["min_amount_minor"], rule["max_amount_minor"]
+    if amount_minor is None:
+        return low is None and high is None
+    return (low is None or amount_minor >= low) and (high is None or amount_minor <= high)
+
+
+class _Stronger:
+    """The rules that would win a row before a taught one, asked as one:
+    those with no amount limits as one pattern per match type, the few with
+    limits one by one (db.first_rule's matching, read over many rows)."""
+
+    def __init__(self, rules):
+        plain = [r for r in rules if r["min_amount_minor"] is None and r["max_amount_minor"] is None]
+        self.limited = [r for r in rules if r not in plain]
+        words = {kind: sorted({r["pattern"].upper() for r in plain if r["match_type"] == kind and r["pattern"]}, key=len, reverse=True)
+                 for kind in MATCH_TYPES}
+        self.contains = re.compile("|".join(map(re.escape, words["contains"]))) if words["contains"] else None
+        self.starts = tuple(words["startswith"])
+        self.exact = set(words["exact"])
+
+    def wins(self, description: str | None, amount_minor) -> bool:
+        text = (description or "").upper()
+        if self.contains is not None and self.contains.search(text):
+            return True
+        if (self.starts and text.startswith(self.starts)) or text in self.exact:
+            return True
+        return any(_matches(r, description) and _wins_amount(r, amount_minor) for r in self.limited)
+
+
+def wording_reach(conn: sqlite3.Connection, pattern: str, match_type: str = "contains",
+                  service_id: int | None = None) -> Reach:
+    """The rows a wording taught as `service_id`'s rule would label (None: a
+    merchant fin does not hold yet). Teaching inserts the rule, or re-points
+    the rule fin already has for that wording (its priority, limits and
+    match kept, as resolve does): a row is reached when its wording matches
+    and the taught rule would win it, by db.first_rule's order (priority,
+    then the longest wording; an existing rule wins a tie). A row another
+    rule wins is not reached, so rows a longer or higher rule holds are
+    never taken."""
+    pattern = pattern.strip()
+    existing = conn.execute(
+        "SELECT id, pattern, match_type, priority, min_amount_minor, max_amount_minor FROM merchant_rules"
+        " WHERE UPPER(pattern) = ? ORDER BY id LIMIT 1", (pattern.upper(),)).fetchone()
+    taught = dict(existing) if existing else {
+        "id": None, "pattern": pattern, "match_type": match_type, "priority": 0,
+        "min_amount_minor": None, "max_amount_minor": None}
+    reach = Reach(pattern=pattern, match_type=taught["match_type"], service_id=service_id)
+    like = {"contains": "UPPER(t.description) LIKE '%' || ? || '%'",
+            "startswith": "UPPER(t.description) LIKE ? || '%'"}.get(taught["match_type"], "UPPER(t.description) = ?")
+    # LIKE's own wildcards in a wording are matched by _matches below.
+    candidates = conn.execute(
+        f"SELECT {_HELD} FROM {_FROM} WHERE {like}", (taught["pattern"].upper(),)).fetchall()
+    # Only a rule that ranks with the taught one or above can win a row from
+    # it: the rest are never asked (db.first_rule's order: its cached rule list, read once).
+    stronger = _Stronger([r for r in db._get_rules(conn) if r["id"] != taught["id"] and _rank(r) >= _rank(taught)])
+    for held in candidates:
+        if not _matches(taught, held["description"]) or not _wins_amount(taught, held["amount_minor"]):
+            continue
+        if stronger.wins(held["description"], held["amount_minor"]):
+            continue
+        reach.rows.append(held)
+        if held["service_id"] is not None and held["service_id"] != service_id:
+            reach.others.setdefault(held["service_id"], []).append(held)
+    reach.rows.sort(key=lambda r: (r["date"] or "", r["id"]), reverse=True)
+    if reach.others:
+        marks = ",".join("?" * len(reach.others))
+        reach.names = {r[0]: r[1] for r in conn.execute(
+            f"SELECT id, name FROM services WHERE id IN ({marks})", list(reach.others))}
+    reach.taught = taught
+    return reach
+
+
+def kept(held) -> bool:
+    """A row the rule leaves with its merchant: a field of it chosen or
+    worked out."""
+    return any(_source(held, f) is not None and not label_source.reachable(_source(held, f))
+               for f in label_source.FIELDS)
+
+
+def taking(conn: sqlite3.Connection, reach: Reach, name: str, label: dict, sources: tuple) -> Plan:
+    """The plan for the rows another merchant holds that a taught wording
+    would take (fin-surfaces 53, through 21's preview): Apply moves each to
+    the merchant taught with its label (`label`: book and type; each field's
+    source as it was, a field fin gave taking `sources`, the rule's); Only
+    new rows leaves each with its merchant, the fields fin gave checked. A
+    row with a field chosen or worked out stays as it is, counted apart. The
+    merchant's id is the route's to add: a new one has none yet."""
+    plan = Plan(subject={"kind": "merchant", "id": reach.service_id, "name": name}, change={})
+    plan.wording = reach.pattern
+    plan.moves_to = name
+    for svc in reach.others:
+        for held in reach.others[svc]:
+            if kept(held):
+                plan.chosen += 1
+                continue
+            apply, only_new = {}, {}
+            for (field_name, value), source in zip(label.items(), sources):
+                if value is None:
+                    continue
+                apply[field_name] = value
+                apply[label_source.FIELDS[field_name]] = label_source.reached(
+                    _source(held, field_name), value, source)
+            for field_name in label_source.FIELDS:
+                accepted = label_source.accepted(_source(held, field_name))
+                if accepted is not None:
+                    only_new[label_source.FIELDS[field_name]] = accepted
+            checked = any(_source(held, f) == label_source.CHECKED for f in label_source.FIELDS)
+            plan.rows.append(Planned(held, apply, only_new, checked=checked))
+    plan.rows.sort(key=lambda p: (p.held["date"] or "", p.held["id"]), reverse=True)
+    plan.names = dict(reach.names)
+    plan.others = reach.others_named(kept)
+    # The token stamps the rule as taught and the rows it would take, as
+    # the preview saw them; the live count needs none.
+    plan.token = _stamp("wording", reach.taught, reach.service_id,
+                        [tuple(held) for rows in reach.others.values() for held in rows],
+                        name, sorted(label.items()), sources)
+    return plan
+
+
+def joined(first: Plan | None, second: Plan | None) -> Plan | None:
+    """One preview for a teach that changes a held merchant's default and
+    whose wording takes another merchant's rows: one question, both sets of
+    rows, one token."""
+    if first is None or second is None:
+        return first or second
+    plan = Plan(subject=first.subject, change=dict(first.change), rows=first.rows + second.rows,
+                fills=first.fills + second.fills, chosen=first.chosen + second.chosen)
+    plan.wording, plan.moves_to = second.wording, second.moves_to
+    plan.names, plan.others = second.names, second.others
+    plan.token = _stamp(first.token, second.token)
+    return plan
+
+
 # --- the preview as the drawer and chat read it --------------------------------------------
 
 
@@ -252,7 +438,10 @@ def _month_end(month: str) -> str:
 def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict], dict]:
     """The money moved per book pair, in S$ at the saved month-end rates;
     what could not be valued; the months touched."""
-    moving = [p for p in plan.rows if "book" in p.apply]
+    # A row a taught wording moves to its merchant keeps its book when the
+    # merchant's is the same: no money moves for it.
+    moving = [p for p in plan.rows if "book" in p.apply
+              and (p.held["book"] or book_type.DEFAULT_BOOK) != (p.apply["book"] or book_type.DEFAULT_BOOK)]
     own = _parts(conn, [p.held["id"] for p in moving])
     sums: dict = {}
     months: set[str] = set()
@@ -286,16 +475,27 @@ def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
     fields = list(plan.change)
     change = [{"field": f, "from": _word(f, was, types), "to": _word(f, now, types)}
               for f, (was, now) in plan.change.items()]
+    if plan.wording is not None:
+        change.append({"field": "wording", "from": None, "to": plan.wording})
     examples = []
     for p in plan.rows[:EXAMPLES]:
         held = p.held
-        after = {f: p.apply.get(f, held[f]) for f in fields}
+        # A row a taught wording takes from another merchant reads by its
+        # merchant and type: "Air India · Travel → IndigoAir · Travel".
+        taken = plan.moves_to is not None and held["service_id"] != plan.subject["id"]
+        shown = ["type_id"] if taken else fields
+        after = {f: p.apply.get(f, held[f]) for f in shown}
+        now_words = _label_words(shown, {f: held[f] for f in shown}, types)
+        after_words = _label_words(shown, after, types)
+        if taken:
+            now_words = f"{plan.names.get(held['service_id'], 'another merchant')} · {now_words}"
+            after_words = f"{plan.moves_to} · {after_words}"
         examples.append({
             "id": held["id"], "date": held["date"], "amount_minor": held["amount_minor"],
             "currency": held["currency"],
-            "now": _label_words(fields, {f: held[f] for f in fields}, types),
-            "after": _label_words(fields, after, types),
-            "source": next(_source(held, f) for f in fields if f in p.apply),
+            "now": now_words,
+            "after": after_words,
+            "source": next((_source(held, f) for f in shown if f in p.apply), _source(held, "type_id")),
         })
     checked = sum(1 for p in plan.rows if p.checked)
     out = {
@@ -308,7 +508,7 @@ def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
         "left_out": [],
         "months": None,
         "examples": examples,
-        "others": [],
+        "others": list(plan.others),
         "token": plan.token,
     }
     if "book" in plan.change:
