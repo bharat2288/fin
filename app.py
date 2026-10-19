@@ -46,7 +46,6 @@ import expect_back
 import trend_series
 import expect_routes
 import refund_links
-from person import checked_name as checked_person_name, create_person, find_person
 from scope import _HOUSEHOLD_ACCOUNT, _SGD_ACCOUNT, _TYPE_JOINS, book_expr
 from missing import missing_months
 from db import first_rule, get_connection, get_db, init_db, invalidate_rules_cache, match_merchant, rule_label
@@ -2458,7 +2457,9 @@ def api_transactions():
 # rule). A label that would make such a row a move between the household's own
 # accounts, a company's cost or a movement naming a non-person would count its
 # money twice, so it is refused, naming the record; labelling the row's own
-# part (spending, income, a gift, a person's movement) stays allowed.
+# part (spending, income, a gift) stays allowed. Since the contract no label
+# or flow edit names a person as a movement's other side at all
+# (review.PERSON_MOVEMENT_REFUSED).
 # ---------------------------------------------------------------------------
 
 def _counted_elsewhere(flow_name: str | None, book: str | None, other_kind: str | None) -> bool:
@@ -2681,6 +2682,14 @@ def api_resolve_transaction():
             type_id = _checked_type_id(conn, data.get("type_id"))
         except UnknownLabel as e:
             return jsonify({"error": str(e)}), 400
+        # A flow edit that would make a row naming a person a movement names
+        # the person as a movement's other side: refused since the contract
+        # (personal-ledger 23), before anything is written.
+        if flow_type == flow.MOVEMENT and conn.execute(
+            "SELECT 1 FROM transactions t JOIN accounts o ON o.id = t.other_side_id "
+            "WHERE t.id = ? AND o.type = 'person'", (tx_id,)
+        ).fetchone():
+            return jsonify({"error": review.PERSON_MOVEMENT_REFUSED}), 400
 
         try:
             # Step 1: Resolve service — find existing or create new
@@ -4492,6 +4501,8 @@ def _label_account(conn, choice, account_id, row_account_id) -> int:
     account = conn.execute(
         "SELECT id, type, owner FROM accounts WHERE id = ?", (account_id,)
     ).fetchone()
+    if account is not None and account["type"] == "person":
+        raise review.LabelRefused(review.PERSON_MOVEMENT_REFUSED)
     if (
         account is None
         or account["type"] not in choice.kinds
@@ -4522,12 +4533,16 @@ def api_review_label(tx_id: int):
         gift            nothing: spending when given, income when received
         own_account     account_id of a household bank account or card
         company         account_id of a company
-        loan_to_person  account_id of a person, or person: a name. A name
-                        nobody has yet creates that person's account.
         loan_repayment  account_id of a loan
         income          income_kind_id
+
+    A person is no movement's other side (personal-ledger 23, the contract):
+    "loan_to_person", or a person's account under any choice, is refused in
+    review.PERSON_MOVEMENT_REFUSED's words and writes nothing.
     """
     data = request.get_json(silent=True) or {}
+    if data.get("choice") in review.RETIRED:
+        return jsonify({"error": review.PERSON_MOVEMENT_REFUSED}), 400
     choice = review.BY_NAME.get(data.get("choice")) if isinstance(data.get("choice"), str) else None
     if choice is None:
         return jsonify({"error": f"unknown choice: {data.get('choice')!r}"}), 400
@@ -4542,7 +4557,7 @@ def api_review_label(tx_id: int):
             return jsonify({"error": "no such row"}), 404
 
         flow_name = flow.checked_flow(choice.flow)
-        book = type_id = other_side = new_person = None
+        book = type_id = other_side = None
         try:
             if choice.asks == review.ASKS_TYPE:
                 type_id = _checked_type_id(conn, data.get("type_id"))
@@ -4564,46 +4579,24 @@ def api_review_label(tx_id: int):
                 ).fetchone():
                     raise review.LabelRefused("income_kind_id is required: one of the income kinds")
                 type_id = kind_id
-            elif choice.asks == review.ASKS_PERSON and data.get("account_id") is None:
-                try:
-                    name = checked_person_name(data.get("person"))
-                except ValueError:
-                    raise review.LabelRefused("person is required: who the money was lent to") from None
-                other_side = find_person(conn, name)
-                if other_side is None:
-                    new_person = name
             else:
                 other_side = _label_account(conn, choice, data.get("account_id"), tx["account_id"])
         except (UnknownLabel, BookNeeded, review.LabelRefused) as e:
             return jsonify({"error": str(e)}), 400
 
         # A row a record rests on keeps to what the sheet counts once.
-        other_kind = "person" if new_person is not None else (conn.execute(
+        other_kind = (conn.execute(
             "SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone() or [None])[0]
         why = _label_refusal(conn, tx_id, flow_name, book, other_kind)
         if why:
             return jsonify({"error": why}), 400
 
-        # Everything asked for is there: the person's account, then the label,
-        # in one transaction.
-        if new_person is not None:
-            other_side = create_person(conn, new_person)
+        # Everything asked for is there: the label, in one transaction.
         conn.execute(
             "UPDATE transactions SET flow_type = ?, flow_type_manual = 1, other_side_id = ?, "
             "book = ?, type_id = ?, cat_source = 'manual' WHERE id = ?",
             (flow_name, other_side, book, type_id, tx_id),
         )
-        if choice.name == "loan_to_person":
-            # From expand on, a loan to or from a person is an expectation or a
-            # set-off at once: the conversion step's own rule, on this row, in
-            # this change (personal-ledger 23, case 44).
-            import convert_expect_back
-
-            try:
-                convert_expect_back.convert_row(conn, tx_id)
-            except expect_back.Refused as e:
-                conn.rollback()
-                return jsonify({"error": str(e)}), 400
         # A row that now names a loan, or no longer does, changes what was paid.
         loan_interest.derive(conn)
         conn.commit()
@@ -4614,7 +4607,6 @@ def api_review_label(tx_id: int):
         "flow_type": flow_name,
         "other_side_id": other_side,
         "other_side_name": mask_card_number(named["name"]) if named else None,
-        "created_account": new_person is not None,
     })
 
 
@@ -4642,8 +4634,10 @@ def _label_as_choice(row) -> tuple | None:
         return ("income", {"income_kind_id": row["type_id"]}) if row["type_id"] is not None else None
     if row["other_side_id"] is None:
         return None
+    # A movement naming a person reads as no choice: "a loan to a person"
+    # retired at the contract, so a past loan is never guessed again.
     for choice in review.CHOICES:
-        if choice.flow == flow_name and choice.asks in (review.ASKS_ACCOUNT, review.ASKS_PERSON) and kind in choice.kinds:
+        if choice.flow == flow_name and choice.asks == review.ASKS_ACCOUNT and kind in choice.kinds:
             return choice.name, {"account_id": row["other_side_id"]}
     return None
 

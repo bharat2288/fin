@@ -5,11 +5,12 @@ rows in the old person line's own scope, walked in ROW_DAY order, become a
 back or pay expectation or set off what is open the other way; an anchor
 becomes an opening figure. The step runs behind the conversion runner's
 backup, checks the old person line against the new records at every month
-end, prints counts only, and a second run changes nothing. A down step takes
-the converted records back out. From expand on, the review route's "a loan
-to a person" applies the same rule in the label's own change.
+end, prints counts only, and a second run changes nothing. Since the
+contract (ticket 47) the down step and the review route's "a loan to a
+person" are retired (tests/test_expect_contract_retire.py), and the old
+person line is the step's own read (convert_expect_back.old_line).
 
-Every name and figure is invented (the spec's cases 40-45a). Each test builds
+Every name and figure is invented (the spec's cases 40-45). Each test builds
 its own database under tmp_path; nothing opens a real book.
 """
 
@@ -29,8 +30,7 @@ import convert_all
 import convert_expect_back
 import db
 import expect_back
-import history
-from expect_fixtures import entry, let_go, set_off
+from expect_fixtures import entry, set_off
 
 OLD_SCHEMA = Path(__file__).parent / "schema_before_expect_back.sql"
 TODAY = date(2026, 10, 19)
@@ -143,15 +143,14 @@ def backups(path: Path, step: str = "expect-back") -> list[str]:
 
 def person_lines(path: Path) -> dict:
     """Each person's old line at every month end, as the sheet counted it
-    before the switch took persons off it: what the conversion and the down
-    step must leave as it was."""
+    before the switch took persons off it: what the conversion must leave as
+    it was."""
     conn = open_book(path)
     try:
         persons = conn.execute(
             "SELECT id, name, type, currency, status FROM accounts WHERE type = 'person'").fetchall()
         return {
-            (p["name"], month): balance_sheet._counterparty_line(
-                conn, p, balance_sheet.month_end(month), month, lambda name: name)["balance_minor"]
+            (p["name"], month): convert_expect_back.old_line(conn, p, balance_sheet.month_end(month).isoformat())
             for month in MONTHS for p in persons
         }
     finally:
@@ -383,10 +382,6 @@ def test_case_44_a_book_with_no_person_rows_reads_as_applied(book):
     assert conversion.run_step(book, convert_expect_back.STEP)["status"] == "already-applied"
 
 
-def _label(client, row_id, person_id):
-    return client.post(f"/api/review/{row_id}/label", json={"choice": "loan_to_person", "account_id": person_id})
-
-
 def _review_row(conn, account_id, day, description, amount_minor) -> int:
     row_id = _row(conn, account_id, day, description, amount_minor, None, flow="review", manual=0)
     conn.commit()
@@ -395,7 +390,7 @@ def _review_row(conn, account_id, day, description, amount_minor) -> int:
 
 @pytest.fixture
 def lane(temp_db):
-    """fin's own temporary book, after expand: Ravi and two waiting transfers."""
+    """fin's own temporary book: Ravi and two waiting transfers."""
     conn = db.get_connection()
     try:
         savings = _account(conn, "Everyday savings", "bank")
@@ -406,35 +401,6 @@ def lane(temp_db):
     finally:
         conn.close()
     return {"savings": savings, "Ravi": ravi, "out": out, "back": back, "path": temp_db}
-
-
-def test_case_44_a_label_after_expand_writes_its_records_in_the_same_change(client, lane):
-    path = lane["path"]
-
-    first = _label(client, lane["out"], lane["Ravi"])
-    assert first.status_code == 200, first.get_json()
-    second = _label(client, lane["back"], lane["Ravi"])
-    assert second.status_code == 200, second.get_json()
-
-    assert expectations(path) == [(lane["out"], "back", 200000, "converted", str(lane["Ravi"]))]
-    assert set_offs(path) == [(lane["back"], lane["out"], 50000, "converted")]
-    conn = open_book(path)
-    try:
-        changed = {r[0] for r in conn.execute("SELECT tbl FROM change_rows WHERE entry_id = ?",
-                                              (int(first.headers["X-Fin-Change"]),))}
-        assert {"transactions", "expectation", "expectation_name"} <= changed
-        # Nothing is left for the step: the label converted its row.
-        assert convert_expect_back.STEP.is_applied(conn)
-    finally:
-        conn.close()
-
-    # Undoing the label takes its set-off with it, in the label's one change.
-    assert client.post(f"/api/history/{second.headers['X-Fin-Change']}/undo").status_code == 200
-    assert set_offs(path) == []
-    assert query(path, "SELECT flow_type, other_side_id FROM transactions WHERE id = ?",
-                 (lane["back"],)) == [("review", None)]
-    assert client.post(f"/api/history/{first.headers['X-Fin-Change']}/undo").status_code == 200
-    assert expectations(path) == []
 
 
 def test_case_44_an_outside_write_leaves_the_step_planned_and_fin_will_not_start(lane):
@@ -533,75 +499,3 @@ def test_the_step_fails_whole_when_an_old_line_would_change(book, capsys):
     assert "1 person's line would change at 1 month end" in out
     assert "Ravi" not in out
     assert dump(book) == before
-
-
-# --- 45a: the down step --------------------------------------------------------------
-
-
-def test_case_45a_the_down_step_restores_every_old_person_line(book, capsys):
-    seeded(book)
-    lines, worth = person_lines(book), net_worths(book)
-    run(book, capsys)
-    assert expectations(book)
-
-    code, out = run(book, capsys, "--down")
-
-    assert code == 0, out
-    assert query(book, "SELECT COUNT(*) FROM expectation") == [(0,)]
-    assert query(book, "SELECT COUNT(*) FROM expectation_name") == [(0,)]
-    assert query(book, "SELECT COUNT(*) FROM set_off") == [(0,)]
-    assert person_lines(book) == lines
-    assert net_worths(book) == worth
-    assert len(backups(book, "expect-back-down")) == 1
-    # The step is planned again: fin would not start until it runs.
-    conn = open_book(book)
-    try:
-        assert not convert_expect_back.STEP.is_applied(conn)
-    finally:
-        conn.close()
-    # Run again, it changes nothing.
-    assert run(book, capsys, "--down")[1].count("already-applied") == 1
-
-
-def test_case_45a_the_down_step_is_refused_while_hand_changes_rest_on_converted_items(book, capsys):
-    ids = seeded(book)
-    run(book, capsys)
-    conn = open_book(book)
-    ravi = conn.execute("SELECT id FROM expectation WHERE row_id = ?", (ids["ravi_out"],)).fetchone()[0]
-    sam = conn.execute("SELECT id FROM expectation WHERE person_id = ?", (ids["Sam"],)).fetchone()[0]
-    paid = _row(conn, ids["savings"], "2026-09-10", "PAYNOW 0003", -10000, None, flow="review", manual=0)
-    conn.commit()
-    set_off(conn, paid, ravi, 10000)                    # a hand set-off
-    let_go(conn, sam, "gift", "2026-10-19")             # a let-go
-    conn.close()
-    before = dump(book)
-
-    code, out = run(book, capsys, "--down")
-
-    assert code == 1
-    assert "2 converted items have hand changes: unlink or undo them first" in out
-    assert dump(book) == before
-    assert backups(book, "expect-back-down") == []
-
-
-def test_case_45a_an_amount_edit_on_a_converted_item_counts_as_a_hand_change(book, capsys):
-    ids = seeded(book)
-    run(book, capsys)
-    conn = open_book(book)
-    parents = conn.execute("SELECT id FROM expectation WHERE row_id = ?", (ids["parents_in"],)).fetchone()[0]
-    with entry(conn, "Changed what is to pay back"):
-        conn.execute("UPDATE expectation SET amount_minor = 450000 WHERE id = ?", (parents,))
-    conn.close()
-
-    code, out = run(book, capsys, "--down")
-
-    assert code == 1
-    assert "1 converted item has hand changes: unlink or undo them first" in out
-
-    # Undone, it is no longer a hand change.
-    conn = open_book(book)
-    with entry(conn, "Changed what is to pay back"):
-        conn.execute("UPDATE expectation SET amount_minor = 500000 WHERE id = ?", (parents,))
-    conn.close()
-    assert run(book, capsys, "--down")[0] == 0
-    assert history.TRACKED  # the edits were recorded in the change history

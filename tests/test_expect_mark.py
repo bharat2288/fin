@@ -203,7 +203,7 @@ def test_case_7_edit_down_not_below_what_is_back(client, conn, story):
     assert made["harbour"] == x["id"]
 
 
-def test_case_8_someone_new_is_made_once_and_the_review_route_reuses_them(client, conn, story):
+def test_case_8_someone_new_is_made_once_and_reused(client, conn, story):
     jay = story.people["Jay"]
     resp = mark_route(client, story.harbour, amount="200.00", names=[jay], new_names=["Mei"])
     assert resp.status_code == 200, resp.get_json()
@@ -215,13 +215,9 @@ def test_case_8_someone_new_is_made_once_and_the_review_route_reuses_them(client
     assert conn.execute("SELECT COUNT(*) FROM accounts WHERE UPPER(name) = 'MEI'").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM accounts WHERE UPPER(name) = 'JAY'").fetchone()[0] == 1
     assert names_of(conn, expectation_of(conn, story.klook)["id"]) == ["Jay", "Mei"]
-    # The review route's "a loan to a person" finds the same Mei, as before.
-    labelled = client.post(f"/api/review/{story.lena_2210}/label", json={"choice": "loan_to_person", "person": "mei"})
-    assert labelled.status_code == 200, labelled.get_json()
-    other = conn.execute("SELECT other_side_id FROM transactions WHERE id = ?", (story.lena_2210,)).fetchone()[0]
-    assert other == mei["id"]
     # Undoing the first mark takes Mei back only if nothing rests on her: here the
-    # second mark and the label do, so the undo is refused by name.
+    # second mark does, so the undo is refused by name. (The review route's "a
+    # loan to a person" retired at the contract.)
     first = int(resp.headers["X-Fin-Change"])
     assert undo(client, first).status_code == 409
 
