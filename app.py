@@ -43,6 +43,7 @@ import suggest
 import tie
 import trend_routes
 import expect_back
+import trend_series
 import expect_routes
 import refund_links
 from person import checked_name as checked_person_name, create_person, find_person
@@ -1899,7 +1900,8 @@ def api_dashboard_stat_cards():
                                   review list, with waiting_out_count,
                                   _out_total, waiting_in_count, _in_total
                                   the same way. untyped counts the month's
-                                  spending rows with no type.
+                                  spending rows with no type, less any whose
+                                  own part is nothing (accounted for).
       loan_principal              the month's loan instalments less the
                                   interest worked out for it (loan_interest.py):
                                   not spending. loan_instalments and
@@ -1907,6 +1909,12 @@ def api_dashboard_stat_cards():
                                   household plus loan_principal.
     spend is the View filter's figure (every book, or the one asked for, on
     any account), as the charts and the list show it; no card shows it.
+
+    Expect back (ticket 29): every figure sums each row's own part (its amount
+    less what is expected back on it or placed from it) plus the let-gos
+    counted in the month, as trend_series.counted_lines gives them, and every
+    count is of rows; a row whose own part is nothing is in no figure and no
+    count. While expect_back's gate is off that is the rows' bare amounts.
     """
     # Determine reference month
     ref_month_param = request.args.get("ref_month")
@@ -1978,11 +1986,15 @@ def api_dashboard_stat_cards():
 
     # The breakdown of each book's net card: money out, and money back in
     # refunds (a negative row), the part of the net that came off it.
+    # Expect back (ticket 29): every sum reads counted lines
+    # (trend_series.counted_lines): a row at its own part, and a let-go as a
+    # line of its own on the day it counts. The sides split on the line's
+    # sign; the counts are of rows (t.id), never of let-gos.
     side_sums = "".join(
         f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN amount_minor ELSE 0 END), "
         f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN -amount_minor ELSE 0 END), "
-        f"COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN 1 END), "
-        f"COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN 1 END), "
+        f"COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN t.id END), "
+        f"COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN t.id END), "
         for _ in books
     )
 
@@ -2010,12 +2022,11 @@ def api_dashboard_stat_cards():
                     {paid_sums}
                     {side_sums}
                     SUM(amount_minor),
-                    COUNT(CASE WHEN t.type_id IS NULL THEN 1 END),
-                    COUNT(*),
-                    COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? THEN 1 END)
-                FROM transactions t
+                    COUNT(CASE WHEN t.type_id IS NULL THEN t.id END),
+                    COUNT(t.id),
+                    COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? THEN t.id END)
+                FROM {trend_series.counted_from()}
                 LEFT JOIN services svc ON t.service_id = svc.id
-                JOIN statements s ON t.statement_id = s.id
                 LEFT JOIN accounts a ON s.account_id = a.id
                 WHERE t.flow_type IN ('expense', 'refund')
                   AND {_SGD_ACCOUNT}
@@ -2167,6 +2178,9 @@ def api_dashboard_monthly():
 
     Query params: start, end, book, exclude_one_off, granularity, group_parent
     granularity: 'monthly' (default), 'weekly', 'quarterly'
+
+    Each row counts its own part and each let-go counts in its own type on
+    its own day (trend_series.counted_lines; ticket 29).
     """
     filters, params = _build_filters(request.args, hide=False)
     granularity = request.args.get("granularity", "monthly")
@@ -2188,10 +2202,9 @@ def api_dashboard_monthly():
                 {time_bucket} as period,
                 {type_expr} as type,
                 SUM(t.amount_minor) as total
-            FROM transactions t
+            FROM {trend_series.counted_from()}
             {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
-            JOIN statements s ON t.statement_id = s.id
             WHERE t.flow_type IN ('expense', 'refund') AND {_SGD_ACCOUNT} {filters}
             GROUP BY period, type
             ORDER BY period, total DESC
@@ -2217,6 +2230,9 @@ def api_dashboard_types():
     """Type totals for donut chart. One type serves every book.
 
     Query params: start, end, book, exclude_one_off, group_parent
+
+    Each row counts its own part and each let-go counts in its own type on
+    its own day (trend_series.counted_lines; ticket 29); count is of rows.
     """
     filters, params = _build_filters(request.args, hide=False)
     type_expr = _type_group_expr(request.args)
@@ -2226,11 +2242,10 @@ def api_dashboard_types():
             SELECT
                 {type_expr} as type,
                 SUM(t.amount_minor) as total,
-                COUNT(*) as count
-            FROM transactions t
+                COUNT(t.id) as count
+            FROM {trend_series.counted_from()}
             {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
-            JOIN statements s ON t.statement_id = s.id
             WHERE t.flow_type IN ('expense', 'refund') AND {_SGD_ACCOUNT} {filters}
             GROUP BY type
             ORDER BY total DESC

@@ -3220,10 +3220,17 @@ ACT['figure-delete-yes'] = async el => {
 // ---------------------------------------------------------------------------
 
 const charts = [];
-/** Net per currency: the signed sum of the rows, money out positive and a refund negative. */
+/** What a row counts in a spending figure, in minor units of its currency: the payload's counted_minor, which the
+ *  server sets to the row's own part once expect back is switched on (its amount less what is expected back on it)
+ *  and to its amount until then. A payload without the field counts the amount, as before. Never worked out here. */
+function countedMinor(row) {
+    const c = row.currency || 'SGD';
+    return Number.isInteger(row.counted_minor) ? row.counted_minor : toMinor(row.amount_sgd, c);
+}
+/** Net per currency: the signed sum of what the rows count, money out positive and a refund negative. */
 function totalsByCurrency(rows) {
     const by = {};
-    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + toMinor(row.amount_sgd, c); });
+    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + countedMinor(row); });
     return by;
 }
 function totalsText(by) {
@@ -3238,7 +3245,7 @@ function groupRows(rows, keyOf) {
         if (!groups.has(k)) groups.set(k, []);
         groups.get(k).push(row);
     });
-    return [...groups.entries()].map(([name, list]) => ({ name, list, by: totalsByCurrency(list), sgd: totalsByCurrency(list).SGD || 0 }))
+    return [...groups.entries()].map(([name, list]) => { const by = totalsByCurrency(list); return { name, list, by, sgd: by.SGD || 0 }; })
         .sort((a, b) => b.sgd - a.sgd);
 }
 /** A refund: money back on a spending row (a negative amount). */
@@ -3522,8 +3529,8 @@ function drawSpendingCharts(perBook, months) {
         // Per month, S$ accounts only, hidden merchants counted: spent, refunded and their net.
         const monthly = months.map(m => {
             const inMonth = b.counted.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD');
-            const spentMinor = inMonth.filter(row => !isRefund(row)).reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0);
-            const backMinor = -inMonth.filter(isRefund).reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0);
+            const spentMinor = inMonth.filter(row => !isRefund(row)).reduce((a, row) => a + countedMinor(row), 0);
+            const backMinor = -inMonth.filter(isRefund).reduce((a, row) => a + countedMinor(row), 0);
             return { spent: spentMinor, back: backMinor, net: spentMinor - backMinor };
         });
         const sums = monthly.map(x => x.net / 100);
