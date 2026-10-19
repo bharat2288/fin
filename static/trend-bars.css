@@ -1,1 +1,63 @@
-/* trend-bars.css: shell (fin-surfaces 23). */
+/* trend-bars.css: the trend card's bars (fin-surfaces 37). Colours are the theme's
+   tokens, so both themes follow; the book slots match chartTokens().books. */
+
+.trend-bars { position: relative; }
+.trend-bars__svg { display: block; max-width: 100%; height: auto; overflow: visible; }
+
+.trend-bars__grid { stroke: var(--border-subtle); stroke-width: 1; }
+.trend-bars__base { stroke: var(--border-emphasis); stroke-width: 1; }
+.trend-bars__axis,
+.trend-bars__tick { fill: var(--text-tertiary); font: 11px var(--font-mono, ui-monospace, monospace); }
+.trend-bars__tick--warn { fill: var(--semantic-warning); }
+.trend-bars__tick--sofar { font-style: italic; }
+
+.trend-bars__hit { fill: transparent; cursor: pointer; }
+.trend-bars__hit:focus { outline: none; }
+.trend-bars__hit:focus-visible { stroke: var(--text-primary); stroke-width: 1; stroke-dasharray: 2 2; }
+.trend-bars__col:hover .trend-bars__hit { fill: color-mix(in srgb, var(--text-tertiary) 8%, transparent); }
+
+.trend-bars__seg { cursor: pointer; stroke: var(--bg-surface); stroke-width: 1; }
+.trend-bars__seg--c1 { fill: var(--chart-1); }
+.trend-bars__seg--c2 { fill: var(--chart-6); }
+.trend-bars__seg--c3 { fill: var(--chart-2); }
+.trend-bars__seg--c4 { fill: var(--chart-3); }
+.trend-bars__seg--in { fill: var(--k-in); }
+.trend-bars__seg--out { fill: var(--k-out); }
+
+/* the quarter under way: outlined, not filled */
+.trend-bars__col--open .trend-bars__seg:not(.trend-bars__seg--missing) {
+    fill-opacity: 0.18; stroke: var(--text-secondary); stroke-width: 1.5;
+}
+
+/* what came back: a dashed cap above the net */
+.trend-bars__cap { fill: none; stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 3 2; pointer-events: none; }
+
+/* a month with no statement in: the warning tone in stripes, and ⧗ */
+.trend-bars__hatch-ground { fill: var(--bg-surface); }
+.trend-bars__hatch-line { stroke: var(--semantic-warning); stroke-width: 2; }
+.trend-bars__seg--missing { stroke: var(--semantic-warning); stroke-width: 1; }
+.trend-bars__part-hatch { pointer-events: none; fill-opacity: 0.85; }
+.trend-bars__glyph { fill: var(--semantic-warning); font-size: 12px; pointer-events: none; }
+
+/* no saved rate for the month */
+.trend-bars__norate { fill: none; stroke: var(--semantic-warning); stroke-width: 1.5; }
+
+/* one book showing: its monthly average (per bar) */
+.trend-bars__avg { stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 5 4; pointer-events: none; }
+.trend-bars__avg-label { fill: var(--text-secondary); font: 11px var(--font-mono, ui-monospace, monospace); pointer-events: none; }
+
+.trend-bars__tip {
+    position: absolute; z-index: 5; max-width: min(280px, calc(100vw - 32px));
+    padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md, 6px);
+    background: var(--bg-elevated, var(--bg-surface)); color: var(--text-primary);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--text-primary) 14%, transparent);
+    font-size: 12px; line-height: 1.45;
+}
+.trend-bars__tip[hidden] { display: none; }
+.trend-bars__tip-title { font-weight: 600; margin-bottom: 2px; }
+.trend-bars__tip-acts { display: flex; gap: 6px; margin-top: 6px; }
+.trend-bars__act {
+    padding: 2px 8px; border: 1px solid var(--border-emphasis); border-radius: var(--radius-sm, 4px);
+    background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+.trend-bars__act:hover { background: var(--bg-raised); }
