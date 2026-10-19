@@ -300,3 +300,17 @@ def test_case_29_the_rupee_balance_lines_end_label_drops_whole_paise():
     assert ends == ["₹ 5,20,000"]
     # An S$ account keeps its cents.
     assert re.findall(r'<text class="trend-line__val"[^>]*>([^<]*)</text>', svg(load("balances_sgd"))) == ["S$ 55,000.00"]
+
+
+def test_case_39_end_labels_of_lines_ending_close_together_do_not_overlap():
+    # Walk finding (1366): Dining / Groceries and Travel / Education ended close together and
+    # their 12px end labels overlapped by 2px: the nudge kept them 13px apart, less than a
+    # label's own line box (12px x 1.25 = 15px).
+    p = load("trend_types")
+    ends = {"Dining": 50000, "Groceries": 49000, "Travel": 48000, "Education": 47500}
+    for t in p["types"]:
+        if t["name"] in ends:
+            next(x for x in t["points"] if x["month"] == "2026-10")["net"] = ends[t["name"]]
+    ys = sorted(float(y) for y in re.findall(r'<text class="trend-line__end" x="[^"]*" y="([^"]*)"', svg(p)))
+    assert len(ys) == 4
+    assert all(b - a >= 15 for a, b in zip(ys, ys[1:])), ys

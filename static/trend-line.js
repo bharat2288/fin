@@ -297,9 +297,10 @@
             if (lastK !== undefined && (coloured(l) || l.picked) && !l.dim) {
                 p += `<circle class="trend-line__dot" cx="${f1(g.x(lastK))}" cy="${f1(y(values[lastK]))}" r="4"/>`;
                 if (!phone) {
-                    // End labels never sit on each other: a label too close to one drawn is nudged down.
+                    // End labels never sit on each other: a label too close to one drawn is nudged
+                    // down, a whole line box apart (12px labels, 15px each).
                     let ly = y(values[lastK]);
-                    labelled.slice().sort((a, b) => a - b).forEach(o => { if (Math.abs(o - ly) < 13) ly = o + 13; });
+                    labelled.slice().sort((a, b) => a - b).forEach(o => { if (Math.abs(o - ly) < 15) ly = o + 15; });
                     labelled.push(ly);
                     p += `<text class="trend-line__end" x="${f1(g.x(lastK) + 9)}" y="${f1(ly + 4)}">${esc(l.name)}</text>`;
                 }
