@@ -40,12 +40,13 @@ def test_get_db_closes_its_connection(temp_db):
     assert closed
 
 
-def test_trend_blueprint_is_registered_and_serves_nothing():
+def test_trend_blueprint_is_registered_and_serves_only_reads():
+    """The route lanes add their routes here; every one is a GET read (case 50)."""
     import trend_routes
     assert fin_app.app.blueprints[trend_routes.bp.name] is trend_routes.bp
-    served = [r.rule for r in fin_app.app.url_map.iter_rules()
+    served = [r for r in fin_app.app.url_map.iter_rules()
               if r.endpoint.startswith(trend_routes.bp.name + ".")]
-    assert served == []
+    assert all(r.methods - {"HEAD", "OPTIONS"} == {"GET"} for r in served)
 
 
 def test_route_modules_exist_and_none_imports_app():
