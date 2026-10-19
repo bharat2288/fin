@@ -328,3 +328,34 @@ def test_case_30_large_rupee_figures_group_in_lakhs_and_convert_half_even():
                        paise: window.Trend.fmt(12450050, 'INR'), sgd: window.Trend.fmt(192975, 'SGD') });""")
     assert got == {"s": 192975, "r": "₹ 1,24,500", "half": 5348, "aug": 3080,
                    "paise": "₹ 1,24,500.50", "sgd": "S$ 1,929.75"}
+
+
+# --- stacked by type or merchant: a colour key, and the book chips claim no colour --
+
+def test_case_16_stacked_by_type_the_card_keys_the_type_colours_and_book_chips_have_no_swatch():
+    # Walk finding: the legend showed only the book chips, whose swatches are the
+    # colours the bars give the first and second stack key, so they read as types.
+    bars = (STATIC / "trend-bars.js").read_text(encoding="utf-8")
+    got = run(bars + FAKE_EL + """
+      const p = load('trend_merchant');
+      p.stack = 'type';
+      p.stack_options = ['book', 'type'];
+      p.stack_keys = [{key: 'Household|type:22', label: 'Entertainment', id: 22},
+                      {key: 'Household|type:30', label: 'Home', id: 30},
+                      {key: 'Larkspur|type:22', label: 'Entertainment', id: 22}];
+      const el = fakeEl();
+      window.chartTokens = () => ({ books: ['#c1', '#c2', '#c3', '#c4'] });
+      window.Trend.card(el, p, { mode: 'bars' });
+      const byType = el.innerHTML;
+      p.stack = 'book';
+      p.stack_keys = [{key: 'Household', label: 'Household', id: null}, {key: 'Larkspur', label: 'Larkspur', id: null}];
+      window.Trend.card(el, p, { mode: 'bars' });
+      out({ byType, byBook: el.innerHTML });""")
+    key = re.search(r'<ul class="trend-key"[^>]*>(.*?)</ul>', got["byType"], re.S)
+    assert key, "stacked by type, the card shows a colour key"
+    items = re.findall(r'<li><span class="trend-swatch"[^>]*style="background:([^"]+)"></span>([^<]+)</li>', key.group(1))
+    assert items == [("#c1", "Entertainment"), ("#c2", "Home")]
+    chips = re.findall(r'<button[^>]*data-trend="book"[^>]*>(.*?)</button>', got["byType"], re.S)
+    assert len(chips) == 2 and not any("trend-swatch" in c for c in chips)
+    assert 'class="trend-key"' not in got["byBook"]
+    assert all("trend-swatch" in c for c in re.findall(r'<button[^>]*data-trend="book"[^>]*>(.*?)</button>', got["byBook"], re.S))

@@ -381,3 +381,51 @@ def test_the_card_hides_a_book_through_books_on():
     m = model(p)
     keys = {s["key"] for b in m["buckets"] for s in b["segments"] if not s.get("placeholder")}
     assert keys and all(shown[0] in k or k == shown[0] for k in keys), keys
+
+
+# ---------------------------------------------------------------------------
+# Cases 16, 17: coloured by the type (or merchant), with Other its own tone.
+# Walk finding: stack keys are per (book, key), and colouring by their position
+# gave one type two colours across books and wrapped the fifth key (Other) onto
+# the first merchant's colour.
+# ---------------------------------------------------------------------------
+
+def keyed(keys):
+    return [{"key": k, "label": label, "id": i} for k, label, i in keys]
+
+
+def test_case_16_one_type_keeps_one_colour_across_books():
+    p = payload([month_bucket("2026-08", "Aug 2026", {
+        "Household|type:22": cell("Household", 2000, 0), "Household|type:30": cell("Household", 3000, 0),
+        "Household|type:14": cell("Household", 9500, 0), "Moom|type:22": cell("Moom", 1500, 0)})],
+        [], [book_line("Household", 14500, 14500, 1), book_line("Moom", 1500, 1500, 1)], stack="type")
+    p["stack_keys"] = keyed([("Household|type:22", "Entertainment", 22), ("Household|type:30", "Home", 30),
+                             ("Household|type:14", "Groceries", 14), ("Moom|type:22", "Entertainment", 22)])
+    aug = bucket(model(p), "2026-08")
+    tones = {s["key"]: s["tone"] for s in aug["segments"]}
+    assert tones == {"Household|type:22": "c1", "Household|type:30": "c2", "Household|type:14": "c3",
+                     "Moom|type:22": "c1"}
+    assert _node(f"console.log(JSON.stringify(window.Trend.bars.key({json.dumps(p)})))") == [
+        {"label": "Entertainment", "tone": "c1"}, {"label": "Home", "tone": "c2"},
+        {"label": "Groceries", "tone": "c3"}]
+
+
+def test_case_17_other_takes_its_own_tone_and_never_the_first_merchants():
+    names = ["Grab Food", "Din Tai Fung", "PS.Cafe", "Toast Box"]
+    keys = [(f"Household|merchant:{i}", n, i) for i, n in enumerate(names, 1)]
+    keys += [("Household|other", "Other (15 merchants)", None), ("Moom|merchant:2", "Din Tai Fung", 2)]
+    by = {k: cell(k.split("|")[0], 1000, 0) for k, _, _ in keys}
+    p = payload([month_bucket("2026-09", "Sep 2026", by)], [],
+                [book_line("Household", 5000, 5000, 1), book_line("Moom", 1000, 1000, 1)], stack="merchant")
+    p["stack_keys"] = keyed(keys)
+    tones = {s["key"]: s["tone"] for s in bucket(model(p), "2026-09")["segments"]}
+    assert tones["Household|merchant:1"] == "c1" and tones["Household|other"] == "other"
+    assert tones["Moom|merchant:2"] == tones["Household|merchant:2"] == "c2"
+    assert [k["tone"] for k in _node(f"console.log(JSON.stringify(window.Trend.bars.key({json.dumps(p)})))")]         == ["c1", "c2", "c3", "c4", "other"]
+
+
+def test_stacked_by_book_the_tones_follow_the_books_and_there_is_no_key():
+    p = fixture("trend_merchant")
+    sep = bucket(model(p), "2026-09")
+    assert [(s["key"], s["tone"]) for s in sep["segments"]] == [("Household", "c1"), ("Larkspur", "c2")]
+    assert _node(f"console.log(JSON.stringify(window.Trend.bars.key({json.dumps(p)})))") == []

@@ -277,10 +277,20 @@
         } else {
             const chips = legend(payload, st.hidden);
             const tones = colours();
+            // Stacked by type or merchant the bars take that key's colours: the book chips
+            // claim none, and a key names each colour (the bars' own rule, Trend.bars.key).
+            const keyed = payload.stack && payload.stack !== 'book' && Trend.bars && typeof Trend.bars.key === 'function'
+                ? Trend.bars.key(payload) : [];
+            const toneOf = t => (t === 'other' ? 'var(--border-emphasis)' : tones[Number(String(t).slice(1)) - 1]);
+            const swatch = colour => `<span class="trend-swatch"${colour ? ` style="background:${esc(colour)}"` : ''}></span>`;
             if (chips.length) {
                 parts.push(`<div class="trend-legend" role="group" aria-label="Books">${chips.map((c, i) =>
                     `<button type="button" class="chip trend-book${c.on ? '' : ' is-out'}" data-trend="book" data-value="${esc(c.book)}" aria-pressed="${c.on ? 'true' : 'false'}"${c.disabled ? ' disabled title="One book always shows"' : ''}>` +
-                    `<span class="trend-swatch"${tones[i] ? ` style="background:${esc(tones[i])}"` : ''}></span>${esc(c.book)}</button>`).join('')}</div>`);
+                    `${keyed.length ? '' : swatch(tones[i])}${esc(c.book)}</button>`).join('')}</div>`);
+            }
+            if (keyed.length) {
+                parts.push(`<ul class="trend-key" aria-label="Colours">${keyed.map(k =>
+                    `<li>${swatch(toneOf(k.tone))}${esc(k.label)}</li>`).join('')}</ul>`);
             }
             drawn = view(payload, st);
             parts.push('<div class="trend-plot"></div>');

@@ -7,6 +7,9 @@
 .trend-label { color: var(--text-tertiary); font-size: var(--t-ui); }
 .trend-legend { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .trend-book[disabled] { cursor: default; opacity: 0.85; }
+.trend-key { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4);
+    color: var(--text-secondary); font-size: var(--t-ui); }
+.trend-key li { display: inline-flex; align-items: center; gap: 6px; }
 .trend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none;
     background: var(--text-tertiary); box-shadow: 0 0 0 1px var(--bg-surface); }
 .trend-plot { min-width: 0; overflow-x: auto; }

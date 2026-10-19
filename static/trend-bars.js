@@ -54,8 +54,34 @@
         return outlined ? `${plural(b.months.length, 'month')} of this quarter so far` : null;
     }
 
+    const OTHER = /(^|\|)other$/;
+
+    /** The colour each stack key takes, and the key the card shows for it. Stacked by
+     *  book, a book's place (the legend's book swatches follow it) and no key. Stacked by
+     *  type or merchant, one type or merchant takes one colour in every book, dealt in the
+     *  order first seen; Other takes its own neutral tone and comes last in the key. */
+    function tonesOf(payload) {
+        const keys = payload.stack_keys || [];
+        const byKey = {};
+        if (!payload.stack || payload.stack === 'book') {
+            keys.forEach((k, i) => { byKey[k.key] = `c${i % 4 + 1}`; });
+            return { byKey, key: [] };
+        }
+        const seen = [], key = [];
+        let other = null;
+        keys.forEach(k => {
+            if (OTHER.test(k.key)) { byKey[k.key] = 'other'; other = other || { label: k.label || 'Other', tone: 'other' }; return; }
+            const name = k.label || k.key;
+            let i = seen.indexOf(name);
+            if (i < 0) { i = seen.push(name) - 1; key.push({ label: name, tone: `c${i % 4 + 1}` }); }
+            byKey[k.key] = `c${i % 4 + 1}`;
+        });
+        return { byKey, key: other ? key.concat(other) : key };
+    }
+
     function model(payload, opts = {}) {
         const cur = payload.currency || 'SGD';
+        const tones = tonesOf(payload).byKey;
         const keyOrder = (payload.stack_keys || []).map(k => k.key);
         const labels = Object.fromEntries((payload.stack_keys || []).map(k => [k.key, k.label || k.key]));
         const bookLines = payload.books || [];
@@ -84,7 +110,8 @@
                 const c = (b.by || {})[key];
                 if (!c || !shown.has(c.book)) return;
                 const miss = missingFor(c.book);
-                const s = { key, label: labels[key] || key, book: c.book, net: c.net, spent: c.spent, back: c.back,
+                const s = { key, label: labels[key] || key, book: c.book, tone: tones[key] || `c${segments.length % 4 + 1}`,
+                    net: c.net, spent: c.spent, back: c.back,
                     cap: null, hatch: miss.size / months.length, placeholder: false, glyph: null,
                     click: narrow(months.filter(m => !miss.has(m))), hover: c.hover || null };
                 if (c.net >= 0) {
@@ -166,7 +193,6 @@
         const y = v => T + (hi - v) / (hi - lo) * ph;
         const n = Math.max(1, m.buckets.length), slot = pw / n;
         const bw = Math.max(4, Math.min(slot * 0.62, 48));
-        const keyIndex = Object.fromEntries((payload.stack_keys || []).map((k, i) => [k.key, i]));
         const every = slot < 34 ? Math.ceil(34 / slot) : 1;
         const parts = [];
         parts.push(`<defs><pattern id="${hatchId}" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">`
@@ -183,7 +209,7 @@
                 const hiY = y(Math.max(s.y0, s.y1)), drawn = Math.abs(y(s.y0) - y(s.y1));
                 const h = Math.max(s.placeholder ? 8 : 1, drawn);
                 const yy = hiY - (h - drawn);
-                const tone = s.book === 'account' ? `trend-bars__seg--${s.key}` : `trend-bars__seg--c${(keyIndex[s.key] ?? j) % 4 + 1}`;
+                const tone = s.book === 'account' ? `trend-bars__seg--${s.key}` : `trend-bars__seg--${s.tone}`;
                 g.push(`<g data-seg="${j}">`);
                 if (s.placeholder) {
                     g.push(`<rect class="trend-bars__seg trend-bars__seg--missing" x="${x}" y="${yy}" width="${bw}" height="${h}" fill="url(#${hatchId})"/>`);
@@ -278,6 +304,6 @@
     }
 
     window.Trend = window.Trend || {};
-    window.Trend.bars = { model, draw, monthsLabel };
+    window.Trend.bars = { model, draw, monthsLabel, key: payload => tonesOf(payload).key };
     if (typeof window.Trend.registerMode === 'function') window.Trend.registerMode('bars', draw);
 })();
