@@ -4475,8 +4475,14 @@ ACT['merchant-merge'] = async el => {
     const target = $('#mc-target').value;
     if (!target) { toast('Choose the merchant to merge into', { bad: true }); return; }
     const r = await sendPreviewed('POST', `/api/services/${el.dataset.id}/merge`, { target_id: Number(target) });
-    if (previewedDone(r, 'Merged')) { closeSheet(); rerender(); }
+    if (previewedDone(r, 'Merged')) { closeSheet(); afterMerge(Number(el.dataset.id), Number(target)); }
 };
+/** After a merge: on the merged-away merchant's own page, its page is gone,
+ *  so go to the page of the one it merged into; anywhere else, draw again. */
+function afterMerge(source, target) {
+    if (location.hash === `#/books/merchant/${source}`) location.hash = `#/books/merchant/${target}`;
+    else rerender();
+}
 ACT['merchant-delete'] = async el => {
     if (!confirm('Delete this merchant? You can undo it from Changes.')) return;
     const r = await act('DELETE', `/api/services/${el.dataset.id}`, undefined, 'Merchant deleted');

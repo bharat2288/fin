@@ -771,3 +771,29 @@ def test_the_rule_sheet_its_delete_and_the_merge_go_through_the_preview():
     assert "sendPreviewed('DELETE', `/api/rules/" in act("rule-delete")
     assert "sendPreviewed('POST', `/api/services/${el.dataset.id}/merge`" in act("merchant-merge")
     assert "Re-run every rule to apply a change" not in APP_JS
+
+
+@needs_node
+def test_a_merge_from_the_merged_merchants_page_lands_on_the_one_it_merged_into():
+    """Merging from the merged-away merchant's own page goes to the page of
+    the merchant it merged into: its own page is gone, and drawing it again
+    asks the server for a merchant no longer there (a 404 in the console,
+    build rule 21). From anywhere else the page is drawn again."""
+    code = "\n".join([r"""
+let drawn = 0;
+const location = { hash: '' };
+function rerender() { drawn += 1; }
+""", _function("afterMerge"), r"""
+location.hash = '#/books/merchant/182';
+afterMerge(182, 171);
+const fromItsPage = [location.hash, drawn];
+location.hash = '#/books/lists/merchants';
+afterMerge(182, 171);
+console.log(JSON.stringify({ fromItsPage, fromLists: [location.hash, drawn] }));
+"""])
+    got = _node(code)
+    assert got["fromItsPage"] == ["#/books/merchant/171", 0]
+    assert got["fromLists"] == ["#/books/lists/merchants", 1]
+    start = APP_JS.index("ACT['merchant-merge'] =")
+    merge = APP_JS[start:APP_JS.index("\n};", start) + 3]       # the handler alone
+    assert "afterMerge(" in merge and "rerender()" not in merge
