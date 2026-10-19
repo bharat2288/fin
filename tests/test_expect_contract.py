@@ -155,12 +155,14 @@ def test_empty_shells_draw_nothing_in_any_slot():
         Object.keys(window.Expect.slots).sort()]));
     })();"""
     out = run_node(code)
+    # A row the lists say nothing about (no amount, no parts) draws nothing in any slot,
+    # whichever lanes have filled them since (personal-ledger 34 fills the mark's).
     assert out[:8] == [""] * 8
     # An entry point is absent until its lane fills its shell, then a function
-    # (35 fills viewExpectation, 37 fills openLetGo).
-    assert out[8] == "function" and out[11] == "function"
-    assert out[9:11] == ["undefined"] * 2
-    assert out[12] == []
+    # (34 fills openExpectMark, 35 viewExpectation, 37 openLetGo).
+    assert out[8] == "function" and out[9] == "function" and out[11] == "function"
+    assert out[10] == "undefined"
+    assert set(out[12]) <= {"rowActions", "rowPill", "merchantRowAction", "booksSections", "queueStep", "backForFoot"}
 
 
 @needs_node
