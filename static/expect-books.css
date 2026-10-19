@@ -1,3 +1,16 @@
 /* Expect back: Books' three sections (D5), in the booksSections slot.
    A shell from personal-ledger 26, filled by personal-ledger 31. Every class here is prefixed .xb-
    (tests/test_expect_contract.py), so no rule reaches a page it was not written for. */
+
+.xb-books-all { margin-top: var(--space-4); }
+.xb-books-all > .xb-books + .xb-books { margin-top: var(--space-4); }
+.xb-books__total { font-size: var(--t-title); font-weight: var(--font-bold); white-space: nowrap; }
+.xb-books__title { color: var(--text-primary); font-weight: var(--font-semibold); }
+.xb-books__sub { margin-top: 2px; font-size: var(--t-meta); color: var(--text-tertiary); }
+.xb-books__out { margin-left: var(--space-2); color: var(--text-secondary); border-color: var(--border-default); }
+.xb-age { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.xb-age.xb-old { color: var(--semantic-warning); font-weight: var(--font-semibold); }
+
+@media (max-width: 640px) {
+    .xb-books__who { display: none; }
+}
