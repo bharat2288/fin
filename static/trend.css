@@ -48,6 +48,22 @@
 /* ==== end: account ==== */
 
 /* ==== reserved: type ==== */
+/* The type page (fin-surfaces 45): chart, merchants with their share, rows. */
+.tp-below { display: flex; flex-direction: column; gap: var(--space-4); margin-top: var(--space-4); }
+.tp-empty { margin: 0; padding: var(--space-4) 0; color: var(--text-secondary); }
+.tp-narrow { margin: 0; color: var(--text-secondary); font-size: var(--t-ui); }
+.tp-pick { min-width: 150px; }
+.tp-paid { color: var(--text-tertiary); font-size: var(--t-ui); white-space: nowrap; }
+.tp-others td:first-child { color: var(--text-tertiary); }
+.tp-share { width: 38%; white-space: nowrap; }
+.tp-share > .num { margin-left: var(--space-2); color: var(--text-tertiary); font-size: var(--t-ui); font-variant-numeric: tabular-nums; }
+.tp-bar { display: inline-block; vertical-align: middle; width: calc(100% - 4em); height: 6px; border-radius: 3px;
+    background: var(--border-subtle); overflow: hidden; }
+.tp-bar > i { display: block; height: 100%; background: var(--chart-1); }
+@media (max-width: 560px) {
+    .tp-share { width: auto; }
+    .tp-bar { display: none; }
+}
 /* ==== end: type ==== */
 
 /* ==== reserved: types ==== */
