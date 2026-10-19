@@ -337,7 +337,7 @@ let pastAnswer = null;         // a question waiting on the sheet (askPast): clo
 /** A sheet: a right drawer on the desk, a bottom sheet on a phone (folio's
  *  kit drawer). eyebrow sits over the title; center makes a short confirm;
  *  foot is a row of buttons kept in view under the body. */
-function openSheet(title, body, { sub = '', eyebrow = '', center = false, foot = '' } = {}) {
+function openSheet(title, body, { sub = '', eyebrow = '', center = false, foot = '', focusSheet = false } = {}) {
     closeSheet();
     const root = $('#sheets');
     root.innerHTML = `<div class="scrim" data-act="scrim">
@@ -351,7 +351,9 @@ function openSheet(title, body, { sub = '', eyebrow = '', center = false, foot =
     const keys = e => { if (e.key === 'Escape') closeSheet(); };
     document.addEventListener('keydown', keys);
     sheetCloser = () => document.removeEventListener('keydown', keys);
-    setTimeout(() => (sheet.querySelector('input, select, textarea, .choice, .btn.primary') || sheet).focus(), 30);
+    // focusSheet: the sheet itself takes focus, never one of its answers (a
+    // question whose answers are not preselected, as the preview's are not).
+    setTimeout(() => ((focusSheet ? null : sheet.querySelector('input, select, textarea, .choice, .btn.primary')) || sheet).focus(), 30);
     return sheet;
 }
 function closeSheet() {
@@ -1192,8 +1194,12 @@ ACT['home-guess-yes'] = async el => {
     const pattern = suggestPattern(row.description);
     const body = { tx_id: row.id, service_name: el.dataset.merchant || row.service_name || titleCase(pattern || row.description),
         type_id: Number(el.dataset.type), apply_scope: pattern ? 'service_default' : 'transaction', pattern, match_type: 'contains', suggestion_visible: true };
-    const r = await act('POST', '/api/transactions/resolve', body, 'Labelled');
-    if (r) rerender();
+    const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
+    if (r.cancelled) return;
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return; }
+    toast(previewedWords(r, 'Labelled'), { undo: r.change });
+    refreshFrame();
+    rerender();
 };
 
 ACT['looks-right'] = async el => {
@@ -2483,13 +2489,16 @@ async function saveResolve(body, group = [], { quiet = false, check = null, onSc
         body.past = answer;
         past = { answer, n: svc.rows_to_check };
     }
-    const r = await send('POST', '/api/transactions/resolve', body);
+    // Teaching a merchant fin holds a new default reaches its past rows
+    // through the preview, as the merchant sheet does (fin-surfaces 21).
+    const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
+    if (r.cancelled) return { ok: false, resolved: false, cancelled: true, changes: [], labelled: 0, labelledIds: [], error: 'Nothing was saved.' };
     if (!r.ok) {
         const error = r.data.error || 'That did not work; nothing was changed';
         if (!quiet) toast(error, { bad: true });
         return { ok: false, resolved: false, changes: [], labelled: 0, labelledIds: [], error };
     }
-    if (!quiet) { toast('Saved', { undo: r.change }); refreshFrame(); }
+    if (!quiet) { toast(previewedWords(r, 'Saved'), { undo: r.change }); refreshFrame(); }
     const changes = r.change ? [r.change] : [];
     // The group's other rows the rule did not reach (a merchant text too plain
     // for a rule, or rows whose text the pattern misses) are labelled one by one.
@@ -3943,6 +3952,63 @@ ACT['past-answer'] = el => {
     closeSheet();
     if (answer) answer(el.dataset.past);
 };
+
+// The preview (fin-surfaces 21): a change that would relabel past rows is
+// answered first by the server with what it would do (409, `preview`), and
+// asked once in the one-confirm drawer: Cancel, Only new rows, or Apply to N
+// past rows, neither answer focused first. The answer goes back with the
+// preview's token; a token that no longer holds is refused by the server.
+const PREVIEW_FIELD = { book: ['book', 'Book'], type_id: ['type', 'Type'] };
+/** The drawer's parts for a preview: {eyebrow, title, body, foot}. */
+function previewParts(p) {
+    const name = p.subject.name;
+    const words = p.change.map(c => (PREVIEW_FIELD[c.field] || [c.field, c.field]));
+    const title = p.change.length === 1 ? `Change ${esc(name)}’s ${words[0][0]} to ${esc(p.change[0].to)}?` : `Change ${esc(name)}’s ${words.map(w => w[0]).join(' and ')}?`;
+    const span = m => m.first === m.last ? monthName(m.first, { short: true }) : `${monthName(m.first, { short: true })} – ${monthName(m.last, { short: true })}`;
+    const facts = p.money && p.months ? `<div class="prev-facts">
+        <div><span class="cap">Moves</span>${p.money.map(m => `<b class="num">${esc(money(m.amount_minor))}</b><span class="sub">${esc(m.from)} → ${esc(m.to)}</span>`).join('')}</div>
+        <div><span class="cap">Months</span><b class="num">${p.months.count}</b><span class="sub">${esc(span(p.months))}</span></div></div>` : '';
+    const leftOut = (p.left_out || []).length ? `<p class="sub">Not in the S$ figure: ${p.left_out.map(x => `${esc(money(x.amount_minor, x.currency))} in ${esc(monthName(x.month, { short: true }))} (${esc(x.reason)})`).join('; ')}.</p>` : '';
+    const kept = [p.checked ? `Of them, <b>${p.checked} you checked</b>.` : '', p.chosen ? `<b>${p.chosen} you chose</b> stay as they are.` : ''].filter(Boolean).join(' ');
+    const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b>${x.source === 'checked' ? ' <span class="prev-mark">checked</span>' : ''}</td></tr>`);
+    const body = `<ul class="diff">${p.change.map((c, i) => `<li>${words[i][1]}: <s>${esc(c.from)}</s> → <b>${esc(c.to)}</b></li>`).join('')}</ul>
+        <p class="q">This changes ${plural(p.count, 'past row')}</p>
+        ${facts}${leftOut}${kept ? `<p class="sub">${kept}</p>` : ''}
+        <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>
+        <button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`;
+    return { eyebrow: `${esc(name)} · ${words.map(w => w[0]).join(' and ')}`, title, body, foot };
+}
+/** Ask the preview: 'apply', 'only_new', or null when it is closed. */
+function askPreview(p) {
+    const parts = previewParts(p);
+    return new Promise(done => {
+        openSheet(parts.title, parts.body, { eyebrow: parts.eyebrow, center: true, foot: parts.foot, focusSheet: true });
+        pastAnswer = done;
+    });
+}
+ACT['preview-answer'] = el => ACT['past-answer'](el);
+// See all: the merchant's own page lists every one of its rows, newest first.
+ACT['preview-all'] = el => { closeSheet(); location.hash = `#/books/merchant/${el.dataset.id}`; };
+/** A write that may reach past rows: sent once; when the server answers with
+ *  a preview, the drawer asks, and the answer goes back (under `key`) with
+ *  the preview's token. Returns send's result, or {ok: false, cancelled}
+ *  when the drawer was closed: nothing was written. */
+async function sendPreviewed(method, url, body, { key = 'past' } = {}) {
+    const r = await send(method, url, body);
+    if (r.status !== 409 || !r.data.preview) return r;
+    const answer = await askPreview(r.data.preview);
+    if (!answer) return { ok: false, cancelled: true, status: 409, data: { error: 'Nothing was saved.' }, change: null };
+    const answered = await send(method, url, { ...body, [key]: answer, token: r.data.preview.token });
+    return { ...answered, answered: { past: answer, count: r.data.preview.count } };
+}
+/** What a previewed write did, in words, for its toast. */
+function previewedWords(r, done) {
+    const a = r.answered;
+    if (!a || !a.count) return done;
+    if (a.past === 'apply') return `${done}, and ${plural(a.count, 'past row')} changed. One change in Changes, with Undo.`;
+    return `${done}. Only new rows take it; the ${plural(a.count, 'past row')} keep theirs, marked checked.`;
+}
 ACT['each-on'] = async el => {
     const s = await merchantById(Number(el.dataset.id));
     if (!s) { toast('This merchant is no longer in fin', { bad: true }); closeSheet(); return; }
@@ -4153,7 +4219,7 @@ ACT.merchant = async el => {
     const others = [...ACT.__services.values()].filter(x => x.id !== s.id);
     openSheet(esc(s.name), `<div class="fields">${merchantFields(r, s)}
         <label class="check"><input type="checkbox" id="mc-oneoff"${s.is_one_off ? ' checked' : ''}> One-off</label>
-        <p class="small muted">${plural(s.txn_count, 'row')} · ${plural(s.rule_count, 'rule')}${(s.rules || []).length ? ': ' + s.rules.map(x => esc(x.pattern)).join(', ') : ''}. A change of book or type is written to the rows that take their label from it.</p></div>
+        <p class="small muted">${plural(s.txn_count, 'row')} · ${plural(s.rule_count, 'rule')}${(s.rules || []).length ? ': ' + s.rules.map(x => esc(x.pattern)).join(', ') : ''}. A change of book or type that reaches its past rows is shown first, to apply to them or to new rows only.</p></div>
         <button class="btn primary block" data-act="merchant-save" data-id="${s.id}">Save</button>
         <hr class="rule"><h3>Clean up</h3>
         <div class="sl-merge"><label class="field"><span>Merge into</span><select id="mc-target"><option value="">Choose a merchant</option>${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>
@@ -4164,8 +4230,12 @@ ACT['merchant-save'] = async el => {
     const body = { name: $('#mc-name').value.trim(), book: $('#mc-book').value || null, type_id: $('#mc-type').value ? Number($('#mc-type').value) : null,
         notes: $('#mc-notes').value.trim() || null,
         exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0, is_one_off: $('#mc-oneoff').checked ? 1 : 0 };
-    const r = await act('PUT', `/api/services/${el.dataset.id}`, body, 'Merchant saved');
-    if (r) { closeSheet(); rerender(); }
+    const r = await sendPreviewed('PUT', `/api/services/${el.dataset.id}`, body);
+    if (r.cancelled) return;
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return; }
+    toast(previewedWords(r, 'Merchant saved'), { undo: r.change });
+    refreshFrame();
+    closeSheet(); rerender();
 };
 ACT['merchant-merge'] = async el => {
     const target = $('#mc-target').value;

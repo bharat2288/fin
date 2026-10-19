@@ -375,7 +375,7 @@ def test_a_merchants_type_changed_on_its_sheet_reaches_checked_fields_and_leaves
                  cat_source="manual")
     before = entries(client)
 
-    resp = client.put(f"/api/services/{svc}", json={"type_id": type_id(conn, "Transport")})
+    resp = client.put(f"/api/services/{svc}", json={"type_id": type_id(conn, "Transport"), "past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     assert resp.get_json()["recategorized"] == 4
@@ -403,7 +403,7 @@ def test_a_merchants_book_change_leaves_a_book_a_rule_overrides(client, conn, st
     corp = row(conn, statement, "SAMPLE AIR CORP 0042", book="Kalesh", service_id=svc,
                sources=("checked", "merchant"), cat_source="manual")
 
-    resp = client.put(f"/api/services/{svc}", json={"book": "Moom"})
+    resp = client.put(f"/api/services/{svc}", json={"book": "Moom", "past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     assert held(client, plain) == ("Moom", "Travel", "merchant", "merchant")
@@ -543,7 +543,8 @@ def test_a_hand_set_row_with_no_sources_yet_is_neither_reached_nor_waiting(clien
     conn.commit()
 
     assert by_review not in waiting(client)
-    resp = client.put(f"/api/services/{svc}", json={"book": "Kalesh", "type_id": type_id(conn, "Transport")})
+    resp = client.put(f"/api/services/{svc}", json={"book": "Kalesh", "type_id": type_id(conn, "Transport"),
+                                                   "past": "apply"})
 
     assert resp.status_code == 200
     assert held(client, by_review) == ("Moom", "Travel", None, None)
