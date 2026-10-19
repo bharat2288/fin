@@ -4503,7 +4503,7 @@ def api_rules_create():
         }
         try:
             plan = relabel_preview.rule_change(conn, None, proposed, _paynow_fallback_label)
-        except LookupError as e:
+        except relabel_preview.Gone as e:
             return jsonify({"error": str(e)}), 400
         refused = _previewed_answer(conn, plan, past, data.get("token"))
         if refused is not None:
@@ -4581,7 +4581,7 @@ def api_rules_update(rule_id):
             return gone
         try:
             plan = relabel_preview.rule_change(conn, rule_id, proposed, _paynow_fallback_label)
-        except LookupError as e:
+        except relabel_preview.Gone as e:
             return jsonify({"error": str(e)}), 400
         refused = _previewed_answer(conn, plan, past, data.get("token"))
         if refused is not None:

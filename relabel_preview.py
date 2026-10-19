@@ -78,6 +78,12 @@ class Refused(ValueError):
     """An answer the route cannot take; nothing was written."""
 
 
+class Gone(LookupError):
+    """The preview's two fixed refusals: the merchant or the rule it was asked
+    about is no longer in fin. Its words are the client's to read; no other
+    error's are."""
+
+
 @dataclass
 class Planned:
     """One row the change relabels: `apply` and `only_new` are the label
@@ -184,7 +190,7 @@ def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
         "SELECT id, name, book, type_id, review_each_time FROM services WHERE id = ?", (service_id,)
     ).fetchone()
     if merchant is None:
-        raise LookupError("This merchant is no longer in fin")
+        raise Gone("This merchant is no longer in fin")
     plan = Plan(
         subject={"kind": "merchant", "id": merchant["id"], "name": merchant["name"]},
         change={f: (merchant[f], v) for f, v in label.items()},
@@ -433,7 +439,7 @@ def merge_change(conn: sqlite3.Connection, source_id: int, target_id: int) -> Pl
     they are the target's now, but not by its default."""
     target = conn.execute("SELECT id, name, book, type_id FROM services WHERE id = ?", (target_id,)).fetchone()
     if target is None:
-        raise LookupError("This merchant is no longer in fin")
+        raise Gone("This merchant is no longer in fin")
     plan = merchant_change(conn, source_id, {"book": target["book"], "type_id": target["type_id"]})
     for planned in plan.rows:
         planned.only_new = _accept_all(planned.held)
@@ -531,14 +537,14 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
     if rule_id is not None:
         held_rule = next((r for r in rules if r["id"] == rule_id), None)
         if held_rule is None:
-            raise LookupError("This rule is no longer in fin")
+            raise Gone("This rule is no longer in fin")
     after_rule = None
     if proposed is not None:
         after_rule = {**(held_rule or _NEW_RULE), **proposed}
         merchant = conn.execute("SELECT book, type_id, review_each_time FROM services WHERE id = ?",
                                 (after_rule["service_id"],)).fetchone()
         if merchant is None:
-            raise LookupError("This merchant is no longer in fin")
+            raise Gone("This merchant is no longer in fin")
         after_rule.update(dict(merchant))
     after_rules = sorted([r for r in rules if r["id"] != rule_id] + ([after_rule] if after_rule else []),
                          key=db.match_order)

@@ -28,8 +28,10 @@ import subprocess
 
 import pytest
 
+import app as fin_app
 import db
 import mcp_tools
+import relabel_preview
 from test_book_and_type_switch import (  # noqa: F401 (statement is a fixture)
     merchant, statement, type_id,
 )
@@ -610,6 +612,26 @@ def test_a_rule_for_a_merchant_fin_does_not_hold_is_refused(client, conn, indigo
 
     assert (added.status_code, edited.status_code) == (400, 400)
     assert added.get_json()["error"] == edited.get_json()["error"] == "This merchant is no longer in fin"
+    assert book_state(conn) == before
+
+
+def test_an_internal_error_in_the_rule_preview_is_never_echoed_to_the_client(client, conn, indigo, monkeypatch):
+    """The house rule: no raw exception text to a client. A KeyError (a
+    LookupError) inside the preview is not one of its two refusals: it falls
+    to fin's generic answer, and nothing is written."""
+    def broken(_conn):
+        raise KeyError("internal_column_name")
+
+    monkeypatch.setattr(relabel_preview, "_names", broken)
+    monkeypatch.setitem(fin_app.app.config, "PROPAGATE_EXCEPTIONS", False)
+    before = book_state(conn)
+
+    added = client.post("/api/rules", json={"pattern": "SAMPLE ELSEWHERE", "service_id": indigo["indigo"]})
+    edited = client.put(f"/api/rules/{indigo['rule']}", json={"pattern": "INDIGO"})
+
+    for resp in (added, edited):
+        assert resp.status_code == 500
+        assert "internal_column_name" not in resp.get_data(as_text=True)
     assert book_state(conn) == before
 
 
