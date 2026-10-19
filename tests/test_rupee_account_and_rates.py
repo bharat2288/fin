@@ -557,25 +557,25 @@ def test_currency_change_is_not_guessed_when_a_rate_or_the_opening_balance_is_mi
     assert line["change_minor"] is None and "no balance" in line["why"]
     assert HDFC in change["note"]
 
-    # July opens on June's balance, and June's rate is the latest saved for
-    # both ends of July: the same balance at the same rate, so no change.
+    # July opens on June's balance, but June's rate is from before July, so it
+    # is no rate for July's end (ruling 4): July's change is not worked out.
     july = sheet(client, "2026-07")["currency_change"]
-    assert (july["minor"], july["lines"][0]["opening_minor"]) == (0, CLOSING)
-    assert july["lines"][0]["end"]["exact"] is False
+    assert (july["minor"], july["lines"][0]["opening_minor"]) == (None, CLOSING)
+    assert july["lines"][0]["why"] == "no saved INR/SGD rate from 2026-07-01 to 2026-07-31"
 
 
 def test_currency_change_is_not_guessed_when_the_start_has_no_rate(client, monkeypatch):
     rupee = make_account(client, HDFC, "bank", currency="INR")
     enter(client, rupee, "100000.00", "2026-03-31")
     bring_in(client, monkeypatch)
-    set_rate(client, "2026-06-30", "0.01534")   # nothing saved on or before 31 May
+    set_rate(client, "2026-06-30", "0.01534")   # nothing saved in May
 
     change = sheet(client, "2026-06")["currency_change"]
 
     assert change["minor"] is None
     (line,) = change["lines"]
     assert line["opening_minor"] == END_OF_MAY and line["change_minor"] is None
-    assert line["why"] == "no saved INR/SGD rate on or before 2026-05-31"
+    assert line["why"] == "no saved INR/SGD rate from 2026-05-01 to 2026-05-31"
 
 
 # --- rupees are never added to SGD figures as if they were SGD ------------------

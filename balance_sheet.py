@@ -35,14 +35,16 @@ owed negative. A row's amount is positive for money out.
 
 An account kept in another currency (the rupee account) shows its balance in
 its own currency and, beside it, its value in SGD at the saved rate for the
-date: that day's rate, or failing it the latest earlier saved one, said on the
-line. Its SGD value joins the totals. With no saved rate on or before the date
-it is shown in its own currency only and left out of the totals, and the sheet
-says so. The SGD value is decimal arithmetic rounded half-even to the cent.
+date: that day's rate, or failing it the latest earlier one saved in the same
+month, said on the line (`valued`). Its SGD value joins the totals. A rate
+dated before the month is no rate for it (ruling 4 of the trend pages): with
+no saved rate in the month on or before the date the balance is shown in its
+own currency only and left out of the totals, and the sheet says so. The SGD
+value is decimal arithmetic rounded half-even to the cent.
 
 Currency change for the month is, for each such account, its balance at the
 start of the month (the previous month's end) valued at the end rate, less
-the same balance valued at the start rate.
+the same balance valued at the start rate, each rate saved in its own month.
 
 Everything here is worked out on read; nothing is stored.
 """
@@ -306,8 +308,62 @@ def balance_on(conn: sqlite3.Connection, account, on: str) -> int | None:
     return _moved(conn, account["id"], account["type"], anchor, on, account["currency"])[0]
 
 
-def _no_rate(currency: str, on: str) -> str:
-    return f"no saved {rates.pair_for(currency)} rate on or before {on}"
+NO_RATE_KEPT = "a currency fin keeps no rate for"
+
+
+def _no_rate(currency: str, on: str, not_before: str | None = None) -> str:
+    pair = rates.pair_for(currency)
+    if not_before is None:
+        return f"no saved {pair} rate on or before {on}"
+    return f"no saved {pair} rate from {not_before} to {on}"
+
+
+def _rate_on(conn: sqlite3.Connection, currency: str, on: str, not_before: str | None) -> dict | None:
+    """The saved rate a figure on a day uses: the latest on or before the
+    day, and with `not_before` none dated before that day (ruling 4: a rate
+    from before the month is no rate for it). None when there is none."""
+    found = rates.on_or_before(conn, rates.pair_for(currency), on)
+    if found is None or (not_before is not None and found["date"] < not_before):
+        return None
+    return found
+
+
+def _month_start(on: str) -> str:
+    """The first day of the month a day (YYYY-MM-DD) is in: the earliest a
+    rate for a figure on that day may be dated."""
+    return f"{on[:7]}-01"
+
+
+def valued(conn: sqlite3.Connection, amount_minor: int, currency: str, upto: str,
+           not_before: str | None = None) -> dict:
+    """An amount in whole minor units of `currency`, valued in the currency of
+    the totals at the latest saved rate on or before `upto` (a day,
+    YYYY-MM-DD). With `not_before`, a rate dated before that day counts as no
+    rate: the trend pages and the balance sheet pass the month's first day.
+
+    Returns `value_minor` (None when it cannot be valued), `rate` (the rate
+    used as a line shows it: pair, rate, date, asked, exact, source, text;
+    None for an amount already in the currency of the totals or with no rate)
+    and `left_out` (why it has no value, or None). The value is decimal
+    arithmetic rounded half-even to the cent. Only saved rates are read;
+    nothing is ever fetched, and with none nothing is guessed.
+    """
+    if currency == TOTAL_CURRENCY:
+        return {"value_minor": amount_minor, "rate": None, "left_out": None}
+    if currency not in money.MINOR_UNIT_DIGITS:
+        return {"value_minor": None, "rate": None, "left_out": f"in {currency}, {NO_RATE_KEPT}"}
+    found = _rate_on(conn, currency, upto, not_before)
+    if found is None:
+        return {
+            "value_minor": None,
+            "rate": None,
+            "left_out": f"in {currency}, {_no_rate(currency, upto, not_before)}",
+        }
+    return {
+        "value_minor": money.convert_minor(amount_minor, found["value"], currency, TOTAL_CURRENCY),
+        "rate": _rate_shown(currency, found),
+        "left_out": None,
+    }
 
 
 def _rate_shown(currency: str, rate: dict) -> dict:
@@ -394,27 +450,18 @@ def _part_line(conn: sqlite3.Connection, account, whole: int, currency: str, nam
 
 def _valued(conn: sqlite3.Connection, balance: int, currency: str, upto: str) -> dict:
     """A balance as a line shows it: in its own currency, and what it is worth
-    in the currency of the totals, with the rate that says so or why it is
-    left out of them."""
-    if currency == TOTAL_CURRENCY:
-        value, rate, left_out = balance, None, None
-    elif currency not in money.MINOR_UNIT_DIGITS:
-        value, rate, left_out = None, None, f"in {currency}, a currency fin keeps no rate for"
-    else:
-        found = rates.on_or_before(conn, rates.pair_for(currency), upto)
-        if found is None:
-            value, rate, left_out = None, None, f"in {currency}, {_no_rate(currency, upto)}"
-        else:
-            value = money.convert_minor(balance, found["value"], currency, TOTAL_CURRENCY)
-            rate, left_out = _rate_shown(currency, found), None
+    in the currency of the totals at a rate saved in the month (`valued`),
+    with the rate that says so or why it is left out of them."""
+    shown = valued(conn, balance, currency, upto, not_before=_month_start(upto))
+    value = shown["value_minor"]
     return {
         "balance_minor": balance,
         "balance": anchors.format_amount(balance, currency),
         "value_minor": value,
         "value": None if value is None else anchors.format_amount(value, TOTAL_CURRENCY),
-        "rate": rate,
+        "rate": shown["rate"],
         "in_total": value is not None,
-        "left_out": left_out,
+        "left_out": shown["left_out"],
     }
 
 
@@ -544,8 +591,8 @@ def _currency_change(conn: sqlite3.Connection, accounts: list, as_at: date, name
     is rounded to the cent on its own, as the sheet shows it, so the figure
     is the difference of two figures the sheets show.
 
-    An account with no balance at the start, or no saved rate for either day,
-    has no figure: none is guessed, the total is then None, and the note says
+    An account with no balance at the start, or no rate saved in its month on
+    or before either day, has no figure: none is guessed, the total is then None, and the note says
     which account and why.
     """
     start = (as_at.replace(day=1) - timedelta(days=1)).isoformat()
@@ -571,18 +618,20 @@ def _currency_change(conn: sqlite3.Connection, accounts: list, as_at: date, name
         }
         lines.append(line)
         if currency not in money.MINOR_UNIT_DIGITS:
-            line["why"] = f"in {currency}, a currency fin keeps no rate for"
+            line["why"] = f"in {currency}, {NO_RATE_KEPT}"
             continue
         opening = balance_on(conn, account, start)
         if opening is None:
             line["why"] = f"no balance on {start}"
             continue
         line.update(opening_minor=opening, opening=anchors.format_amount(opening, currency))
-        pair = rates.pair_for(currency)
-        start_rate = rates.on_or_before(conn, pair, start)
-        end_rate = rates.on_or_before(conn, pair, end)
+        # Each end at a rate saved in its own month, as each month's sheet
+        # values it (ruling 4).
+        start_rate = _rate_on(conn, currency, start, _month_start(start))
+        end_rate = _rate_on(conn, currency, end, _month_start(end))
         if start_rate is None or end_rate is None:
-            line["why"] = _no_rate(currency, start if start_rate is None else end)
+            on = start if start_rate is None else end
+            line["why"] = _no_rate(currency, on, _month_start(on))
             continue
         at_start = money.convert_minor(opening, start_rate["value"], currency, TOTAL_CURRENCY)
         at_end = money.convert_minor(opening, end_rate["value"], currency, TOTAL_CURRENCY)
