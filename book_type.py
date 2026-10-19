@@ -151,9 +151,10 @@ INCOME_KINDS = (
 SPENDING = "spending"
 INCOME = "income"
 
-# Book for a merchant no rule knows is proposed by its type, never by the
-# paying account. These types propose Moom; ASKS_FOR_BOOK types propose
-# nothing and the operator must say; every other type proposes Household.
+# Book for a merchant no rule knows is proposed by its type. These types
+# propose Moom; ASKS_FOR_BOOK types propose nothing and the operator must say;
+# every other type proposes Household. A picker's first value may instead come
+# from the operator's history or the paying account (book_prefill.py).
 PROPOSES_MOOM = ("Advertising", "Stock purchases", "Payment fees")
 ASKS_FOR_BOOK = ("Software & AI tools",)
 

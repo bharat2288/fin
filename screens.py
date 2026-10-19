@@ -11,6 +11,8 @@
   so until a file that ties is imported for the same account and day. "Known,
   leave it" sets one aside: it leaves Home and the top of the queue and stays
   marked refused on its account (02, ruling 8).
+- The merchants for which the operator said No to fin's suggestion to check
+  each row (fin-surfaces 14): fin does not ask again for them.
 
 None of this is in a tracked table: looking, or setting a refusal aside, is
 not a change to the book and is not in the history.
@@ -23,7 +25,10 @@ import sqlite3
 
 LAST_LOOKED = "last_looked_entry"
 LAST_LOOKED_AT = "last_looked_at"   # when the operator last looked (UTC), for Home's line
-KEYS = (LAST_LOOKED, LAST_LOOKED_AT)
+# The merchants whose "check each row from now on?" was answered No: a JSON
+# list of merchant ids. No is for good; nothing takes a merchant off it.
+CHECK_EACH_ROW_DECLINED = "check_each_row_declined"
+KEYS = (LAST_LOOKED, LAST_LOOKED_AT, CHECK_EACH_ROW_DECLINED)
 
 # What a chat-side import answers while the switch (chat_writes.py) is off.
 IMPORTS_OFF = (
@@ -126,6 +131,19 @@ def claude_marks(conn: sqlite3.Connection) -> dict:
         elif tbl == "accounts":
             touch(accounts, row_id, entry_id)
     return {"last_looked": mark or None, "rows": rows, "accounts": accounts}
+
+
+def declined_check_each_row(conn: sqlite3.Connection) -> list[int]:
+    """The merchants the operator said No to checking each row for."""
+    value = _get(conn, CHECK_EACH_ROW_DECLINED)
+    return json.loads(value) if value else []
+
+
+def decline_check_each_row(conn: sqlite3.Connection, service_id: int) -> None:
+    """Keep a No for this merchant; a second No changes nothing."""
+    held = declined_check_each_row(conn)
+    if service_id not in held:
+        _set(conn, CHECK_EACH_ROW_DECLINED, json.dumps(held + [service_id]))
 
 
 # ---------------------------------------------------------------------------
