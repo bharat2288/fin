@@ -340,7 +340,7 @@
     }
 
     /** The mode: draw(el, payload, opts) → {pick(id), toggle(id), showAll(), redraw()}.
-     *  opts: {off, picked, onChange(state), onMonth(month), onImport(month)}. */
+     *  opts: {off, picked, onChange(state), onMonth(months, label), onImport(month)}; months is a list, as the bars send it. */
     function draw(el, payload, opts) {
         opts = opts || {};
         const state = { off: new Set(opts.off || []), picked: opts.picked === undefined ? null : opts.picked };
@@ -386,7 +386,7 @@
                     if (r.dataset.bar) r.addEventListener('click', () => {
                         const bar = m.bars[k];
                         if (bar.hatched) { if (opts.onImport) opts.onImport(bar.month); }
-                        else if (opts.onMonth) opts.onMonth(bar.month);
+                        else if (opts.onMonth) opts.onMonth([bar.month], Trend.bars && Trend.bars.monthsLabel ? Trend.bars.monthsLabel([bar.month]) : bar.month);
                     });
                 });
             });

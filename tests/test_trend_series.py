@@ -279,8 +279,8 @@ def test_case_44_a_month_whose_refunds_exceed_its_spend_dips_below_zero(conn):
 def test_the_contract_fixtures_figures_come_out_of_the_function(conn):
     """24's series fixture, seeded as rows, reads back through series().
 
-    The fixture labels itself stack_by "book" but carries the type at the
-    stack-key level; those figures are what stack_by "type" answers."""
+    The fixture's own stack_by label is what the call is asked for, so the label
+    and the stack keys under it cannot disagree again."""
     fixture = json.loads((FIXTURES / "trend_series.json").read_text(encoding="utf-8"))
     b = Book(conn)
     grab = tf.merchant(conn, "Grab", "Household", "Transport")
@@ -294,7 +294,7 @@ def test_the_contract_fixtures_figures_come_out_of_the_function(conn):
                 if c["back"]:
                     b.add(card[book], f"{month}-20", -c["back"], "GRAB", service_id=grab,
                           book=book, type_name=type_name)
-    got = trend_series.series(conn, ("merchant", grab), fixture["start"], fixture["end"], "type")
+    got = trend_series.series(conn, ("merchant", grab), fixture["start"], fixture["end"], fixture["stack_by"])
     assert got["series"] == fixture["series"]
 
 
