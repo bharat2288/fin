@@ -499,17 +499,20 @@ def test_case_37a_keep_it_or_to_pay_back_is_drawn_from_the_fixture_shape():
 
 
 @needs_node
-def test_the_whole_fixture_draws_three_cards_in_the_step():
+def test_the_whole_fixture_draws_four_cards_in_the_step():
     f = load("queue_paybacks")
     asks = load("refund_ask_which")["asks"]
     words = text(step(f, asks))
-    assert "Back for… 3" in words   # Jay's, Kim's and the Amazon refund; the plain row is not counted
+    # Jay's, Kim's, Lena's waiting payment (personal-ledger 42) and the Amazon refund; the plain
+    # row is not counted.
+    assert "Back for… 4" in words
 
 
 @needs_node
 def test_an_empty_lane_draws_nothing():
     assert step({"paybacks": [], "waiting_offers": []}) == ""
-    assert step(load("queue_paybacks") | {"paybacks": [load("queue_paybacks")["paybacks"][2]]}) == ""
+    assert step(load("queue_paybacks") | {"paybacks": [load("queue_paybacks")["paybacks"][2]],
+                                          "waiting_offers": []}) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -533,4 +536,4 @@ def test_case_55_the_lane_is_one_read_whatever_its_size(conn, book):
         spent = row(conn, b, b.everyday_card, f"2026-09-{1 + i % 28:02d}", f"DINNER {i}", 10000 + i, type_name="Dining")
         mark(conn, spent, 5000, names=(p["Jay"], p["Kim"]) if i % 2 else ())
         row(conn, b, b.savings, f"2026-10-{1 + i % 28:02d}", f"PAYNOW FROM JAY TAN {i:04d}", -1000 - i, flow="review")
-    assert reads(conn) == small <= 4
+    assert reads(conn) == small <= 5   # personal-ledger 42 adds the waiting offers' one read
