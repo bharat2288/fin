@@ -1,0 +1,374 @@
+{
+  "subject": {
+    "kind": "merchant",
+    "id": 101,
+    "name": "Grab"
+  },
+  "span": "12M",
+  "to": "2026-10",
+  "stack": "book",
+  "currency": "SGD",
+  "buckets": [
+    {
+      "key": "2025-11",
+      "label": "Nov 2025",
+      "months": [
+        "2025-11"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 21000,
+          "back": 0,
+          "net": 21000,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2025-12",
+      "label": "Dec 2025",
+      "months": [
+        "2025-12"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 34400,
+          "back": 2400,
+          "net": 32000,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-01",
+      "label": "Jan 2026",
+      "months": [
+        "2026-01"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 22000,
+          "back": 0,
+          "net": 22000,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-02",
+      "label": "Feb 2026",
+      "months": [
+        "2026-02"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 22000,
+          "back": 1500,
+          "net": 20500,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-03",
+      "label": "Mar 2026",
+      "months": [
+        "2026-03"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 24500,
+          "back": 1500,
+          "net": 23000,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-04",
+      "label": "Apr 2026",
+      "months": [
+        "2026-04"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 21500,
+          "back": 0,
+          "net": 21500,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-05",
+      "label": "May 2026",
+      "months": [
+        "2026-05"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 24000,
+          "back": 0,
+          "net": 24000,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-06",
+      "label": "Jun 2026",
+      "months": [
+        "2026-06"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 23760,
+          "back": 1200,
+          "net": 22560,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-07",
+      "label": "Jul 2026",
+      "months": [
+        "2026-07"
+      ],
+      "so_far": false,
+      "missing": {
+        "Household": [
+          "2026-07"
+        ]
+      },
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 4200,
+          "back": 0,
+          "net": 4200,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-08",
+      "label": "Aug 2026",
+      "months": [
+        "2026-08"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 20800,
+          "back": 1800,
+          "net": 19000,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 3700,
+          "back": 0,
+          "net": 3700,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-09",
+      "label": "Sep 2026",
+      "months": [
+        "2026-09"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 21240,
+          "back": 1800,
+          "net": 19440,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 6100,
+          "back": 0,
+          "net": 6100,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-10",
+      "label": "Oct 2026",
+      "months": [
+        "2026-10"
+      ],
+      "so_far": true,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 39000,
+          "back": 0,
+          "net": 39000,
+          "inr_minor": null
+        },
+        "Larkspur": {
+          "book": "Larkspur",
+          "spent": 5240,
+          "back": 0,
+          "net": 5240,
+          "inr_minor": null
+        }
+      }
+    }
+  ],
+  "books": [
+    {
+      "book": "Household",
+      "net": 264000,
+      "spent": 274200,
+      "back": 10200,
+      "avg": 24000,
+      "months_counted": 11,
+      "vs_prev_pct": 10,
+      "rows": 31,
+      "last_date": "2026-10-12"
+    },
+    {
+      "book": "Larkspur",
+      "net": 48840,
+      "spent": 48840,
+      "back": 0,
+      "avg": 4070,
+      "months_counted": 12,
+      "vs_prev_pct": null,
+      "rows": 9,
+      "last_date": "2026-10-03"
+    }
+  ],
+  "stack_keys": [
+    {
+      "key": "Household",
+      "label": "Household",
+      "id": null
+    },
+    {
+      "key": "Larkspur",
+      "label": "Larkspur",
+      "id": null
+    }
+  ],
+  "stack_options": [],
+  "left_out": [],
+  "few": null,
+  "empty": null
+}

@@ -1,0 +1,206 @@
+{
+  "account": {
+    "id": 32,
+    "name": "Rupee savings",
+    "currency": "INR",
+    "type": "bank",
+    "part_of": null
+  },
+  "span": "12M",
+  "to": "2026-10",
+  "cur": "INR",
+  "months": [
+    {
+      "month": "2025-11",
+      "balance": null,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2025-11-30",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": "Balances start on 1 Jan 2026, as on the balance sheet"
+    },
+    {
+      "month": "2025-12",
+      "balance": null,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2025-12-31",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": "Balances start on 1 Jan 2026, as on the balance sheet"
+    },
+    {
+      "month": "2026-01",
+      "balance": 48000000,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-01-31",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-02",
+      "balance": 48000000,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-02-28",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-03",
+      "balance": 48000000,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-03-31",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-04",
+      "balance": 48000000,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-04-30",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-05",
+      "balance": 48000000,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-05-31",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-06",
+      "balance": 48000000,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-06-30",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-07",
+      "balance": 48000000,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-07-31",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-08",
+      "balance": 48000000,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-08-31",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-09",
+      "balance": 52000000,
+      "estimate": null,
+      "in": 6240000,
+      "out": 4875000,
+      "missing": false,
+      "so_far": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-09-30",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "note": null
+    },
+    {
+      "month": "2026-10",
+      "balance": null,
+      "estimate": null,
+      "in": 5000000,
+      "out": 4800000,
+      "missing": false,
+      "so_far": true,
+      "rate": null,
+      "note": null
+    }
+  ],
+  "head": {
+    "balance": 52000000,
+    "date": "2026-09-30"
+  },
+  "note": "S$ at each month's end-of-month rate"
+}
