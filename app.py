@@ -4600,6 +4600,17 @@ def api_review_label(tx_id: int):
             "book = ?, type_id = ?, cat_source = 'manual' WHERE id = ?",
             (flow_name, other_side, book, type_id, tx_id),
         )
+        if choice.name == "loan_to_person":
+            # From expand on, a loan to or from a person is an expectation or a
+            # set-off at once: the conversion step's own rule, on this row, in
+            # this change (personal-ledger 23, case 44).
+            import convert_expect_back
+
+            try:
+                convert_expect_back.convert_row(conn, tx_id)
+            except expect_back.Refused as e:
+                conn.rollback()
+                return jsonify({"error": str(e)}), 400
         # A row that now names a loan, or no longer does, changes what was paid.
         loan_interest.derive(conn)
         conn.commit()

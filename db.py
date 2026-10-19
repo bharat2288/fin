@@ -244,7 +244,10 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
     statement, rows with no flow, or a change history without every tracked
     table and its triggers (history.has_shape). The expect-back records
     (personal-ledger 23) are tracked tables, so a book from before them reads
-    as needing the change-history step again, which makes them."""
+    as needing the change-history step again, which makes them; and a person's
+    loan rows or opening figure not yet converted into expectations reads as
+    needing the expect-back step (convert_expect_back.py), checked here by
+    name, last, once the shape it reads is there."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "transactions" not in tables:
         return False  # a new database
@@ -263,7 +266,15 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
         or conn.execute("SELECT 1 FROM transactions WHERE flow_type IS NULL LIMIT 1").fetchone()
         is not None
         or not history.has_shape(conn)
+        or _expect_back_pending(conn)
     )
+
+
+def _expect_back_pending(conn: sqlite3.Connection) -> bool:
+    """Whether the expect-back step still has a person's line to convert."""
+    import convert_expect_back  # imported here: it imports this module
+
+    return not convert_expect_back.STEP.is_applied(conn)
 
 
 def refusal(conn: sqlite3.Connection, path) -> str:

@@ -58,6 +58,9 @@ CHAIN = (
     ("flows", "convert_null_flows"),
     ("vantage-header-label", "convert_vantage_label"),
     ("change-history", "convert_change_history"),
+    # Personal-ledger 23: loans to and from people become expectations. After
+    # change-history, which makes the records it writes.
+    ("expect-back", "convert_expect_back"),
 )
 
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
