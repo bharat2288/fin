@@ -558,7 +558,7 @@ def test_an_account_named_as_an_other_side_cannot_be_deleted(client, waiting):
 # --- replay: a rule re-run leaves what was set by hand -----------------------------
 
 
-def test_recategorize_all_and_a_rule_rerun_leave_hand_set_rows_unchanged(client, waiting):
+def test_the_drift_apply_and_a_rule_rerun_leave_hand_set_rows_unchanged(client, waiting):
     bring_in(client, BANK, [(9, "INWARD PAYNOW FROM SAMPLE SENDER REF 4410", -3100.00)])
     labelled(client, TRANSFERS[0][1], choice="company", account_id=waiting["Moom"])
     labelled(client, TRANSFERS[1][1], choice="company", account_id=waiting["Kalesh"])
@@ -580,9 +580,9 @@ def test_recategorize_all_and_a_rule_rerun_leave_hand_set_rows_unchanged(client,
         "name": "Sample Catch-all", "book": "Household", "type_id": spending_type(client, "Shopping"),
     }).get_json()["id"]
     rule = client.post("/api/rules", json={"pattern": "REF", "service_id": svc}).get_json()["id"]
-    first = client.post("/api/rules/recategorize")
+    first = client.post("/api/rules/drift", json={"past": "apply"})
     rerun = client.put(f"/api/rules/{rule}", json={"priority": 5})
-    second = client.post("/api/rules/recategorize")
+    second = client.post("/api/rules/drift", json={"past": "apply"})
 
     assert (first.status_code, rerun.status_code, second.status_code) == (200, 200, 200)
     assert rerun.get_json()["recategorized"] == 0
@@ -590,14 +590,14 @@ def test_recategorize_all_and_a_rule_rerun_leave_hand_set_rows_unchanged(client,
     assert row(client, "SAMPLE BISTRO 0042")["flow_type"] == "movement"
 
 
-def test_recategorize_all_keeps_the_other_side_the_rules_gave(client, loan_merchants):
+def test_the_drift_count_keeps_the_other_side_the_rules_gave(client, loan_merchants):
     bring_in(client, BANK, RULED + TRANSFERS)
     before = listed(client, sort="date", sort_dir="asc")
 
-    first = client.post("/api/rules/recategorize").get_json()
-    second = client.post("/api/rules/recategorize").get_json()
+    counted = client.get("/api/rules/drift").get_json()["count"]
+    first = client.post("/api/rules/drift", json={"past": "apply"}).get_json()
 
-    assert (first["updated"], second["updated"]) == (0, 0)
+    assert (counted, first["recategorized"]) == (0, 0)
     assert listed(client, sort="date", sort_dir="asc") == before
 
 
@@ -607,7 +607,7 @@ def test_a_new_rule_takes_a_waiting_row_off_the_review_list(client, waiting):
     }).get_json()["id"]
     client.post("/api/rules", json={"pattern": "SAMPLE PAYEE", "service_id": svc, "past": "apply"})
 
-    client.post("/api/rules/recategorize")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     assert what_it_is(row(client, TRANSFERS[2][1])) == ("expense", None, "Household", "Home")
     assert [tx["description"] for tx in review_list(client)] == [TRANSFERS[0][1], TRANSFERS[1][1]]

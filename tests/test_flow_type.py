@@ -426,8 +426,8 @@ def test_resolve_recomputes_flow_type_from_the_wording(client, conn):
     assert row["flow_type_manual"] == 0
 
 
-def test_recategorize_preserves_flow_type_manual_rows(client, conn):
-    """Bullet 9b: /api/rules/recategorize does not touch flow_type on manual rows."""
+def test_the_drift_apply_preserves_flow_type_manual_rows(client, conn):
+    """Bullet 9b: applying the drift (Re-run every rule's place) does not touch flow_type on manual rows."""
     tx_id, _, _ = _seed_one_tx(conn)
     # Manually override flow_type
     conn.execute(
@@ -436,7 +436,7 @@ def test_recategorize_preserves_flow_type_manual_rows(client, conn):
     )
     conn.commit()
 
-    resp = client.post("/api/rules/recategorize")
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
     assert resp.status_code == 200
 
     row = conn.execute(
@@ -446,8 +446,8 @@ def test_recategorize_preserves_flow_type_manual_rows(client, conn):
     assert row["flow_type_manual"] == 1
 
 
-def test_recategorize_recomputes_flow_type_on_the_rows_a_rule_relabels(client, conn):
-    """Rule-driven recategorization should refresh derived flow_type on non-manual rows."""
+def test_the_drift_apply_recomputes_flow_type_on_the_rows_a_rule_relabels(client, conn):
+    """Relabelling the rows that differ from their rule refreshes derived flow_type on non-manual rows."""
     shopping = _type_id(conn, "Shopping")
     conn.execute(
         "INSERT INTO services (name, book, type_id) VALUES ('Refund Service', 'Household', ?)",
@@ -479,7 +479,7 @@ def test_recategorize_recomputes_flow_type_on_the_rows_a_rule_relabels(client, c
     conn.commit()
     db.invalidate_rules_cache()
 
-    resp = client.post("/api/rules/recategorize")
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
     assert resp.status_code == 200, resp.get_json()
 
     row = conn.execute(

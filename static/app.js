@@ -3979,7 +3979,8 @@ async function viewLists(tab) {
             <p class="card-foot">Stale and missing figures say so, and open their fix. Owed balances are negative.</p></section>`;
     }
     if (tab === 'rules') {
-        const rules = await get('/api/rules');
+        // The drift count (fin-surfaces 51) is a read beside the list: one it cannot give leaves the line undrawn.
+        const [rules, drift] = await Promise.all([get('/api/rules'), get('/api/rules/drift').catch(() => ({ count: 0 }))]);
         const shown = rules.filter(x => !needle || `${x.pattern} ${x.service_name}`.toLowerCase().includes(needle));
         ACT.__rules = new Map(rules.map(x => [x.id, x]));
         const sets = x => {
@@ -3994,7 +3995,7 @@ async function viewLists(tab) {
             <td class="r num sl-fig">${x.rows_labelled ?? ''}<span class="sl-phone-word"> ${x.rows_labelled === 1 ? 'row' : 'rows'}</span></td>
             <td class="sl-sub">${esc(MATCH_WORDS[x.match_type] || x.match_type)} · gives ${esc(x.service_name || '')}${sets(x) ? ' · ' + sets(x) : ''}</td></tr>`).join('');
         return `${head}<section class="card"><div class="section-header">${search('Search patterns or merchants')}
-            <div class="row"><button class="btn" data-act="rerun-rules">${icon('arrows-clockwise')}Re-run every rule</button><button class="btn" data-act="rule" data-id="">${icon('plus')}Add a rule</button></div></div>
+            <div class="row">${driftLine(drift)}<button class="btn" data-act="rule" data-id="">${icon('plus')}Add a rule</button></div></div>
             <p class="card-foot sl-lead">${shown.length} of ${rules.length} rules${shown.length > 200 ? ' · the first 200 shown' : ''}. A rule gives a row its merchant, and with it a book and type.</p>
             <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Pattern</th><th>Match</th><th>Merchant</th><th>Sets</th><th class="r">Rows it labelled</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rule matches.</td></tr>'}</tbody></table></div></section>`;
     }
@@ -4140,6 +4141,7 @@ const PREVIEW_TITLE = { add: 'Add the rule', edit: 'Save the rule', delete: 'Del
 function previewParts(p) {
     const name = p.subject.name;
     const kind = p.subject.kind;
+    if (kind === 'drift') return driftParts(p);
     const fieldLines = p.change.filter(c => c.label || c.from !== c.to);
     const words = fieldLines.map(c => (c.label ? [c.label.toLowerCase(), c.label] : (PREVIEW_FIELD[c.field] || [c.field, c.field])));
     const only = fieldLines.length === 1 ? fieldLines[0] : null;
@@ -4171,6 +4173,17 @@ function previewParts(p) {
         ${kind === 'rule' || p.subject.id == null ? '' : `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>`}`;
     const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`;
     return { eyebrow, title, body, foot };
+}
+/** The drift's drawer (fin-surfaces 51, mocked as 21's screen 6): the rows
+ *  that differ from their rule, as examples; Leave them writes nothing,
+ *  Apply relabels them. No Only new rows: nothing new is being taught. */
+function driftParts(p) {
+    const one = p.count === 1;
+    const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b></td></tr>`);
+    const body = `<p class="sub">Rows labelled by a rule or a merchant whose label is not what the rules give now. Rows you checked or chose are not counted.</p>
+        <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'row')}</button>`;
+    return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
 }
 /** Ask the preview: 'apply', 'only_new', or null when it is closed. */
 function askPreview(p) {
@@ -4480,10 +4493,27 @@ ACT['rule-delete'] = async el => {
     const r = await sendPreviewed('DELETE', `/api/rules/${el.dataset.id}`, {});
     if (previewedDone(r, 'Rule deleted')) { closeSheet(); rerender(); }
 };
-ACT['rerun-rules'] = async () => {
-    if (!confirm('Re-run every rule on the rows the rules labelled? Rows you labelled by hand are left alone. It is one change in Changes, with Undo.')) return;
-    const r = await act('POST', '/api/rules/recategorize', {}, 'Rules re-run');
-    if (r) rerender();
+// Re-running every rule is retired (fin-surfaces 21 and 51). Lists › Rules says
+// how many rows differ from what their rule says now (fields from the
+// merchant, a rule or the wording; never one checked or chosen), drawn only
+// above 0, and opens the one-confirm drawer: Leave them, or Apply.
+/** The drift line in the rules card's head: a quiet ghost button, or nothing at 0. */
+function driftLine(d) {
+    if (!d || !d.count) return '';
+    const one = d.count === 1;
+    return `<button type="button" class="btn sm ghost" data-act="rule-drift">${plural(d.count, 'row')} ${one ? 'differs' : 'differ'} from what ${one ? 'its' : 'their'} rule says now ›</button>`;
+}
+ACT['rule-drift'] = async () => {
+    const p = await get('/api/rules/drift', { fresh: true }).catch(() => null);
+    if (!p) { toast('fin could not count the rows just now; nothing was changed', { bad: true }); return; }
+    if (!p.count) { toast('No row differs from its rule now.'); rerender(); return; }
+    if (await askPreview(p) !== 'apply') return;
+    const r = await send('POST', '/api/rules/drift', { past: 'apply', token: p.token });
+    closeSheet();
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); rerender(); return; }
+    toast(`${plural(r.data.recategorized, 'row')} relabelled. One change in Changes, with Undo.`, { undo: r.change });
+    refreshFrame();
+    rerender();
 };
 
 ACT['account-edit'] = async el => {

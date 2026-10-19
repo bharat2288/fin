@@ -16,7 +16,7 @@ import mcp_tools
 import parsers
 from parse_dbs import ParsedStatement, ParsedTransaction
 from test_balance_sheet import bring_in, make_account
-from test_mcp_tools import many  # noqa: F401 (a fixture)
+from test_mcp_tools import big_change, many  # noqa: F401 (a fixture)
 
 BANK = "Sample Bank 0002"
 ACTOR = "chat:sample-subject"
@@ -231,13 +231,13 @@ def test_an_undo_can_itself_be_undone(book):
 
 
 def test_asked_first_is_recorded_when_the_chat_carries_the_agreed_count(many):
-    stopped = chat("rerun_rules")
+    stopped = big_change()
     assert stopped["stopped"] is True
     # Stopped: nothing stands, nothing is recorded as asked.
     assert not any(e["asked_first"] for e in many.get("/api/history").get_json()["entries"])
 
     count = stopped["would_change_rows"]
-    done = chat("rerun_rules", expected_count=count)
+    done = big_change(expected_count=count)
     entry = done["change"]["entry_id"]
     shown = many.get("/api/history").get_json()
     assert shown["many_rows"] == mcp_tools.MANY_ROWS
@@ -249,7 +249,10 @@ def test_asked_first_is_recorded_when_the_chat_carries_the_agreed_count(many):
 
 def test_a_large_change_not_asked_in_chat_is_not_marked(many, conn):
     # The operator's own change over the count, and a chat change under it.
-    many.post("/api/rules/recategorize", json={})
+    svc = next(s for s in many.get("/api/services").get_json() if s["name"] == "Sample Grocer")
+    types = many.get("/api/types").get_json()
+    other = next(t for t in (types if isinstance(types, list) else types["types"]) if t["id"] != svc["type_id"])["id"]
+    assert many.put(f"/api/services/{svc['id']}", json={"type_id": other, "past": "apply"}).status_code == 200
     tx = first_row(many)
     chat("set_note", tx_id=tx["id"], notes="small")
     entries = many.get("/api/history").get_json()["entries"]

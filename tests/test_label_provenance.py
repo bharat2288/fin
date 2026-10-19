@@ -202,7 +202,7 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
     )
 
 
-def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
+def test_the_drift_apply_recomputes_inferred_and_preserves_manual(client):
     conn = db.get_connection()
     try:
         dining_id = _type_id(conn, "Dining")
@@ -248,11 +248,10 @@ def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
 
     db.invalidate_rules_cache()
 
-    resp = client.post("/api/rules/recategorize", json={})
+    assert client.get("/api/rules/drift").get_json()["count"] == 1   # the manual row is not counted
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
     assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["updated"] == 1
-    assert data["skipped_manual"] == 1
+    assert resp.get_json()["recategorized"] == 1
 
     conn = db.get_connection()
     try:

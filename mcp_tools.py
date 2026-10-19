@@ -20,6 +20,18 @@ Rulings this module carries:
   already off; no tool turns it on: only the operator, in fin's app.
 - A change over MANY_ROWS that stands on the operator's agreed count is
   recorded as asked first (history.record_asked), so Changes can say so.
+- The preview (fin-surfaces 21 and 51): change_merchant, change_rule,
+  add_rule, delete_rule and merge_merchants take `past` (apply | only_new)
+  and the preview's `token`. Without `past`, when past rows would change,
+  nothing is written and the answer carries the preview's numbers for Claude
+  to ask the operator. An answer sent back with the preview's token stands
+  on the count the preview gave (the operator's yes to it), as expected_count
+  does, and is recorded as asked first; one with no token is asked the count
+  as any write.
+- Permission changes (fin-surfaces 51): rerun_rules is removed, as Re-run
+  every rule is retired; rule_drift, a read, gives the rows that differ from
+  what their rule says now in its place. Applying them is the operator's, on
+  Lists › Rules: no chat tool writes them.
 - Expect back (personal-ledger 23, E8): seven write tools (mark_expect_back, undo_mark,
   set_off, unlink_set_off, let_go, undo_let_go, not_a_payback) are thin wrappers over the
   routes the app's drawers call, and expected_back reads the open list and an item's page;
@@ -86,6 +98,29 @@ _EXPECTED = {
     "type": "integer",
     "description": f"For a change over {MANY_ROWS} rows: the row count the operator agreed to.",
 }
+
+
+# The preview's answer (fin-surfaces 21 and 51): a merchant or rule change
+# that would relabel past rows writes nothing until it is told what the past
+# rows do, and the preview it answers with is the operator's to answer.
+_PAST = {
+    "past": {
+        "type": "string", "enum": ["apply", "only_new"],
+        "description": "The operator's answer to the preview: apply (the past rows change too) "
+                       "or only_new (only new rows take it; the past rows keep their labels, marked checked).",
+    },
+    "token": {"type": "string", "description": "The preview's token, sent back with its answer."},
+}
+_PAST_SAID = (
+    "When past rows would change and past is not given, nothing is written: the answer carries "
+    "the preview (how many past rows, how many of them the operator checked, how many they chose "
+    "stay as they are, for a book the money that moves and the months, three examples, and a "
+    "token). Ask the operator, with those numbers, whether the past rows change too or only new "
+    "rows take it, unless they already said; then call again with past and the preview's token. "
+    "A token from a preview that no longer holds is refused: look again."
+)
+# The tools that answer with the preview.
+_PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})
 
 
 def _pick(args: dict, *names: str) -> dict:
@@ -197,6 +232,17 @@ _READS = [
         _schema(),
         False,
         _get("/api/rules"),
+    ),
+    Tool(
+        "rule_drift",
+        "The rows whose label differs from what the merchant rules give now (re-running the "
+        "rules is retired; this count is what replaces it): how many, the newest three as "
+        "examples (now and after). Only labels from a merchant, a rule or the wording count; "
+        "a row the operator checked or chose never does. Applying it is the operator's, on "
+        "Lists › Rules in fin, where the count opens the same preview.",
+        _schema(),
+        False,
+        _get("/api/rules/drift"),
     ),
     Tool(
         "types",
@@ -320,54 +366,49 @@ _WRITES = [
     _w(
         "add_rule",
         "Add a merchant rule: rows whose description matches the pattern take the merchant "
-        "(service_id) and its book and type, or the rule's own overrides.",
+        "(service_id) and its book and type, or the rule's own overrides. " + _PAST_SAID,
         {"pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I},
+         "type_override_id": _I, "priority": _I, **_PAST},
         ("pattern", "service_id"),
         lambda a: ("POST", "/api/rules", _pick(a, "pattern", "service_id", "match_type",
-                                              "book_override", "type_override_id", "priority")),
+                                              "book_override", "type_override_id", "priority",
+                                              *_PAST)),
     ),
     _w(
         "change_rule",
-        "Change a merchant rule.",
+        "Change a merchant rule. " + _PAST_SAID,
         {"rule_id": _I, "pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I},
+         "type_override_id": _I, "priority": _I, **_PAST},
         ("rule_id",),
         lambda a: ("PUT", f"/api/rules/{int(a['rule_id'])}",
                    _pick(a, "pattern", "service_id", "match_type", "book_override",
-                         "type_override_id", "priority")),
+                         "type_override_id", "priority", *_PAST)),
     ),
     _w(
         "delete_rule",
-        "Delete a merchant rule.",
-        {"rule_id": _I},
+        "Delete a merchant rule. " + _PAST_SAID,
+        {"rule_id": _I, **_PAST},
         ("rule_id",),
-        lambda a: ("DELETE", f"/api/rules/{int(a['rule_id'])}", None),
-    ),
-    _w(
-        "rerun_rules",
-        "Re-run every merchant rule over the rows. Rows set by hand are left alone.",
-        {},
-        (),
-        lambda a: ("POST", "/api/rules/recategorize", {}),
+        lambda a: ("DELETE", f"/api/rules/{int(a['rule_id'])}", _pick(a, *_PAST)),
     ),
     _w(
         "change_merchant",
-        "Change a merchant: its name, default book and type (its rows that take the default "
-        "follow), note, one-off, hidden from spending views, or review each time.",
+        "Change a merchant: its name, default book and type, note, one-off, hidden from "
+        "spending views, or review each time. A new book or type reaches its past rows that "
+        "take the default (never one the operator chose). " + _PAST_SAID,
         {"service_id": _I, "name": _S, "book": _S, "type_id": _I, "notes": _S, "is_one_off": _B,
-         "exclude_from_expense_views": _B, "review_each_time": _B},
+         "exclude_from_expense_views": _B, "review_each_time": _B, **_PAST},
         ("service_id",),
         lambda a: ("PUT", f"/api/services/{int(a['service_id'])}",
                    _pick(a, "name", "book", "type_id", "notes", "is_one_off",
-                         "exclude_from_expense_views", "review_each_time")),
+                         "exclude_from_expense_views", "review_each_time", *_PAST)),
     ),
     _w(
         "merge_merchants",
-        "Merge one merchant into another: its rows and rules move to the target.",
-        {"source_id": _I, "target_id": _I},
+        "Merge one merchant into another: its rows and rules move to the target. " + _PAST_SAID,
+        {"source_id": _I, "target_id": _I, **_PAST},
         ("source_id", "target_id"),
-        lambda a: ("POST", f"/api/services/{int(a['source_id'])}/merge", _pick(a, "target_id")),
+        lambda a: ("POST", f"/api/services/{int(a['source_id'])}/merge", _pick(a, "target_id", *_PAST)),
     ),
     _w(
         "add_company_or_person",
@@ -564,7 +605,15 @@ def _answer(resp) -> dict:
         body = None
     if resp.status_code >= 400:
         message = body.get("error") if isinstance(body, dict) else None
-        return {"ok": False, "error": message if isinstance(message, str) else FIXED_ERROR}
+        answer = {"ok": False, "error": message if isinstance(message, str) else FIXED_ERROR}
+        # A change that would relabel past rows and was not answered: the
+        # preview's numbers, for Claude to ask with; a stale answer says so.
+        if resp.status_code == 409 and isinstance(body, dict):
+            if isinstance(body.get("preview"), dict):
+                answer["preview"] = _hidden_out(body["preview"])
+            if body.get("stale") is True:
+                answer["stale"] = True
+        return answer
     return {"ok": True, "result": _hidden_out(body)}
 
 
@@ -632,7 +681,13 @@ def call(name: str, args: dict | None, actor: str) -> dict:
         if entry_id is None:
             return answer
         rows = int(resp.headers.get("X-Fin-Change-Rows", "0"))
-        if rows > MANY_ROWS and expected != rows:
+        # An answer to a preview, sent back with its token, stands on the
+        # count the operator was asked: the route wrote only because the
+        # token still held, so the change is the one the preview showed
+        # (fin-surfaces 51). An answer with no token behind it is asked the
+        # count as any other write.
+        answered = name in _PREVIEWED and args.get("past") is not None and args.get("token") is not None
+        if rows > MANY_ROWS and expected != rows and not answered:
             conn = db.get_connection()
             try:
                 history.discard(conn, int(entry_id))

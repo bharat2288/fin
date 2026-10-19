@@ -26,9 +26,12 @@ READS = [
     "review_summary", "accounts", "figures", "merchants", "rules", "types", "books", "flows",
     "coverage", "rates", "history", "change", "expected_back",
 ]
+# fin-surfaces 51: rerun_rules removed (Re-run every rule retired); rule_drift,
+# a read, gives the rows that differ from what their rule says now.
+READS.insert(READS.index("rules") + 1, "rule_drift")
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
-    "add_rule", "change_rule", "delete_rule", "rerun_rules", "change_merchant", "merge_merchants",
+    "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
     "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
@@ -197,9 +200,20 @@ def many(client):
     type_id = listed[0]["id"]
     client.put(f"/api/services/{svc['id']}", json={"type_id": type_id})
     rule = client.post("/api/rules", json={"pattern": "SAMPLE GROCER", "service_id": svc["id"],
-                                           "past": "only_new"})
+                                           "past": "apply"})
     assert rule.status_code == 200, rule.get_json()
     return client
+
+
+def big_change(**extra):
+    """A chat write over MANY_ROWS rows: Sample Grocer's 25 rows to another
+    type, past rows too, answered with no preview behind it (so the count is
+    asked, as for any write)."""
+    svc = next(s for s in call("merchants")["result"] if s["name"] == "Sample Grocer")
+    listed = call("types")["result"]
+    listed = listed if isinstance(listed, list) else listed["types"]
+    other = next(t["id"] for t in listed if t["id"] != svc["type_id"])
+    return call("change_merchant", service_id=svc["id"], type_id=other, past="apply", **extra)
 
 
 def labels(client) -> list:
@@ -212,7 +226,7 @@ def labels(client) -> list:
 def test_a_change_over_twenty_rows_stops_and_gives_the_count(many):
     before, history_before = labels(many), call("history")["result"]["entries"]
 
-    answer = call("rerun_rules")
+    answer = big_change()
 
     assert answer["stopped"] is True
     count = answer["would_change_rows"]
@@ -220,14 +234,14 @@ def test_a_change_over_twenty_rows_stops_and_gives_the_count(many):
     assert labels(many) == before
     assert call("history")["result"]["entries"] == history_before
 
-    assert call("rerun_rules", expected_count=count + 1)["stopped"] is True
-    done = call("rerun_rules", expected_count=count)
+    assert big_change(expected_count=count + 1)["stopped"] is True
+    done = big_change(expected_count=count)
     assert done["ok"] and done["change"]["rows"] == count
     assert labels(many) != before
 
 
 def test_undoing_a_change_over_twenty_rows_stops_before_writing_and_gives_the_count(many):
-    done = call("rerun_rules", expected_count=call("rerun_rules")["would_change_rows"])
+    done = big_change(expected_count=big_change()["would_change_rows"])
     entry, count = done["change"]["entry_id"], done["change"]["rows"]
     after, history_after = labels(many), call("history")["result"]["entries"]
 
@@ -249,7 +263,7 @@ def test_a_change_that_could_not_be_put_back_is_reported_as_standing(many, monke
         raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
 
     monkeypatch.setattr(mcp_tools.history, "discard", broken)
-    answer = call("rerun_rules")
+    answer = big_change()
 
     assert answer["ok"] is False and answer.get("stopped") is not True
     assert answer["change"]["rows"] > mcp_tools.MANY_ROWS
