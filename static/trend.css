@@ -28,6 +28,14 @@
 /* ==== end: renderer ==== */
 
 /* ==== reserved: merchant ==== */
+/* The merchant page's trend (fin-surfaces 44): the card between the facts and Rows,
+   the few-rows line, the empty-span line, and the Rows card's "Showing … · Show all". */
+.mp-trend { min-width: 0; }
+.mp-trend__few, .mp-trend__note { margin: 0; color: var(--text-secondary); font-size: var(--t-ui); }
+.mp-trend__note { padding: var(--space-5) 0; }
+.mp-trend__filt { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2);
+    font-size: var(--t-ui); color: var(--text-secondary); }
+.mp-trend__filt span { font-weight: var(--font-semibold); color: var(--text-primary); }
 /* ==== end: merchant ==== */
 
 /* ==== reserved: account ==== */

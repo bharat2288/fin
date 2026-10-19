@@ -3910,6 +3910,13 @@ async function checkEachRowOn(s, past) {
 // Undo. The head leaves room for a trend chart, drawing none.
 const MP_PAGE = 50;
 const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false, month: null };
+/** The rows narrowed by a trend bar: month is one 'YYYY-MM', or a quarter's months (a list) read as one date range. */
+function monthQuery(month) {
+    const ms = [].concat(month || []);
+    if (!ms.length) return '';
+    if (ms.length === 1) return `&month=${ms[0]}`;
+    return `&start=${ms[0]}-01&end=${monthEnd(ms[ms.length - 1])}`;
+}
 ACT['merchant-page'] = el => { location.hash = `#/books/merchant/${el.dataset.id}`; };
 /** The merchant page's Account cell: the account's name opens its page. */
 function mpAccountCell(x) {
@@ -3925,7 +3932,7 @@ async function viewMerchant(id) {
             <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div></div>`;
     }
     const [r, list, services, varies] = await Promise.all([refs(),
-        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}${mp.month ? `&month=${mp.month}` : ''}`, { fresh: true }),
+        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}${monthQuery(mp.month)}`, { fresh: true }),
         servicesList(), get(`/api/services/${id}/book-varies`, { fresh: true })]);
     afterRender(() => window.mountMerchantTrend?.());
     ACT.__services = new Map(services.map(x => [x.id, x]));
