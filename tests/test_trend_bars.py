@@ -53,7 +53,8 @@ PRELUDE = "\n".join([
 
 
 def _node(body):
-    out = subprocess.run([NODE, "-e", PRELUDE + "\n" + body], capture_output=True, text=True,
+    # The script goes in on stdin: on Windows a long -e argument passes the command-line limit.
+    out = subprocess.run([NODE, "-"], input=PRELUDE + "\n" + body, capture_output=True, text=True,
                          timeout=30, encoding="utf-8")
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
