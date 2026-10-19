@@ -260,6 +260,22 @@ def test_case_24_a_span_chip_asks_again_at_that_span_and_remembers_it():
     assert got["asked"][-1] == "/api/trend?subject=merchant&id=101&span=2Y" and got["kept"] == '"2Y"'
 
 
+def test_case_24_in_a_private_window_a_span_chip_still_switches_only_the_remembering_is_lost():
+    # Walk finding 19-private: with device storage refused, Trend.span() answers 12M,
+    # so the chip's own value has to reach the read, and the page's redraws keep it.
+    got = run("""
+      const host = fakeEl();
+      answer = load('grab');
+      await MT.load(101, host);
+      press(host, { trend: 'span', value: '2Y' });
+      await new Promise(r => setTimeout(r, 0));
+      await MT.load(101, host);
+      out(asked);""", private=True)
+    assert got == ["/api/trend?subject=merchant&id=101&span=12M",
+                   "/api/trend?subject=merchant&id=101&span=2Y",
+                   "/api/trend?subject=merchant&id=101&span=2Y"]
+
+
 # --- a bar narrows the rows (case 25) --------------------------------------------
 
 def test_case_25_the_sep_bar_narrows_the_rows_to_september():
@@ -388,3 +404,17 @@ def test_case_49_a_merchant_gone_from_fin_says_so_and_links_to_lists():
       out(host.innerHTML);""")
     assert "This merchant is no longer in fin" in got
     assert 'href="#/books/lists/merchants"' in got
+
+
+# --- the card's own padding (walk layout finding) ----------------------------------
+
+def test_the_trend_card_is_padded_like_the_merchant_page_card_heads():
+    # The host is "card mp-card mp-trend"; styles.css's ".card.mp-card { padding: 0;
+    # overflow: hidden }" is for the table cards, and left the chips, the axis label and
+    # the summary on the card's edge with the tail's first letter clipped. The merchant
+    # block pads it as the Rows card's head is padded, at a weight that beats that rule.
+    css = (STATIC / "trend.css").read_text(encoding="utf-8")
+    block = css.split("/* ==== reserved: merchant ==== */")[1].split("/* ==== end: merchant ==== */")[0]
+    rule = re.search(r"\.card\.mp-card\.mp-trend\s*\{([^}]*)\}", block)
+    assert rule, "the merchant block pads .card.mp-card.mp-trend"
+    assert re.search(r"padding:\s*var\(--space-4\)\s+var\(--space-5\)", rule.group(1))

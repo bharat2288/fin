@@ -8,7 +8,7 @@ Python: the bars (trend_span's months or quarters), each bar's net per stack
 key (trend_series, one grouped query whatever the span), the months missing
 for each book (missing.missing_months, over the accounts carrying that book's
 rows in the span), rupees in S$ at the saved month-end rate
-(balance_sheet.valued, a rate from before the month being no rate), each
+(trend_series.valued, a rate from before the month being no rate), each
 book's own net, average and comparison (trend_summary), and for a type the
 merchants table.
 
@@ -25,7 +25,6 @@ differ, the fixtures win (the build's rulings): a bar's `rate` is
 
 from __future__ import annotations
 
-import calendar
 import datetime
 import re
 import sqlite3
@@ -90,12 +89,6 @@ def _view():
 
 def _month_name(month: str) -> str:
     return f"{_MONTH_NAMES[int(month[5:7]) - 1]} {month[:4]}"
-
-
-def _month_end(month: str) -> str:
-    """The calendar last day of 'YYYY-MM' (not balance_sheet.month_end, which
-    refuses anything before 1 Jan 2026)."""
-    return f"{month}-{calendar.monthrange(int(month[:4]), int(month[5:7]))[1]:02d}"
 
 
 def _book_order(book: str) -> tuple:
@@ -169,45 +162,37 @@ def _in_sgd(conn: sqlite3.Connection, raw: dict) -> tuple[dict, dict, dict, dict
     """S1's series (month -> book -> key -> currency -> {spent, back, net})
     in S$ only.
 
-    Each amount in another currency is valued by balance_sheet.valued at the
+    Each cell is valued by trend_series.valued, the rule R2 shares: at the
     latest saved rate on or before the month end and not before its first day
-    (ruling 4); spent and refunded are valued apart, so net stays spent less
-    refunded to the cent. Answers (series in S$, rupees per month/book/key,
-    the rate each month used, what was left out per (month, book, currency)).
-    Every book and key with rows keeps an S$ entry, zero when nothing of it
-    could be valued."""
+    (ruling 4), spent and refunded apart, so net stays spent less refunded to
+    the cent. Answers (series in S$, rupees per month/book/key, the rate each
+    month used, what was left out per (month, book, currency)). Every book and
+    key with rows keeps an S$ entry, zero when nothing of it could be valued."""
     sgd: dict = {}
     inr: dict = {}
     rate_of: dict = {}
     left: dict = {}
     for month, by_book in raw.items():
-        upto, first_day = _month_end(month), f"{month}-01"
         for book, by_key in by_book.items():
             for key, by_currency in by_key.items():
                 cell = {"spent": 0, "back": 0, "net": 0}
                 for currency, amount in by_currency.items():
-                    if currency == TOTAL:
-                        cell["spent"] += amount["spent"]
-                        cell["back"] += amount["back"]
-                        continue
                     if currency == "INR":
                         inr.setdefault(month, {}).setdefault(book, {}).setdefault(key, 0)
                         inr[month][book][key] += amount["net"]
-                    spent = balance_sheet.valued(conn, amount["spent"], currency, upto,
-                                                 not_before=first_day)
-                    if spent["value_minor"] is None:
+                    got = trend_series.valued(conn, amount, currency, month)
+                    if got["net"] is None:
                         out = left.setdefault((month, book, currency), {
                             "kind": NO_RATE if currency in money.MINOR_UNIT_DIGITS else NO_RATE_KEPT,
                             "amount_minor": 0,
-                            "reason": spent["left_out"],
+                            "reason": got["left_out"],
                         })
                         out["amount_minor"] += amount["net"]
                         continue
-                    back = balance_sheet.valued(conn, amount["back"], currency, upto,
-                                                not_before=first_day)
-                    cell["spent"] += spent["value_minor"]
-                    cell["back"] += back["value_minor"]
-                    rate_of[month] = spent["rate"]
+                    cell["spent"] += got["spent"]
+                    cell["back"] += got["back"]
+                    if got["rate"] is not None:
+                        rate_of[month] = got["rate"]
                 cell["net"] = cell["spent"] - cell["back"]
                 sgd.setdefault(month, {}).setdefault(book, {})[key] = {TOTAL: cell}
     return sgd, inr, rate_of, left

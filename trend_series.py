@@ -14,13 +14,19 @@ printed foreign amount. Books are never added together: each book is its own
 branch of the answer.
 
 One grouped query whatever the span. Built on scope.py, never app.py.
+
+A cell in another currency comes to S$ through `valued`, the one rule every
+trend figure in S$ is a sum of: R1's bars and R2's lines value the same
+cells the same way, so they agree to the cent by construction.
 """
 
 from __future__ import annotations
 
+import calendar
 import sqlite3
 
 import account_kind
+import balance_sheet
 import book_type
 import trend_span
 from scope import _TYPE_JOINS, book_expr
@@ -82,7 +88,7 @@ def _subject(conn: sqlite3.Connection, subject) -> tuple[str, dict]:
 
 
 def series(conn: sqlite3.Connection, subject, start: str, end: str,
-           stack_by: str = "book") -> dict:
+           stack_by: str = "book", split_by: str | None = None) -> dict:
     """The net series of `subject` from month `start` to `end` ('YYYY-MM',
     inclusive), stacked by `stack_by` ('book', 'type' or 'merchant').
 
@@ -91,16 +97,25 @@ def series(conn: sqlite3.Connection, subject, start: str, end: str,
     month -> book -> stack key -> currency -> {spent, back, net}. Every month
     of the span is present; a month with no rows is {}. A type's key is its
     display name ('Transport > Rides'), a merchant's its name.
+
+    With `split_by` ('type' or 'merchant', not `stack_by`), each stack key
+    holds its parts: month -> book -> stack key -> part -> currency ->
+    {spent, back, net}. A book's types split by merchant are the cells a
+    type's page reads, so S$ figures summed from them match that page's.
     """
     if stack_by not in _STACK:
         raise ValueError(f"stack_by must be one of {', '.join(_STACK)}")
+    if split_by is not None and (split_by not in ("type", "merchant") or split_by == stack_by):
+        raise ValueError("split_by must be type or merchant, and not the stack")
     months = _months(start, end)
     where, named = _subject(conn, subject)
+    part = _STACK[split_by] if split_by is not None else "NULL"
     rows = conn.execute(
         f"""
         SELECT strftime('%Y-%m', t.date) AS row_month,
                {book_expr('t')} AS row_book,
                {_STACK[stack_by]} AS row_key,
+               {part} AS row_part,
                COALESCE(a.currency, 'SGD') AS row_currency,
                SUM(CASE WHEN t.amount_minor > 0 THEN t.amount_minor ELSE 0 END) AS spent,
                SUM(CASE WHEN t.amount_minor < 0 THEN -t.amount_minor ELSE 0 END) AS back
@@ -113,8 +128,8 @@ def series(conn: sqlite3.Connection, subject, start: str, end: str,
           AND strftime('%Y-%m', t.date) BETWEEN :start AND :end
           AND {_ACCOUNTS_COUNTED}
           AND {where}
-        GROUP BY row_month, row_book, row_key, row_currency
-        ORDER BY row_month, row_book, row_key, row_currency
+        GROUP BY row_month, row_book, row_key, row_part, row_currency
+        ORDER BY row_month, row_book, row_key, row_part, row_currency
         """,
         {
             "start": months[0], "end": months[-1], "subject": subject[1],
@@ -126,8 +141,32 @@ def series(conn: sqlite3.Connection, subject, start: str, end: str,
     out: dict = {m: {} for m in months}
     for r in rows:
         spent, back = r["spent"] or 0, r["back"] or 0
-        out[r["row_month"]].setdefault(r["row_book"], {}).setdefault(r["row_key"], {})[r["row_currency"]] = {
-            "spent": spent, "back": back, "net": spent - back,
-        }
+        cells = out[r["row_month"]].setdefault(r["row_book"], {}).setdefault(r["row_key"], {})
+        if split_by is not None:
+            cells = cells.setdefault(r["row_part"], {})
+        cells[r["row_currency"]] = {"spent": spent, "back": back, "net": spent - back}
     return {"subject": named, "start": months[0], "end": months[-1],
             "stack_by": stack_by, "series": out}
+
+
+def valued(conn: sqlite3.Connection, cell: dict, currency: str, month: str) -> dict:
+    """One cell of the series ({spent, back, net} in `currency`, month
+    'YYYY-MM') in S$, through balance_sheet.valued at the latest saved rate
+    on or before the month's last day and not before its first (ruling 4).
+    Spent and back are valued apart, so net stays spent less back to the
+    cent.
+
+    Answers {spent, back, net, rate, left_out}: spent, back and net are None
+    when the cell cannot be valued, and left_out says why; rate is the rate
+    used, None for S$."""
+    year, mon = int(month[:4]), int(month[5:7])
+    first_day = f"{month}-01"
+    last_day = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+    spent = balance_sheet.valued(conn, cell["spent"], currency, last_day, not_before=first_day)
+    if spent["value_minor"] is None:
+        return {"spent": None, "back": None, "net": None, "rate": None,
+                "left_out": spent["left_out"]}
+    back = balance_sheet.valued(conn, cell["back"], currency, last_day, not_before=first_day)
+    return {"spent": spent["value_minor"], "back": back["value_minor"],
+            "net": spent["value_minor"] - back["value_minor"], "rate": spent["rate"],
+            "left_out": None}

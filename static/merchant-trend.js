@@ -22,9 +22,10 @@
     const LISTS = '#/books/lists/merchants';
     const IMPORT = '#/books/import';
 
-    // Which merchant the card is for, the stack picked on it, its element, and a
-    // counter so a slow answer for an older ask is dropped.
-    const state = { id: null, stack: null, host: null, seq: 0 };
+    // Which merchant the card is for, the stack and span picked on it, its element,
+    // and a counter so a slow answer for an older ask is dropped. The span picked is
+    // kept here as well as on the device, so a chip still switches in a private window.
+    const state = { id: null, stack: null, span: null, host: null, seq: 0 };
 
     function url(id, span, stack) {
         return `/api/trend?subject=merchant&id=${encodeURIComponent(id)}&span=${encodeURIComponent(span)}`
@@ -135,7 +136,7 @@
     function cardOpts(id, mode) {
         return {
             mode, kind: 'merchant',
-            onSpan: () => load(id, state.host),
+            onSpan: value => { state.span = value; return load(id, state.host); },
             onStack: value => { state.stack = value; return load(id, state.host); },
             onRefresh: () => load(id, state.host),
             onMonth: months => narrow(months),
@@ -144,7 +145,7 @@
     }
 
     function claim(id, host) {
-        if (state.id !== id) { state.id = id; state.stack = null; }
+        if (state.id !== id) { state.id = id; state.stack = null; state.span = null; }
         state.host = host;
     }
 
@@ -167,7 +168,7 @@
         const seq = ++state.seq;
         let payload;
         try {
-            payload = await get(url(id, window.Trend.span(), state.stack), { fresh: true });
+            payload = await get(url(id, state.span || window.Trend.span(), state.stack), { fresh: true });
         } catch (err) {
             if (seq !== state.seq) return null;
             host.innerHTML = err && err.status === 404 ? goneHtml()
