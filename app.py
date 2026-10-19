@@ -42,6 +42,7 @@ import suggest
 import tie
 import trend_routes
 from scope import _HOUSEHOLD_ACCOUNT, _SGD_ACCOUNT, _TYPE_JOINS, book_expr
+from missing import missing_months
 from db import first_rule, get_connection, get_db, init_db, invalidate_rules_cache, match_merchant, rule_label
 
 
@@ -1739,8 +1740,10 @@ def api_dashboard_stat_cards():
       _back_rows, avg_<book>_out     (the chip reads it): money out, and the
                                      refunds back that came off it.
       <book>_missing                 no row in the month and an account that
-                                     carried the book's rows has no statement
-                                     for it: not a real zero.
+                                     carried the book's rows should have sent
+                                     a statement for it and has not
+                                     (missing.py): not a real zero. The
+                                     current month is never missing.
       waiting, waiting_total      every transfer waiting, whenever dated: the
                                   review list, with waiting_out_count,
                                   _out_total, waiting_in_count, _in_total
@@ -1898,8 +1901,9 @@ def api_dashboard_stat_cards():
         }
 
         # A book with no row in the month while an account that carried its
-        # rows in the year before has no statement for the month: the card
-        # is missing, not a real zero (Spending hatches the same month).
+        # rows in the year before should have sent a statement for the month
+        # and has not: the card is missing, not a real zero (Spending hatches
+        # the same month).
         ref_key = f"{ref_y:04d}-{ref_m:02d}"
         year_ago = f"{ref_y - 1:04d}-{ref_m:02d}-01"
         missing = {}
@@ -1916,14 +1920,11 @@ def api_dashboard_stat_cards():
                   AND a.type IN (?, ?)
                   AND t.date >= ? AND t.date < ?
             """, (name, account_kind.HOUSEHOLD, *account_kind.STATEMENT_KINDS, year_ago, f"{ref_key}-01")).fetchall()
-            for c in carried:
-                held = conn.execute(
-                    "SELECT 1 FROM statements WHERE account_id = ? AND substr(statement_date, 1, 7) = ?",
-                    (c[0], ref_key),
-                ).fetchone()
-                if not held:
-                    missing[key] = True
-                    break
+            # Whether one of them should have sent a statement for the month
+            # and has not is the trend's rule (missing.py, S3): the current
+            # month is "so far", never missing.
+            if missing_months(conn, [c[0] for c in carried], [ref_key], date.today()):
+                missing[key] = True
 
         # The transfers dated in the reference month that nobody has labelled:
         # what the household figure is waiting on.
