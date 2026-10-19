@@ -2730,20 +2730,20 @@ function rateWords(rate) {
     const unit = (rate.pair || '').split('/')[0] || '';
     return `1 ${unit} = S$ ${rate.rate}, rate saved ${dateWords(rate.date)}`;
 }
-/** A company's or person's balance as a short sum, the zero parts dropped:
+/** A company's balance as a short sum, the zero parts dropped (a person has
+ *  no sheet line since the switch, so never a made_of):
  *  "opening S$ 15,000.00 + paid for it S$ 1,830.99 (23 rows) = S$ 16,830.99". */
 function madeOfSum(line) {
     const m = line.made_of;
     if (!m) return '';
-    const person = line.kind === 'person';
     const parts = [];
     if (m.opening_minor) parts.push(['', 'opening', m.opening_minor]);
-    if (m.paid_for_minor) parts.push(['+', person ? 'lent' : 'paid for it', m.paid_for_minor]);
+    if (m.paid_for_minor) parts.push(['+', 'paid for it', m.paid_for_minor]);
     if (m.capital_minor) parts.push(['+', 'capital', m.capital_minor]);
     if (m.paid_back_minor) parts.push(['−', 'paid back', m.paid_back_minor]);
     if (!parts.length) return 'no money moved yet';
     if (parts.length === 1 && parts[0][0] === '') {
-        return person ? `lent ${money(m.opening_minor)}, nothing paid back` : `opening ${money(m.opening_minor)}, nothing moved since`;
+        return `opening ${money(m.opening_minor)}, nothing moved since`;
     }
     const onlyPaidFor = parts.filter(p => p[1] !== 'opening').length === 1 && m.paid_for_minor;
     const text = parts.map(([op, label, minor], i) => `${i || op ? op + ' ' : ''}${label} ${money(minor)}${onlyPaidFor && op === '+' && line.rows_since ? ` (${plural(line.rows_since, 'row')})` : ''}`).join(' ');

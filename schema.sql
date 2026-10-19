@@ -742,3 +742,19 @@ CREATE TABLE IF NOT EXISTS change_asked (
     expected_count INTEGER NOT NULL,
     at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- The conversion steps recorded as run on this book (conversion.py): one row
+-- per step that records itself, written by the step inside the runner's
+-- transaction, with its writes, so it commits or rolls back with them. A
+-- step whose work cannot be read back from the rows alone reads this
+-- instead: after expect-back, the operator's own acts (an Unlink, an Undo of
+-- the mark, a person figure entered or deleted) can leave rows its plan would
+-- convert again, and the book is still converted. fin also records
+-- expect-back when it starts on a book with nothing left for that step to
+-- convert (a new book, or one whose people have no rows). Not a tracked
+-- table: an undo never removes it. A new table, made empty by CREATE IF NOT
+-- EXISTS on start; no existing row is converted.
+CREATE TABLE IF NOT EXISTS conversion_steps (
+    step TEXT PRIMARY KEY,          -- a step's name, as conversion.CHAIN names it
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))  -- UTC
+);
