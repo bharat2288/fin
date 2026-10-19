@@ -3198,20 +3198,23 @@ ACT['figure-delete-yes'] = async el => {
 
 // ---------------------------------------------------------------------------
 // Spending: the old dashboard's views under Books, one book or every book
-// with a total each, never one sum. Money out is the total; refunds are
-// money back, shown beside it and never taken off it.
+// with a total each, never one sum. The total is net of refunds: the signed
+// sum of the month's rows, a refund counting in the month it arrives. S$
+// accounts only; a rupee row is named beside the figure, not added to it.
 // ---------------------------------------------------------------------------
 
 const charts = [];
+/** Net per currency: the signed sum of the rows, money out positive and a refund negative. */
 function totalsByCurrency(rows) {
     const by = {};
-    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + Math.abs(toMinor(row.amount_sgd, c)); });
+    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + toMinor(row.amount_sgd, c); });
     return by;
 }
 function totalsText(by) {
     const parts = Object.entries(by).map(([c, m]) => money(m, c));
     return parts.length ? parts.join(' and ') : money(0, 'SGD');
 }
+/** Rows grouped by `keyOf`, each group's net in S$ first: a group netting below zero sorts last. */
 function groupRows(rows, keyOf) {
     const groups = new Map();
     rows.forEach(row => {
@@ -3288,8 +3291,11 @@ async function viewSpending() {
     const span = sp.span === 'year' ? months : [S.month];
     const household = r.books[0].name;
     const books = sp.book === 'all' ? r.books.map(b => b.name) : [sp.book];
-    const qs = book => {
+    // The lists keep hiding the merchants hidden from expense views; the tiles,
+    // the aside and the chart count them (include_hidden), as stat-cards does.
+    const qs = (book, counted = false) => {
         const p = new URLSearchParams({ book, start: months[0] + '-01', end: monthEnd(S.month), expense_only: 'true', sort: 'date', sort_dir: 'desc' });
+        if (counted) p.set('include_hidden', 'true');
         if (sp.search) p.set('search', sp.search);
         if (sp.types.length) p.set('types', sp.types.join(','));
         if (sp.account) p.set('account_id', sp.account);
@@ -3297,52 +3303,62 @@ async function viewSpending() {
         return p.toString();
     };
     // Every page is read: a total is never one page's sum.
-    const [lists, coverage] = await Promise.all([
+    const [lists, counts, coverage] = await Promise.all([
         Promise.all(books.map(b => getAllRows(qs(b)))),
+        Promise.all(books.map(b => getAllRows(qs(b, true)))),
         get(`/api/statements/coverage?months=${monthsSince(months[0])}`).catch(() => null),
     ]);
     const perBook = books.map((book, i) => {
-        const year = lists[i].transactions;
-        const inSpan = year.filter(row => span.includes(row.date.slice(0, 7)));
-        const rows = inSpan.filter(row => !isRefund(row));
-        const back = inSpan.filter(isRefund);
-        const others = [...new Set(year.map(row => row.currency || 'SGD').filter(c => c !== 'SGD'))];
-        return { book, year, rows, back, all: inSpan, by: totalsByCurrency(rows), backBy: totalsByCurrency(back), short: shownOf(lists[i]), others };
+        const year = lists[i].transactions;           // what the lists and tables show
+        const counted = counts[i].transactions;       // what the figures count
+        const inSpan = rows => rows.filter(row => span.includes(row.date.slice(0, 7)));
+        const net = inSpan(counted);
+        const spent = net.filter(row => !isRefund(row));
+        const back = net.filter(isRefund);
+        const others = [...new Set(counted.map(row => row.currency || 'SGD').filter(c => c !== 'SGD'))];
+        return { book, year, counted, all: inSpan(year), net, spent, back, by: totalsByCurrency(net), spentBy: totalsByCurrency(spent),
+            backBy: totalsByCurrency(back), short: shownOf(counts[i]) || shownOf(lists[i]), others };
     });
     ACT.__rows = new Map(perBook.flatMap(b => b.all).map(x => [x.id, x]));
     const spanWords = span.length === 1 ? `${monthName(S.month)}${S.month === currentMonth() ? ' so far' : ''}` : `12 months to ${monthName(S.month, { short: true })}`;
 
     // P1.3: a month with nothing in it says why, and where the latest rows are.
     let emptyNote = '';
-    if (sp.span !== 'year' && perBook.every(b => !b.all.length)) {
-        const latest = perBook.flatMap(b => b.year).map(x => x.date).sort().pop();
+    if (sp.span !== 'year' && perBook.every(b => !b.net.length)) {
+        const latest = perBook.flatMap(b => b.counted).map(x => x.date).sort().pop();
         const filtered = activeSpendFilters(sp, r).length;
         emptyNote = `<div class="notice sl-empty-month">${icon('calendar-blank')}<div class="grow"><b>Nothing in ${esc(monthName(S.month))}${S.month === currentMonth() ? ' yet' : ''}.</b>
             ${latest ? `The latest rows are from ${esc(day(latest, { year: latest.slice(0, 4) !== S.month.slice(0, 4) }))}${S.month === currentMonth() ? `; ${esc(LONG_MONTHS[Number(S.month.slice(5)) - 1])}’s statements are not in` : ''}.` : filtered ? 'Nothing matches the filters in the 12 months either.' : 'No statement for it is in.'}</div>
             ${latest ? `<button class="btn" data-act="spend-month" data-m="${latest.slice(0, 7)}">Look at ${esc(LONG_MONTHS[Number(latest.slice(5, 7)) - 1])}</button>` : ''}</div>`;
     }
 
-    // P1.1, P1.2: one tile per book; money out is its total, refunds beside it.
+    // P1.1, P1.2: one tile per book; its figure is net of refunds, S$ accounts only.
+    const sgd = by => by.SGD || 0;
+    const otherNote = b => {
+        const parts = Object.entries(b.by).filter(([c, m]) => c !== 'SGD' && m).map(([c, m]) => money(m, c));
+        return parts.length ? `<p class="small muted sl-other">${esc(parts.join(' and '))} on accounts in another currency is not in this figure.</p>` : '';
+    };
     const tiles = `<div class="stat-tiles sl-tiles">${perBook.map(b => {
         const isHouse = b.book === household;
         return `<div class="stat-tile${isHouse ? '' : ' hatch'}">
             <div class="sl-tile-head"><span class="stat-tile__label">${isHouse ? 'Household spending' : `${esc(b.book)} · its costs`}</span>${isHouse ? '' : '<span class="outside-tag">not household</span>'}</div>
-            <div class="stat-tile__figure">${esc(totalsText(b.by))}</div>
-            <div class="stat-tile__sub">${plural(b.rows.length, 'row')} out · ${esc(spanWords)}</div>
-            ${b.back.length ? `<div class="sl-back-line"><span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}back in refunds ${esc(totalsText(b.backBy))}</span><span class="muted small">${plural(b.back.length, 'row')}, not taken off</span></div>` : ''}
+            <div class="stat-tile__figure">${esc(money(sgd(b.by), 'SGD'))}</div>
+            <div class="stat-tile__sub">${plural(b.spent.length, 'row')} out · ${esc(spanWords)}</div>
+            ${sgd(b.backBy) ? `<div class="sl-back-line"><span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}after ${esc(money(-sgd(b.backBy), 'SGD'))} refunds</span></div>` : ''}
+            ${otherNote(b)}
             ${b.short ? `<p class="small sl-short">${icon('warning')}Short: too many rows to read at once (${esc(b.short)} over 12 months). Narrow the filters.</p>` : ''}</div>`;
     }).join('')}</div>
-        <p class="card-foot">${perBook.length > 1 ? 'Each book has its own total. They are never added together. ' : ''}Refunds are shown beside spending, never taken off it.</p>`;
+        <p class="card-foot">${perBook.length > 1 ? 'Each book has its own total. They are never added together. ' : ''}Net of refunds: a refund counts in the month it arrives. S$ accounts only.</p>`;
 
     // P3.1: a month with no statement in for this book's accounts is marked, not drawn as nothing spent.
     const missingFor = b => {
         if (!coverage) return new Set();
-        const ids = new Set(b.year.map(x => x.account_id).filter(id => coverage.matrix[id]));
+        const ids = new Set(b.counted.map(x => x.account_id).filter(id => coverage.matrix[id]));
         const out = new Set();
         if (!ids.size) return out;
         months.forEach(m => {
             if (m >= currentMonth()) return;
-            if (b.year.some(x => x.date.startsWith(m))) return;
+            if (b.counted.some(x => x.date.startsWith(m))) return;
             if ([...ids].some(id => coverage.matrix[id][m] && !coverage.matrix[id][m].imported)) out.add(m);
         });
         return out;
@@ -3351,7 +3367,7 @@ async function viewSpending() {
     const typeKey = row => (fold ? (row.parent_type || row.type) : row.display_type) || 'No type';
     const body = perBook.map(b => {
         // P1.4: a book with no costs in the 12 months folds to one line.
-        if (!b.year.length) {
+        if (!b.counted.length) {
             return `<section class="card sl-folded"><h2>${esc(b.book)}</h2><p>No costs in the 12 months to ${esc(monthName(S.month, { short: true }))}${activeSpendFilters(sp, r).length ? ' that match the filters' : ''}, so there is no chart.</p>
                 <a class="link" href="#/books">Look at ${esc(b.book)} on the balance sheet</a></section>`;
         }
@@ -3365,26 +3381,23 @@ async function viewSpending() {
                 : `<p class="card-empty">No rows in ${esc(spanWords)}.</p>`;
         } else {
             const keyOf = sp.view === 'type' ? typeKey : row => row.service_name || row.description;
-            const groups = groupRows(b.rows, keyOf);
-            const backs = groupRows(b.back, keyOf);
+            const groups = groupRows(b.all, keyOf);
             const noun = sp.view === 'type' ? 'Type' : 'Merchant';
             const nameCell = g => g.name === 'No type' ? tag('nofig', 'No type') : esc(g.name);
-            content = groups.length || backs.length ? `<div class="table-wrap"><table class="t sl-groups"><thead><tr><th>${noun}</th><th class="r">Rows</th><th class="r">Total</th><th class="r desk-only">Share</th></tr></thead><tbody>
+            const whole = sgd(b.by);   // the tile's figure: every share is of it
+            content = groups.length ? `<div class="table-wrap"><table class="t sl-groups"><thead><tr><th>${noun}</th><th class="r">Rows</th><th class="r">Net</th><th class="r desk-only">Share</th></tr></thead><tbody>
                 ${groups.slice(0, 60).map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
-                    <td class="r num">${esc(totalsText(g.by))}</td><td class="r num desk-only">${pct(g.sgd, b.by.SGD || 0)}</td></tr>`).join('')}
+                    <td class="r num">${esc(totalsText(g.by))}</td><td class="r num desk-only">${g.sgd > 0 && whole > 0 ? pct(g.sgd, whole) : '—'}</td></tr>`).join('')}
                 ${groups.length > 60 ? `<tr><td colspan="4" class="muted">…and ${groups.length - 60} more</td></tr>` : ''}
-                ${backs.length ? `<tr class="section"><td colspan="4">Back in: refunds, not spending</td></tr>
-                    ${backs.map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
-                        <td class="r num sl-back">${esc(totalsText(g.by))} back</td><td class="r small muted desk-only">not in the share</td></tr>`).join('')}` : ''}
                 </tbody></table></div>`
                 : `<p class="card-empty">No rows in ${esc(spanWords)}.</p>`;
         }
         const missingWords = b.missing.size ? ` A hatched month has no statement in for some of this book’s accounts; <a class="link" href="#/books/import">import it</a>.` : '';
         return `<section class="card"><div class="section-header"><h2>${esc(b.book)}</h2>
-                <span class="section-header__aside">out <b class="num">${esc(totalsText(b.by))}</b>${b.back.length ? ` · back <b class="num">${esc(totalsText(b.backBy))}</b>` : ''} · ${plural(b.all.length, 'row')}</span></div>
-            <div class="chart-box small sl-chart"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)}, money out by month"></canvas></div>
-            <p class="small muted sl-chart-note">Money out by month, 12 months to ${esc(monthName(S.month, { short: true }))}, on its own scale. Tap a month to look at it.
-                ${b.others.length ? `<b>S$ rows only</b>; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows are shown in the table and its total, not in the chart.` : 'In S$.'}${missingWords}</p>
+                <span class="section-header__aside">net <b class="num">${esc(money(sgd(b.by), 'SGD'))}</b> · spent <b class="num">${esc(money(sgd(b.spentBy), 'SGD'))}</b>${sgd(b.backBy) ? ` · refunded <b class="num">${esc(money(-sgd(b.backBy), 'SGD'))}</b>` : ''}</span></div>
+            <div class="chart-box small sl-chart"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)}, net spending by month"></canvas></div>
+            <p class="small muted sl-chart-note">Net of refunds by month, 12 months to ${esc(monthName(S.month, { short: true }))}, on its own scale; a month with more refunded than spent falls below the axis. Tap a month to look at it.
+                ${b.others.length ? `<b>S$ accounts only</b>; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows are shown in the tables, not in the figures or the chart.` : 'In S$.'}${missingWords}</p>
             ${content}</section>`;
     }).join('');
 
@@ -3475,26 +3488,37 @@ function drawSpendingCharts(perBook, months) {
         const canvas = document.getElementById(`chart-${b.book}`);
         if (!canvas) return;
         const missing = b.missing || new Set();
-        const sums = months.map(m => b.year.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD' && !isRefund(row))
-            .reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0) / 100);
+        // Per month, S$ accounts only, hidden merchants counted: spent, refunded and their net.
+        const monthly = months.map(m => {
+            const inMonth = b.counted.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD');
+            const spentMinor = inMonth.filter(row => !isRefund(row)).reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0);
+            const backMinor = -inMonth.filter(isRefund).reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0);
+            return { spent: spentMinor, back: backMinor, net: spentMinor - backMinor };
+        });
+        const sums = monthly.map(x => x.net / 100);
         const top = Math.max(...sums, 1);
+        const axisWords = v => `${v < 0 ? '−' : ''}S$ ${Math.abs(v) >= 1000 ? (Math.abs(v) / 1000) + 'k' : Math.abs(v)}`;
         const fill = tk.books[i % tk.books.length];
         const label = m => MONTHS[Number(m.slice(5)) - 1];
         charts.push(new Chart(canvas, {
             type: 'bar',
             data: { labels: months.map(m => missing.has(m) ? [label(m), narrow ? '⧗' : '⧗ missing'] : label(m)), datasets: [
-                { label: `${b.book}, money out`, data: sums,
+                { label: `${b.book}, net of refunds`, data: sums,
                     backgroundColor: months.map(m => m === S.month ? tk.current : fill), borderRadius: 4, barPercentage: 0.64, categoryPercentage: 1 },
                 { label: 'no statement in', data: months.map(m => missing.has(m) ? top : null),
                     backgroundColor: hatchPattern(tk.base, tk.surface), borderColor: tk.base, borderWidth: 1, borderRadius: 4, barPercentage: 0.64, categoryPercentage: 1 },
             ] },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false,
-                plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.datasetIndex === 1 ? 'No statement in yet for this month: import it' : money(Math.round(c.raw * 100), 'SGD') } } },
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => {
+                    if (c.datasetIndex === 1) return 'No statement in yet for this month: import it';
+                    const x = monthly[c.dataIndex];
+                    return [`Spent ${money(x.spent, 'SGD')}`, `Refunded ${money(x.back, 'SGD')}`, `Net ${money(x.net, 'SGD')}`];
+                } } } },
                 scales: {
                     x: { stacked: true, grid: { display: false }, border: { color: tk.base },
                         ticks: { font: { family: tk.mono, size: narrow ? 9 : 10 }, maxRotation: 0, autoSkip: false, color: c => missing.has(months[c.index]) ? warn : tk.ink } },
-                    y: { stacked: true, border: { display: false }, grid: { color: tk.grid, lineWidth: 1 }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 }, maxTicksLimit: 5, callback: v => `S$ ${v >= 1000 ? (v / 1000) + 'k' : v}` } },
+                    y: { stacked: true, beginAtZero: true, border: { display: false }, grid: { color: tk.grid, lineWidth: 1 }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 }, maxTicksLimit: 5, callback: axisWords } },
                 },
                 onClick: (_e, els) => {
                     if (!els.length) return;

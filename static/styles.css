@@ -503,6 +503,7 @@ table.t tr.clickable { cursor: pointer; }
 table.t td.empty { padding: 24px; text-align: center; color: var(--text-tertiary); border: 0; background: none; }
 .table-tight td, .table-tight th { padding-top: 4px; padding-bottom: 4px; }
 /* ==== reserved: spending-net ==== */
+.sl-other { margin: 4px 0 0; }
 /* ==== end: spending-net ==== */
 
 /* kit (from folio): bandedTable. The tight table with a header band, built by
