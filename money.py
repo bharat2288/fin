@@ -8,7 +8,7 @@ decimal, rounded half-even; no float rounding is used.
 from __future__ import annotations
 
 import re
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 
 # How many decimal places the minor unit of each currency an account may be
 # kept in has: cents for SGD, paise for INR. A currency not listed here is not
@@ -100,6 +100,37 @@ def convert_minor(amount_minor: int, rate: Decimal, source: str, target: str) ->
     units = Decimal(amount_minor).scaleb(-MINOR_UNIT_DIGITS[source])
     exact = (units * rate).scaleb(MINOR_UNIT_DIGITS[target])
     return int(exact.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
+# Significant digits a division keeps before it is rounded to the minor unit:
+# far more than any amount and rate carry, so the one rounding is half-even to
+# the minor unit and not an earlier one at the context's default 28.
+_DIVISION_DIGITS = 60
+
+
+def convert_minor_inverse(amount_minor: int, rate: Decimal, source: str, target: str) -> int:
+    """convert_minor's one inverse: an amount in one currency as whole minor
+    units of another, at a rate that says how many units of the *source* one
+    unit of the target is worth (the rate convert_minor takes going the other
+    way). Rates are kept as INR/SGD, so S$ into rupees divides by the rate:
+    9,000 cents at 0.0155 is 580,645 paise. The division is decimal and the
+    result is rounded half-even to the target's minor unit; no caller works
+    out 1/rate itself. `rate` is a Decimal above zero, never a float."""
+    if source not in MINOR_UNIT_DIGITS:
+        raise UnknownCurrency(source)
+    if target not in MINOR_UNIT_DIGITS:
+        raise UnknownCurrency(target)
+    if isinstance(amount_minor, bool) or not isinstance(amount_minor, int):
+        raise ValueError("an amount is a whole number of minor units")
+    if not isinstance(rate, Decimal):
+        raise ValueError("a rate is a decimal, never a float")
+    if not rate.is_finite() or rate <= 0:
+        raise ValueError("a rate is above zero")
+    units = Decimal(amount_minor).scaleb(-MINOR_UNIT_DIGITS[source])
+    with localcontext() as exact_division:
+        exact_division.prec = _DIVISION_DIGITS
+        exact = (units / rate).scaleb(MINOR_UNIT_DIGITS[target])
+        return int(exact.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
 
 
 # --- currency codes ---------------------------------------------------------
