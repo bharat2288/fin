@@ -78,6 +78,12 @@ class Refused(ValueError):
     """An answer the route cannot take; nothing was written."""
 
 
+class Gone(LookupError):
+    """The preview's two fixed refusals: the merchant or the rule it was asked
+    about is no longer in fin. Its words are the client's to read; no other
+    error's are."""
+
+
 @dataclass
 class Planned:
     """One row the change relabels: `apply` and `only_new` are the label
@@ -179,12 +185,14 @@ def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
     count is the rows Apply changes (spec 24, Deepened). Only when
     `teaching` (resolve, from the Queue) is a row with no type left out: the
     teach labels the rows it matches itself (its backfill, as before the
-    preview). (An empty book reads as the default book.)"""
+    preview), and where it asks, the route adds those to the count
+    (with_fills), so the count is still the rows the change writes. (An
+    empty book reads as the default book.)"""
     merchant = conn.execute(
         "SELECT id, name, book, type_id, review_each_time FROM services WHERE id = ?", (service_id,)
     ).fetchone()
     if merchant is None:
-        raise LookupError("This merchant is no longer in fin")
+        raise Gone("This merchant is no longer in fin")
     plan = Plan(
         subject={"kind": "merchant", "id": merchant["id"], "name": merchant["name"]},
         change={f: (merchant[f], v) for f, v in label.items()},
@@ -412,6 +420,32 @@ def joined(first: Plan | None, second: Plan | None) -> Plan | None:
     return plan
 
 
+def with_fills(conn: sqlite3.Connection, plan: Plan, fills: dict[int, dict]) -> Plan:
+    """A teach's preview (resolve, from the Queue): the plan's rows and the
+    merchant's own rows the teach labels itself whatever the answer
+    (`fills`, {row id: the label columns its backfill writes}: those its
+    wording matches that have no type yet, which merchant_change leaves out
+    when teaching). They are written in the same change entry, so the
+    preview counts and shows them, as the merchant sheet does, and the count
+    is the past rows the entry writes (spec 24, Deepened; case 13). The token
+    stamps them too. The route writes them, not the plan; with no fills, the
+    plan as it is."""
+    if not fills:
+        return plan
+    filled = []
+    for held in _held_rows(conn, list(fills)):
+        sets = fills[held["id"]]
+        checked = any(_source(held, f) == label_source.CHECKED for f in label_source.FIELDS if f in sets)
+        filled.append(Planned(held, sets, sets, checked=checked))
+    shown = Plan(subject=plan.subject, change=dict(plan.change), chosen=plan.chosen, called=plan.called,
+                 doing=plan.doing, words=plan.words, others=list(plan.others), extra=dict(plan.extra),
+                 wording=plan.wording, moves_to=plan.moves_to, names=dict(plan.names))
+    shown.rows = sorted(plan.rows + filled, key=lambda p: (p.held["date"] or "", p.held["id"]), reverse=True)
+    shown.token = _stamp(plan.token, sorted((i, tuple(sorted(s.items()))) for i, s in fills.items()),
+                         [tuple(p.held) for p in filled])
+    return shown
+
+
 def _accept_all(held) -> dict:
     """Only new rows when the row's merchant changes (a merge) or would
     have (a rule): each field fin gave is checked, its value left."""
@@ -433,7 +467,7 @@ def merge_change(conn: sqlite3.Connection, source_id: int, target_id: int) -> Pl
     they are the target's now, but not by its default."""
     target = conn.execute("SELECT id, name, book, type_id FROM services WHERE id = ?", (target_id,)).fetchone()
     if target is None:
-        raise LookupError("This merchant is no longer in fin")
+        raise Gone("This merchant is no longer in fin")
     plan = merchant_change(conn, source_id, {"book": target["book"], "type_id": target["type_id"]})
     for planned in plan.rows:
         planned.only_new = _accept_all(planned.held)
@@ -531,14 +565,14 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
     if rule_id is not None:
         held_rule = next((r for r in rules if r["id"] == rule_id), None)
         if held_rule is None:
-            raise LookupError("This rule is no longer in fin")
+            raise Gone("This rule is no longer in fin")
     after_rule = None
     if proposed is not None:
         after_rule = {**(held_rule or _NEW_RULE), **proposed}
         merchant = conn.execute("SELECT book, type_id, review_each_time FROM services WHERE id = ?",
                                 (after_rule["service_id"],)).fetchone()
         if merchant is None:
-            raise LookupError("This merchant is no longer in fin")
+            raise Gone("This merchant is no longer in fin")
         after_rule.update(dict(merchant))
     after_rules = sorted([r for r in rules if r["id"] != rule_id] + ([after_rule] if after_rule else []),
                          key=db.match_order)
@@ -843,6 +877,16 @@ def _row_words(merchant: str | None, book, type_id, with_book: bool, types: dict
     return " · ".join(parts)
 
 
+def _held_by(plan: Plan, service_id: int | None) -> str | None:
+    """The merchant a row has now, as a taught wording's preview names it:
+    none, the merchant taught, or another merchant."""
+    if service_id is None:
+        return None
+    if service_id == plan.subject["id"]:
+        return plan.moves_to
+    return plan.names.get(service_id, "another merchant")
+
+
 def _example(conn, plan: Plan, p: Planned, types: dict[int, str], names: dict[int, str] | None) -> dict:
     """One example row, now → after, as the preview's kind of change reads
     it: a merchant's own book or type (and a merge) by those fields; a rule's
@@ -852,9 +896,9 @@ def _example(conn, plan: Plan, p: Planned, types: dict[int, str], names: dict[in
     held = p.held
     out = {"id": held["id"], "date": held["date"], "amount_minor": held["amount_minor"], "currency": held["currency"]}
     after = {k: p.apply.get(k, held[k]) for k in ("service_id", "book", "type_id")}
-    if plan.moves_to is not None and held["service_id"] != plan.subject["id"]:
+    if plan.moves_to is not None and (held["service_id"] != plan.subject["id"] or not plan.change):
         return {**out,
-                "now": _row_words(plan.names.get(held["service_id"], "another merchant"), held["book"],
+                "now": _row_words(_held_by(plan, held["service_id"]), held["book"],
                                   held["type_id"], False, types),
                 "after": _row_words(plan.moves_to, after["book"], after["type_id"], False, types),
                 "source": _source(held, "type_id") or _source(held, "book")}

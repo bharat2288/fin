@@ -293,6 +293,144 @@ def test_a_book_through_every_step_has_the_columns_of_a_new_one(todays, conn):
     assert MARK not in new
 
 
+# --- the whole chain: a hand-set row with an empty field (review fix) ------------------
+
+
+@pytest.fixture
+def hand_set_empty(todays: Path) -> dict:
+    """Hand-set rows with an empty field, written with their one mark on the
+    book in today's shape: the label-source step and this one, run by the one
+    command, give them their sources. Returns their ids and the merchants'."""
+    conn = open_book(todays)
+    try:
+        b = Book(conn)
+        stall = b.merchant("Sample Stall", "Household", "Dining")
+        bare = b.merchant("Sample Bare Stall", None, "Dining")
+        moom = b.merchant("Sample Office Stall", "Moom", "Dining")
+        grocer = b.merchant("Sample Grocer", "Household", None)
+        ids = {
+            "stall": stall, "grocer": grocer,
+            # A spending row's empty book reads as Household: equal to the
+            # merchant's (or to the book a merchant with none offers), checked.
+            "null_book": b.row("SAMPLE STALL 21", 700, book=None, type_name="Dining",
+                               service_id=stall, source="manual"),
+            "null_book_bare": b.row("SAMPLE BARE STALL 22", 700, book=None, type_name="Dining",
+                                    service_id=bare, source="manual"),
+            # Different from the merchant's: chosen.
+            "null_book_moom": b.row("SAMPLE OFFICE STALL 23", 700, book=None, type_name="Dining",
+                                    service_id=moom, source="manual"),
+            # A spending row never typed: it waits in the Queue for a type.
+            "untyped": b.row("SAMPLE GROCER 24", 1500, book="Household", type_name=None,
+                             service_id=grocer, source="manual"),
+            "untyped_no_merchant": b.row("SOMEWHERE HAND SET 25", 900, book="Household", type_name=None,
+                                         service_id=None, source="manual"),
+            # Named by hand on the review list: a movement, no book, no type.
+            "movement": b.row("SAMPLE STALL TRANSFER 26", 4000, book=None, type_name=None,
+                              service_id=None, source="manual", flow="movement"),
+        }
+        conn.execute("UPDATE transactions SET flow_type_manual = 1 WHERE id = ?", (ids["movement"],))
+        conn.commit()
+        return ids
+    finally:
+        conn.close()
+
+
+def sources_of(path: Path, ids) -> dict:
+    conn = open_book(path)
+    try:
+        return {i: tuple(conn.execute("SELECT book_source, type_source FROM transactions WHERE id = ?",
+                                      (i,)).fetchone()) for i in ids}
+    finally:
+        conn.close()
+
+
+def test_a_hand_set_spending_rows_empty_book_is_compared_as_household(todays, hand_set_empty):
+    """Case 32's rule for the book a NULL reads as: equal to the merchant's
+    book (or to the one a merchant with none offers) is checked, so a later
+    fix still reaches it; different is chosen."""
+    ids = hand_set_empty
+
+    assert convert_all.main([str(todays)]) == 0
+
+    got = sources_of(todays, [ids["null_book"], ids["null_book_bare"], ids["null_book_moom"]])
+    assert got[ids["null_book"]] == ("checked", "checked")
+    assert got[ids["null_book_bare"]] == ("checked", "checked")
+    assert got[ids["null_book_moom"]] == ("chosen", "checked")
+
+
+def test_a_hand_set_spending_row_never_typed_gets_no_type_source(todays, hand_set_empty):
+    """A source is empty when the field is: a spending row waiting for a type
+    is given none, so it stays reachable."""
+    ids = hand_set_empty
+
+    assert convert_all.main([str(todays)]) == 0
+
+    got = sources_of(todays, [ids["untyped"], ids["untyped_no_merchant"]])
+    assert got[ids["untyped"]] == ("checked", None)
+    assert got[ids["untyped_no_merchant"]] == ("chosen", None)
+
+
+def test_the_step_refuses_a_source_written_onto_a_waiting_rows_empty_type(todays, hand_set_empty, monkeypatch):
+    """The invariant, stated: every field reads as before, but a spending
+    row's empty type, which holds the source it held. A step that wrote the
+    mark's chosen there is rolled back."""
+    ids = hand_set_empty
+    conversion.run_step(todays, convert_label_source.STEP)
+    was = dump(todays)
+    planned = retire_single_mark.planned
+
+    def writes_chosen_there(conn):
+        return [*planned(conn), ("checked", "chosen", ids["untyped"])]
+
+    monkeypatch.setattr(retire_single_mark, "planned", writes_chosen_there)
+    with pytest.raises(conversion.ConversionFailed, match="waiting for a type"):
+        conversion.run_step(todays, retire_single_mark.STEP)
+    assert dump(todays) == was
+
+
+def test_a_hand_set_row_never_typed_is_reached_by_its_merchants_new_type(todays, hand_set_empty, monkeypatch):
+    """Seam 1 after the whole chain: the merchant's new type, applied to its
+    past rows, types the row that waited in the Queue for one."""
+    ids = hand_set_empty
+    assert convert_all.main([str(todays)]) == 0
+    monkeypatch.setattr(db, "DB_PATH", todays)
+    db.invalidate_rules_cache()
+    db.init_db()
+    conn = open_book(todays)
+    groceries = conn.execute("SELECT id FROM types WHERE name = 'Groceries'").fetchone()[0]
+    conn.close()
+    fin_app.app.config["TESTING"] = True
+    with fin_app.app.test_client() as client:
+        waiting = client.get("/api/transactions?types=__untyped__&per_page=500").get_json()["transactions"]
+        asked = client.put(f"/api/services/{ids['grocer']}", json={"type_id": groceries})
+        preview = asked.get_json()["preview"]
+        applied = client.put(f"/api/services/{ids['grocer']}",
+                             json={"type_id": groceries, "past": "apply", "token": preview["token"]})
+    db.invalidate_rules_cache()
+
+    assert ids["untyped"] in {t["id"] for t in waiting}
+    assert asked.status_code == 409 and preview["count"] == 1
+    assert applied.status_code == 200, applied.get_json()
+    conn = open_book(todays)
+    try:
+        after = conn.execute("SELECT type_id, type_source FROM transactions WHERE id = ?",
+                             (ids["untyped"],)).fetchone()
+    finally:
+        conn.close()
+    assert tuple(after) == (groceries, "merchant")
+
+
+def test_a_movement_named_by_hand_keeps_chosen_on_its_empty_fields(todays, hand_set_empty):
+    """Personal-ledger 51's protection, through the whole chain: a movement's
+    empty book and type are the operator's choice, so no later rule gives it
+    a merchant, a book or a type."""
+    ids = hand_set_empty
+
+    assert convert_all.main([str(todays)]) == 0
+
+    assert sources_of(todays, [ids["movement"]])[ids["movement"]] == ("chosen", "chosen")
+
+
 # --- applied is recorded, and read from the record ------------------------------------
 
 

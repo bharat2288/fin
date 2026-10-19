@@ -303,6 +303,68 @@ def test_case_13_teaching_with_only_new_rows_checks_the_past_rows(client, conn, 
     assert merchant_label(conn, indigo["svc"]) == ("Moom", travel)
 
 
+def teach_and_apply(client, conn, body, tx) -> tuple[dict, set]:
+    """The teach previewed, then applied with its token: the preview, and
+    the rows the change wrote other than the row taught."""
+    asked = client.post("/api/transactions/resolve", json=body)
+    assert asked.status_code == 409, asked.get_json()
+    preview = asked.get_json()["preview"]
+    before = every_row(conn)
+    resp = client.post("/api/transactions/resolve", json={**body, "past_rows": "apply", "token": preview["token"]})
+    assert resp.status_code == 200, resp.get_json()
+    return preview, changed(before, every_row(conn)) - {tx}
+
+
+def test_case_13_teaching_counts_the_merchants_row_waiting_for_a_type_that_it_labels(client, conn, indigo):
+    """The judge (spec 24, Deepened): the count is the rows the change
+    writes. A row of IndigoAir's still waiting for a type, which the teach's
+    wording matches, is labelled by the teach in the same change, so the
+    preview counts it: 24, not 23."""
+    waiting = add_row(conn, indigo["statement"], "INDIGOAIR 6E WAITING", 41000, service_id=indigo["svc"],
+                      type_name=None, day="2026-09-30")
+    tx, body = queue_teach(conn, indigo)
+
+    preview, wrote = teach_and_apply(client, conn, body, tx)
+
+    assert waiting in wrote
+    assert preview["count"] == len(wrote) == 24
+    assert labels(conn, [waiting])[waiting] == ("Moom", type_id(conn, "Travel"), "merchant", "merchant")
+
+
+def test_teaching_a_wording_that_takes_rows_counts_the_merchants_waiting_row_too(client, conn, indigo):
+    """The same judge where only the wording asks (IndigoAir's default kept,
+    a row Air India holds taken): the merchant's own row waiting for a type
+    is counted and shown beside the taken one."""
+    air_india = merchant(conn, "Air India", "Moom", "Transport")
+    taken = add_row(conn, indigo["statement"], "AIR INDIA INDIGOAIR LOUNGE", 4200, service_id=air_india,
+                    book="Moom", type_name="Transport", day="2026-09-15")
+    waiting = add_row(conn, indigo["statement"], "INDIGOAIR 6E WAITING", 41000, service_id=indigo["svc"],
+                      type_name=None, day="2026-09-30")
+    tx, body = queue_teach(conn, indigo)
+
+    preview, wrote = teach_and_apply(client, conn, {**body, "book": "Household"}, tx)
+
+    assert wrote == {taken, waiting}
+    assert preview["count"] == 2
+    assert {(x["id"], x["now"], x["after"]) for x in preview["examples"]} == {
+        (taken, "Air India · Transport", "IndigoAir · Travel"),
+        (waiting, "IndigoAir · no type", "IndigoAir · Travel")}
+
+
+def test_case_29_a_row_with_no_merchant_is_taught_as_the_row_taught_is_and_not_counted(client, conn, indigo):
+    """Rows with no merchant that the wording matches wait in the Queue as
+    the row taught does; the teach labels them as it always has, and the
+    preview, as in case 29, counts only the past rows it relabels."""
+    loose = add_row(conn, indigo["statement"], "INDIGOAIR 6E LOOSE", 41000, service_id=None, book=None,
+                    type_name=None, day="2026-09-29")
+    tx, body = queue_teach(conn, indigo)
+
+    preview, wrote = teach_and_apply(client, conn, body, tx)
+
+    assert loose in wrote
+    assert preview["count"] == len(wrote - {loose}) == 23
+
+
 def test_teaching_that_keeps_the_merchants_default_asks_nothing(client, conn, indigo):
     tx, body = queue_teach(conn, indigo)
 
