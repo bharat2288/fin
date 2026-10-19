@@ -46,6 +46,11 @@ Currency change for the month is, for each such account, its balance at the
 start of the month (the previous month's end) valued at the end rate, less
 the same balance valued at the start rate, each rate saved in its own month.
 
+Expect back's three sections (books_expect.py: Expected back, Waiting for its
+row, To pay back) ride on the sheet under `expect`, one call. Until the switch
+(expect_back.SWITCHED) they are shown and not in the total, and persons stay
+among the counterparties as they are.
+
 Everything here is worked out on read; nothing is stored.
 """
 
@@ -666,7 +671,8 @@ def _marked(line: dict, account) -> dict:
     return line
 
 
-def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> dict:
+def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name,
+          today: date | None = None) -> dict:
     """The household's balance sheet at the end of a month written YYYY-MM.
 
     Lists the household's own bank, card, loan and holding accounts, then its
@@ -675,7 +681,17 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
     what is shown, never the figure (ruling 6).
     `name_of` is how an account's name is shown. Raises NotShown
     for a month that is not one, or that ends before the sheet starts.
+
+    Under `expect` it carries expect back's three sections (books_expect.py)
+    as at the month's end, their ages counted to `today` while the month runs
+    (today's date when not given). Until the switch (expect_back.SWITCHED)
+    they are not in the total, and persons stay among the counterparties;
+    with it, Expected back joins net worth and what is owed (Waiting for its
+    row, To pay back) comes off it.
     """
+    import books_expect  # imported here: it reads this module
+    import expect_back
+
     as_at = month_end(month)
     sections = []
     listed = []
@@ -727,8 +743,12 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
         ],
     })
 
+    expect = books_expect.sections(conn, as_at.isoformat(), today=today or date.today())
     net_worth = sum(section["total_minor"] for section in sections)
     left_out = [entry for section in sections for entry in section["left_out"]]
+    if expect_back.SWITCHED:
+        net_worth += books_expect.net_minor(expect)
+        left_out += books_expect.left_out(expect)
     return {
         "month": month,
         "as_at": as_at.isoformat(),
@@ -739,6 +759,7 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name) -> di
         "net_worth": anchors.format_amount(net_worth, TOTAL_CURRENCY),
         "left_out": left_out,
         "currency_change": _currency_change(conn, listed, as_at, name_of),
+        "expect": expect,
         "note": (
             "Left out of the total: "
             + "; ".join(f"{entry['name']} ({entry['why']})" for entry in left_out)

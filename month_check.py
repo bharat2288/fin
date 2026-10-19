@@ -53,6 +53,17 @@ up to the whole), never off by a cent of rounding. Otherwise the account is
 left out of both sides: its value is taken out of net worth at each end, its
 rows are not counted, and the check says so.
 
+Expect back (personal-ledger 23, behind expect_back.SWITCHED until the
+switch): a row counts its own part as income or spending, a let-go counts on
+its day (a back item's rest as Household spending, a pay item's as income),
+and Books' three sections are lines of net worth read by their keys. Each
+foreign-currency item in the check has its own currency change (its open
+amount at the start revalued) and the spread on the month's set-offs across
+currencies (what the payment moved less what the item fell, at the month-end
+rate); an item made or paid against from an account left out of the check
+is money across its edge (`outside`); an item with no rate, or an opening
+figure dated in the month, is left out of both sides (_expect_terms).
+
 January 2026 has no previous month-end on the sheet: nothing is shown before
 1 January 2026, so there is no net worth to start from, and no unexplained
 figure is given.
@@ -67,7 +78,9 @@ import account_kind
 import anchors
 import balance_sheet
 import book_type
+import books_expect
 import card_balance
+import expect_back
 import flow
 import loan_interest
 import money
@@ -92,11 +105,14 @@ def _rows_by_account(conn: sqlite3.Connection, after: str, upto: str) -> dict:
     its card's one balance (card_balance.py) counts as that balance's account."""
     income = ", ".join("?" for _ in INCOME_FLOWS)
     spending = ", ".join("?" for _ in SPENDING_FLOWS)
+    # A row counts its own part (expect_back.own_sql): its amount less what is
+    # expected or placed on it. Until the switch that is its bare amount.
+    own = expect_back.own_sql("t")
     rows = conn.execute(
         "SELECT a.id, "
-        f"COALESCE(SUM(CASE WHEN t.flow_type IN ({income}) THEN -t.amount_minor ELSE 0 END), 0), "
+        f"COALESCE(SUM(CASE WHEN t.flow_type IN ({income}) THEN -{own} ELSE 0 END), 0), "
         f"COALESCE(SUM(CASE WHEN t.flow_type IN ({spending}) AND COALESCE(t.book, ?) = ? "
-        "THEN t.amount_minor ELSE 0 END), 0) "
+        f"THEN {own} ELSE 0 END), 0) "
         "FROM transactions t "
         "JOIN statements s ON t.statement_id = s.id "
         "JOIN accounts a ON s.account_id = a.id "
@@ -242,13 +258,220 @@ def _conversions(conn: sqlite3.Connection, acct: int, after: str, upto: str,
     return sum(here[o] for o in paired), sum(there[o] for o in paired)
 
 
+def _keyed_line(section: dict, line: dict) -> dict:
+    """An expect-back line (books_expect.py) as the check reads a line: by its
+    key, its value signed as net worth counts it (what is owed negative), in
+    the total only when it has an S$ value."""
+    value = line["sgd_minor"]
+    return {
+        "account_id": line["key"],
+        "name": line["title"],
+        "kind": section["key"],
+        "currency": line["currency"],
+        "balance_minor": line["open_minor"],
+        "value_minor": None if value is None else (-value if section["owed"] else value),
+        "in_total": value is not None,
+        "left_out": books_expect.NO_RATE if value is None else None,
+        "check": None,
+        "rests_on": None,
+    }
+
+
 def _line_values(shown: dict, parts: dict | None = None) -> dict:
     """Each line of a sheet by its account id, less the lines of accounts
-    that are part of another's balance."""
-    return {
+    that are part of another's balance; and each expect-back line in a
+    section that is in the total, by its key ("expectation:<id>",
+    "waiting:<set-off id>"), which those lines carry in place of an account."""
+    lines = {
         line["account_id"]: line for section in shown["sections"] for line in section["lines"]
         if line["account_id"] not in (parts or {})
     }
+    for section in shown.get("expect", {}).get("sections", []):
+        if section["in_total"]:
+            lines.update((line["key"], _keyed_line(section, line)) for line in section["lines"])
+    return lines
+
+
+def _split(lines: dict) -> tuple[dict, dict]:
+    """A sheet's lines as _line_values gives them, apart: the accounts' (by
+    account id) and expect back's (by key)."""
+    keyed = {k: line for k, line in lines.items() if isinstance(k, str)}
+    return {k: line for k, line in lines.items() if not isinstance(k, str)}, keyed
+
+
+def _expect_terms(conn: sqlite3.Connection, after: str, upto: str, in_check: set, parts: dict,
+                  end_keyed: dict, start_keyed: dict) -> dict:
+    """The check's expect-back terms for the month after `after` up to `upto`
+    (spec E5), once the three Books sections are in net worth.
+
+    Which items are in the check: every item is, unless it has no S$ value
+    at an end where it is listed (no rate), it is in another currency with no
+    rate at the month-end, or it is an opening figure dated in the month (as
+    an account's first figure is): those are left out of both sides, and
+    `out` names each, {key: {"name", "why"}}.
+
+    Every event of the month moves an item's line and, but for a let-go, the
+    account of the row it is on. Valued at the month-end rate:
+        made        the row's expectation, on the row's day: a back item
+                    rises with the row's money out, a pay item with its money in
+        set off     on its payment row's day: the payment's money moves its
+                    account, the item falls (or, before its expectation's day,
+                    the payment waits: Waiting for its row rises)
+        found its   on its expectation's day, a waiting set-off leaves
+        row         Waiting for its row and is set against the item
+        let go      on its own day: the item falls, and a back item's rest is
+                    spending (Household), a pay item's income
+    Where every side of an event is in the check, the rows and lines it
+    moves cancel, or leave the spread of a set-off across currencies (what
+    the payment moved less what the item fell, both at the month-end rate):
+    currency change. Where a side is left out, what the sides in the check
+    moved is money across the check's edge: `outside`.
+
+    Each foreign-currency item in the check has its line of currency change:
+    its open amount at the start valued at the end rate less at the start
+    rate, plus its spread; and, as the sheet values each line on its own,
+    the cent of rounding between its events and its two values joins that
+    spread, so the item ties to the cent.
+    """
+    total = balance_sheet.TOTAL_CURRENCY
+    value_at_end = books_expect.valuer(conn, upto)
+
+    def v(amount: int, currency: str) -> int | None:
+        return value_at_end(amount, currency)[0]
+
+    day = balance_sheet.ROW_DAY
+    items = {
+        r["id"]: r for r in conn.execute(
+            f"SELECT e.id, e.direction, e.currency, e.amount_minor, e.row_id, s.account_id, p.name AS person_name, "
+            f"COALESCE({day}, e.opening_date) AS day FROM expectation e "
+            "LEFT JOIN transactions t ON t.id = e.row_id LEFT JOIN statements s ON s.id = t.statement_id "
+            "LEFT JOIN accounts p ON p.id = e.person_id")
+    }
+    keys = set(end_keyed) | set(start_keyed)
+    out: dict = {}
+    for key in keys:
+        end, start = end_keyed.get(key), start_keyed.get(key)
+        line = end or start
+        if any(x is not None and not x["in_total"] for x in (end, start)):
+            out[key] = {"name": line["name"], "why": books_expect.NO_RATE}
+        elif line["currency"] != total and v(0, line["currency"]) is None:
+            out[key] = {"name": line["name"], "why": f"{books_expect.NO_RATE} on {upto}"}
+    for x in items.values():
+        if x["row_id"] is None and after < x["day"] <= upto:
+            out[f"expectation:{x['id']}"] = {"name": f"Opening figure · {x['person_name']}",
+                                             "why": f"opening figure on {x['day']}"}
+
+    def held(key: str) -> bool:
+        return key not in out
+
+    def row_in(account_id) -> bool:
+        return parts.get(account_id, account_id) in in_check
+
+    outside = 0
+    spread: dict[str, int] = {}
+    moved: dict[str, int] = {}   # what the month's events moved each item's line, valued
+
+    def event(sides: list, key: str) -> None:
+        """One event's sides: (in the check, what it moved net worth by)."""
+        nonlocal outside
+        counted = sum(amount for inside, amount in sides if inside and amount is not None)
+        if all(inside for inside, _ in sides):
+            spread[key] = spread.get(key, 0) + counted
+        else:
+            outside += counted
+
+    def line_moved(key: str, amount: int | None) -> tuple:
+        if amount is not None:
+            moved[key] = moved.get(key, 0) + amount
+        return held(key), amount
+
+    def sign(x) -> int:
+        return 1 if x["direction"] == expect_back.BACK else -1
+
+    for x in items.values():
+        if x["row_id"] is not None and after < x["day"] <= upto:
+            key = f"expectation:{x['id']}"
+            worth = v(x["amount_minor"], x["currency"])
+            event([(row_in(x["account_id"]), None if worth is None else -sign(x) * worth),
+                   line_moved(key, None if worth is None else sign(x) * worth)], key)
+
+    for so in conn.execute(
+        f"SELECT so.id, so.expectation_id, so.amount_minor, so.item_amount_minor, t.amount_minor AS row_amount, "
+        f"COALESCE(a.currency, ?) AS currency, s.account_id, {day} AS day FROM set_off so "
+        "JOIN transactions t ON t.id = so.payment_row_id JOIN statements s ON s.id = t.statement_id "
+        "JOIN accounts a ON a.id = s.account_id",
+        (total,),
+    ):
+        x = items.get(so["expectation_id"])
+        waits = x is None or x["day"] > so["day"]
+        paid = v(so["amount_minor"], so["currency"])
+        into = 1 if so["row_amount"] < 0 else -1  # money in raises its account
+        waiting = f"waiting:{so['id']}"
+        if after < so["day"] <= upto:
+            payment = (row_in(so["account_id"]), None if paid is None else into * paid)
+            if waits:
+                event([payment, line_moved(waiting, None if paid is None else -paid)], waiting)
+            else:
+                key = f"expectation:{x['id']}"
+                fell = v(so["item_amount_minor"], x["currency"])
+                event([payment, line_moved(key, None if fell is None else -sign(x) * fell)], key)
+        if x is not None and waits and after < x["day"] <= upto:
+            key = f"expectation:{x['id']}"
+            fell = v(so["item_amount_minor"], x["currency"])
+            event([line_moved(waiting, None if paid is None else paid),
+                   line_moved(key, None if fell is None else -sign(x) * fell)], key)
+
+    income = spending = 0
+    for g in conn.execute(
+        f"SELECT g.*, l.expectation_id FROM ({expect_back.let_go_sql()}) g "
+        "JOIN let_go l ON l.id = g.let_go_id WHERE g.day > ? AND g.day <= ?",
+        (after, upto),
+    ):
+        key = f"expectation:{g['expectation_id']}"
+        if not held(key):
+            continue
+        worth = v(abs(g["amount_minor"]), g["currency"])
+        if worth is None:
+            continue
+        if g["flow_type"] == "expense":
+            if (g["book"] or book_type.DEFAULT_BOOK) == book_type.DEFAULT_BOOK:
+                spending += worth
+            line_moved(key, -worth)
+        else:
+            income += worth
+            line_moved(key, worth)
+
+    lines = []
+    for key in sorted(keys | set(spread)):
+        if not held(key):
+            continue
+        end, start = end_keyed.get(key), start_keyed.get(key)
+        line = end or start
+        revaluation = 0
+        if line is not None and line["currency"] != total:
+            if start is not None:
+                revaluation = _signed(start, v(start["balance_minor"], line["currency"])) - start["value_minor"]
+            # The cent of rounding between the line's two values and its events.
+            change = (end["value_minor"] if end else 0) - (start["value_minor"] if start else 0)
+            spread[key] = spread.get(key, 0) + change - revaluation - moved.get(key, 0)
+        elif not spread.get(key):
+            continue
+        lines.append({
+            "account_id": None,
+            "key": key,
+            "name": line["name"] if line is not None else key,
+            "revaluation_minor": revaluation,
+            "spread_minor": spread.get(key, 0),
+            "spread": _shown(spread.get(key, 0)),
+        })
+    currency_change = sum(x["revaluation_minor"] + x["spread_minor"] for x in lines)
+    return {"income": income, "spending": spending, "currency_change": currency_change,
+            "outside": outside, "lines": lines, "out": out}
+
+
+def _signed(line: dict, value: int) -> int:
+    """A value as an expect-back line counts in net worth: owed negative."""
+    return -value if line["kind"] != "expected_back" else value
 
 
 def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda name: name,
@@ -265,12 +488,15 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
     # line of its own here: its rows are the balance account's
     # (card_balance.py), in the check or out of it with that account.
     parts = card_balance.part_of_ids(conn)
-    end_lines = _line_values(end_sheet, parts)
+    # Expect back's lines (keyed, books_expect.py) are read apart from the
+    # accounts': they are in net worth only once the switch puts them there.
+    end_lines, end_keyed = _split(_line_values(end_sheet, parts))
+    start_keyed: dict = {}
     if start < balance_sheet.START:
         start_sheet = start_lines = None
     else:
         start_sheet = balance_sheet.sheet(conn, f"{start:%Y-%m}", name_of)
-        start_lines = _line_values(start_sheet, parts)
+        start_lines, start_keyed = _split(_line_values(start_sheet, parts))
 
     # The accounts in the check: those in net worth at both ends (M8). An
     # account with no balance at one end (a card with no statement balance,
@@ -349,6 +575,19 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
             "spread": _shown(spread),
         })
 
+    # Expect back (spec E5), once its sections are in net worth: spending and
+    # income with the let-gos, money moved across the check's edge by its
+    # items, and each foreign-currency item's currency change and spread.
+    keyed_out: dict = {}
+    if expect_back.SWITCHED and start_sheet is not None:
+        terms = _expect_terms(conn, after, upto, with_parts, parts, end_keyed, start_keyed)
+        income += terms["income"]
+        spending += terms["spending"]
+        currency_change += terms["currency_change"]
+        outside += terms["outside"]
+        spreads += terms["lines"]
+        keyed_out = terms["out"]
+
     # What is left out, and why: every account in another currency whose
     # change has no figure, every account in net worth at one end only, and
     # every other account left out that the month's rows touch.
@@ -368,11 +607,18 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
             why = _why_out(start_line, after)
         name = (end_line or start_line)["name"]
         left_out.append({"account_id": acct, "name": name, "why": why})
+    # Expect back's items left out of both sides, and why.
+    for key in sorted(keyed_out, key=lambda k: (keyed_out[k]["name"], k)):
+        left_out.append({"account_id": key, **keyed_out[key]})
 
     actual = end_sheet["net_worth_minor"]
     for acct in out_of_check:
         line = end_lines.get(acct)
         if line is not None and line.get("in_total"):
+            actual -= line["value_minor"]
+    for key in keyed_out:
+        line = end_keyed.get(key)
+        if line is not None and line["in_total"]:
             actual -= line["value_minor"]
 
     if start_sheet is None:
@@ -386,6 +632,10 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
         for acct in out_of_check:
             line = start_lines.get(acct)
             if line is not None and line.get("in_total"):
+                opening_worth -= line["value_minor"]
+        for key in keyed_out:
+            line = start_keyed.get(key)
+            if line is not None and line["in_total"]:
                 opening_worth -= line["value_minor"]
         expected = opening_worth + income - spending + currency_change + outside
         unexplained = actual - expected

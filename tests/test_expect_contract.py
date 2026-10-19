@@ -163,6 +163,7 @@ def test_empty_shells_draw_nothing_in_any_slot():
     assert out[8:12] == ["function"] * 4
     assert set(out[12]) <= {"rowActions", "rowPill", "merchantRowAction", "booksSections", "queueStep", "backForFoot"}
     assert "rowActions" in out[12]  # personal-ledger 36: the row sheet's Back for…
+    assert "booksSections" in out[12]  # personal-ledger 31: Books sections
 
 
 @needs_node
