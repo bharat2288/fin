@@ -1489,6 +1489,47 @@ def _write_label(conn, held, sets: dict) -> bool:
     return True
 
 
+def _would_change(held, sets: dict) -> bool:
+    """Whether writing `sets` to the row `held` changes anything."""
+    return any(held[k] != v for k, v in sets.items())
+
+
+def _teach_fills(conn, service_id: int, tx_id: int, pattern: str, match_type: str,
+                 book, type_id, taught: tuple) -> list[tuple]:
+    """The rows a teach (resolve) labels itself, whatever the preview's
+    answer: those its wording matches that have no merchant, or have this
+    merchant (`service_id`) and still no type, with the label columns each
+    takes, the merchant aside. They take
+    the taught label: from the rule for the field it overrides, from the
+    merchant for the other (`taught`, label_source.rule_sources). A field
+    chosen or worked out keeps its own, as every later change leaves it (spec
+    24; an empty field reads its own source, as the rule preview reads it),
+    and a checked one stays checked; a row with no field to reach is left out
+    and keeps its merchant too (fin-surfaces 54). The backfill writes these
+    rows, and a preview counts the merchant's among them, so the two read
+    the same list."""
+    fill_where = (
+        "(service_id IS NULL OR (service_id = ? AND type_id IS NULL AND id != ?)) "
+        f"AND {_build_match_condition(match_type)}"
+    )
+    given = {"book": (book, taught[0]), "type_id": (type_id, taught[1])}
+    out = []
+    for held in conn.execute(
+        f"SELECT {_LABEL_HELD} FROM transactions t WHERE {fill_where}", (service_id, tx_id, pattern.upper())
+    ).fetchall():
+        reached = [(field, column) for field, column in label_source.FIELDS.items()
+                   if label_source.reachable(held[column])]
+        if not reached:
+            continue
+        sets = {}
+        for field, column in reached:
+            value, source = given[field]
+            sets[field] = value
+            sets[column] = label_source.reached(_source(held, column), value, source)
+        out.append((held, sets))
+    return out
+
+
 def _source(held, column: str) -> str | None:
     """A held row's source for one field, as label_source reads it; none
     for an empty field with no source."""
@@ -2977,6 +3018,21 @@ def api_resolve_transaction():
                         label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book)))
             plan = relabel_preview.joined(merchant_plan, taken_plan)
             if plan is not None:
+                # Where the teach asks anyway, the merchant's own rows still
+                # waiting for a type that it labels itself in the same change,
+                # whatever the answer (its backfill), are counted too, as the
+                # merchant sheet counts them (case 13): so the count is the
+                # past rows the change writes. Rows with no merchant are the
+                # teach's own, waiting as the row taught is, never counted
+                # (case 29); where nothing else asks, so are these.
+                if plan.count and svc and pattern and apply_scope in {"rule", "service_default"}:
+                    taught = label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book))
+                    fills = {}
+                    for held, sets in _teach_fills(conn, service_id, tx_id, pattern, match_type, book, type_id, taught):
+                        sets = {"service_id": service_id, **sets}
+                        if held["service_id"] == service_id and _would_change(held, sets):
+                            fills[held["id"]] = sets
+                    plan = relabel_preview.with_fills(conn, plan, fills)
                 refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
                 if refused is not None:
                     return refused
@@ -3038,36 +3094,11 @@ def api_resolve_transaction():
                     )
 
                 # Backfill the other rows matching this pattern that have no
-                # merchant, or have this merchant but still no type.
-                match_cond = _build_match_condition(match_type)
-                fill_where = (
-                    f"(service_id IS NULL OR (service_id = ? AND type_id IS NULL AND id != ?)) "
-                    f"AND {match_cond}"
-                )
-                fill_params = (service_id, tx_id, pattern.upper())
-                # The rows the rule now labels take its label: from the rule
-                # for the field it overrides, from the merchant for the other.
-                # A field chosen or worked out keeps its own, as every later
-                # change leaves it (spec 24; an empty field reads its own
-                # source, as the rule preview reads it), and a checked one
-                # stays checked; a row with no field to reach keeps its
-                # merchant too (fin-surfaces 54).
-                given = {"book": (book, taught[0]), "type_id": (type_id, taught[1])}
-                for held in conn.execute(
-                    f"SELECT {_LABEL_HELD} FROM transactions t WHERE {fill_where}", fill_params
-                ).fetchall():
-                    reached = [
-                        (field, column) for field, column in label_source.FIELDS.items()
-                        if label_source.reachable(held[column])
-                    ]
-                    if not reached:
-                        continue
-                    sets = {"service_id": service_id}
-                    for field, column in reached:
-                        value, source = given[field]
-                        sets[field] = value
-                        sets[column] = label_source.reached(_source(held, column), value, source)
-                    if _write_label(conn, held, sets):
+                # merchant, or have this merchant but still no type: the
+                # rows a preview, where one was asked, counted as the teach's
+                # own (_teach_fills).
+                for held, sets in _teach_fills(conn, service_id, tx_id, pattern, match_type, book, type_id, taught):
+                    if _write_label(conn, held, {"service_id": service_id, **sets}):
                         backfilled_ids.append(held["id"])
                 backfilled = len(backfilled_ids)
 
