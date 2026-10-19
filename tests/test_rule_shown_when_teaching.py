@@ -225,6 +225,26 @@ def test_a_chosen_row_of_another_merchant_is_left_where_it_is_and_counted_apart(
         book["air_india"], "Kalesh")
 
 
+def test_a_taken_row_whose_book_is_the_taught_merchants_moves_no_money(client, conn, book):
+    """A row a taught wording moves to a merchant whose book is the row's own
+    moves no money (relabel_preview._book_moves, the one test fin-surfaces 50
+    and 53 share): taught as Moom, Air India's four Moom rows show no money
+    line; taught as Household with one of them already Household, only the
+    other three move."""
+    p = client.post("/api/transactions/resolve", json=teach(conn, book["tx"], "INDIGO", book="Moom")).get_json()["preview"]
+    assert (p["count"], p["money"], p["months"]) == (4, None, None)
+
+    conn.execute("UPDATE transactions SET book = 'Household' WHERE id = ?", (book["held"][0],))
+    conn.commit()
+    p = client.post("/api/transactions/resolve", json=teach(conn, book["tx"], "INDIGO")).get_json()["preview"]
+    moving = book["held"][1:]
+    total = sum(r[0] for r in conn.execute(
+        f"SELECT amount_minor FROM transactions WHERE id IN ({','.join('?' * len(moving))})", moving))
+    assert p["count"] == 4
+    assert p["money"] == [{"from": "Moom", "to": "Household", "amount_minor": total}]
+    assert p["months"]["count"] == 3
+
+
 def test_a_wording_on_a_held_merchant_with_a_new_default_is_one_preview(client, conn, book, statement):
     """Teaching a merchant fin holds a new default, by a wording that also
     reaches another merchant's rows: one question, both sets of rows."""

@@ -312,7 +312,7 @@ def test_rule_update_can_apply_type_override_and_relabel(client):
 
     resp = client.put(
         f"/api/rules/{rule_id}",
-        json={"type_override_id": shopping_id},
+        json={"type_override_id": shopping_id, "past": "apply"},
     )
     assert resp.status_code == 200
     assert resp.get_json()["recategorized"] == 1

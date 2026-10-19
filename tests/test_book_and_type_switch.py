@@ -480,7 +480,7 @@ def test_rule_update_rewrites_book_and_type_on_its_rows_and_leaves_manual_ones(
                   type_name="Equipment", service_id=market, cat_source="manual")
 
     resp = client.put(f"/api/rules/{rule_id}", json={
-        "type_override_id": type_id(conn, "Stock purchases"), "book_override": "Moom",
+        "type_override_id": type_id(conn, "Stock purchases"), "book_override": "Moom", "past": "apply",
     })
 
     assert resp.status_code == 200, resp.get_json()
@@ -490,7 +490,7 @@ def test_rule_update_rewrites_book_and_type_on_its_rows_and_leaves_manual_ones(
 
     # Taking the override off again hands the rows back to the merchant.
     resp = client.put(f"/api/rules/{rule_id}", json={
-        "type_override_id": None, "book_override": None,
+        "type_override_id": None, "book_override": None, "past": "apply",
     })
     assert resp.status_code == 200, resp.get_json()
     assert label(client, inherited) == ("Household", "Shopping", "service_default")
@@ -504,7 +504,7 @@ def test_a_rule_overriding_the_type_alone_keeps_the_merchants_book(client, conn,
              cat_source="service_default")
 
     resp = client.put(f"/api/rules/{rule_id}", json={
-        "type_override_id": type_id(conn, "Equipment"),
+        "type_override_id": type_id(conn, "Equipment"), "past": "apply",
     })
 
     assert resp.status_code == 200, resp.get_json()
@@ -679,7 +679,7 @@ def test_service_merge_writes_the_targets_book_and_type_to_the_rows_it_takes(
                   type_name="Software & AI tools", service_id=target,
                   cat_source="service_default")
 
-    resp = client.post(f"/api/services/{source}/merge", json={"target_id": target})
+    resp = client.post(f"/api/services/{source}/merge", json={"target_id": target, "past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     merged = resp.get_json()["merged"]

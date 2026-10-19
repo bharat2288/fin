@@ -1472,8 +1472,6 @@ _LABEL_COLUMNS = frozenset({
 # What a label write reads of a row first.
 _LABEL_HELD = ("t.id, t.description, t.amount_minor, t.book, t.type_id, t.service_id, "
                "t.book_source, t.type_source, t.cat_source, t.flow_type, t.flow_type_manual, t.other_side_id")
-# A rule's override of each field.
-_OVERRIDE_OF = {"book": "book_override", "type_id": "type_override_id"}
 
 
 def _write_label(conn, held, sets: dict) -> bool:
@@ -1506,48 +1504,6 @@ def _source(held, column: str) -> str | None:
     if held[field] is None and held[column] is None:
         return None
     return label_source.source_of(held[column], held["cat_source"])
-
-
-def _own_rule(conn, held, service_id: int | None):
-    """The rule that labels the row's wording now, when it is one of
-    `service_id`'s; a rule of another merchant gives this row nothing."""
-    rule = first_rule(held["description"] or "", conn, held["amount_minor"])
-    if rule is None or service_id is None or rule["service_id"] != service_id:
-        return None
-    return rule
-
-
-def _reach_merchant_rows(conn, svc_id: int, label: dict, only: list[int] | None = None) -> int:
-    """A merchant's new book or type ({field: value}, the fields that
-    changed) written to its rows (`only` those, when given): each field a
-    later change may reach takes it, unless the row's own rule overrides that
-    field. A checked field stays checked; one from fin is from the merchant.
-    Returns the rows changed."""
-    if not label:
-        return 0
-    reach = " OR ".join(label_source.reachable_sql(field) for field in label)
-    picked = None if only is None else set(only)
-    changed = 0
-    for held in conn.execute(
-        f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.service_id = ? AND ({reach})", (svc_id,)
-    ).fetchall():
-        if picked is not None and held["id"] not in picked:
-            continue
-        own = _own_rule(conn, held, svc_id)
-        sets = {}
-        for field, value in label.items():
-            column = label_source.FIELDS[field]
-            held_source = _source(held, column)
-            # A field a rule set is the rule's, not the merchant's default.
-            if held_source is not None and (not label_source.reachable(held_source)
-                                            or held_source == label_source.RULE):
-                continue
-            if own is not None and own[_OVERRIDE_OF[field]] is not None:
-                continue
-            sets[field] = value
-            sets[column] = label_source.reached(held_source, value, label_source.MERCHANT)
-        changed += _write_label(conn, held, sets)
-    return changed
 
 
 def _accept_past(conn, where: str, params: tuple) -> int:
@@ -1692,26 +1648,47 @@ def _previewed_answer(conn, plan, answer: str | None, token, answer_key: str = "
     is left to change (case 20); with rows to change and no answer, the
     preview itself (409, the body the drawer and chat read)."""
     if token is not None and token != plan.token:
-        return jsonify({"error": relabel_preview.stale(plan.subject["name"]), "stale": True}), 409
+        return jsonify({"error": relabel_preview.stale(plan), "stale": True}), 409
     if plan.count and answer is None:
         return jsonify({
-            "error": relabel_preview.asked(plan.subject["name"], plan.count, answer_key),
+            "error": relabel_preview.asked(plan, answer_key),
             "preview": relabel_preview.summary(conn, plan),
         }), 409
     return None
 
 
+def _reflowed(conn, p, flow_ctx) -> dict:
+    """A rule's relabel, with the row's flow worked out again for its new
+    merchant (a flow set by hand keeps its flow and its other side)."""
+    sets = dict(p.apply)
+    if p.held["flow_type_manual"]:
+        return sets
+    service_id = sets.get("service_id", p.held["service_id"])
+    labelled = bool(sets.get("type_id", p.held["type_id"]) or service_id)
+    sets["flow_type"], sets["other_side_id"] = _classify_flow_for_tx(
+        conn, p.held["description"], p.held["amount_minor"], flow_ctx=flow_ctx,
+        tx_id=p.held["id"], service_id=service_id, labelled=labelled,
+    )
+    return sets
+
+
 def _write_plan(conn, plan, answer: str | None, fill: bool = True) -> tuple[int, int]:
     """The plan the preview counted, as answered: apply writes each row's new
-    values (its sources as they were); only_new marks each kept field
-    checked, values left. With `fill`, a row with no type is given the
-    merchant's whatever the answer (the sheet, as before the preview; the
-    Queue's own backfill does it for teaching). Returns (rows whose label
-    changed, rows marked checked)."""
+    values (its sources as they were; a rule's rows with their flow worked
+    out again); only_new marks each kept field checked, values left. With
+    `fill`, a row with no type is given the merchant's whatever the answer
+    (the sheet, as before the preview; the Queue's own backfill does it for
+    teaching). Returns (rows whose label changed, rows marked checked)."""
     relabelled = checked = 0
+    flow_ctx = None
     for p in plan.rows:
         if answer == relabel_preview.APPLY:
-            relabelled += _write_label(conn, p.held, p.apply)
+            sets = p.apply
+            if p.reflow:
+                if flow_ctx is None:
+                    flow_ctx = flow.build_context(conn)
+                sets = _reflowed(conn, p, flow_ctx)
+            relabelled += _write_label(conn, p.held, sets)
         elif answer == relabel_preview.ONLY_NEW:
             checked += _write_label(conn, p.held, p.only_new)
     if fill:
@@ -1909,12 +1886,24 @@ def api_services_book_varies_decline(svc_id):
 
 @app.route("/api/services/<int:svc_id>/merge", methods=["POST"])
 def api_services_merge(svc_id):
-    """Merge source service into target: reassign all FKs, delete source."""
-    data = request.get_json()
+    """Merge source service into target: reassign all FKs, delete source.
+
+    The rows it moves that the target's book and type would relabel go
+    through the preview (relabel_preview.merge_change): without `past`
+    nothing is written and the preview comes back (409); `past: apply`
+    gives them the target's labels (a chosen field, and one a rule override
+    sets, keep their own); `past: only_new` moves them keeping their book
+    and type, each field from fin checked. `token` is refused once either
+    merchant, the source's rules or its rows changed since the preview."""
+    data = request.get_json(silent=True) or {}
     target_id = data.get("target_id")
     if not target_id or int(target_id) == svc_id:
         return jsonify({"error": "Invalid merge target"}), 400
     target_id = int(target_id)
+    try:
+        past = relabel_preview.checked_answer(data.get("past"))
+    except relabel_preview.Refused as e:
+        return jsonify({"error": str(e)}), 400
 
     with get_db() as conn:
         # Verify both exist
@@ -1925,13 +1914,10 @@ def api_services_merge(svc_id):
         if not source or not target:
             return jsonify({"error": "Service not found"}), 404
 
-        # The rows being moved take the target's book and type in each field
-        # a later change may reach (label_source); a field a rule override
-        # sets keeps its own (the rules move with them), and so does a
-        # chosen one.
-        moving = [r[0] for r in conn.execute(
-            "SELECT id FROM transactions WHERE service_id = ?", (svc_id,)
-        ).fetchall()]
+        plan = relabel_preview.merge_change(conn, svc_id, target_id)
+        refused = _previewed_answer(conn, plan, past, data.get("token"))
+        if refused is not None:
+            return refused
 
         # Reassign all references from source → target
         txn_count = conn.execute(
@@ -1943,9 +1929,7 @@ def api_services_merge(svc_id):
             (target_id, svc_id),
         ).rowcount
         invalidate_rules_cache()  # the moved rules are the target's now
-        relabelled = _reach_merchant_rows(
-            conn, target_id, {"book": target["book"], "type_id": target["type_id"]}, only=moving,
-        )
+        relabelled, _ = _write_plan(conn, plan, past)
         sub_count = conn.execute(
             "UPDATE subscriptions SET service_id = ? WHERE service_id = ?",
             (target_id, svc_id),
@@ -4497,8 +4481,16 @@ def _rows_labelled_by_rule(conn) -> dict[int, int]:
 @app.route("/api/rules", methods=["POST"])
 def api_rules_create():
     """Add a new merchant rule. Requires service_id: book and type come from
-    the service unless the rule overrides them."""
-    data = request.get_json()
+    the service unless the rule overrides them.
+
+    A rule that would relabel past rows (the rows it would win, whose label
+    would then change) goes through the preview (relabel_preview.rule_change):
+    without `past` nothing is written and the preview comes back (409);
+    `past: apply` labels those rows by it; `past: only_new` adds the rule and
+    marks their fields checked, values left. `token` is refused once the
+    rules or those rows changed since the preview. Returns {id, success,
+    recategorized, checked}."""
+    data = request.get_json(silent=True)
     if not data or "pattern" not in data or "service_id" not in data:
         return jsonify({"error": "pattern and service_id required"}), 400
     pattern_error = _rule_pattern_error(data.get("pattern"))
@@ -4511,50 +4503,87 @@ def api_rules_create():
             type_override_id = _checked_type_id(conn, data.get("type_override_id"))
             min_minor = _threshold_minor(data, "min_amount")
             max_minor = _threshold_minor(data, "max_amount")
-        except (UnknownLabel, BadAmount) as e:
+            past = relabel_preview.checked_answer(data.get("past"))
+        except (UnknownLabel, BadAmount, relabel_preview.Refused) as e:
             return jsonify({"error": str(e)}), 400
-        return _crud_insert(
-            conn,
-            "INSERT INTO merchant_rules (pattern, service_id, book_override, type_override_id, "
-            "match_type, confidence, priority, min_amount_minor, max_amount_minor) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                data["pattern"],
-                data["service_id"],
-                book_override,
-                type_override_id,
-                data.get("match_type", "contains"),
-                "confirmed",
-                data.get("priority", 0),
-                min_minor,
-                max_minor,
-            ),
-            "rule",
-            post_commit=invalidate_rules_cache,
-        )
+        proposed = {
+            "pattern": data["pattern"],
+            "service_id": data["service_id"],
+            "book_override": book_override,
+            "type_override_id": type_override_id,
+            "match_type": data.get("match_type", "contains"),
+            "priority": data.get("priority", 0),
+            "min_amount_minor": min_minor,
+            "max_amount_minor": max_minor,
+        }
+        try:
+            plan = relabel_preview.rule_change(conn, None, proposed, _paynow_fallback_label)
+        except LookupError as e:
+            return jsonify({"error": str(e)}), 400
+        refused = _previewed_answer(conn, plan, past, data.get("token"))
+        if refused is not None:
+            return refused
+        try:
+            new_id = conn.execute(
+                "INSERT INTO merchant_rules (pattern, service_id, book_override, type_override_id, "
+                "match_type, confidence, priority, min_amount_minor, max_amount_minor) "
+                "VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?, ?)",
+                (proposed["pattern"], proposed["service_id"], book_override, type_override_id,
+                 proposed["match_type"], proposed["priority"], min_minor, max_minor),
+            ).lastrowid
+            recategorized, checked = _write_plan(conn, plan, past, fill=False)
+            conn.commit()
+        except Exception as e:
+            app.logger.warning("Failed to create rule: %s", e)
+            return jsonify({"error": "Failed to create rule"}), 400
+        finally:
+            invalidate_rules_cache()
+    return jsonify({"id": new_id, "success": True, "recategorized": recategorized, "checked": checked})
+
+
+# What a rule edit may set, as the API names it, and the column that holds
+# it. Frozen: the column names in the edit's statement come from here only.
+_RULE_EDIT_COLUMNS = {
+    "pattern": "pattern", "service_id": "service_id", "book_override": "book_override",
+    "type_override_id": "type_override_id", "match_type": "match_type", "priority": "priority",
+    **_THRESHOLD_COLUMNS,
+}
+
+
+def _rule_gone(conn, rule_id: int):
+    """The refusal for a rule fin no longer holds, or None."""
+    if conn.execute("SELECT 1 FROM merchant_rules WHERE id = ?", (rule_id,)).fetchone() is None:
+        return jsonify({"error": "This rule is no longer in fin"}), 404
+    return None
 
 
 @app.route("/api/rules/<int:rule_id>", methods=["PUT"])
 def api_rules_update(rule_id):
-    """Update a merchant rule, then write its book and type to its rows."""
-    data = request.get_json()
-    if "pattern" in (data or {}):
+    """Update a merchant rule. The rows whose winning rule, after the edit,
+    differs from before, or whose label from that rule changes, go through
+    the preview (relabel_preview.rule_change): so a rule's priority and
+    amount limits are honoured, and a row another rule wins is left alone.
+    Without `past` nothing is written and the preview comes back (409);
+    `past: apply` relabels them (from fin takes the new winner's source,
+    checked stays checked, a chosen field keeps its own); `past: only_new`
+    saves the rule and marks their fields checked. `token` is refused once
+    the rules or those rows changed since the preview. Returns {success,
+    recategorized, checked}."""
+    data = request.get_json(silent=True) or {}
+    if "pattern" in data:
         pattern_error = _rule_pattern_error(data.get("pattern"))
         if pattern_error:
             return jsonify({"error": pattern_error}), 400
-    sets, params = _build_update_sets(
-        data,
-        ["pattern", "service_id", "book_override", "type_override_id", "match_type",
-         "priority"],
-    )
+    proposed = {}
     try:
-        for field, column in _THRESHOLD_COLUMNS.items():
-            if field in (data or {}):
-                sets.append(f"{column} = ?")
-                params.append(_threshold_minor(data, field))
-    except BadAmount as e:
+        for field, column in _RULE_EDIT_COLUMNS.items():
+            if field in data:
+                proposed[column] = (_threshold_minor(data, field) if field in _THRESHOLD_COLUMNS
+                                    else data[field])
+        past = relabel_preview.checked_answer(data.get("past"))
+    except (BadAmount, relabel_preview.Refused) as e:
         return jsonify({"error": str(e)}), 400
-    if not sets:
+    if not proposed:
         return jsonify({"error": "No fields to update"}), 400
 
     with get_db() as conn:
@@ -4562,69 +4591,56 @@ def api_rules_update(rule_id):
             _checked_labels(conn, data, "book_override", "type_override_id")
         except UnknownLabel as e:
             return jsonify({"error": str(e)}), 400
-        params.append(rule_id)
-        conn.execute(f"UPDATE merchant_rules SET {', '.join(sets)} WHERE id = ?", params)
-
-        # Relabel: re-run this specific rule against transactions
-        # Fetch the updated rule + the merchant's default book and type
-        rule = conn.execute(
-            "SELECT mr.pattern, mr.match_type, mr.service_id, mr.book_override, "
-            "mr.type_override_id, s.book, s.type_id "
-            "FROM merchant_rules mr JOIN services s ON mr.service_id = s.id "
-            "WHERE mr.id = ?", (rule_id,)
-        ).fetchone()
-        recategorized = 0
-        if rule:
-            pattern_upper = rule["pattern"].upper()
-            match_cond = _build_match_condition(rule["match_type"])
-            book, type_id, _ = rule_label(rule)
-            given = dict(zip(label_source.FIELDS, (book, type_id)))
-            from_rule = dict(zip(label_source.FIELDS, label_source.rule_sources(rule)))
-            flow_ctx = None
-            # The rows the pattern matches that a later change may reach: each
-            # reachable field takes the rule's label (a checked one stays
-            # checked, one from fin is from the rule or its merchant); a
-            # chosen field keeps its own.
-            rows = conn.execute(
-                f"""
-                SELECT {_LABEL_HELD}
-                FROM transactions t
-                WHERE {match_cond}
-                  AND COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')
-                  AND {label_source.any_reachable_sql('t')}
-                """,
-                (pattern_upper,),
-            ).fetchall()
-            for tx in rows:
-                sets = {"service_id": rule["service_id"]}
-                for field, column in label_source.FIELDS.items():
-                    held_source = _source(tx, column)
-                    if held_source is None or label_source.reachable(held_source):
-                        sets[field] = given[field]
-                        sets[column] = label_source.reached(held_source, given[field], from_rule[field])
-                if not tx["flow_type_manual"]:
-                    if flow_ctx is None:
-                        flow_ctx = flow.build_context(conn)
-                    sets["flow_type"], sets["other_side_id"] = _classify_flow_for_tx(
-                        conn, tx["description"], tx["amount_minor"], flow_ctx=flow_ctx,
-                        tx_id=tx["id"], service_id=rule["service_id"], labelled=True,
-                    )
-                _write_label(conn, tx, sets)
-                recategorized += 1
-
-        conn.commit()
-        invalidate_rules_cache()
-    return jsonify({"success": True, "recategorized": recategorized})
+        gone = _rule_gone(conn, rule_id)
+        if gone is not None:
+            return gone
+        try:
+            plan = relabel_preview.rule_change(conn, rule_id, proposed, _paynow_fallback_label)
+        except LookupError as e:
+            return jsonify({"error": str(e)}), 400
+        refused = _previewed_answer(conn, plan, past, data.get("token"))
+        if refused is not None:
+            return refused
+        try:
+            conn.execute(
+                f"UPDATE merchant_rules SET {', '.join(f'{c} = ?' for c in proposed)} WHERE id = ?",
+                (*proposed.values(), rule_id),
+            )
+            recategorized, checked = _write_plan(conn, plan, past, fill=False)
+            conn.commit()
+        finally:
+            invalidate_rules_cache()
+    return jsonify({"success": True, "recategorized": recategorized, "checked": checked})
 
 
 @app.route("/api/rules/<int:rule_id>", methods=["DELETE"])
 def api_rules_delete(rule_id):
-    """Delete a merchant rule."""
+    """Delete a merchant rule. The rows it labels whose label would then
+    change (by the rules left, or to no merchant, waiting in the Queue) go
+    through the preview: without `past` nothing is written and the preview
+    comes back (409); `past: apply` relabels them; `past: only_new` deletes
+    the rule and the rows keep their labels, checked. Body (optional):
+    {past, token}. Returns {success, recategorized, checked}."""
+    data = request.get_json(silent=True) or {}
+    try:
+        past = relabel_preview.checked_answer(data.get("past"))
+    except relabel_preview.Refused as e:
+        return jsonify({"error": str(e)}), 400
     with get_db() as conn:
-        conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
-        conn.commit()
-        invalidate_rules_cache()
-    return jsonify({"success": True})
+        gone = _rule_gone(conn, rule_id)
+        if gone is not None:
+            return gone
+        plan = relabel_preview.rule_change(conn, rule_id, None, _paynow_fallback_label)
+        refused = _previewed_answer(conn, plan, past, data.get("token"))
+        if refused is not None:
+            return refused
+        try:
+            conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
+            recategorized, checked = _write_plan(conn, plan, past, fill=False)
+            conn.commit()
+        finally:
+            invalidate_rules_cache()
+    return jsonify({"success": True, "recategorized": recategorized, "checked": checked})
 
 
 @app.route("/api/rules/recategorize", methods=["POST"])

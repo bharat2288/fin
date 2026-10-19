@@ -605,7 +605,7 @@ def test_a_new_rule_takes_a_waiting_row_off_the_review_list(client, waiting):
     svc = client.post("/api/services", json={
         "name": "Sample Payee", "book": "Household", "type_id": spending_type(client, "Home"),
     }).get_json()["id"]
-    client.post("/api/rules", json={"pattern": "SAMPLE PAYEE", "service_id": svc})
+    client.post("/api/rules", json={"pattern": "SAMPLE PAYEE", "service_id": svc, "past": "apply"})
 
     client.post("/api/rules/recategorize")
 
