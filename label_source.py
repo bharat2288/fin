@@ -27,6 +27,7 @@ it changes. A contract step (personal-ledger 51) retires it.
 
 from __future__ import annotations
 
+import json
 import re
 
 import book_type
@@ -189,3 +190,70 @@ def mark(book_source: str | None, type_source: str | None, otherwise: str | None
         if book_source in sources or type_source in sources:
             return name
     return otherwise
+
+
+# --- The marks shown (fin-surfaces 52) ---------------------------------------
+
+# The field names a screen reads a row's two sources by.
+SHOWN = {"book": "book", "type_id": "type"}
+
+
+def shown_sources(tx) -> dict:
+    """A row's two sources as the screens are given them, read by source_of
+    (a field with no source of its own reads the old mark, expand); none for
+    an empty field. `tx` holds the row's raw book, type_id, the two source
+    columns and cat_source."""
+    out = {}
+    for field, name in SHOWN.items():
+        held = tx[FIELDS[field]]
+        has_value = tx[field] is not None or held is not None
+        out[name] = source_of(held, tx["cat_source"]) if has_value else None
+    return out
+
+
+def _set_it(field: str, source: str, before: dict | None, after: dict) -> bool:
+    """Whether one recorded change set a field to the source it holds now.
+
+    A change recorded with the source columns set it when it gave the field
+    that source, or (chosen) a new value while chosen. One recorded before
+    the label-source step holds no source: the row's hand-set mark there is
+    what set a field now checked or chosen."""
+    column = FIELDS[field]
+    before = before or {}
+    if column in after:
+        if after[column] != source:
+            return False
+        if before.get(column) != source:
+            return True
+        return source == CHOSEN and before.get(field) != after.get(field)
+    if source not in LOOKED_AT or after.get(_MARK_COLUMN) != "manual":
+        return False
+    return before.get(_MARK_COLUMN) != "manual" or before.get(field) != after.get(field)
+
+
+def set_by(conn, tx_id: int, sources: dict) -> dict:
+    """For each field checked or chosen, the latest change entry that set it
+    so: its id, where it came from (`via`, `actor`) and when (`at`, UTC).
+    None for a field from fin, and for one set before fin kept a history."""
+    wanted = {field: sources[name] for field, name in SHOWN.items() if sources.get(name) in LOOKED_AT}
+    out = {name: None for name in SHOWN.values()}
+    if not wanted:
+        return out
+    found: dict[str, dict] = {}
+    for r in conn.execute(
+        "SELECT e.id, e.via, e.actor, e.at, c.before, c.after FROM change_rows c"
+        " JOIN change_entries e ON e.id = c.entry_id"
+        " WHERE c.tbl = 'transactions' AND c.row_id = ? AND e.open = 0 AND c.after IS NOT NULL"
+        " ORDER BY c.id DESC",
+        (tx_id,),
+    ):
+        before = json.loads(r["before"]) if r["before"] else None
+        after = json.loads(r["after"])
+        for field, source in wanted.items():
+            if field not in found and _set_it(field, source, before, after):
+                found[field] = {"entry_id": r["id"], "via": r["via"], "actor": r["actor"], "at": r["at"]}
+        if len(found) == len(wanted):
+            break
+    for field, entry in found.items():
+        out[SHOWN[field]] = entry
+    return out

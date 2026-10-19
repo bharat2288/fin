@@ -2504,7 +2504,7 @@ def api_transactions():
                 t.amount_foreign, t.currency_foreign,
                 {book_expr("t")} as book,
                 t.type_id, ty.name as type, tp.name as parent_type,
-                t.cat_source, t.book_source, t.type_source,
+                t.cat_source, t.book_source, t.type_source, t.book as own_book,
                 t.is_one_off, COALESCE(t.flow_type, 'expense') as flow_type, t.flow_type_manual,
                 t.notes,
                 t.other_side_id, oa.name as other_side_name,
@@ -2546,11 +2546,20 @@ def api_transactions():
                                         tx.pop("waiting_minor"), tx["currency"])
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])
         tx["not_checked"] = bool(tx["not_checked"])
+        # Where each field came from, as the marks show it (fin-surfaces 52).
+        tx["sources"] = label_source.shown_sources({**tx, "book": tx.pop("own_book")})
         if tx.get("account_name"):
             tx["account_name"] = mask_card_number(tx["account_name"])
         if tx.get("other_side_name"):
             tx["other_side_name"] = mask_card_number(tx["other_side_name"])
         txns.append(tx)
+
+    # One row, as its sheet reads it: who checked or chose each field, and
+    # when, from the change history.
+    if tx_id is not None and txns:
+        with get_db() as conn:
+            for tx in txns:
+                tx["set_by"] = label_source.set_by(conn, tx["id"], tx["sources"])
 
     return jsonify({
         "transactions": txns,
