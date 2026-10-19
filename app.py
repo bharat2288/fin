@@ -41,6 +41,7 @@ import screens
 import suggest
 import tie
 import trend_routes
+import expect_back
 import expect_routes
 import refund_links
 from person import checked_name as checked_person_name, create_person, find_person
@@ -1040,11 +1041,98 @@ def api_accounts_update(acct_id):
                         ["name", "short_name", "type", "last_four", "currency", "status", "owner"])
 
 
+def _account_records_refusal(conn, acct_id: int) -> str | None:
+    """Why deleting an account would leave a record of expect back pointing at
+    nothing, in the operator's words, or None: the oldest of its rows that an
+    expectation, a set-off, a refund link or a set-aside rests on; else, for a
+    person, the first record that names them."""
+    held = conn.execute(
+        "SELECT t.id, t.description FROM transactions t JOIN statements s ON s.id = t.statement_id "
+        "WHERE s.account_id = ? AND ("
+        " EXISTS (SELECT 1 FROM expectation e WHERE e.row_id = t.id)"
+        " OR EXISTS (SELECT 1 FROM set_off so WHERE so.payment_row_id = t.id)"
+        " OR EXISTS (SELECT 1 FROM refund_link r WHERE r.refund_row_id = t.id OR r.purchase_row_id = t.id)"
+        " OR EXISTS (SELECT 1 FROM dismissal d WHERE d.row_id = t.id OR d.purchase_row_id = t.id)"
+        ") ORDER BY t.date, t.id LIMIT 1",
+        (acct_id,),
+    ).fetchone()
+    if held is not None:
+        row_id, description = held["id"], held["description"]
+        marked = conn.execute(
+            "SELECT id, direction, currency FROM expectation WHERE row_id = ?", (row_id,)
+        ).fetchone()
+        if marked is not None:
+            what = "expected back" if marked["direction"] == expect_back.BACK else "to pay back"
+            back = expect_back.set_off_minor(conn, marked["id"])
+            if back:
+                return (f"{description} is {what} with {expect_back.short(back, marked['currency'])} "
+                        "set against it. Unlink those and undo the mark first.")
+            return f"{description} is {what}. Undo the mark first."
+        placed = conn.execute(
+            "SELECT so.amount_minor, COALESCE(a.currency, 'SGD') AS currency, "
+            "COALESCE(it.description, 'Opening figure · ' || p.name, 'its row, when it comes') AS item "
+            "FROM set_off so JOIN transactions t ON t.id = so.payment_row_id "
+            "JOIN statements s ON s.id = t.statement_id JOIN accounts a ON a.id = s.account_id "
+            "LEFT JOIN expectation e ON e.id = so.expectation_id "
+            "LEFT JOIN transactions it ON it.id = e.row_id LEFT JOIN accounts p ON p.id = e.person_id "
+            "WHERE so.payment_row_id = ? ORDER BY so.id",
+            (row_id,),
+        ).fetchall()
+        if placed:
+            parts = [f"{expect_back.short(p['amount_minor'], p['currency'])} set against {p['item']}" for p in placed]
+            listed = parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+            return f"{description} has {listed}. Unlink {'it' if len(parts) == 1 else 'those'} first."
+        if conn.execute("SELECT 1 FROM refund_link WHERE refund_row_id = ? OR purchase_row_id = ?",
+                        (row_id, row_id)).fetchone():
+            return f"{description} is linked as a refund. Unlink it first."
+        return f"{description} was set aside. Undo that change first."
+
+    person = conn.execute("SELECT name FROM accounts WHERE id = ? AND type = 'person'", (acct_id,)).fetchone()
+    if person is None:
+        return None
+    name = person["name"]
+    item = "COALESCE(it.description, 'Opening figure · ' || p.name)"
+    if conn.execute("SELECT 1 FROM expectation WHERE person_id = ?", (acct_id,)).fetchone():
+        return f"{name} has an opening figure expected back or to pay back. Undo that change first."
+    named = conn.execute(
+        f"SELECT {item} FROM expectation_name n JOIN expectation e ON e.id = n.expectation_id "
+        "LEFT JOIN transactions it ON it.id = e.row_id LEFT JOIN accounts p ON p.id = e.person_id "
+        "WHERE n.person_id = ? ORDER BY e.id LIMIT 1",
+        (acct_id,),
+    ).fetchone()
+    if named is not None:
+        return f"{name} is named on {named[0]}. Take the name off it first."
+    waiting = conn.execute(
+        "SELECT t.description FROM set_off so JOIN transactions t ON t.id = so.payment_row_id "
+        "WHERE so.person_id = ? ORDER BY so.id LIMIT 1",
+        (acct_id,),
+    ).fetchone()
+    if waiting is not None:
+        return f"{name} is named on {waiting[0]}, waiting for its row. Unlink it first."
+    given = conn.execute(
+        f"SELECT {item} FROM let_go l JOIN expectation e ON e.id = l.expectation_id "
+        "LEFT JOIN transactions it ON it.id = e.row_id LEFT JOIN accounts p ON p.id = e.person_id "
+        "WHERE l.to_whom_id = ? ORDER BY l.id LIMIT 1",
+        (acct_id,),
+    ).fetchone()
+    if given is not None:
+        return f"{name} is named on the let-go of {given[0]}. Undo the let-go first."
+    learnt = conn.execute("SELECT wording FROM sender_wording WHERE person_id = ? ORDER BY id LIMIT 1",
+                          (acct_id,)).fetchone()
+    if learnt is not None:
+        return f"{name} is learnt from the wording '{learnt[0]}'. Undo that change first."
+    return None
+
+
 @app.route("/api/accounts/<int:acct_id>", methods=["DELETE"])
 def api_accounts_delete(acct_id):
     """Delete an account. Refuses if statements or anchors reference it, or a
-    row names it as its other side."""
+    row names it as its other side; first, in named words, if a record of
+    expect back rests on one of its rows or names it as a person."""
     with get_db() as conn:
+        why = _account_records_refusal(conn, acct_id)
+        if why:
+            return jsonify({"error": why}), 400
         stmt_count = conn.execute(
             "SELECT COUNT(*) FROM statements WHERE account_id = ?", (acct_id,)
         ).fetchone()[0]
@@ -2276,6 +2364,80 @@ def api_transactions():
     })
 
 
+# ---------------------------------------------------------------------------
+# Rows that carry records (personal-ledger 23: flow writers respect the
+# records). An expectation sits, and a set-off's payment row is, only where
+# nothing else on the sheet already counts the row (expect_back's eligibility
+# rule). A label that would make such a row a move between the household's own
+# accounts, a company's cost or a movement naming a non-person would count its
+# money twice, so it is refused, naming the record; labelling the row's own
+# part (spending, income, a gift, a person's movement) stays allowed.
+# ---------------------------------------------------------------------------
+
+def _counted_elsewhere(flow_name: str | None, book: str | None, other_kind: str | None) -> bool:
+    """Whether a row with this flow, book and other side's kind is one the
+    sheet already counts whole, so no record may rest on it."""
+    if flow_name in ("transfer", "payment"):
+        return True
+    if (book or book_type.DEFAULT_BOOK) != account_kind.HOUSEHOLD:
+        return True
+    return flow_name == flow.MOVEMENT and other_kind != "person"
+
+
+def _row_records_refusal(conn, tx_id: int) -> str | None:
+    """What rests on a row, in a refusal's words: its expectation, else what it
+    places as a payment. None when the row carries no record."""
+    marked = conn.execute(
+        "SELECT direction, amount_minor, currency FROM expectation WHERE row_id = ?", (tx_id,)
+    ).fetchone()
+    if marked is not None:
+        what = "expected back" if marked["direction"] == expect_back.BACK else "to pay back"
+        return (f"{expect_back.short(marked['amount_minor'], marked['currency'])} of this row is {what}; "
+                "undo the mark first.")
+    placed = conn.execute(
+        "SELECT so.amount_minor, COALESCE(a.currency, 'SGD') AS currency, so.expectation_id, "
+        "COALESCE(it.description, 'Opening figure · ' || p.name) AS item "
+        "FROM set_off so JOIN transactions t ON t.id = so.payment_row_id "
+        "JOIN statements s ON s.id = t.statement_id JOIN accounts a ON a.id = s.account_id "
+        "LEFT JOIN expectation e ON e.id = so.expectation_id "
+        "LEFT JOIN transactions it ON it.id = e.row_id LEFT JOIN accounts p ON p.id = e.person_id "
+        "WHERE so.payment_row_id = ? ORDER BY so.id",
+        (tx_id,),
+    ).fetchall()
+    if not placed:
+        return None
+
+    def where(p) -> str:
+        return "waiting for its row" if p["expectation_id"] is None else f"set against {p['item']}"
+
+    if len(placed) == 1:
+        p = placed[0]
+        return f"{expect_back.short(p['amount_minor'], p['currency'])} of this row is {where(p)}; unlink it first."
+    parts = [f"{expect_back.short(p['amount_minor'], p['currency'])} {where(p)}" for p in placed]
+    return f"This row has {', '.join(parts[:-1])} and {parts[-1]}; unlink those first."
+
+
+def _label_refusal(conn, tx_id: int, flow_name: str | None, book: str | None,
+                   other_kind: str | None) -> str | None:
+    """Why a label may not make this row what it would then be (its flow, book
+    and other side's kind after the write), or None."""
+    if not _counted_elsewhere(flow_name, book, other_kind):
+        return None
+    return _row_records_refusal(conn, tx_id)
+
+
+def _relabel_refusal(conn, tx_id: int, book: str | None) -> str | None:
+    """A label that changes only a row's book (and type): refused when the new
+    book is a company's and a record rests on the row."""
+    held = conn.execute(
+        "SELECT t.flow_type, o.type AS other_kind FROM transactions t "
+        "LEFT JOIN accounts o ON o.id = t.other_side_id WHERE t.id = ?", (tx_id,)
+    ).fetchone()
+    if held is None:
+        return None
+    return _label_refusal(conn, tx_id, held["flow_type"], book, held["other_kind"])
+
+
 @app.route("/api/transactions/<int:tx_id>", methods=["PUT"])
 def api_update_transaction(tx_id: int):
     """Update a transaction's notes, book, type, or one-off flag. A row may
@@ -2298,6 +2460,10 @@ def api_update_transaction(tx_id: int):
             _checked_labels(conn, data)
         except UnknownLabel as e:
             return jsonify({"error": str(e)}), 400
+        if "book" in data:
+            why = _relabel_refusal(conn, tx_id, data["book"])
+            if why:
+                return jsonify({"error": why}), 400
         values.append(tx_id)
         conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", values)
         conn.commit()
@@ -2339,6 +2505,12 @@ def api_bulk_label():
         if gone:
             return jsonify({"error": f"{len(gone)} of these rows {'is' if len(gone) == 1 else 'are'} "
                                      "no longer in fin (changed elsewhere); nothing was saved"}), 400
+        for line in lines:
+            book = line.get("book")
+            if book not in (None, ""):
+                why = _relabel_refusal(conn, line["tx_id"], book)
+                if why:
+                    return jsonify({"error": why}), 400
         for line in lines:
             given = {k: v for k, v in line.items() if k in ("book", "type_id") and v not in (None, "")}
             sets, values = _build_update_sets(given, ["book", "type_id"])
@@ -4317,6 +4489,13 @@ def api_review_label(tx_id: int):
                 other_side = _label_account(conn, choice, data.get("account_id"), tx["account_id"])
         except (UnknownLabel, BookNeeded, review.LabelRefused) as e:
             return jsonify({"error": str(e)}), 400
+
+        # A row a record rests on keeps to what the sheet counts once.
+        other_kind = "person" if new_person is not None else (conn.execute(
+            "SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone() or [None])[0]
+        why = _label_refusal(conn, tx_id, flow_name, book, other_kind)
+        if why:
+            return jsonify({"error": why}), 400
 
         # Everything asked for is there: the person's account, then the label,
         # in one transaction.
