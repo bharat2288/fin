@@ -5,8 +5,9 @@
 // chips, the Stack by control, the legend chips, the summary, the ₹ / S$
 // switch and the no-rate Fetch around one drawn chart. Every figure comes
 // from the server's payload (R1 /api/trend, R3 /api/accounts/<id>/balances);
-// the card only filters by the books showing, words the figures, and, for a
-// rupee account's S$ view, multiplies by the month-end rate the server named.
+// the card only filters by the books showing and words the figures. It values
+// no money itself: a rupee account's S$ view is R3's own answer (cur=SGD),
+// which the page asks for through opts.onCur.
 //
 // It reads these app.js globals by name, at call time, and copies none:
 /* global money, esc, store, act, chartTokens, icon, day, monthName, plural, monthEnd */
@@ -49,22 +50,6 @@
     function fmt(minor, cur) {
         const text = money(minor, cur);
         return cur === 'INR' && Number.isInteger(minor) && minor % 100 === 0 ? text.replace(/\.00$/, '') : text;
-    }
-
-    /** A rupee (or other two-digit) amount in S$ minor units at a decimal-text
-     *  rate, rounded half-even, as balance_sheet.valued rounds. */
-    function toSgd(minor, rateText) {
-        if (minor === null || minor === undefined || !rateText) return null;
-        const [whole, frac = ''] = String(rateText).split('.');
-        const den = 10n ** BigInt(frac.length);
-        const num = BigInt(whole + frac);
-        const product = BigInt(minor) * num;
-        const neg = product < 0n;
-        const abs = neg ? -product : product;
-        let q = abs / den;
-        const twice = (abs % den) * 2n;
-        if (twice > den || (twice === den && q % 2n === 1n)) q += 1n;
-        return Number(neg ? -q : q);
     }
 
     // -----------------------------------------------------------------------
@@ -194,42 +179,32 @@
     }
 
     // -----------------------------------------------------------------------
-    // ₹ / S$: a rupee account opens in ₹; its S$ view is each month at the
-    // month-end rate the server named. An S$ account has no switch.
+    // ₹ / S$: a rupee account opens in ₹; its S$ view is R3's answer for
+    // cur=SGD, each month valued on the server at its month-end rate. The
+    // payload's `cur` is the currency drawn. An S$ account has no switch.
     // -----------------------------------------------------------------------
 
     function accountCurrency(payload) { return payload.account ? payload.account.currency : null; }
 
-    function currencySwitch(payload, cur) {
+    function currencySwitch(payload) {
         const own = accountCurrency(payload);
         if (!own || own === 'SGD') return null;
-        return { current: cur || payload.cur || own, options: [{ value: own, label: own === 'INR' ? '₹' : own }, { value: 'SGD', label: 'S$' }] };
+        return { current: payload.cur || own, options: [{ value: own, label: own === 'INR' ? '₹' : own }, { value: 'SGD', label: 'S$' }] };
     }
 
-    function inCurrency(payload, cur) {
-        if (!cur || cur === payload.cur || cur !== 'SGD') return payload;
-        const months = (payload.months || []).map(m => {
-            const rate = m.rate && m.rate.text;
-            return Object.assign({}, m, {
-                balance: rate ? toSgd(m.balance, rate) : null, estimate: rate ? toSgd(m.estimate, rate) : null,
-                in: rate ? toSgd(m.in, rate) : null, out: rate ? toSgd(m.out, rate) : null,
-            });
-        });
-        return Object.assign({}, payload, { cur: 'SGD', months });
-    }
-
-    function accountSummary(payload, cur) {
+    function accountSummary(payload) {
         const head = payload.head;
         if (!head || head.balance === null || head.balance === undefined) return null;
         const own = accountCurrency(payload) || payload.cur;
+        const cur = payload.cur || own;
         const m = (payload.months || []).find(x => x.month === head.date.slice(0, 7)) || {};
-        if (!cur || cur === own || cur !== 'SGD') {
+        if (cur === own) {
             return { text: `Balance ${fmt(head.balance, own)} on ${day(head.date)} · in ${fmt(m.in, own)} · out ${fmt(m.out, own)}`, note: null };
         }
         const rate = m.rate && m.rate.text;
         const at = rate ? ` at ${rate}` : '';
         return {
-            text: `Balance ${fmt(toSgd(head.balance, rate), 'SGD')} on ${day(head.date)}${at} · in ${fmt(toSgd(m.in, rate), 'SGD')} · out ${fmt(toSgd(m.out, rate), 'SGD')}`,
+            text: `Balance ${fmt(head.balance, cur)} on ${day(head.date)}${at} · in ${fmt(m.in, cur)} · out ${fmt(m.out, cur)}`,
             note: payload.note || null,
         };
     }
@@ -264,15 +239,15 @@
             controls.push(`<div class="trend-stack"><span class="trend-label">Stack by</span>${seg('Stack by', 'stack',
                 stack.options.map(o => ({ value: o.value, label: o.label, pressed: o.value === stack.current })))}</div>`);
         }
-        const sw = account ? currencySwitch(payload, st.cur) : null;
+        const sw = account ? currencySwitch(payload) : null;
         if (sw) controls.push(seg('Currency', 'cur', sw.options.map(o => ({ value: o.value, label: o.label, pressed: o.value === sw.current }))));
 
         const parts = [`<div class="trend-controls">${controls.join('')}</div>`];
         let drawn;
         if (account) {
-            drawn = inCurrency(payload, st.cur);
+            drawn = payload;
             parts.push('<div class="trend-plot"></div>');
-            const s = accountSummary(payload, st.cur);
+            const s = accountSummary(payload);
             if (s) parts.push(`<div class="trend-summary"><p class="trend-sum-line">${esc(s.text)}</p>${s.note ? `<p class="trend-note">${esc(s.note)}</p>` : ''}</div>`);
         } else {
             const chips = legend(payload, st.hidden);
@@ -328,8 +303,10 @@
                 render(el);
                 return undefined;
             case 'cur':
-                st.cur = value;
-                render(el);
+                // The page asks R3 for the other currency and draws its answer.
+                if (value !== (st.payload.cur || accountCurrency(st.payload)) && typeof st.opts.onCur === 'function') {
+                    st.opts.onCur(value);
+                }
                 return undefined;
             case 'fetch':
                 return fetchRate(control.dataset.cur, value, st.opts);
@@ -340,13 +317,14 @@
 
     /** Draw the card into `el`. opts: mode ('bars' | 'line'), kind
      *  ('merchant' adds the rows tail), onSpan(span), onStack(stack),
+     *  onCur(cur) when the ₹ / S$ switch asks for the other currency,
      *  onRefresh() after a rate is fetched, onMonth / onImport passed to the
      *  drawer. Called again on the same el (a new span's payload), it keeps
-     *  the books taken off and the currency picked. */
+     *  the books taken off. */
     function card(el, payload, opts) {
         let st = el.__trend;
         if (!st) {
-            st = el.__trend = { hidden: [], cur: null };
+            st = el.__trend = { hidden: [] };
             el.addEventListener('click', e => onClick(el, e));
         }
         st.payload = payload;
@@ -354,14 +332,13 @@
         const names = bookNames(payload);
         st.hidden = (st.hidden || []).filter(b => names.includes(b));
         if (names.length && st.hidden.length >= names.length) st.hidden = [];
-        if (!st.cur) st.cur = payload.cur || null;
         render(el);
         return { el, update: next => card(el, next, st.opts) };
     }
 
     Object.assign(Trend, {
-        SPANS, span, rememberSpan, spanChips, fmt, toSgd, legend, toggleBook, view, summary,
-        stackControl, noRate, fetchRate, currencySwitch, inCurrency, accountSummary, card,
+        SPANS, span, rememberSpan, spanChips, fmt, legend, toggleBook, view, summary,
+        stackControl, noRate, fetchRate, currencySwitch, accountSummary, card,
     });
 
     // The dev fixture harness (tests/fixtures/trend/harness.html) draws through

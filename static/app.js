@@ -1393,7 +1393,6 @@ function transferGuessWords(g) {
         gift: ['<b>a gift</b>', 'Yes, a gift'],
         own_account: [`<b>a move to my own account</b>, ${other}`, `Yes, a move to ${g.other_side || 'it'}`],
         company: [`<b>money into a company</b>, ${other}`, `Yes, into ${g.other_side || 'the company'}`],
-        loan_to_person: [`<b>a loan to a person</b>, ${other}`, `Yes, a loan to ${g.other_side || 'them'}`],
         loan_repayment: [`<b>a loan repayment</b>, ${other}`, `Yes, repaying ${g.other_side || 'the loan'}`],
         income: [`<b>income</b>, ${esc(g.type || '')}`, `Yes, income`],
     }[g.choice] || [esc(g.choice), 'Yes'];
@@ -2348,9 +2347,19 @@ async function openWhatWas(row, group, { mixed = false, notGuess = '' } = {}) {
     drawChoices();
 }
 function drawChoices() {
-    const { r, choice } = step;
-    const all = r.review.choices;
-    const tile = c => `<button type="button" class="choice" data-act="ww-pick" data-choice="${esc(c.name)}">
+    const { r, choice, row } = step;
+    // "A loan to a person" retired (personal-ledger 23, the contract). In its
+    // place one row is offered Expect some back… (money out) or Expect to pay
+    // back (money in), which opens the expect drawer on the row.
+    const one = step.group.length === 1;
+    const expect = row.amount_minor < 0
+        ? { label: 'expect to pay back', description: 'money to give back to someone: it is not income' }
+        : { label: 'expect some back…', description: 'part or all of it is coming back from someone: that part is not spending' };
+    const all = one ? r.review.choices.flatMap(c => c.name === 'gift' ? [c, expect] : [c]) : r.review.choices;
+    const tile = c => c === expect
+        ? `<button type="button" class="choice" data-act="expect-mark" data-tx="${row.id}">
+        <strong>${esc(sentence(c.label))}</strong><span>${esc(c.description)}</span></button>`
+        : `<button type="button" class="choice" data-act="ww-pick" data-choice="${esc(c.name)}">
         <strong>${esc(c.name === 'spending' && step.guessed ? 'Spending, another type' : sentence(c.label))}</strong><span>${esc(c.description)}</span></button>`;
     const box = $('#ww-choices');
     if (!box) return;
@@ -2386,10 +2395,6 @@ ACT['ww-pick'] = el => {
     } else if (choice.asks === 'account') {
         const allowed = r.accounts.filter(a => choice.kinds.includes(a.type) && !step.group.some(x => x.account_id === a.id) && a.status !== 'archived');
         fields = `<label class="field"><span>Which account</span><select id="cw-account"><option value="">Choose</option>${allowed.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.currency)})</option>`).join('')}</select></label>`;
-    } else if (choice.asks === 'person') {
-        const people = r.accounts.filter(a => a.type === 'person');
-        fields = `<label class="field"><span>Who</span><select id="cw-person"><option value="">A new name…</option>${people.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></label>
-            <label class="field"><span>New name</span><input type="text" id="cw-person-name" placeholder="Only for someone new"></label>`;
     } else if (choice.asks === 'income_kind') {
         fields = `<label class="field"><span>What kind of income</span><select id="cw-income">${typeOptions(incomeKinds, null, { kind: 'income', blank: 'Choose' })}</select></label>`;
     }
@@ -2555,8 +2560,6 @@ ACT['ww-save'] = async () => {
     if (val('cw-type')) body.type_id = Number(val('cw-type'));
     if (val('cw-book')) body.book = val('cw-book');
     if (val('cw-account')) body.account_id = Number(val('cw-account'));
-    if (val('cw-person')) body.account_id = Number(val('cw-person'));
-    else if (val('cw-person-name')) body.person = val('cw-person-name').trim();
     if (val('cw-income')) body.income_kind_id = Number(val('cw-income'));
     const rows = untyped ? group : [row];
     if (rows.length === 1) {
@@ -2732,20 +2735,20 @@ function rateWords(rate) {
     const unit = (rate.pair || '').split('/')[0] || '';
     return `1 ${unit} = S$ ${rate.rate}, rate saved ${dateWords(rate.date)}`;
 }
-/** A company's or person's balance as a short sum, the zero parts dropped:
+/** A company's balance as a short sum, the zero parts dropped (a person has
+ *  no sheet line since the switch, so never a made_of):
  *  "opening S$ 15,000.00 + paid for it S$ 1,830.99 (23 rows) = S$ 16,830.99". */
 function madeOfSum(line) {
     const m = line.made_of;
     if (!m) return '';
-    const person = line.kind === 'person';
     const parts = [];
     if (m.opening_minor) parts.push(['', 'opening', m.opening_minor]);
-    if (m.paid_for_minor) parts.push(['+', person ? 'lent' : 'paid for it', m.paid_for_minor]);
+    if (m.paid_for_minor) parts.push(['+', 'paid for it', m.paid_for_minor]);
     if (m.capital_minor) parts.push(['+', 'capital', m.capital_minor]);
     if (m.paid_back_minor) parts.push(['−', 'paid back', m.paid_back_minor]);
     if (!parts.length) return 'no money moved yet';
     if (parts.length === 1 && parts[0][0] === '') {
-        return person ? `lent ${money(m.opening_minor)}, nothing paid back` : `opening ${money(m.opening_minor)}, nothing moved since`;
+        return `opening ${money(m.opening_minor)}, nothing moved since`;
     }
     const onlyPaidFor = parts.filter(p => p[1] !== 'opening').length === 1 && m.paid_for_minor;
     const text = parts.map(([op, label, minor], i) => `${i || op ? op + ' ' : ''}${label} ${money(minor)}${onlyPaidFor && op === '+' && line.rows_since ? ` (${plural(line.rows_since, 'row')})` : ''}`).join(' ');

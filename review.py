@@ -14,7 +14,6 @@ import account_kind
 # What a choice asks the operator for.
 ASKS_TYPE = "type"                # a spending type, and a book where the type proposes none
 ASKS_ACCOUNT = "account"          # one of the accounts of the kinds the choice names
-ASKS_PERSON = "person"            # a person's account, or the name of a new person
 ASKS_INCOME_KIND = "income_kind"  # one of the income kinds
 
 
@@ -38,8 +37,6 @@ CHOICES = (
            "money moved to or from another of the household's bank accounts or cards"),
     Choice("company", "money into a company", "movement", ASKS_ACCOUNT, ("company",),
            "capital put into a company, or the company paying it back; it moves the company's balance"),
-    Choice("loan_to_person", "a loan to a person", "movement", ASKS_PERSON, ("person",),
-           "money lent to a person, or that person paying it back; a new name gets an account"),
     Choice("loan_repayment", "a loan repayment", "movement", ASKS_ACCOUNT, ("loan",),
            "an instalment or repayment on one of the household's loans"),
     Choice("income", "income", "income", ASKS_INCOME_KIND, (),
@@ -47,6 +44,18 @@ CHOICES = (
 )
 
 BY_NAME = {choice.name: choice for choice in CHOICES}
+
+# A person is no movement's other side since the contract (personal-ledger 23,
+# release 3): what is lent to or owed to a person is an expectation on the
+# row, named for them. "a loan to a person" left the choices; a label or a
+# flow edit that would name a person as a movement's other side is refused in
+# these words, and writes nothing. Rows converted before keep their flow and
+# other side as history.
+RETIRED = ("loan_to_person",)
+PERSON_MOVEMENT_REFUSED = (
+    "A person is no longer a movement's other side: mark the row Expect some back… "
+    "(money out) or Expect to pay back (money in)."
+)
 
 # What a gift is filed under: a spending type when given, an income kind when received.
 GIFT_GIVEN_TYPE = "Gifts & Donations"

@@ -193,7 +193,27 @@
         const y = v => T + (hi - v) / (hi - lo) * ph;
         const n = Math.max(1, m.buckets.length), slot = pw / n;
         const bw = Math.max(4, Math.min(slot * 0.62, 48));
-        const every = slot < 34 ? Math.ceil(34 / slot) : 1;
+        // Ticks (11px monospace: 0.6em a character). The last bar and every bar marked
+        // missing always carry one; the others are every k-th bar counted back from the
+        // last, k the smallest at which none touch, and one that would touch a kept tick
+        // is left out. The year rides on the first tick drawn and wherever the year turns.
+        const bk = m.buckets, yearOf = b => b.key.slice(2, 4);
+        const textsFor = idx => Object.fromEntries(idx.map((i, j) => {
+            const b = bk[i], year = !b.quarter && (j === 0 || yearOf(b) !== yearOf(bk[idx[j - 1]]));
+            return [i, (b.quarter ? b.label : (b.label || '').slice(0, 3)) + (year ? ` ${yearOf(b)}` : '') + (b.warn ? ` ${GLYPH}` : '')];
+        }));
+        const touch = (t, a, c) => Math.abs(c - a) * slot < (t[a].length + t[c].length) * 3.3 + 4;
+        const must = new Set(bk.length ? [n - 1].concat(bk.map((b, i) => (b.warn ? i : -1)).filter(i => i >= 0)) : []);
+        const pick = k => {
+            let idx = bk.map((_, i) => i).filter(i => must.has(i) || (n - 1 - i) % k === 0);
+            let t = textsFor(idx);
+            idx = idx.filter((i, j) => must.has(i) || !((j > 0 && must.has(idx[j - 1]) && touch(t, idx[j - 1], i))
+                || (j + 1 < idx.length && must.has(idx[j + 1]) && touch(t, i, idx[j + 1]))));
+            t = textsFor(idx);
+            return { t, ok: idx.every((i, j) => !j || !touch(t, idx[j - 1], i) || (must.has(i) && must.has(idx[j - 1]))) };
+        };
+        let ticks = pick(1);
+        for (let k = 2; k <= n && !ticks.ok; k++) ticks = pick(k);
         const parts = [];
         parts.push(`<defs><pattern id="${hatchId}" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">`
             + `<rect width="6" height="6" class="trend-bars__hatch-ground"/><line x1="0" y1="0" x2="0" y2="6" class="trend-bars__hatch-line"/></pattern></defs>`);
@@ -222,10 +242,9 @@
                 g.push('</g>');
             });
             if (b.no_rate_mark) g.push(`<circle class="trend-bars__norate" cx="${x + bw / 2}" cy="${y(b.top) - 8}" r="3.5"><title>no rate</title></circle>`);
-            if (i % every === 0 || i === n - 1) {
-                const tick = b.quarter ? b.label : `${(b.label || '').slice(0, 3)}${i === 0 || b.key.endsWith('-01') ? ` ${b.key.slice(2, 4)}` : ''}`;
+            if (ticks.t[i] !== undefined) {
                 const cls = `trend-bars__tick${b.warn ? ' trend-bars__tick--warn' : ''}${b.so_far ? ' trend-bars__tick--sofar' : ''}`;
-                g.push(`<text class="${cls}" x="${L + i * slot + slot / 2}" y="${H - 10}" text-anchor="middle">${esc(tick)}${b.warn ? ' ' + GLYPH : ''}</text>`);
+                g.push(`<text class="${cls}" x="${L + i * slot + slot / 2}" y="${H - 10}" text-anchor="middle">${esc(ticks.t[i])}</text>`);
             }
             g.push('</g>');
             parts.push(g.join(''));

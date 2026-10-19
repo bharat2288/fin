@@ -274,7 +274,8 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
 
 
 def _expect_back_pending(conn: sqlite3.Connection) -> bool:
-    """Whether the expect-back step still has a person's line to convert."""
+    """Whether the expect-back step still has a person's line to convert:
+    never once the book records the step ran (conversion.recorded)."""
     import convert_expect_back  # imported here: it imports this module
 
     return not convert_expect_back.STEP.is_applied(conn)
@@ -343,6 +344,14 @@ def init_db() -> None:
     # Run schema (CREATE IF NOT EXISTS is safe to re-run)
     schema_sql = SCHEMA_PATH.read_text()
     conn.executescript(schema_sql)
+
+    # Every step reads as applied (the refusal above), so nothing is left for
+    # the expect-back step: record it, so that an Unlink, an Undo of the mark
+    # or a person figure later never reads as a conversion still to run.
+    import convert_expect_back  # imported here: it imports this module
+
+    convert_expect_back.record_if_applied(conn)
+    conn.commit()
 
     # An entry a crash left open would record the seeding below as its own.
     history.close_left_open(conn)

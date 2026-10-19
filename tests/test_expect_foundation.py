@@ -475,17 +475,6 @@ def test_someone_new_is_made_once_and_reused_by_name(conn):
         person.find_or_create_person(conn, "   ")
 
 
-def test_the_review_route_finds_or_creates_its_person_through_person_py(client, conn, story):
-    loan = row(conn, story.book, story.book.savings, "2026-06-03", "TRANSFER TO MEI", 200000, flow="review")
-    resp = client.post(f"/api/review/{loan}/label", json={"choice": "loan_to_person", "person": "Mei"})
-    assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["created_account"] is True
-    second = row(conn, story.book, story.book.savings, "2026-06-04", "TRANSFER TO MEI", 1000, flow="review")
-    resp = client.post(f"/api/review/{second}/label", json={"choice": "loan_to_person", "person": "mei"})
-    assert resp.get_json()["created_account"] is False
-    assert resp.get_json()["other_side_id"] == person.find_person(conn, "MEI")
-
-
 def test_the_import_links_refunds_once_inside_its_change(client, conn, monkeypatch):
     seen = []
 

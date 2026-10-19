@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 import balance_sheet
+import convert_expect_back
 import month_check
 from expect_fixtures import check_book, entry
 from test_books_expect import case_48
@@ -49,17 +50,14 @@ def lines_of(shown: dict) -> list[dict]:
 
 def old_person_lines(conn, month: str) -> int:
     """What the persons' lines added to net worth before the switch: each
-    person's old line, as the sheet counted it (in the total when it had an
-    S$ value)."""
-    as_at = balance_sheet.month_end(month)
-    total = 0
-    for person in conn.execute(
+    person's old line (the conversion's own read since the contract). Every
+    person here is kept in S$, so each line was in the total at its face."""
+    as_at = balance_sheet.month_end(month).isoformat()
+    persons = conn.execute(
         "SELECT id, name, type, currency, status FROM accounts WHERE type = 'person' AND owner = 'Household'"
-    ).fetchall():
-        line = balance_sheet._counterparty_line(conn, person, as_at, month, lambda name: name)
-        if line["in_total"]:
-            total += line["value_minor"]
-    return total
+    ).fetchall()
+    assert {p["currency"] or "SGD" for p in persons} <= {"SGD"}
+    return sum(convert_expect_back.old_line(conn, p, as_at) for p in persons)
 
 
 # --- case 40 and 43: net worth across the switch ------------------------------------
