@@ -267,6 +267,26 @@ def test_case_44_a_type_below_zero_dips_below_the_axis():
     assert m["scale"]["zero"] is True
 
 
+def _y_labels(out):
+    return re.findall(r'<text class="trend-line__y"[^>]*>([^<]*)</text>', out)
+
+
+def test_the_axis_puts_the_sign_after_the_symbol_as_the_house_formatter_does():
+    # Review finding: money() writes "S$ −560.00" (kept on purpose, ticket 37); the
+    # line's axis wrote "−S$ 250". The axis keeps the house placement, "S$ −250".
+    p = load("trend_types")
+    g = next(t for t in p["types"] if t["name"] == "Groceries")
+    next(x for x in g["points"] if x["month"] == "2026-08")["net"] = -46000
+    below = [label for label in _y_labels(svg(p)) if "−" in label]
+    assert below, "the scale reaches below zero, so the axis has a negative label"
+    assert all(re.fullmatch(r"S\$ −\d[\d.,]*K?", label) for label in below), below
+
+    # The account's money in / out axis is signed both ways, the same placement.
+    signed = [label for label in _y_labels(svg(load("balances_sgd"))) if "+" in label or "−" in label]
+    assert any("+" in label for label in signed) and any("−" in label for label in signed), signed
+    assert all(re.fullmatch(r"S\$ [+−]\d[\d.,]*K?", label) for label in signed), signed
+
+
 def test_the_drawing_has_no_unknown_figures_at_both_widths():
     for name, state in (("balances_sgd", {}), ("balances_inr", {}), ("trend_types", {"picked": 8, "off": [9]})):
         for width in (1366, 390):

@@ -169,12 +169,14 @@
     }
     function full(m) { const [y, n] = m.split('-').map(Number); return `${MONTH_FULL[n - 1]} ${y}`; }
     function sign(cur) { return String(money(0, cur)).split(' ')[0]; }
-    function short(v, cur) {
+    /** An axis figure, compact, with the sign after the symbol as money()
+     *  places it ("S$ −250"); `signed` marks a rise "S$ +1K" too. */
+    function short(v, cur, signed = false) {
         const d = cur === 'JPY' ? 0 : 2;
         const major = v / Math.pow(10, d);
         const txt = new Intl.NumberFormat(cur === 'INR' ? 'en-IN' : 'en-US',
             { notation: 'compact', maximumFractionDigits: 1 }).format(Math.abs(major));
-        return `${v < 0 ? '−' : ''}${sign(cur)} ${txt}`;
+        return `${sign(cur)} ${v < 0 ? '−' : (signed && v > 0 ? '+' : '')}${txt}`;
     }
     function f1(v) { return Number(v).toFixed(1); }
 
@@ -246,7 +248,7 @@
         const gap = Math.max(2, g.bw * 0.3), w = Math.max(1, g.bw - gap);
         let b = `<defs>${hatchDef(id + 'b')}</defs>`;
         [mx, 0, -mx].forEach(v => { b += `<line class="${v ? 'trend-line__grid' : 'trend-line__base'}" x1="${g.L}" x2="${f1(width - g.R)}" y1="${f1(y2(v))}" y2="${f1(y2(v))}"/>`
-            + `<text class="trend-line__y" x="${g.L - 6}" y="${f1(y2(v) + 4)}" text-anchor="end">${v ? esc((v > 0 ? '+' : '') + short(v, m.cur)) : '0'}</text>`; });
+            + `<text class="trend-line__y" x="${g.L - 6}" y="${f1(y2(v) + 4)}" text-anchor="end">${v ? esc(short(v, m.cur, true)) : '0'}</text>`; });
         m.bars.forEach((bar, k) => {
             const bx = f1(g.L + k * g.bw + gap / 2), cls = bar.hatched ? ' trend-line__bar--hatched' : (bar.so_far ? ' trend-line__bar--so-far' : '');
             const fill = bar.hatched ? ` style="fill:url(#${id}b)"` : '';
