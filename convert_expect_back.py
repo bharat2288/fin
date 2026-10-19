@@ -53,6 +53,14 @@ It runs through the conversion runner, last in the chain. It prints counts
 only, never a name or an amount.
 
     python convert_expect_back.py <path to database>
+    python convert_expect_back.py --plan <path to database>
+
+--plan reads the book and writes nothing (opened read-only, no backup): the
+counts the step would make, and every refusal with the person and the
+figures or rows that cause it, so that a refusal can be put right in fin
+before the conversion (a refused step keeps fin from starting). Steps before
+this one not yet applied are run on a copy in memory, so the plan reads the
+book as convert_all would hand it over.
 
 The down step is retired with the contract: the way back is the dated backup
 the runner takes before the step writes anything.
@@ -66,6 +74,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import account_kind
@@ -74,6 +83,7 @@ import conversion
 import db
 import expect_back
 import flow
+import money
 
 NAME = "expect-back"
 DOWN_RETIRED = ("the down step is retired (personal-ledger 23, the contract): the way back is the "
@@ -100,6 +110,7 @@ class _Row:
     currency: str
     book: str
     carries: bool
+    text: str = ""
 
 
 @dataclass
@@ -120,6 +131,9 @@ class Plan:
     refusals: Counter = field(default_factory=Counter)
     persons: set = field(default_factory=set)
     rows: set = field(default_factory=set)
+    # Who and what each refusal is about: (kind, person, items), the items
+    # being the person's figures (date, amount) or the rows (_Row) at fault.
+    refused: list = field(default_factory=list)
 
 
 def _persons(conn: sqlite3.Connection, person_id: int | None = None) -> list:
@@ -142,7 +156,8 @@ def _person_rows(conn: sqlite3.Connection) -> dict[int, list[_Row]]:
         "(EXISTS (SELECT 1 FROM expectation e WHERE e.row_id = t.id) "
         " OR EXISTS (SELECT 1 FROM set_off so WHERE so.payment_row_id = t.id) "
         " OR EXISTS (SELECT 1 FROM refund_link rl WHERE rl.source = 'hand' "
-        "            AND (rl.refund_row_id = t.id OR rl.purchase_row_id = t.id))) AS carries "
+        "            AND (rl.refund_row_id = t.id OR rl.purchase_row_id = t.id))) AS carries, "
+        "t.description "
         "FROM transactions t JOIN statements s ON s.id = t.statement_id "
         "JOIN accounts a ON a.id = s.account_id JOIN accounts p ON p.id = t.other_side_id "
         "WHERE t.flow_type = ? AND p.type = ? AND p.owner = ? AND a.owner = ? "
@@ -150,7 +165,7 @@ def _person_rows(conn: sqlite3.Connection) -> dict[int, list[_Row]]:
         (TOTAL, account_kind.HOUSEHOLD, flow.MOVEMENT, PERSON, account_kind.HOUSEHOLD,
          account_kind.HOUSEHOLD),
     ):
-        found.setdefault(r[1], []).append(_Row(r[0], r[1], r[2], r[3], r[4], r[5], bool(r[6])))
+        found.setdefault(r[1], []).append(_Row(r[0], r[1], r[2], r[3], r[4], r[5], bool(r[6]), r[7] or ""))
     return found
 
 
@@ -213,12 +228,13 @@ def _plan_person(plan: Plan, person, rows: list[_Row], anchors: list, expectatio
     person_id = person["id"]
     if len(anchors) > 1:
         plan.refusals["anchors"] += 1
+        plan.refused.append(("anchors", person, list(anchors)))
         return
     anchor = anchors[0] if anchors else None
     after = anchor[0] if anchor else SCOPE_AFTER
 
     in_scope: dict[int, _Row] = {}
-    pending = []
+    pending, in_a_company = [], []
     for r in rows:
         if r.currency != person["currency"]:
             plan.counts["other_currency"] += 1
@@ -234,8 +250,11 @@ def _plan_person(plan: Plan, person, rows: list[_Row], anchors: list, expectatio
             continue
         if r.book != account_kind.HOUSEHOLD:
             plan.refusals["company_book"] += 1
+            in_a_company.append(r)
             continue
         pending.append(r)
+    if in_a_company:
+        plan.refused.append(("company_book", person, in_a_company))
 
     # What is held already on the person's line: an opening figure, or an
     # expectation on one of its rows; never one let go.
@@ -514,12 +533,75 @@ def _report_plan(plan: Plan) -> None:
         print(f"rows already carrying a record, left as they are: {c['carrying']}")
 
 
+def _amount(minor: int, currency: str, *, signed: bool = False) -> str:
+    """'SGD 2,000.00'; signed, '+' for money out and '-' for money in. Plain
+    ASCII, so any console prints it."""
+    digits = money.MINOR_UNIT_DIGITS.get(currency, 2)
+    sign = "-" if minor < 0 else ("+" if signed else "")
+    return f"{currency} {sign}{Decimal(abs(minor)).scaleb(-digits):,.{digits}f}"
+
+
+_REMEDIES = {
+    "anchors": "keep one figure per person (the person's account in fin), then plan again",
+    "company_book": "put each row in the Household's book, or label it without the person, then plan again",
+}
+
+
+def _report_refusals(plan: Plan) -> None:
+    """Every refusal, with the person and the figures or rows that cause it."""
+    for kind in ("anchors", "company_book"):
+        found = [(person, items) for k, person, items in plan.refused if k == kind]
+        if not found:
+            continue
+        print(f"the step would refuse: {_refusal_words({kind: plan.refusals[kind]})[0]}")
+        for person, items in found:
+            currency = person["currency"]
+            if kind == "anchors":
+                figures = "; ".join(f"{on} {_amount(amount, currency)}" for on, amount in items)
+                print(f"  {person['name']}: {figures}")
+            else:
+                for r in items:
+                    print(f"  {person['name']}: {r.day}  {r.text}  {_amount(r.amount, r.currency, signed=True)}  "
+                          f"in {r.book}'s book")
+        print(f"  remedy: {_REMEDIES[kind]}")
+
+
+def plan_main(path: Path) -> int:
+    """--plan: what the step would do to this book, read-only. Exit 1 when it
+    would refuse."""
+    if not path.is_file():
+        print(f"no database at {path}")
+        return 1
+    try:
+        copy, ran = conversion.plan_copy(path, NAME)
+    except conversion.ConversionRefused as exc:
+        print(f"ConversionRefused: {exc}")
+        return 1
+    try:
+        if conversion.recorded(copy, NAME):
+            print(f"step {NAME}: already applied (the book records that it ran); nothing to plan")
+            return 0
+        plan = planned(copy)
+    finally:
+        copy.close()
+
+    print(f"plan for step {NAME}, read from {path}")
+    if ran:
+        print(f"steps before it not yet applied, run here on a copy in memory: {', '.join(ran)}")
+    _report_plan(plan)
+    _report_refusals(plan)
+    print("nothing was written: the book was opened read-only and no backup was taken")
+    return 1 if plan.refusals else 0
+
+
 def main(argv: list[str]) -> int:
     if argv[:1] == ["--down"]:
         print(DOWN_RETIRED)
         return 2
-    if len(argv) != 1:
-        print("usage: python convert_expect_back.py <path to database>")
+    if argv[:1] == ["--plan"] and len(argv) == 2:
+        return plan_main(Path(argv[1]).resolve())
+    if len(argv) != 1 or argv[0].startswith("--"):
+        print("usage: python convert_expect_back.py [--plan] <path to database>")
         return 2
     path = Path(argv[0]).resolve()
     if not path.is_file():
@@ -538,6 +620,8 @@ def main(argv: list[str]) -> int:
         report = conversion.run_step(path, STEP)
     except (conversion.ConversionRefused, conversion.ConversionFailed) as exc:
         print(f"{type(exc).__name__}: {exc}")
+        if plan is not None and plan.refusals:
+            print(f"who and which rows: python convert_expect_back.py --plan {path}")
         return 1
 
     print(f"step {report['step']}: {report['status']}")

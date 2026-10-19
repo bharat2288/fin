@@ -128,6 +128,52 @@ def _has_steps_table(conn: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
+def read_copy(db_path: Path | str) -> sqlite3.Connection:
+    """A copy of the book in memory, for a plan: the file is opened
+    read-only and never written. With no -wal beside it the book is opened
+    immutable, so SQLite makes no -wal or -shm file either; with one, read-only
+    through it, so committed rows not yet folded in are read."""
+    db_path = Path(db_path).resolve()
+    wal = db_path.with_name(db_path.name + "-wal")
+    mode = "mode=ro" if wal.exists() and wal.stat().st_size else "mode=ro&immutable=1"
+    source = sqlite3.connect(f"{db_path.as_uri()}?{mode}", uri=True)
+    try:
+        copy = sqlite3.connect(":memory:", isolation_level=None)
+        source.backup(copy)
+    finally:
+        source.close()
+    copy.row_factory = sqlite3.Row
+    return copy
+
+
+def plan_copy(db_path: Path | str, step_name: str) -> tuple[sqlite3.Connection, list[str]]:
+    """The book as the chain would hand it to `step_name`, in memory: a
+    read_copy with every step before it that does not read as applied run on
+    the copy (no backup: nothing is kept). Returns the copy and the steps run
+    on it. ConversionRefused when one of them would refuse."""
+    copy = read_copy(db_path)
+    ran = []
+    modules = dict(CHAIN)
+    try:
+        for name in _earlier(step_name):
+            step = chain_step(modules[name])
+            try:
+                applied = step.is_applied(copy)
+            except sqlite3.Error:
+                applied = False
+            if applied:
+                continue
+            why = step.refusal(copy)
+            if why:
+                raise ConversionRefused(f"step {name} will not run: {why}")
+            step.apply(copy)
+            ran.append(name)
+    except BaseException:
+        copy.close()
+        raise
+    return copy, ran
+
+
 def _earlier(step_name: str) -> list[str]:
     names = [name for name, _ in CHAIN]
     return names[: names.index(step_name)] if step_name in names else []

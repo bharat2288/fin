@@ -640,6 +640,7 @@ def test_case_45_a_person_with_two_anchors_is_refused_and_the_backup_kept(book, 
 
     assert code == 1
     assert "1 person has more than one anchor" in out
+    assert f"python convert_expect_back.py --plan {book}" in out  # who, read-only
     assert dump(book) == before
     assert len(backups(book)) == 1
     # Still planned: fin will not start on it.
