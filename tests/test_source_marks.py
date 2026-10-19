@@ -149,6 +149,62 @@ def test_the_other_sources_each_read_in_words(client, conn, statement):
     assert words(untyped) == ["Book from its merchant"]
 
 
+def _facts(found, details):
+    """The row sheet's facts list as openRowSheet draws it: rowFactsHTML with
+    what labelledBy reads from the row and its history."""
+    code = "\n".join([
+        "const tag = (k, t) => `<tag ${k}>${t}</tag>`;", "function todayIso() { return '2026-10-20'; }",
+        _const("MONTHS"), _function("esc"), _function("when"), _const("pageLinkKinds"), _function("pageLink"),
+        _function("notCheckedTag"), _function("whoName"), _const("SKIP_FIELDS"), _function("changedFields"),
+        _const("LABEL_SOURCE_WORDS"), _const("LABEL_FIELDS"), _function("labelledBy"), _function("rowFactsHTML"),
+        f"const DATA = {json.dumps({'found': found, 'details': details})};",
+        "console.log(JSON.stringify(rowFactsHTML(DATA.found, 'Travel', labelledBy(DATA.found, DATA.details))));"])
+    out = subprocess.run([NODE, "-"], input=code, capture_output=True, text=True, encoding="utf-8",
+                         timeout=30, check=True, env={**os.environ, "TZ": "UTC"})
+    return json.loads(out.stdout)
+
+
+def _details(client, tx_id) -> list:
+    """The row's own history, each entry opened, as rowHistory reads it."""
+    listed = client.get(f"/api/history/row/transactions/{tx_id}").get_json()["entries"]
+    return [client.get(f"/api/history/{e['id']}").get_json() for e in listed[:12]]
+
+
+@needs_node
+def test_case_9_the_row_sheet_says_each_fields_source_not_the_old_single_mark(client, conn, indigo):
+    """Walk lp-r1: chat's set_label to the book the row already had changed no
+    value, so the facts list fell back to the old single mark and read
+    "Labelled by · by hand" above "Book chosen by Claude in chat". A field
+    with a source has its own line (one line per field, mockup screen 5);
+    "hand-set" is retired for chosen (decision 24, Words)."""
+    _, tx = indigo
+    chose = mcp_tools.call("set_label", {"tx_id": tx, "book": "Household"}, actor=CHAT_ACTOR)
+    assert chose["ok"], chose
+    found = shown(client, tx)
+    assert found["sources"]["book"] == "chosen" and found["cat_source"] == "manual"
+
+    facts = text(_facts(found, _details(client, tx)))
+
+    assert "Labelled by" not in facts and "by hand" not in facts
+    assert "Book Household" in facts and "Merchant IndigoAir" in facts
+
+
+@needs_node
+def test_a_row_with_no_book_or_type_still_says_who_labelled_it(client, conn, statement):
+    """A row with neither field (a transfer) has no source line, so its facts
+    keep the line saying who labelled it and when."""
+    tx = row(conn, statement, "SAMPLE TRANSFER OUT", book=None, type_name=None, flow="transfer",
+             sources=(None, None), cat_source="auto")
+    put = client.put(f"/api/transactions/{tx}", json={"notes": "to savings"})
+    assert put.status_code == 200
+    found = shown(client, tx)
+    assert not (found["sources"]["book"] or found["sources"]["type"])
+
+    facts = text(_facts(found, _details(client, tx)))
+
+    assert "Labelled by" in facts
+
+
 def test_the_entry_that_set_a_field_is_the_latest_and_an_undo_takes_its_place(client, conn, indigo):
     _, tx = indigo
     first = client.put(f"/api/transactions/{tx}", json={"book": "Moom"})

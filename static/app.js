@@ -5279,8 +5279,11 @@ async function openTimeline(table, rowId, opts) {
 
 const LABEL_SOURCE_WORDS = { manual: 'by hand', service_default: 'its merchant', rule_override: 'a rule', fallback: 'its wording', derived: 'worked out from figures', auto: 'the rules' };
 const LABEL_FIELDS = ['type_id', 'service_id', 'flow_type', 'book'];
-/** Who labelled a row and when, from its own history (walk C8.2). */
+/** Who labelled a row and when, from its own history (walk C8.2); '' for a
+ *  row whose book or type has a source, which sourceLinesHTML says per field
+ *  (spec 24: one line per field on the row sheet). */
 function labelledBy(found, details) {
+    if (found.sources && (found.sources.book || found.sources.type)) return '';
     for (const d of details) {
         if (d.undone_by) continue;
         const c = d.changes.find(x => x.table === 'transactions' && x.row_id === found.id && x.op === 'update');
@@ -5340,7 +5343,7 @@ function rowFactsHTML(found, label, by) {
             <div><dt>Type</dt><dd>${typed}${notCheckedTag(found)}</dd></div>
             ${found.other_side_name ? `<div><dt>Other side</dt><dd>${esc(found.other_side_name)}</dd></div>` : ''}
             <div><dt>Merchant</dt><dd>${found.service_name && found.service_id ? pageLink('merchant', found.service_id, found.service_name) : '<span class="muted">none yet</span>'}</dd></div>
-            <div><dt>Labelled by</dt><dd>${esc(by)}</dd></div>
+            ${by ? `<div><dt>Labelled by</dt><dd>${esc(by)}</dd></div>` : ''}
         </dl>`;
 }
 
