@@ -63,10 +63,15 @@ class UndoRefused(Exception):
     """The entry was not undone. Nothing was changed."""
 
 
-def schema_statements() -> list[str]:
+def schema_statements(leave_out: dict[str, tuple[str, ...]] | None = None) -> list[str]:
     """The history block of schema.sql (tables, indexes, triggers), one
     statement each, for a caller that must run them inside its own
-    transaction (executescript would commit)."""
+    transaction (executescript would commit).
+
+    `leave_out` names, per tracked table, columns a database does not have
+    yet because a later conversion step adds them: that table's triggers then
+    record every other column, and the later step puts the full triggers in
+    place when it adds the columns."""
     block = _BLOCK.search(SCHEMA_PATH.read_text()).group(1)
     statements, current = [], ""
     for line in block.splitlines(keepends=True):
@@ -74,9 +79,27 @@ def schema_statements() -> list[str]:
             continue
         current += line
         if sqlite3.complete_statement(current):
-            statements.append(current.strip())
+            statements.append(_leaving_out(current.strip(), leave_out or {}))
             current = ""
     return statements
+
+
+def table_triggers(table: str) -> list[str]:
+    """The three history triggers schema.sql declares on one tracked table."""
+    if table not in TRACKED:
+        raise ValueError(f"not a tracked table: {table!r}")
+    return [s for s in schema_statements() if s.startswith(f"CREATE TRIGGER IF NOT EXISTS history_{table}_")]
+
+
+def _leaving_out(statement: str, leave_out: dict[str, tuple[str, ...]]) -> str:
+    for table, columns in leave_out.items():
+        if not statement.startswith(f"CREATE TRIGGER IF NOT EXISTS history_{table}_"):
+            continue
+        for column in columns:
+            if not re.fullmatch(r"\w+", column):
+                raise ValueError(f"not a column name: {column!r}")
+            statement = re.sub(rf", '{column}', (?:NEW|OLD)\.{column}\b", "", statement)
+    return statement
 
 
 def has_shape(conn: sqlite3.Connection) -> bool:

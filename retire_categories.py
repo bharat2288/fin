@@ -46,6 +46,7 @@ RETIRED_LATER = {
     "merchant_rules": (("min_amount", "REAL"), ("max_amount", "REAL")),
 }
 CATEGORIES = "categories"
+STEP_NAME = "retire-categories"
 # What the merchants gain in the same rebuild.
 REVIEW_MARK = "review_each_time"
 
@@ -95,10 +96,15 @@ def _is_applied(conn: sqlite3.Connection) -> bool:
 
 
 def _rebuild(conn: sqlite3.Connection, table: str, retired: str, body: str) -> None:
-    """Remake `table` in its declared shape, keeping every row and its id."""
+    """Remake `table` in its declared shape, keeping every row and its id.
+    A column a later step of the chain adds (conversion.added_after) is left
+    out while the table does not have it: that step adds and fills it."""
     new = f"{table}_new"
-    conn.execute(f"CREATE TABLE {new} ({body}\n)")
     old_columns = _columns(conn, table)
+    for column in sorted(conversion.added_after(STEP_NAME).get(table, ())):
+        if column not in old_columns:
+            body = re.sub(rf"\n[ \t]+{re.escape(column)}[ \t][^\n]*", "", body)
+    conn.execute(f"CREATE TABLE {new} ({body}\n)")
     for column, declaration in RETIRED_LATER.get(table, ()):
         if column in old_columns:
             conn.execute(f"ALTER TABLE {new} ADD COLUMN {column} {declaration}")
@@ -137,7 +143,7 @@ def _invariant(before: dict, after: dict) -> list[str]:
 
 
 STEP = conversion.Step(
-    name="retire-categories", apply=_apply, is_applied=_is_applied, invariant=_invariant
+    name=STEP_NAME, apply=_apply, is_applied=_is_applied, invariant=_invariant
 )
 
 

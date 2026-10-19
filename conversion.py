@@ -61,6 +61,9 @@ CHAIN = (
     # Personal-ledger 23: loans to and from people become expectations. After
     # change-history, which makes the records it writes.
     ("expect-back", "convert_expect_back"),
+    # Personal-ledger 24: a source for a row's book and for its type, filled
+    # from cat_source. After expect-back, one conversion at a time.
+    ("label-source", "convert_label_source"),
 )
 
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
@@ -97,6 +100,19 @@ def not_applied(conn: sqlite3.Connection, names=None) -> list[str]:
         if not applied:
             waiting.append(name)
     return waiting
+
+
+def added_after(step_name: str) -> dict[str, set[str]]:
+    """The columns, per table, that the steps after `step_name` in the chain
+    add (each module's ADDS_COLUMNS). schema.sql declares them already, so a
+    step that builds from schema.sql leaves out those a book does not have
+    yet: the step that adds them fills them."""
+    names = [name for name, _ in CHAIN]
+    later: dict[str, set[str]] = {}
+    for _, module_name in CHAIN[names.index(step_name) + 1:]:
+        for table, columns in getattr(importlib.import_module(module_name), "ADDS_COLUMNS", {}).items():
+            later.setdefault(table, set()).update(columns)
+    return later
 
 
 def _earlier(step_name: str) -> list[str]:
