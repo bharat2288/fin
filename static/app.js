@@ -1930,9 +1930,28 @@ function recDraw(key, { whole = false } = {}) {
         const at = document.createElement('div');
         at.innerHTML = recLineHTML(key, recKeyWording(key), recReach(key), recOpen.has(key));
         box.replaceWith(at.firstElementChild);
-    }
+    } else recWhenShown(key);
     $$('[data-rec-mini]').filter(x => x.dataset.recMini === key).forEach(x => { x.outerHTML = recMiniHTML(recKeyWording(key), key); });
     if (ctx.changed) ctx.changed();
+}
+// A count can come back before its line is in the page: the Queue is built
+// as a string while its other reads finish, then put in. Such a line is
+// drawn again as soon as it is in the page (walk lp-r1, case 31).
+const recLate = new Set();     // the keys whose count came back before their line was in the page
+let recWatch = null;           // the page's observer, kept only while a line is late
+function recWhenShown(key) {
+    recLate.add(key);
+    if (recWatch) return;
+    recWatch = new MutationObserver(() => {
+        [...recLate].forEach(k => {
+            if (!recReach(k)) { recLate.delete(k); return; }   // a later wording is read; its own count draws it
+            if (!$$('[data-rec-line]').some(x => x.dataset.recLine === k)) return;
+            recLate.delete(k);
+            recDraw(k);
+        });
+        if (!recLate.size) { recWatch.disconnect(); recWatch = null; }
+    });
+    recWatch.observe(document.body, { childList: true, subtree: true });
 }
 ACT['rec-edit'] = el => {
     recOpen.add(el.dataset.key);

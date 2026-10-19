@@ -407,6 +407,46 @@ def test_case_31_the_same_line_on_the_sure_card_pick_a_type_and_this_was():
     assert "wwRec()" in _act("ww-pick") and "recShown('ww'" in _function("wwRec")
 
 
+@needs_node
+def test_case_31_a_count_read_before_its_line_is_in_the_page_is_drawn_once_it_is():
+    """Walk lp-r1: the Queue is built as a string while other reads finish,
+    then put in the page. Pick a type's count (SKYWING, 11 rows, 4 of Air
+    India's) came back first, found no line to draw into, and the line read
+    "Recognises SKYWING · change" until something redrew it. Run under node
+    with a page of stand-ins: the line goes in only after the count is
+    back, and the page tells its observers, as a browser does."""
+    names = ("recWarn", "recCountHTML", "recMiniHTML", "recLineHTML", "recKeyWording", "recReach",
+             "recLoad", "recShown", "recDraw")
+    consts = "\n".join(re.search(rf"^const {n} = .*$", APP_JS, re.M).group(0)
+                       for n in ("REC_WAIT", "recWords", "recOpen", "recFound", "recCtx", "recTimers"))
+    late = "\n".join(re.findall(r"^(?:const recLate|let recWatch) = .*$", APP_JS, re.M))
+    helpers = "\n".join(_function(n) for n in names + (("recWhenShown",) if "function recWhenShown(" in APP_JS else ()))
+    code = "\n".join([PRELUDE, r"""
+const page = [], observers = [];
+const $$ = sel => sel === '[data-rec-line]' ? page.filter(b => b.dataset.recLine) : [];
+const $ = () => null;
+class MutationObserver { constructor(cb) { this.cb = cb; } observe() { observers.push(this); } disconnect() { observers.splice(observers.indexOf(this), 1); } }
+const document = { createElement: () => ({ set innerHTML(h) { this.firstElementChild = { html: h }; } }) };
+const REACH = { count: 11, only_this: false, others: [{ name: 'Air India', count: 4 }], pattern: 'SKYWING' };
+async function get(url) { return REACH; }
+const tick = ms => new Promise(r => setTimeout(r, ms));
+""", consts, late, helpers, r"""
+(async () => {
+    const built = recShown('pick-386', { tx: 386, txs: [386], name: 'Skywing', suggested: 'SKYWING' });
+    await tick(20);                      // the count is back; the lane is still a string
+    const box = { dataset: { recLine: 'pick-386' }, html: built, replaceWith(el) { this.html = el.html; } };
+    page.push(box);                      // the lane goes in
+    [...observers].forEach(o => o.cb([]));
+    await tick(20);
+    console.log(JSON.stringify({ built, shown: box.html }));
+})();
+"""])
+    got = _node(code)
+
+    assert text(got["built"]) == "Recognises SKYWING · change"
+    assert text(got["shown"]) == "Recognises SKYWING · 11 rows · also 4 rows now Air India’s · change"
+
+
 def test_the_wording_shown_is_the_one_saved():
     """Each teach sends the wording its line shows, and a line whose wording
     matches nothing is not sent."""
