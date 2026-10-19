@@ -1,6 +1,6 @@
 // Expect back (personal-ledger 23): the Back for… drawer (D2): window.openBackFor, Expect.draw('backForFoot', payment) in its footer.
 //
-// Filled by personal-ledger 36. On a money-in row (or a movement out, against To pay back) the
+// Filled by personal-ledger 36; the rate line across currencies by 39. On a money-in row (or a movement out, against To pay back) the
 // row sheet offers Back for…; the drawer lists the open items nearest the payment first
 // (GET /api/transactions/<id>/back-for), ticks fill oldest first, each amount stays editable,
 // a running line says what is placed, and Set off sends every placement in one request
@@ -21,8 +21,9 @@
     const short = (minor, cur) => money(minor, cur).replace(/\.00$/, '');
 
     /** Ticks fill oldest first: each ticked item, oldest day first, takes what the payment has
-     *  left, capped by what is open on it. An item kept in another currency is not filled here
-     *  (the rate step, ticket 39, converts). Returns {id: minor} for every ticked item. */
+     *  left, capped by what is open on it. An item kept in another currency is not filled here:
+     *  the operator types the payment's amount for it, and the rate line under the placed line
+     *  shows what the server converts it to. Returns {id: minor} for every ticked item. */
     function fillOldestFirst(items, leftMinor, currency) {
         const out = {};
         let left = Math.max(0, leftMinor);
@@ -100,7 +101,31 @@
         return `${Math.floor(minor / unit)}.${String(minor % unit).padStart(digits, '0')}`;
     }
 
-    Expect.setoff = { fillOldestFirst, placedLine, insteadLink, itemTitle, openWords, doneToast, parseAmount, amountText };
+    /** The rate line for one set-off as the server answered it (personal-ledger 39), or null in
+     *  one currency: "S$ 90 = ₹ 5,806.45 at 0.0155 (30 Sep)". While the payment's month runs it
+     *  says so: "(30 Sep; October has no rate yet)" when the rate is from before that month,
+     *  "(16 Oct; October has not ended)" when it is the month's own so far. Every figure is the
+     *  server's (its one conversion); this only words it. */
+    function rateLine(so) {
+        if (!so || !so.rate || so.exp_currency === so.currency) return null;
+        let note = '';
+        if (so.rate_month_ended === false) {
+            const month = LONG_MONTHS[Number(so.date.slice(5, 7)) - 1];
+            note = so.rate_date < `${so.date.slice(0, 7)}-01` ? `; ${month} has no rate yet` : `; ${month} has not ended`;
+        }
+        return `${short(so.amount_minor, so.currency)} = ${short(so.exp_amount_minor, so.exp_currency)} at ${so.rate} (${day(so.rate_date, { year: false })}${note})`;
+    }
+
+    /** What the drawer previews for its rate line: each ticked item kept in another currency
+     *  than the payment's, with a whole amount above nothing, as a request's placements. */
+    function foreignPlacements(items, amounts, currency) {
+        return items
+            .filter(e => e.currency !== currency && (amounts.get(e.id) ?? 0) > 0)
+            .map(e => ({ expectation_id: e.id, amount: amountText(amounts.get(e.id), currency) }));
+    }
+
+    Expect.setoff = { fillOldestFirst, placedLine, insteadLink, itemTitle, openWords, doneToast, parseAmount, amountText,
+        rateLine, foreignPlacements };
 
     // --- the row sheet's action ----------------------------------------------------------------
 
@@ -115,7 +140,8 @@
 
     // --- the drawer ----------------------------------------------------------------------------
 
-    let st = null;   // the open drawer: {txId, data, tick: Set, amt: Map, typed: Map, error}
+    let st = null;   // the open drawer: {txId, data, tick: Set, amt: Map, typed: Map, error, rates, seq}
+    const noRates = () => ({ lines: [], error: null, fetch: null });
 
     const escapeRe = s => s.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&');
     /** Whether a name on an item is the payment's sender, as the server reads it: a learnt
@@ -142,6 +168,59 @@
         return { html: `<div class="xb-placed${line.over ? ' xb-over' : ''}" data-xb-placed>${esc(bad ? 'An amount is not in whole cents' : line.text)}</div>`, can: line.can && !bad };
     }
 
+    /** The rate line(s) under the placed line: what Set off would store for each ticked item
+     *  kept in another currency (the server's preview), or why it cannot, with Fetch when the
+     *  refusal is a missing rate. Drawn only from a preview; opening the drawer fetches nothing. */
+    function ratesHTML() {
+        const r = st.rates;
+        const fetch = r.fetch ? ` <button type="button" class="btn" data-xb-fetch>Fetch the rate</button>` : '';
+        const body = r.error ? `<p class="notice bad">${esc(r.error)}${fetch}</p>`
+            : r.lines.map(t => `<p class="xb-learn">${esc(t)}</p>`).join('');
+        return `<div data-xb-rates>${body}</div>`;
+    }
+
+    function redrawRates() {
+        const box = document.querySelector('#sheets .sheet [data-xb-rates]');
+        if (box && st) box.outerHTML = ratesHTML();
+    }
+
+    let previewTimer = null;
+    function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(preview, 250); }
+
+    /** Ask the set-off route for a preview of the foreign placements (written by nothing). */
+    async function preview() {
+        if (!st) return;
+        const here = st, p = here.data.payment;
+        const byId = itemsById();
+        const placements = foreignPlacements([...here.tick].map(id => byId.get(id)), here.amt, p.currency);
+        const seq = ++here.seq;
+        if (!placements.length) { here.rates = noRates(); redrawRates(); return; }
+        const r = await send('POST', `/api/transactions/${here.txId}/set-offs`, { placements, waiting: null, preview: true });
+        if (st !== here || seq !== here.seq) return;
+        here.rates = r.ok
+            ? { lines: (r.data.set_offs || []).map(rateLine).filter(Boolean), error: null, fetch: null }
+            : { lines: [], error: r.data.error || 'That did not work; nothing was changed', fetch: r.data.fetch || null };
+        redrawRates();
+    }
+
+    /** Fetch the missing rate through the existing rates fetch, then preview again. */
+    async function onFetch() {
+        const here = st, wanted = here && here.rates.fetch;
+        if (!wanted) return;
+        const r = await send('POST', '/api/rates/fetch', wanted);
+        if (st !== here) return;
+        if (!r.ok) {
+            here.rates = { lines: [], error: r.data.error || 'The rate could not be fetched; nothing was saved', fetch: null };
+            redrawRates();
+            return;
+        }
+        toast(`Rate saved for ${day(r.data.rate.date)}`, { undo: r.change });
+        here.error = null;
+        here.rates = noRates();
+        redraw();
+        preview();
+    }
+
     function bodyHTML() {
         const { payment: p, items, direction } = st.data;
         const isPayer = payerNames(st.data);
@@ -165,6 +244,7 @@
             ${items.length ? `<div class="xb-alloc" role="group" aria-label="Open items">${list}</div>`
                 : `<p class="muted small">Nothing is open ${direction === 'pay' ? 'to pay back' : 'to come back'} to set this payment against.</p>`}
             ${lineHTML().html}
+            ${ratesHTML()}
             ${instead ? `<p class="xb-learn"><button type="button" class="link xb-instead" data-xb-instead${instead.disabled ? ' disabled aria-disabled="true"' : ''}>Expect to pay this back instead…</button>${instead.hint ? ` <span class="muted">${esc(instead.hint)}</span>` : ''}</p>` : ''}`;
     }
 
@@ -196,12 +276,14 @@
         st.amt = new Map(Object.entries(filled).map(([k, v]) => [Number(k), v]));
         st.typed = new Map([...st.amt].map(([k, v]) => [k, amountText(v, p.currency)]));
         redraw();
+        schedulePreview();
     }
 
     function onAmount(id, text) {
         st.typed.set(id, text);
         st.amt.set(id, parseAmount(text, st.data.payment.currency));
         redrawLine();
+        schedulePreview();
     }
 
     async function onSetOff() {
@@ -212,7 +294,8 @@
             expectation_id: id, amount: amountText(st.amt.get(id), p.currency), open_minor: byId.get(id).open_minor }));
         const r = await send('POST', `/api/transactions/${st.txId}/set-offs`, { placements, waiting: null });
         if (!r.ok) {
-            st.error = r.data.error || 'That did not work; nothing was changed';
+            if (r.data.fetch) st.rates = { lines: [], error: r.data.error, fetch: r.data.fetch };
+            else st.error = r.data.error || 'That did not work; nothing was changed';
             redraw();
             return;
         }
@@ -229,7 +312,7 @@
         let data;
         try { data = await get(`/api/transactions/${txId}/back-for`, { fresh: true }); }
         catch (err) { sheetBody().innerHTML = `<p class="notice bad">${esc(err.message)}</p>`; return; }
-        st = { txId, data, tick: new Set(), amt: new Map(), typed: new Map(), error: null };
+        st = { txId, data, tick: new Set(), amt: new Map(), typed: new Map(), error: null, rates: noRates(), seq: 0 };
         const p = data.payment;
         const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button>${Expect.draw('backForFoot', p)}<span class="xb-sp"></span>
             <button type="button" class="btn primary" data-xb-setoff disabled>${esc(setOffLabel())}</button>`;
@@ -245,10 +328,11 @@
             if (t.dataset.xbAmt) onAmount(Number(t.dataset.xbAmt), t.value);
         });
         sheet.addEventListener('click', e => {
-            const t = e.target.closest('[data-xb-setoff], [data-xb-instead]');
+            const t = e.target.closest('[data-xb-setoff], [data-xb-instead], [data-xb-fetch]');
             if (!t || t.disabled) return;
             e.preventDefault();
             if (t.hasAttribute('data-xb-setoff')) onSetOff();
+            else if (t.hasAttribute('data-xb-fetch')) onFetch();
             else { st = null; closeSheet(); window.openExpectMark?.(txId); }
         });
     };
