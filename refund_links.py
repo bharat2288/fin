@@ -37,6 +37,8 @@ import suggest
 WINDOW_DAYS = 90
 AUTO = "auto"
 HAND = "hand"
+REFUND_SOURCE = "refund"   # a set-off a refund link placed (expect_back.SET_OFF_SOURCES)
+PAID_BACK_WORDS = "Refund of a purchase already paid back: keep it, or To pay back?"
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 _REFUND_WORDS = re.compile(
@@ -135,9 +137,38 @@ def link(conn: sqlite3.Connection, link_id: int) -> dict:
         (link_id,)).fetchone())
 
 
+def _back_expectation(conn: sqlite3.Connection, purchase_row_id: int) -> int | None:
+    found = conn.execute("SELECT id FROM expectation WHERE row_id = ? AND direction = ?",
+                         (purchase_row_id, expect_back.BACK)).fetchone()
+    return found[0] if found else None
+
+
+def _close(conn: sqlite3.Connection, refund_row_id: int, purchase_row_id: int) -> int | None:
+    """When the purchase carries a back expectation with something open, place
+    min(what is left on the refund, open) against it as a set-off of source
+    `refund` (ruled on 23, Answer 7: the one set-off fin makes without a tap).
+    Returns the set-off's id, or None when nothing is open or the refund
+    cannot pay it (expect_back's eligibility, e.g. a refund labelled by hand
+    into a company book); then the refund simply nets in its month."""
+    expectation_id = _back_expectation(conn, purchase_row_id)
+    if expectation_id is None:
+        return None
+    if expect_back.state(conn, expectation_id) not in (expect_back.OPEN, expect_back.PARTLY_BACK):
+        return None  # closed, or let go: a let-go is never reopened (case 37b)
+    amount = min(expect_back.open_minor(conn, expectation_id),
+                 expect_back.payment_left_minor(conn, refund_row_id))
+    if amount <= 0:
+        return None
+    try:
+        return expect_back.insert_set_off(conn, refund_row_id, expectation_id, amount,
+                                          source=REFUND_SOURCE)
+    except expect_back.Refused:
+        return None  # refused before writing anything
+
+
 def _write(conn: sqlite3.Connection, refund: dict, purchase: dict, source: str) -> dict:
-    """The link, and the purchase's book and type on a refund not labelled by
-    hand (cat_source 'manual')."""
+    """The link, the purchase's book and type on a refund not labelled by
+    hand (cat_source 'manual'), and the close of what the purchase has open."""
     link_id = conn.execute(
         "INSERT INTO refund_link (refund_row_id, purchase_row_id, source) VALUES (?, ?, ?)",
         (refund["id"], purchase["id"], source),
@@ -148,6 +179,7 @@ def _write(conn: sqlite3.Connection, refund: dict, purchase: dict, source: str) 
         "AND COALESCE(cat_source, 'auto') != 'manual' AND (book IS NOT ? OR type_id IS NOT ?)",
         (book, purchase["type_id"], refund["id"], book, purchase["type_id"]),
     )
+    _close(conn, refund["id"], purchase["id"])
     return link(conn, link_id)
 
 
@@ -184,9 +216,11 @@ def _shown(r: dict) -> dict:
 
 
 def asks(conn: sqlite3.Connection) -> list[dict]:
-    """The refunds two or more purchases fit, each with those purchases: the
-    Queue's "Refund of which … order?". One read each of refunds, purchases
-    and dismissals, whatever their number."""
+    """What the Queue asks of refunds: first each refund two or more purchases
+    fit, with those purchases ("Refund of which … order?", kind `which`);
+    then each linked refund of a purchase already paid back (kind
+    `paid_back`, paid_back()). One read each of refunds, purchases and
+    dismissals, whatever their number."""
     purchases = _purchases(conn)
     dismissed = _dismissed(conn)
     found = []
@@ -195,7 +229,157 @@ def asks(conn: sqlite3.Connection) -> list[dict]:
         if len(fits) >= 2:
             found.append({"kind": "which", "refund": _shown(refund),
                           "purchases": [{**_shown(p), "left_minor": p["left_minor"]} for p in fits]})
+    return found + paid_back(conn)
+
+
+# --- a refund of a purchase already paid back (case 37a) ------------------------
+
+# Every refund link with the parts its question reads: the refund's own part
+# (its rest once set off), the purchase's own part, what is open on the
+# purchase's back expectation, whether the refund carries an expectation of
+# its own (a To pay back answer) and whether it was kept (a `payback`
+# dismissal on the refund row: "Keep it" says the money is not to be paid on).
+_LINKED = """
+    SELECT l.id AS link_id, l.refund_row_id, l.purchase_row_id,
+           rp.own_minor AS refund_own, pp.own_minor AS purchase_own,
+           e.id AS expectation_id,
+           CASE WHEN e.id IS NULL THEN 0 ELSE e.amount_minor
+                - COALESCE((SELECT SUM(so.item_amount_minor) FROM set_off so WHERE so.expectation_id = e.id), 0)
+                - COALESCE((SELECT lg.amount_minor FROM let_go lg WHERE lg.expectation_id = e.id), 0)
+           END AS open_minor,
+           EXISTS (SELECT 1 FROM expectation x WHERE x.row_id = l.refund_row_id) AS marked,
+           EXISTS (SELECT 1 FROM dismissal d WHERE d.row_id = l.refund_row_id AND d.kind = 'payback') AS kept
+    FROM refund_link l
+    JOIN transactions r ON r.id = l.refund_row_id
+    JOIN row_parts rp ON rp.row_id = l.refund_row_id
+    JOIN row_parts pp ON pp.row_id = l.purchase_row_id
+    LEFT JOIN expectation e ON e.row_id = l.purchase_row_id AND e.direction = 'back'
+    ORDER BY r.date, r.id
+"""
+
+
+def _beyond(conn: sqlite3.Connection) -> list[dict]:
+    """Each linked refund whose rest is more than is left of its purchase's
+    own part plus what the purchase has open, with that excess (amount_minor):
+    money the refund returns that was already paid back to the household.
+
+    A purchase's own part is used up by its refunds in date order (a rest
+    nets against it), so two refunds never both count the same own part."""
+    used: dict[int, int] = {}
+    found = []
+    for r in conn.execute(_LINKED).fetchall():
+        rest = -r["refund_own"]  # a refund is money in: its own part is negative
+        if rest <= 0:
+            continue
+        yours = max(r["purchase_own"] - used.get(r["purchase_row_id"], 0), 0)
+        excess = rest - yours - max(r["open_minor"], 0)
+        used[r["purchase_row_id"]] = used.get(r["purchase_row_id"], 0) + rest
+        if excess > 0 and not r["marked"] and not r["kept"]:
+            found.append({**dict(r), "amount_minor": excess})
     return found
+
+
+def _names(conn: sqlite3.Connection, expectation_ids) -> dict[int, list[dict]]:
+    ids = sorted({i for i in expectation_ids if i is not None})
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    named: dict[int, list[dict]] = {}
+    for x_id, person_id, name in conn.execute(
+        "SELECT n.expectation_id, a.id, a.name FROM expectation_name n JOIN accounts a ON a.id = n.person_id "
+        f"WHERE n.expectation_id IN ({marks}) ORDER BY n.id", ids,
+    ):
+        named.setdefault(x_id, []).append({"id": person_id, "name": name})
+    return named
+
+
+def paid_back(conn: sqlite3.Connection) -> list[dict]:
+    """The refunds of purchases already paid back, still unanswered: the
+    Queue's "keep it, or To pay back?". Until answered each nets in its month,
+    flagged. Each: {kind, refund_link, refund, purchase, amount_minor (what
+    would be to pay back), currency, names (on the purchase's expectation),
+    words}."""
+    beyond = _beyond(conn)
+    if not beyond:
+        return []
+    ids = sorted({b["refund_row_id"] for b in beyond} | {b["purchase_row_id"] for b in beyond})
+    marks = ",".join("?" for _ in ids)
+    shown = {r["id"]: _shown(r) for r in conn.execute(_ROWS + f"WHERE t.id IN ({marks})", ids)}
+    named = _names(conn, [b["expectation_id"] for b in beyond])
+    return [{
+        "kind": "paid_back", "refund_link": b["link_id"],
+        "refund": shown[b["refund_row_id"]], "purchase": shown[b["purchase_row_id"]],
+        "amount_minor": b["amount_minor"], "currency": shown[b["refund_row_id"]]["currency"],
+        "names": named.get(b["expectation_id"], []), "words": PAID_BACK_WORDS,
+    } for b in beyond]
+
+
+class NotFound(Refused):
+    """The record named does not exist; nothing was written."""
+
+
+def _held_link(conn: sqlite3.Connection, link_id) -> dict:
+    found = conn.execute("SELECT l.id, l.refund_row_id, l.purchase_row_id, t.description "
+                         "FROM refund_link l JOIN transactions t ON t.id = l.refund_row_id WHERE l.id = ?",
+                         (link_id,)).fetchone()
+    if found is None:
+        raise NotFound("no such refund link")
+    return dict(found)
+
+
+def _asked(conn: sqlite3.Connection, link_id: int) -> dict:
+    """The open question on a refund link, read in the answer's transaction,
+    or refused when there is none."""
+    held = _held_link(conn, link_id)
+    for b in _beyond(conn):
+        if b["link_id"] == link_id:
+            return {**held, **b}
+    raise Refused(f"{held['description']} is not asked: nothing to pay back on it")
+
+
+def keep(conn: sqlite3.Connection, link_id: int) -> int:
+    """'Keep it': the refund stays the household's and nets in its month; it
+    is not asked again. Written as a `payback` dismissal on the refund row
+    (it is not money to pay on). Returns the dismissal's id."""
+    _begin(conn)
+    ask = _asked(conn, link_id)
+    return conn.execute("INSERT INTO dismissal (row_id, kind) VALUES (?, 'payback')",
+                        (ask["refund_row_id"],)).lastrowid
+
+
+def pay_back(conn: sqlite3.Connection, link_id: int) -> int:
+    """'To pay back': a pay expectation on the refund row of the amount beyond
+    the purchase's own part plus open, named for whoever is named on the
+    purchase's expectation; it nets nowhere. Returns the expectation's id."""
+    _begin(conn)
+    ask = _asked(conn, link_id)
+    names = [n["id"] for n in _names(conn, [ask["expectation_id"]]).get(ask["expectation_id"], [])]
+    return expect_back.insert_expectation(conn, ask["refund_row_id"], expect_back.PAY,
+                                          ask["amount_minor"], names=names)
+
+
+def unlink(conn: sqlite3.Connection, link_id: int) -> dict:
+    """Unlink a refund from its purchase: the link goes with the set-offs it
+    placed (source `refund`), and a `refund_link` dismissal for the pair is
+    written, so a re-run never relinks it (case 36a). Refused, writing
+    nothing, while the refund is To pay back (undo that mark first) or the
+    purchase's expectation is let go since (expect_back's words)."""
+    _begin(conn)
+    held = _held_link(conn, link_id)
+    if conn.execute("SELECT 1 FROM expectation WHERE row_id = ?", (held["refund_row_id"],)).fetchone():
+        raise Refused(f"{held['description']} is to pay back since; undo the mark on it first")
+    placed = [r[0] for r in conn.execute(
+        "SELECT so.id FROM set_off so JOIN expectation e ON e.id = so.expectation_id "
+        "WHERE so.payment_row_id = ? AND e.row_id = ? AND so.source = ? ORDER BY so.id",
+        (held["refund_row_id"], held["purchase_row_id"], REFUND_SOURCE))]
+    for set_off_id in placed:
+        expect_back.delete_set_off(conn, set_off_id)  # refused, before any write, while let go
+    conn.execute("DELETE FROM refund_link WHERE id = ?", (link_id,))
+    if not conn.execute("SELECT 1 FROM dismissal WHERE row_id = ? AND kind = 'refund_link' "
+                        "AND purchase_row_id = ?", (held["refund_row_id"], held["purchase_row_id"])).fetchone():
+        conn.execute("INSERT INTO dismissal (row_id, kind, purchase_row_id) VALUES (?, 'refund_link', ?)",
+                     (held["refund_row_id"], held["purchase_row_id"]))
+    return {"refund_link": link_id, "set_offs_removed": len(placed)}
 
 
 def link_of(conn: sqlite3.Connection, row_id: int) -> dict:
