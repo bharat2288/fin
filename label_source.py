@@ -57,9 +57,9 @@ _MARKS = (
 )
 
 # How the old mark reads for a field with a value and no source of its own,
-# during the expand step only: a writer not yet switched (the review list's
-# label, personal-ledger 50) still writes cat_source alone, and a hand-set
-# label must not become reachable for that. The label-source step reads the
+# during the expand step only: rows no switched writer has given a source
+# (the demo seed, a refund link's write) still carry cat_source alone, and a
+# hand-set label must not become reachable for that. The label-source step reads the
 # same marks the same way. Retired with cat_source (personal-ledger 51).
 _SOURCE_OF_MARK = {"manual": CHOSEN, "derived": DERIVED, "rule_override": RULE, "fallback": WORDING}
 _MARK_COLUMN = "cat_source"
