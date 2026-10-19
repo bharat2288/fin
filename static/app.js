@@ -531,6 +531,9 @@ const ROUTES = [
     [/^\/books\/import$/, 'books', () => viewImport()],
     [/^\/changes$/, 'changes', () => viewChanges()],
 ];
+/** New pages add their route here, so ROUTES stays this file's and a page exists only once its file loads. */
+function registerRoute(pattern, view) { ROUTES.push([pattern, 'books', view]); }
+window.registerRoute = registerRoute;
 
 let renderToken = 0;
 async function render() {
@@ -580,12 +583,23 @@ document.addEventListener('change', e => {
 ACT['close-sheet'] = () => closeSheet();
 ACT.scrim = () => closeSheet();
 
+// New pages push [key, href, label, icon] here (#/books/types, #/books/type), so a tab exists only once its page does.
+const booksNavExtra = [];
+window.booksNavExtra = booksNavExtra;
 function booksNav(current) {
     const items = [['sheet', '#/books', 'Balance sheet', 'scales'], ['spending', '#/books/spending', 'Spending', 'chart-pie-slice'],
-        ['bills', '#/books/bills', 'Bills', 'receipt'], ['lists', '#/books/lists', 'Lists', 'list-bullets'], ['import', '#/books/import', 'Import', 'upload-simple']];
+        ['bills', '#/books/bills', 'Bills', 'receipt'], ['lists', '#/books/lists', 'Lists', 'list-bullets'], ['import', '#/books/import', 'Import', 'upload-simple'], ...booksNavExtra];
     return `<nav class="seg subnav" aria-label="Books">${items.map(([k, href, label, ic]) =>
         `<a href="${href}"${k === current ? ' aria-current="page"' : ''}>${icon(ic)}${label}</a>`).join('')}</nav>`;
 }
+// A link to a page, by kind. 'type' is plain text until type-page.js sets pageLinkKinds.type, so a link never lands on a stub.
+const pageLinkKinds = { merchant: id => `#/books/merchant/${id}`, account: id => `#/books/account/${id}`, type: null };
+window.pageLinkKinds = pageLinkKinds;
+function pageLink(kind, id, text) {
+    const href = pageLinkKinds[kind]?.(id);
+    return href ? `<a class="link" href="${href}">${esc(text)}</a>` : esc(text);
+}
+window.pageLink = pageLink;
 function monthPicker() {
     return `<label class="field" style="min-width:190px"><span>As at the end of</span>
         <select data-change="month">${sheetMonths().map(m => `<option value="${m}"${m === S.month ? ' selected' : ''}>${monthName(m)}${m === currentMonth() ? ' (so far)' : ''}</option>`).join('')}</select></label>`;
@@ -2961,15 +2975,15 @@ function betweenFigures(t, cur) {
         </tbody></table>`;
 }
 
-const accountPage = { page: 1 };
+const accountPage = { page: 1, month: null };
 async function viewAccount(id) {
     const [r, sheet, ties, anchorsList, refused] = await Promise.all([
         refs(), sheetFor(S.month), get(`/api/accounts/${id}/ties`), get(`/api/anchors?account_id=${id}`), get(`/api/statements/refused?account_id=${id}`),
     ]);
     const acct = r.accountById.get(id);
     if (!acct) throw new Error('No such account');
-    if (accountPage.id !== id) { accountPage.id = id; accountPage.page = 1; }
-    const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}`);
+    if (accountPage.id !== id) { accountPage.id = id; accountPage.page = 1; accountPage.month = null; }
+    const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}${accountPage.month ? `&month=${accountPage.month}` : ''}`);
     const line = sheet.sections.flatMap(s => s.lines).find(l => l.account_id === id);
     const cur = acct.currency || 'SGD';
     const asAtShort = day(sheet.as_at, { year: false });
@@ -3074,6 +3088,7 @@ async function viewAccount(id) {
         return headRow + acctRowTr(row);
     }).join('');
     ACT.__rows = new Map(rows.transactions.map(x => [x.id, x]));
+    afterRender(() => window.mountAccountTrend?.());
 
     return `${booksNav('sheet')}
     <div class="page-head"><div><a class="link small back-link" href="#/books">← Balance sheet</a><span class="eyebrow">Books · ${esc(KIND_WORDS[acct.type] || acct.type)}</span><h1>${esc(acct.name)}${accountMark(id)}</h1>
@@ -3799,10 +3814,10 @@ async function checkEachRowOn(s, past) {
 // press (Set book). Every write is 12's bulk label: hand-set, one change, one
 // Undo. The head leaves room for a trend chart, drawing none.
 const MP_PAGE = 50;
-const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false };
+const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false, month: null };
 ACT['merchant-page'] = el => { location.hash = `#/books/merchant/${el.dataset.id}`; };
 async function viewMerchant(id) {
-    if (merchantPage.id !== id) Object.assign(merchantPage, { id, page: 1, ticks: new Set(), book: '' });
+    if (merchantPage.id !== id) Object.assign(merchantPage, { id, page: 1, ticks: new Set(), book: '', month: null });
     const mp = merchantPage;
     let s;
     try { s = await get(`/api/services/${id}`, { fresh: true }); } catch (err) {
@@ -3811,8 +3826,9 @@ async function viewMerchant(id) {
             <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div></div>`;
     }
     const [r, list, services, varies] = await Promise.all([refs(),
-        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}`, { fresh: true }),
+        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}${mp.month ? `&month=${mp.month}` : ''}`, { fresh: true }),
         servicesList(), get(`/api/services/${id}/book-varies`, { fresh: true })]);
+    afterRender(() => window.mountMerchantTrend?.());
     ACT.__services = new Map(services.map(x => [x.id, x]));
     ACT.__mpRows = new Map(list.transactions.map(x => [x.id, x]));
     const each = !!s.review_each_time;
