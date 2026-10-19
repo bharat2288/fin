@@ -1,0 +1,115 @@
+/* trend.css: shell (fin-surfaces 23). Blocks below are reserved; each page fills its own. */
+
+/* ==== renderer: the trend card (fin-surfaces 36) ==== */
+.trend-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.trend-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
+.trend-stack { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.trend-label { color: var(--text-tertiary); font-size: var(--t-ui); }
+.trend-legend { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.trend-book[disabled] { cursor: default; opacity: 0.85; }
+.trend-key { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4);
+    color: var(--text-secondary); font-size: var(--t-ui); }
+.trend-key li { display: inline-flex; align-items: center; gap: 6px; }
+.trend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none;
+    background: var(--text-tertiary); box-shadow: 0 0 0 1px var(--bg-surface); }
+.trend-plot { min-width: 0; overflow-x: auto; }
+.trend-summary { display: flex; flex-direction: column; gap: var(--space-1); }
+.trend-sum-line { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.trend-tail, .trend-left-out, .trend-note { margin: 0; color: var(--text-tertiary); font-size: var(--t-ui); }
+.trend-change { font-weight: var(--font-semibold); }
+.trend-change.trend-rise { color: var(--semantic-warning); }
+.trend-change.trend-fall { color: var(--semantic-success); }
+.trend-norate { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.trend-norate li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
+    color: var(--text-secondary); font-size: var(--t-ui); }
+.trend-norate .btn svg { width: 14px; height: 14px; }
+@media (max-width: 560px) {
+    .trend-controls { gap: var(--space-2); }
+    .trend-controls .seg { width: 100%; }
+    .trend-controls .seg > button { flex: 1 1 auto; }
+}
+/* ==== end: renderer ==== */
+
+/* ==== reserved: merchant ==== */
+/* The merchant page's trend (fin-surfaces 44): the card between the facts and Rows,
+   the few-rows line, the empty-span line, and the Rows card's "Showing … · Show all". */
+.mp-trend { min-width: 0; }
+/* .card.mp-card zeroes the padding for the table cards; this card holds no table. */
+.card.mp-card.mp-trend { padding: var(--space-4) var(--space-5); }
+.mp-trend__few, .mp-trend__note { margin: 0; color: var(--text-secondary); font-size: var(--t-ui); }
+.mp-trend__note { padding: var(--space-5) 0; }
+.mp-trend__filt { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2);
+    font-size: var(--t-ui); color: var(--text-secondary); }
+.mp-trend__filt span { font-weight: var(--font-semibold); color: var(--text-primary); }
+/* ==== end: merchant ==== */
+
+/* ==== reserved: account ==== */
+/* The account page's trend (fin-surfaces 46): a card after the top cards. */
+.acct-trend { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; margin-bottom: 16px; }
+.acct-trend > .section-header { margin-bottom: 0; flex-wrap: wrap; gap: var(--space-1) var(--space-3); }
+.acct-trend__head { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.acct-trend__card { min-width: 0; }
+.acct-trend__part, .acct-trend__narrow { margin: 0; color: var(--text-secondary); font-size: var(--t-ui); }
+/* ==== end: account ==== */
+
+/* ==== reserved: type ==== */
+/* The type page (fin-surfaces 45): chart, merchants with their share, rows. */
+.tp-below { display: flex; flex-direction: column; gap: var(--space-4); margin-top: var(--space-4); }
+.tp-empty { margin: 0; padding: var(--space-4) 0; color: var(--text-secondary); }
+.tp-narrow { margin: 0; color: var(--text-secondary); font-size: var(--t-ui); }
+.tp-pick { min-width: 150px; }
+.tp-paid { color: var(--text-tertiary); font-size: var(--t-ui); white-space: nowrap; }
+.tp-others td:first-child { color: var(--text-tertiary); }
+.tp-share { width: 38%; white-space: nowrap; }
+.tp-share > .num { margin-left: var(--space-2); color: var(--text-tertiary); font-size: var(--t-ui); font-variant-numeric: tabular-nums; }
+.tp-bar { display: inline-block; vertical-align: middle; width: calc(100% - 4em); height: 6px; border-radius: 3px;
+    background: var(--border-subtle); overflow: hidden; }
+.tp-bar > i { display: block; height: 100%; background: var(--chart-1); }
+@media (max-width: 560px) {
+    .tp-share { width: auto; }
+    .tp-bar { display: none; }
+}
+/* ==== end: type ==== */
+
+/* ==== reserved: types ==== */
+/* Types over time (fin-surfaces 47): the book picker and toggle, the legend's link icon,
+   the small multiples. A cell's colour is the line mode's slot class (--tl). */
+.trend-types-page { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.trend-types__bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-5); }
+.trend-types__group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.trend-types__label { color: var(--text-tertiary); font-size: var(--t-ui); }
+.trend-types__card { min-width: 0; }
+.trend-types-pair { display: inline-flex; align-items: center; white-space: nowrap; }
+.trend-types-link { display: inline-flex; align-items: center; justify-content: center; width: var(--ctl-sm); height: var(--ctl-sm);
+    margin-left: -6px; border-radius: 999px; color: var(--text-tertiary); }
+.trend-types-link svg { width: 14px; height: 14px; }
+.trend-types-link:hover { color: var(--accent-ink); background: color-mix(in srgb, var(--text-primary) 5%, transparent); }
+.trend-types-link:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.trend-types { display: flex; flex-direction: column; gap: var(--space-3); }
+.trend-types__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-3); }
+.trend-types__cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: var(--space-3);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-surface);
+    color: var(--text-secondary); text-decoration: none; font-size: var(--t-meta); }
+.trend-types__cell[href]:hover { border-color: var(--border-emphasis); }
+.trend-types__cell[href]:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.trend-types__head { display: flex; justify-content: space-between; gap: var(--space-2); align-items: baseline; }
+.trend-types__name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--text-primary);
+    font-weight: var(--font-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trend-types__name i { width: 10px; height: 10px; border-radius: 3px; background: var(--tl); flex: none; }
+.trend-types__head b { color: var(--text-primary); font-weight: var(--font-semibold); font-variant-numeric: tabular-nums; }
+.trend-types__top, .trend-types__range { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.trend-types__svg { display: block; width: 100%; height: 72px; overflow: visible; }
+.trend-types__base { stroke: var(--border-emphasis); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.trend-types__ln { fill: none; stroke: var(--tl); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round;
+    vector-effect: non-scaling-stroke; }
+.trend-types__ln--est { stroke-dasharray: 3 4; opacity: .85; }
+.trend-types__dot { fill: var(--tl); }
+.trend-types__est { fill: var(--bg-surface); stroke: var(--tl); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.trend-types__empty { margin: 0; color: var(--text-secondary); font-size: var(--t-ui); }
+@media (max-width: 559px) {
+    .trend-types__bar .seg { width: 100%; }
+    .trend-types__bar .seg > button { flex: 1 1 auto; }
+    .trend-types-link { width: var(--tap); height: var(--tap); }
+    .trend-types__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+}
+/* ==== end: types ==== */

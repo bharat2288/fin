@@ -1,0 +1,348 @@
+{
+  "subject": {
+    "kind": "type",
+    "id": 7,
+    "name": "Dining"
+  },
+  "span": "12M",
+  "to": "2026-10",
+  "stack": "book",
+  "currency": "SGD",
+  "buckets": [
+    {
+      "key": "2025-11",
+      "label": "Nov 2025",
+      "months": [
+        "2025-11"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 64000,
+          "back": 0,
+          "net": 64000,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2025-12",
+      "label": "Dec 2025",
+      "months": [
+        "2025-12"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 88000,
+          "back": 0,
+          "net": 88000,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-01",
+      "label": "Jan 2026",
+      "months": [
+        "2026-01"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 64000,
+          "back": 0,
+          "net": 64000,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-02",
+      "label": "Feb 2026",
+      "months": [
+        "2026-02"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 64000,
+          "back": 0,
+          "net": 64000,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-03",
+      "label": "Mar 2026",
+      "months": [
+        "2026-03"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 88000,
+          "back": 0,
+          "net": 88000,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-04",
+      "label": "Apr 2026",
+      "months": [
+        "2026-04"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 64000,
+          "back": 0,
+          "net": 64000,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-05",
+      "label": "May 2026",
+      "months": [
+        "2026-05"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 64000,
+          "back": 0,
+          "net": 64000,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-06",
+      "label": "Jun 2026",
+      "months": [
+        "2026-06"
+      ],
+      "so_far": false,
+      "missing": {
+        "Household": [
+          "2026-06"
+        ]
+      },
+      "no_rate": true,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 62000,
+          "back": 0,
+          "net": 62000,
+          "inr_minor": 210000
+        }
+      }
+    },
+    {
+      "key": "2026-07",
+      "label": "Jul 2026",
+      "months": [
+        "2026-07"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 64000,
+          "back": 0,
+          "net": 64000,
+          "inr_minor": null
+        }
+      }
+    },
+    {
+      "key": "2026-08",
+      "label": "Aug 2026",
+      "months": [
+        "2026-08"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-08-28",
+        "exact": false,
+        "text": "0.0154"
+      },
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 64000,
+          "back": 0,
+          "net": 64000,
+          "inr_minor": 200000
+        }
+      }
+    },
+    {
+      "key": "2026-09",
+      "label": "Sep 2026",
+      "months": [
+        "2026-09"
+      ],
+      "so_far": false,
+      "missing": {},
+      "no_rate": false,
+      "rate": {
+        "pair": "INR/SGD",
+        "date": "2026-09-30",
+        "exact": true,
+        "text": "0.0155"
+      },
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 64000,
+          "back": 0,
+          "net": 64000,
+          "inr_minor": 345000
+        }
+      }
+    },
+    {
+      "key": "2026-10",
+      "label": "Oct 2026",
+      "months": [
+        "2026-10"
+      ],
+      "so_far": true,
+      "missing": {},
+      "no_rate": false,
+      "rate": null,
+      "by": {
+        "Household": {
+          "book": "Household",
+          "spent": 22000,
+          "back": 0,
+          "net": 22000,
+          "inr_minor": null
+        }
+      }
+    }
+  ],
+  "books": [
+    {
+      "book": "Household",
+      "net": 772000,
+      "spent": 772000,
+      "back": 0,
+      "avg": 70182,
+      "months_counted": 11,
+      "vs_prev_pct": 8,
+      "rows": 212,
+      "last_date": "2026-10-14"
+    }
+  ],
+  "stack_keys": [
+    {
+      "key": "Household",
+      "label": "Household",
+      "id": null
+    }
+  ],
+  "stack_options": [
+    "book",
+    "merchant"
+  ],
+  "left_out": [
+    {
+      "kind": "no_rate",
+      "currency": "INR",
+      "amount_minor": 210000,
+      "month": "2026-06",
+      "reason": "no saved rate for June 2026"
+    }
+  ],
+  "few": null,
+  "empty": null,
+  "merchants": {
+    "book": "Household",
+    "net": 772000,
+    "rows": [
+      {
+        "id": 201,
+        "name": "Grab Food",
+        "net": 248000,
+        "share_pct": 32,
+        "paid_in": null
+      },
+      {
+        "id": 202,
+        "name": "Din Tai Fung",
+        "net": 169000,
+        "share_pct": 22,
+        "paid_in": null
+      },
+      {
+        "id": 203,
+        "name": "PS.Cafe",
+        "net": 108000,
+        "share_pct": 14,
+        "paid_in": null
+      },
+      {
+        "id": 204,
+        "name": "Toast Box",
+        "net": 84000,
+        "share_pct": 11,
+        "paid_in": null
+      },
+      {
+        "id": 205,
+        "name": "Swiggy",
+        "net": 52000,
+        "share_pct": 7,
+        "paid_in": "INR"
+      }
+    ],
+    "others": {
+      "count": 14,
+      "net": 111000,
+      "share_pct": 14
+    }
+  }
+}

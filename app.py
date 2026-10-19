@@ -40,17 +40,11 @@ import review
 import screens
 import suggest
 import tie
-from db import first_rule, get_connection, init_db, invalidate_rules_cache, match_merchant, rule_label
+import trend_routes
+from scope import _HOUSEHOLD_ACCOUNT, _SGD_ACCOUNT, _TYPE_JOINS, book_expr
+from missing import missing_months
+from db import first_rule, get_connection, get_db, init_db, invalidate_rules_cache, match_merchant, rule_label
 
-
-@contextmanager
-def get_db():
-    """Context manager wrapping get_connection() for automatic cleanup."""
-    conn = get_connection()
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 # LOCAL_DEV: off unless a caller turns it on (python app.py, serve.py in
@@ -59,19 +53,13 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 # store, set by serve.py; None means backups are not configured.
 app.config.update(LOCAL_DEV=False, BACKUP_STORE=None)
 app.wsgi_app = access_gate.RequireGateIdentity(app.wsgi_app, app.config)
+app.register_blueprint(trend_routes.bp)
 
 
 def format_type_display(parent: str | None, child: str | None) -> str:
     """Format a type as 'Parent > Child', or the bare name with no parent."""
     return book_type.display_name(child, parent) if child else ""
 
-
-# The joins that give a labelled table its type (ty) and that type's parent
-# (tp). `{owner}` is the alias of the table carrying type_id.
-_TYPE_JOINS = (
-    "LEFT JOIN types ty ON {owner}.type_id = ty.id "
-    "LEFT JOIN types tp ON ty.parent_id = tp.id"
-)
 
 # What the charts call spending rows nobody has given a type.
 NO_TYPE_LABEL = "No type"
@@ -93,12 +81,6 @@ CHECKABLE_ROWS = (
     " AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund') AND t.type_id IS NOT NULL)"
 )
 NOT_CHECKED_ROWS = f"(COALESCE(svc.review_each_time, 0) = 1 AND {CHECKABLE_ROWS})"
-
-
-def book_expr(alias: str = "t") -> str:
-    """SQL for the book a row is read as: its own, or the default when no one
-    has placed it. Scope comes from here and from nowhere else."""
-    return f"COALESCE({alias}.book, '{book_type.DEFAULT_BOOK}')"
 
 
 def _requested_book(args) -> str | None:
@@ -1681,20 +1663,6 @@ def api_service_transactions(svc_id):
 # Dashboard API
 # ---------------------------------------------------------------------------
 
-# Rows on an account kept in the currency the dashboard's figures are in. A
-# row on an account in another currency (the rupee account) is whole minor
-# units of that currency, and is never added to SGD cents as if it were SGD:
-# it is held out of these sums. `s` is the row's statement.
-_SGD_ACCOUNT = (
-    "s.account_id IN (SELECT id FROM accounts WHERE COALESCE(currency, 'SGD') = 'SGD')"
-)
-
-
-# Rows on an account the household owns: what household spending is counted
-# on (ruling 6). Takes the owner as its parameter.
-_HOUSEHOLD_ACCOUNT = "s.account_id IN (SELECT id FROM accounts WHERE owner = ?)"
-
-
 def _waiting_sides(conn, filters: str = "", params: tuple | list = ()) -> dict:
     """The transfers waiting for review, money out and money in apart: how
     many each side holds and what each adds up to in whole minor units, both
@@ -1753,11 +1721,12 @@ def api_dashboard_stat_cards():
     Respects: book, exclude_one_off, account_id
 
     The cards:
-      household, household_rows   spending and refunds in the Household book,
-                                  on accounts the household owns, archived
-                                  or not, hidden merchants included (ruling
-                                  6). No company's row and no row waiting
-                                  for review is in it.
+      household, household_rows   spending net of refunds in the Household
+                                  book (a refund counts in the month it
+                                  arrives), on accounts the household owns,
+                                  archived or not, hidden merchants included
+                                  (ruling 6). No company's row and no row
+                                  waiting for review is in it.
       held_out_count, _total      the month's transfers waiting for review:
                                   what the household figure is held short of.
                                   _total is money out less money in;
@@ -1765,13 +1734,16 @@ def api_dashboard_stat_cards():
                                   held_out_in_count, _in_total state the two
                                   sides apart, each as a positive figure.
       moom, kalesh                each company's costs paid from accounts the
-                                  household owns. Beside the headline, never
-                                  added into it.
-      <book>_out, _back, _out_rows,  each book's card split as Spending shows
-      _back_rows, avg_<book>_out     it: money out, refunds back beside it.
+                                  household owns, net of refunds. Beside the
+                                  headline, never added into it.
+      <book>_out, _back, _out_rows,  the breakdown of each book's net card
+      _back_rows, avg_<book>_out     (the chip reads it): money out, and the
+                                     refunds back that came off it.
       <book>_missing                 no row in the month and an account that
-                                     carried the book's rows has no statement
-                                     for it: not a real zero.
+                                     carried the book's rows should have sent
+                                     a statement for it and has not
+                                     (missing.py): not a real zero. The
+                                     current month is never missing.
       waiting, waiting_total      every transfer waiting, whenever dated: the
                                   review list, with waiting_out_count,
                                   _out_total, waiting_in_count, _in_total
@@ -1853,8 +1825,8 @@ def api_dashboard_stat_cards():
         for _ in companies
     )
 
-    # Each book's card split the way Spending shows it: money out, and money
-    # back in refunds (a negative row) kept beside it, never taken off.
+    # The breakdown of each book's net card: money out, and money back in
+    # refunds (a negative row), the part of the net that came off it.
     side_sums = "".join(
         f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor > 0 THEN amount_minor ELSE 0 END), "
         f"SUM(CASE WHEN {book_expr('t')} = ? AND a.owner = ? AND amount_minor < 0 THEN -amount_minor ELSE 0 END), "
@@ -1929,8 +1901,9 @@ def api_dashboard_stat_cards():
         }
 
         # A book with no row in the month while an account that carried its
-        # rows in the year before has no statement for the month: the card
-        # is missing, not a real zero (Spending hatches the same month).
+        # rows in the year before should have sent a statement for the month
+        # and has not: the card is missing, not a real zero (Spending hatches
+        # the same month).
         ref_key = f"{ref_y:04d}-{ref_m:02d}"
         year_ago = f"{ref_y - 1:04d}-{ref_m:02d}-01"
         missing = {}
@@ -1947,14 +1920,11 @@ def api_dashboard_stat_cards():
                   AND a.type IN (?, ?)
                   AND t.date >= ? AND t.date < ?
             """, (name, account_kind.HOUSEHOLD, *account_kind.STATEMENT_KINDS, year_ago, f"{ref_key}-01")).fetchall()
-            for c in carried:
-                held = conn.execute(
-                    "SELECT 1 FROM statements WHERE account_id = ? AND substr(statement_date, 1, 7) = ?",
-                    (c[0], ref_key),
-                ).fetchone()
-                if not held:
-                    missing[key] = True
-                    break
+            # Whether one of them should have sent a statement for the month
+            # and has not is the trend's rule (missing.py, S3): the current
+            # month is "so far", never missing.
+            if missing_months(conn, [c[0] for c in carried], [ref_key], date.today()):
+                missing[key] = True
 
         # The transfers dated in the reference month that nobody has labelled:
         # what the household figure is waiting on.
@@ -2131,7 +2101,10 @@ def api_transactions():
     """Paginated transaction list with filters.
 
     Query params: start, end, book, exclude_one_off, types, account_id, month,
-                  page, per_page, search, flow
+                  page, per_page, search, flow, include_hidden
+
+    include_hidden=true lists the rows of merchants hidden from expense views
+    too (default: they stay out).
 
     flow=review is the review list: the transfers waiting for a label. It
     hides no merchant, so it lists every row the waiting count counts.
@@ -2139,7 +2112,8 @@ def api_transactions():
     # A row asked for by id, or by its merchant, is shown whatever its
     # merchant's hiding says.
     hide = (request.args.get("flow") != flow.REVIEW and request.args.get("tx_id") is None
-            and request.args.get("service_id") is None)
+            and request.args.get("service_id") is None
+            and request.args.get("include_hidden") != "true")
     filters, params = _build_filters(request.args, hide=hide)
 
     flow_filter = request.args.get("flow")

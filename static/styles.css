@@ -502,6 +502,10 @@ table.t tr.is-highlight > td { background: var(--accent-primary-subtle); }
 table.t tr.clickable { cursor: pointer; }
 table.t td.empty { padding: 24px; text-align: center; color: var(--text-tertiary); border: 0; background: none; }
 .table-tight td, .table-tight th { padding-top: 4px; padding-bottom: 4px; }
+/* ==== reserved: spending-net ==== */
+.sl-other { margin: 4px 0 0; }
+/* ==== end: spending-net ==== */
+
 /* kit (from folio): bandedTable. The tight table with a header band, built by
    app.js bandedTable(): a caption, th scope="col" in caps on the band, money
    right in tabular figures, rows under a hairline. */
@@ -637,6 +641,15 @@ li.empty { list-style: none; margin-top: 8px; }
 .sheet--center .sheet-head h2 { font-weight: var(--font-bold); }
 .sheet--center .sheet-body { flex: 0 1 auto; padding: 0 var(--space-5) var(--space-4); }
 .sheet--center .sheet-foot { flex-wrap: wrap; align-items: center; padding: var(--space-4) var(--space-5); }
+/* ==== reserved: home-net ==== */
+/* Home's book tiles are net of refunds: a month that nets below zero hangs under the axis,
+   short and in the warning colour, so it reads as a mark and not as a small positive month. */
+.home-bars.has-neg { margin-bottom: 16px; }
+.home-bars.has-neg > span.is-neg { height: calc(var(--h) * 0.3); min-height: 3px; border-radius: 0 0 3px 3px;
+    transform: translateY(calc(100% + 1px)); background: color-mix(in srgb, var(--semantic-warning) 70%, var(--bg-surface)); }
+.home-bars.has-neg > span.is-neg.is-current { background: var(--text-primary); }
+/* ==== end: home-net ==== */
+
 /* kit (from folio): the one confirm. The ask, what changes old → new, what it does; Cancel left, the commit right */
 .sheet-body .q { font-size: var(--t-body); font-weight: var(--font-semibold); color: var(--text-primary); }
 .sheet-body .diff { margin: 0; padding: 10px var(--space-3); list-style: none; border: 1px solid var(--border-subtle); border-radius: var(--radius-xl);
@@ -1760,6 +1773,9 @@ table.sl-stack td.sl-sub { display: none; }
 .mp-fact b { font-size: var(--t-title); font-weight: var(--font-bold); letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .mp-fact .sub { font-size: var(--t-meta); color: var(--text-tertiary); }
 .mp-fact--set .seg { align-self: flex-start; }
+
+/* ==== reserved: links ==== */
+/* ==== end: links ==== */
 
 /* kit (from folio): attention item. The ask: icon square, the sentence, its answers right, a whole ink border */
 .attn { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: var(--space-1) var(--space-3); align-items: center;

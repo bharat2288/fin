@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import book_type
@@ -297,6 +298,16 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+@contextmanager
+def get_db():
+    """Context manager wrapping get_connection() for automatic cleanup."""
+    conn = get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:

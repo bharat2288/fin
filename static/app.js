@@ -531,6 +531,9 @@ const ROUTES = [
     [/^\/books\/import$/, 'books', () => viewImport()],
     [/^\/changes$/, 'changes', () => viewChanges()],
 ];
+/** New pages add their route here, so ROUTES stays this file's and a page exists only once its file loads. */
+function registerRoute(pattern, view) { ROUTES.push([pattern, 'books', view]); }
+window.registerRoute = registerRoute;
 
 let renderToken = 0;
 async function render() {
@@ -559,13 +562,46 @@ async function render() {
 function afterRender(fn) { $('#view').__after = fn; }
 function rerender() { render(); }
 
-window.addEventListener('hashchange', () => { closeSheet(); render(); window.scrollTo(0, 0); });
+// ROUTE MEMORY begin
+// Leaving a route saves its scroll and open sections for this session; Back restores them after render.
+// A history entry is tagged with state once it has been reached, so a traversal (Back) arrives carrying
+// the tag and a fresh link click does not: only a traversal restores, a click starts at the top.
+const routeMemory = new Map();
+function rememberRoute(hash) {
+    routeMemory.set(hash, { y: window.scrollY, open: [...document.querySelectorAll('#view details')].map(d => d.open) });
+}
+function recallRoute(hash) {
+    const seen = routeMemory.get(hash);
+    if (!seen) { window.scrollTo(0, 0); return; }
+    document.querySelectorAll('#view details').forEach((d, i) => { d.open = !!seen.open[i]; });
+    window.scrollTo(0, seen.y);
+}
+window.addEventListener('hashchange', async e => {
+    const left = String(e.oldURL || '');
+    rememberRoute(left.includes('#') ? left.slice(left.indexOf('#')) : '');
+    const back = !!(history.state && history.state.finBack);
+    try { history.replaceState({ finBack: true }, ''); } catch { /* a tag that cannot be set only costs the restore */ }
+    closeSheet();
+    if (!back) window.scrollTo(0, 0);
+    await render();
+    if (back) recallRoute(location.hash);
+});
+document.addEventListener('DOMContentLoaded', () => { try { history.replaceState({ finBack: true }, ''); } catch { /* as above */ } });   // the entry the page opened on
+// ROUTE MEMORY end
 document.addEventListener('DOMContentLoaded', render);
 
 // One handler for every [data-act]: the views write plain HTML.
 const ACT = {};
+/** The [data-act] element a click lands on, or null: a link inside an acting row (a name that opens its page) is the
+ *  link's own click, so the row handler never sees it. A link that is itself the [data-act] element still acts. */
+function actTarget(target) {
+    const el = target.closest('[data-act]');
+    if (!el) return null;
+    const a = target.closest('a[href]');
+    return a && a !== el && el.contains(a) ? null : el;
+}
 document.addEventListener('click', e => {
-    const el = e.target.closest('[data-act]');
+    const el = actTarget(e.target);
     if (!el) return;
     const fn = ACT[el.dataset.act];
     if (!fn) return;
@@ -580,12 +616,23 @@ document.addEventListener('change', e => {
 ACT['close-sheet'] = () => closeSheet();
 ACT.scrim = () => closeSheet();
 
+// New pages push [key, href, label, icon] here (#/books/types, #/books/type), so a tab exists only once its page does.
+const booksNavExtra = [];
+window.booksNavExtra = booksNavExtra;
 function booksNav(current) {
     const items = [['sheet', '#/books', 'Balance sheet', 'scales'], ['spending', '#/books/spending', 'Spending', 'chart-pie-slice'],
-        ['bills', '#/books/bills', 'Bills', 'receipt'], ['lists', '#/books/lists', 'Lists', 'list-bullets'], ['import', '#/books/import', 'Import', 'upload-simple']];
+        ['bills', '#/books/bills', 'Bills', 'receipt'], ['lists', '#/books/lists', 'Lists', 'list-bullets'], ['import', '#/books/import', 'Import', 'upload-simple'], ...booksNavExtra];
     return `<nav class="seg subnav" aria-label="Books">${items.map(([k, href, label, ic]) =>
         `<a href="${href}"${k === current ? ' aria-current="page"' : ''}>${icon(ic)}${label}</a>`).join('')}</nav>`;
 }
+// A link to a page, by kind. 'type' is plain text until type-page.js sets pageLinkKinds.type, so a link never lands on a stub.
+const pageLinkKinds = { merchant: id => `#/books/merchant/${id}`, account: id => `#/books/account/${id}`, type: null };
+window.pageLinkKinds = pageLinkKinds;
+function pageLink(kind, id, text) {
+    const href = pageLinkKinds[kind]?.(id);
+    return href ? `<a class="link" href="${href}">${esc(text)}</a>` : esc(text);
+}
+window.pageLink = pageLink;
 function monthPicker() {
     return `<label class="field" style="min-width:190px"><span>As at the end of</span>
         <select data-change="month">${sheetMonths().map(m => `<option value="${m}"${m === S.month ? ' selected' : ''}>${monthName(m)}${m === currentMonth() ? ' (so far)' : ''}</option>`).join('')}</select></label>`;
@@ -1007,12 +1054,17 @@ async function homeGuesses(items) {
     return out;
 }
 
-/** A book's twelve months as small bars, on its own scale; the tile's month dark. */
+/** A book's twelve months as small bars, on its own scale; the tile's month dark.
+ *  The months are net of refunds: one that nets below zero hangs under the axis. */
 function homeBars(values, months, current, cls) {
     const top = Math.max(...values.map(v => Math.abs(v)), 0);
-    return `<div class="home-bars ${cls}" role="img" aria-label="Twelve months, each on this book's own scale">${values.map((v, i) => {
+    const hasNeg = values.some(v => v < 0);
+    const label = `Twelve months, each on this book's own scale${hasNeg ? '; a month below zero hangs under the line' : ''}`;
+    return `<div class="home-bars ${cls}${hasNeg ? ' has-neg' : ''}" role="img" aria-label="${esc(label)}">${values.map((v, i) => {
         const h = top ? Math.max(2, Math.round(Math.abs(v) / top * 100)) : 2;
-        return `<span class="${months[i] === current ? 'is-current' : ''}${v ? '' : ' is-zero'}" style="--h:${h}%" title="${esc(monthName(months[i], { short: true }))}"></span>`;
+        const name = monthName(months[i], { short: true });
+        const title = v < 0 ? `${name}, below zero: ${money(v, 'SGD')}` : name;
+        return `<span class="${months[i] === current ? 'is-current' : ''}${v ? '' : ' is-zero'}${v < 0 ? ' is-neg' : ''}" style="--h:${h}%" title="${esc(title)}"></span>`;
     }).join('')}</div>`;
 }
 function homeVsAverage(minor, avgMinor, months) {
@@ -1022,6 +1074,51 @@ function homeVsAverage(minor, avgMinor, months) {
     const p = Math.round((minor - avgMinor) / Math.abs(avgMinor) * 100);
     if (p === 0) return `<span class="home-vs" title="${span}">same as its recent average ${esc(money(avgMinor, 'SGD'))}</span>`;
     return `<span class="home-vs" title="The recent average is ${span}"><span aria-hidden="true">${p > 0 ? '▲' : '▼'}</span>${Math.abs(p)}% ${p > 0 ? 'above' : 'below'} its recent average ${esc(money(avgMinor, 'SGD'))}</span>`;
+}
+
+/** One Home tile: the eyebrow, the label, the figure, the average line, the
+ *  body, twelve small bars and the foot. The bars are the card's history. */
+function homeTile(cards, months, { cls, eyebrow, label, minor, avg, body, values, href, act, book, foot }) {
+    return `<a class="home-tile ${cls}" href="${href}"${act ? ` data-act="${act}" data-book="${esc(book)}" data-month="${esc(cards.ref_month)}"` : ''}>
+        <span class="home-tile__eyebrow">${esc(eyebrow)}</span>
+        <span class="home-tile__label">${esc(label)}</span>
+        <span class="home-tile__fig num">${esc(money(minor, 'SGD'))}</span>
+        ${avg}
+        <span class="home-tile__body">${body}</span>
+        ${values.length ? homeBars(values, months, cards.ref_month, cls) : ''}
+        <span class="home-tile__foot">${esc(foot)} ${icon('caret-right')}</span></a>`;
+}
+/** Home's book tiles, one per declared book, from stat-cards' payload. The
+ *  figure is the month net of refunds, as the rest of fin counts it; the chip
+ *  names what the refunds came to. A month with no statement in is marked,
+ *  not a zero. A company's tile is the part of its costs the household's own
+ *  accounts paid, and says so. */
+function homeBookTiles(cards, books) {
+    const hist = cards.history || [];
+    const months = hist.map(h => h.month);
+    const tiles = [];
+    books.forEach((b, i) => {
+        const key = b.name.toLowerCase();
+        if (!(key in cards)) return;
+        const minor = toMinor(cards[key] ?? 0);
+        const values = hist.map(h => toMinor(h[key] ?? 0));
+        const backMinor = toMinor(cards[`${key}_back`] || 0);
+        const back = backMinor ? `<span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}after ${esc(money(backMinor, 'SGD'))} refunds</span>` : '';
+        const missing = cards[`${key}_missing`];
+        const avg = missing
+            ? `<span class="tag stale">${icon('warning')}no statement for ${esc(monthName(cards.ref_month, { short: true }))}</span>`
+            : homeVsAverage(minor, toMinor(cards[`avg_${key}`] ?? 0), cards.avg_months || 3);
+        const go = missing ? { href: '#/books/import', foot: 'Import the statement' } : { act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows' };
+        const outRows = cards[`${key}_out_rows`] ?? (i === 0 ? cards.household_rows : 0) ?? 0;
+        if (i === 0) {
+            tiles.push(homeTile(cards, months, { cls: 'is-household', eyebrow: 'Household', label: `${b.name} spending`, minor, avg, values, ...go,
+                body: `${plural(outRows, 'row')} out${back ? ` · ${back}` : ''}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
+        } else {
+            tiles.push(homeTile(cards, months, { cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, ...go,
+                body: `Costs paid from household accounts${back ? ` · ${back}` : ''}. Not household spending; it moves ${esc(b.name)}’s company balance.` }));
+        }
+    });
+    return tiles;
 }
 
 async function viewHome() {
@@ -1053,40 +1150,9 @@ async function viewHome() {
     // figure with its own twelve months; never added.
     const hist = cards.history || [];
     const months = hist.map(h => h.month);
-    const tile = ({ cls, eyebrow, label, minor, avg, body, values, href, act, book, foot }) => `<a class="home-tile ${cls}" href="${href}"${act ? ` data-act="${act}" data-book="${esc(book)}" data-month="${esc(cards.ref_month)}"` : ''}>
-        <span class="home-tile__eyebrow">${esc(eyebrow)}</span>
-        <span class="home-tile__label">${esc(label)}</span>
-        <span class="home-tile__fig num">${esc(money(minor, 'SGD'))}</span>
-        ${avg}
-        <span class="home-tile__body">${body}</span>
-        ${values.length ? homeBars(values, months, cards.ref_month, cls) : ''}
-        <span class="home-tile__foot">${esc(foot)} ${icon('caret-right')}</span></a>`;
-    const tiles = [];
-    // Money out is the figure, as Spending shows it; refunds sit beside it,
-    // never taken off. A month with no statement in is marked, not a zero.
-    r.books.forEach((b, i) => {
-        const key = b.name.toLowerCase();
-        if (!(key in cards)) return;
-        const minor = toMinor(cards[`${key}_out`] ?? cards[key] ?? 0);
-        const values = hist.map(h => toMinor(h[`out_${key}`] ?? h[key] ?? 0));
-        const backMinor = toMinor(cards[`${key}_back`] || 0);
-        const back = backMinor ? `<span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}back ${esc(money(backMinor, 'SGD'))}</span> in refunds, not taken off` : '';
-        const missing = cards[`${key}_missing`];
-        const avg = missing
-            ? `<span class="tag stale">${icon('warning')}no statement for ${esc(monthName(cards.ref_month, { short: true }))}</span>`
-            : homeVsAverage(minor, toMinor(cards[`avg_${key}_out`] ?? cards[`avg_${key}`] ?? 0), cards.avg_months || 3);
-        const go = missing ? { href: '#/books/import', foot: 'Import the statement' } : { act: 'tile-book', book: b.name, href: '#/books/spending', foot: 'See its rows' };
-        const outRows = cards[`${key}_out_rows`] ?? (i === 0 ? cards.household_rows : 0) ?? 0;
-        if (i === 0) {
-            tiles.push(tile({ cls: 'is-household', eyebrow: 'Household', label: `${b.name} spending`, minor, avg, values, ...go,
-                body: `${plural(outRows, 'row')} out${back ? ` · ${back}` : ''}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
-        } else {
-            tiles.push(tile({ cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, ...go,
-                body: `${back ? `Money out · ${back}. ` : ''}Paid from our accounts. Not household spending; it moves ${esc(b.name)}’s company balance.` }));
-        }
-    });
+    const tiles = homeBookTiles(cards, r.books);
     const loanValues = hist.map(h => toMinor(h.loan_principal || 0));
-    tiles.push(tile({ cls: 'is-movement', eyebrow: 'Movement, not spending', label: 'Loan principal repaid', minor: toMinor(cards.loan_principal), values: loanValues, href: '#/books', foot: 'See the loans',
+    tiles.push(homeTile(cards, months, { cls: 'is-movement', eyebrow: 'Movement, not spending', label: 'Loan principal repaid', minor: toMinor(cards.loan_principal), values: loanValues, href: '#/books', foot: 'See the loans',
         avg: toMinor(cards.loan_instalments) ? '' : '<span class="home-vs">no instalment seen this month</span>',
         body: `What the loans fell by: instalments ${esc(money(toMinor(cards.loan_instalments), 'SGD'))} less interest ${esc(money(toMinor(cards.loan_interest), 'SGD'))}. Still the household’s money.` }));
     const tilesCard = `<section class="card home-tiles">
@@ -1388,6 +1454,11 @@ ACT['qi-rows'] = el => { if (toggleRowDetail(el)) qiShown.add(el.dataset.key); e
 /** One row in a money lane: a transfer, a merchant's rows with no type and
  *  no guess, or a missed bill (Pick a type and Check each row draw their own).
  *  One outline action; a missed bill's Open Bills is a link on its meta. */
+/** A card's title; an untyped card whose row has a merchant links it to that merchant's page. */
+function queueTitleHTML(card, title = card.title) {
+    const svc = card.kind === 'untyped' && card.rows[0]?.service_id;
+    return svc ? pageLink('merchant', svc, title) : esc(title);
+}
 async function queueCardHTML(card) {
     const n = card.rows.length;
     if (n) queueGroups.set(card.key, card.rows);
@@ -1404,7 +1475,7 @@ async function queueCardHTML(card) {
     const links = (card.actions || []).filter(a => a.href).map(a => ` · <a class="link" href="${a.href}">${esc(a.label)}</a>`).join('');
     const act = own ? `<button type="button" class="btn sm" data-act="${own.act}"${data(own)}>${esc(guess.actions && /^This was/.test(own.label) ? 'Something else' : own.label)}</button>` : '';
     return `<article class="qi qi--${card.kind}">
-        <div class="qi__w"><p class="qi__t">${esc(title)}${row ? rowMark(row.id) : ''}</p><p class="qi__m">${qiMeta(card, meta)}${links}</p></div>
+        <div class="qi__w"><p class="qi__t">${queueTitleHTML(card, title)}${row ? rowMark(row.id) : ''}</p><p class="qi__m">${qiMeta(card, meta)}${links}</p></div>
         <div class="qi__amt num">${esc(sumByCurrency([card], c => c.amount))}</div>
         <div class="qi__act">${act}</div>
         ${guess.html ? `<div class="qi__more q-guess">${guess.html}${guess.actions ? `<div class="q-guess__act">${guess.actions}</div>` : ''}</div>` : ''}
@@ -2961,15 +3032,15 @@ function betweenFigures(t, cur) {
         </tbody></table>`;
 }
 
-const accountPage = { page: 1 };
+const accountPage = { page: 1, month: null };
 async function viewAccount(id) {
     const [r, sheet, ties, anchorsList, refused] = await Promise.all([
         refs(), sheetFor(S.month), get(`/api/accounts/${id}/ties`), get(`/api/anchors?account_id=${id}`), get(`/api/statements/refused?account_id=${id}`),
     ]);
     const acct = r.accountById.get(id);
     if (!acct) throw new Error('No such account');
-    if (accountPage.id !== id) { accountPage.id = id; accountPage.page = 1; }
-    const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}`);
+    if (accountPage.id !== id) { accountPage.id = id; accountPage.page = 1; accountPage.month = null; }
+    const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}${accountPage.month ? `&month=${accountPage.month}` : ''}`);
     const line = sheet.sections.flatMap(s => s.lines).find(l => l.account_id === id);
     const cur = acct.currency || 'SGD';
     const asAtShort = day(sheet.as_at, { year: false });
@@ -3074,6 +3145,7 @@ async function viewAccount(id) {
         return headRow + acctRowTr(row);
     }).join('');
     ACT.__rows = new Map(rows.transactions.map(x => [x.id, x]));
+    afterRender(() => window.mountAccountTrend?.());
 
     return `${booksNav('sheet')}
     <div class="page-head"><div><a class="link small back-link" href="#/books">← Balance sheet</a><span class="eyebrow">Books · ${esc(KIND_WORDS[acct.type] || acct.type)}</span><h1>${esc(acct.name)}${accountMark(id)}</h1>
@@ -3126,20 +3198,23 @@ ACT['figure-delete-yes'] = async el => {
 
 // ---------------------------------------------------------------------------
 // Spending: the old dashboard's views under Books, one book or every book
-// with a total each, never one sum. Money out is the total; refunds are
-// money back, shown beside it and never taken off it.
+// with a total each, never one sum. The total is net of refunds: the signed
+// sum of the month's rows, a refund counting in the month it arrives. S$
+// accounts only; a rupee row is named beside the figure, not added to it.
 // ---------------------------------------------------------------------------
 
 const charts = [];
+/** Net per currency: the signed sum of the rows, money out positive and a refund negative. */
 function totalsByCurrency(rows) {
     const by = {};
-    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + Math.abs(toMinor(row.amount_sgd, c)); });
+    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + toMinor(row.amount_sgd, c); });
     return by;
 }
 function totalsText(by) {
     const parts = Object.entries(by).map(([c, m]) => money(m, c));
     return parts.length ? parts.join(' and ') : money(0, 'SGD');
 }
+/** Rows grouped by `keyOf`, each group's net in S$ first: a group netting below zero sorts last. */
 function groupRows(rows, keyOf) {
     const groups = new Map();
     rows.forEach(row => {
@@ -3198,15 +3273,29 @@ function spendFilterFields(sp, r) {
 /** A spending row: no money-out pill (every row here is money out); a refund says so. */
 function spendRowTr(row) {
     const minor = toMinor(row.amount_sgd, row.currency);
-    const label = row.display_type ? esc(row.display_type) : tag('nofig', 'no type');
+    const label = row.display_type ? (row.type_id ? pageLink('type', row.type_id, row.display_type) : esc(row.display_type)) : tag('nofig', 'no type');
+    const what = row.service_id ? pageLink('merchant', row.service_id, row.description) : esc(row.description);
+    const account = row.account_id ? pageLink('account', row.account_id, row.account_name || '') : esc(row.account_name || '');
     const amount = minor < 0
         ? `<span class="sl-refund">${icon('arrow-circle-down')}refund</span> <span class="num sl-back">${esc(money(-minor, row.currency))} back</span>`
         : `<span class="num">${esc(money(minor, row.currency))}</span>`;
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
-        <td>${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${esc(row.account_name || '')}</div></td>
+        <td>${what}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${account}</div></td>
         <td>${label}${notCheckedTag(row)}</td>
         <td class="r">${amount}</td></tr>`;
+}
+
+/** The name cell of a By merchant / By type row: a link to its page where it has one (a merchant by its id, a type by its id,
+ *  or, folded into its parent, the parent's), plain text where it has none (a row with no merchant, "No type"). */
+function spendGroupNameCell(g, view, fold, types) {
+    if (view !== 'type') {
+        const row = g.list.find(x => x.service_id && x.service_name === g.name);
+        return row ? pageLink('merchant', row.service_id, g.name) : esc(g.name);
+    }
+    if (g.name === 'No type') return tag('nofig', 'No type');
+    const id = fold ? types.find(t => t.name === g.name && !t.parent_id)?.id : g.list[0]?.type_id;
+    return id ? pageLink('type', id, g.name) : esc(g.name);
 }
 
 async function viewSpending() {
@@ -3216,8 +3305,11 @@ async function viewSpending() {
     const span = sp.span === 'year' ? months : [S.month];
     const household = r.books[0].name;
     const books = sp.book === 'all' ? r.books.map(b => b.name) : [sp.book];
-    const qs = book => {
+    // The lists keep hiding the merchants hidden from expense views; the tiles,
+    // the aside and the chart count them (include_hidden), as stat-cards does.
+    const qs = (book, counted = false) => {
         const p = new URLSearchParams({ book, start: months[0] + '-01', end: monthEnd(S.month), expense_only: 'true', sort: 'date', sort_dir: 'desc' });
+        if (counted) p.set('include_hidden', 'true');
         if (sp.search) p.set('search', sp.search);
         if (sp.types.length) p.set('types', sp.types.join(','));
         if (sp.account) p.set('account_id', sp.account);
@@ -3225,52 +3317,62 @@ async function viewSpending() {
         return p.toString();
     };
     // Every page is read: a total is never one page's sum.
-    const [lists, coverage] = await Promise.all([
+    const [lists, counts, coverage] = await Promise.all([
         Promise.all(books.map(b => getAllRows(qs(b)))),
+        Promise.all(books.map(b => getAllRows(qs(b, true)))),
         get(`/api/statements/coverage?months=${monthsSince(months[0])}`).catch(() => null),
     ]);
     const perBook = books.map((book, i) => {
-        const year = lists[i].transactions;
-        const inSpan = year.filter(row => span.includes(row.date.slice(0, 7)));
-        const rows = inSpan.filter(row => !isRefund(row));
-        const back = inSpan.filter(isRefund);
-        const others = [...new Set(year.map(row => row.currency || 'SGD').filter(c => c !== 'SGD'))];
-        return { book, year, rows, back, all: inSpan, by: totalsByCurrency(rows), backBy: totalsByCurrency(back), short: shownOf(lists[i]), others };
+        const year = lists[i].transactions;           // what the lists and tables show
+        const counted = counts[i].transactions;       // what the figures count
+        const inSpan = rows => rows.filter(row => span.includes(row.date.slice(0, 7)));
+        const net = inSpan(counted);
+        const spent = net.filter(row => !isRefund(row));
+        const back = net.filter(isRefund);
+        const others = [...new Set(counted.map(row => row.currency || 'SGD').filter(c => c !== 'SGD'))];
+        return { book, year, counted, all: inSpan(year), net, spent, back, by: totalsByCurrency(net), spentBy: totalsByCurrency(spent),
+            backBy: totalsByCurrency(back), short: shownOf(counts[i]) || shownOf(lists[i]), others };
     });
     ACT.__rows = new Map(perBook.flatMap(b => b.all).map(x => [x.id, x]));
     const spanWords = span.length === 1 ? `${monthName(S.month)}${S.month === currentMonth() ? ' so far' : ''}` : `12 months to ${monthName(S.month, { short: true })}`;
 
     // P1.3: a month with nothing in it says why, and where the latest rows are.
     let emptyNote = '';
-    if (sp.span !== 'year' && perBook.every(b => !b.all.length)) {
-        const latest = perBook.flatMap(b => b.year).map(x => x.date).sort().pop();
+    if (sp.span !== 'year' && perBook.every(b => !b.net.length)) {
+        const latest = perBook.flatMap(b => b.counted).map(x => x.date).sort().pop();
         const filtered = activeSpendFilters(sp, r).length;
         emptyNote = `<div class="notice sl-empty-month">${icon('calendar-blank')}<div class="grow"><b>Nothing in ${esc(monthName(S.month))}${S.month === currentMonth() ? ' yet' : ''}.</b>
             ${latest ? `The latest rows are from ${esc(day(latest, { year: latest.slice(0, 4) !== S.month.slice(0, 4) }))}${S.month === currentMonth() ? `; ${esc(LONG_MONTHS[Number(S.month.slice(5)) - 1])}’s statements are not in` : ''}.` : filtered ? 'Nothing matches the filters in the 12 months either.' : 'No statement for it is in.'}</div>
             ${latest ? `<button class="btn" data-act="spend-month" data-m="${latest.slice(0, 7)}">Look at ${esc(LONG_MONTHS[Number(latest.slice(5, 7)) - 1])}</button>` : ''}</div>`;
     }
 
-    // P1.1, P1.2: one tile per book; money out is its total, refunds beside it.
+    // P1.1, P1.2: one tile per book; its figure is net of refunds, S$ accounts only.
+    const sgd = by => by.SGD || 0;
+    const otherNote = b => {
+        const parts = Object.entries(b.by).filter(([c, m]) => c !== 'SGD' && m).map(([c, m]) => money(m, c));
+        return parts.length ? `<p class="small muted sl-other">${esc(parts.join(' and '))} on accounts in another currency is not in this figure.</p>` : '';
+    };
     const tiles = `<div class="stat-tiles sl-tiles">${perBook.map(b => {
         const isHouse = b.book === household;
         return `<div class="stat-tile${isHouse ? '' : ' hatch'}">
             <div class="sl-tile-head"><span class="stat-tile__label">${isHouse ? 'Household spending' : `${esc(b.book)} · its costs`}</span>${isHouse ? '' : '<span class="outside-tag">not household</span>'}</div>
-            <div class="stat-tile__figure">${esc(totalsText(b.by))}</div>
-            <div class="stat-tile__sub">${plural(b.rows.length, 'row')} out · ${esc(spanWords)}</div>
-            ${b.back.length ? `<div class="sl-back-line"><span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}back in refunds ${esc(totalsText(b.backBy))}</span><span class="muted small">${plural(b.back.length, 'row')}, not taken off</span></div>` : ''}
+            <div class="stat-tile__figure">${esc(money(sgd(b.by), 'SGD'))}</div>
+            <div class="stat-tile__sub">${plural(b.spent.length, 'row')} out · ${esc(spanWords)}</div>
+            ${sgd(b.backBy) ? `<div class="sl-back-line"><span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}after ${esc(money(-sgd(b.backBy), 'SGD'))} refunds</span></div>` : ''}
+            ${otherNote(b)}
             ${b.short ? `<p class="small sl-short">${icon('warning')}Short: too many rows to read at once (${esc(b.short)} over 12 months). Narrow the filters.</p>` : ''}</div>`;
     }).join('')}</div>
-        <p class="card-foot">${perBook.length > 1 ? 'Each book has its own total. They are never added together. ' : ''}Refunds are shown beside spending, never taken off it.</p>`;
+        <p class="card-foot">${perBook.length > 1 ? 'Each book has its own total. They are never added together. ' : ''}Net of refunds: a refund counts in the month it arrives. S$ accounts only.</p>`;
 
     // P3.1: a month with no statement in for this book's accounts is marked, not drawn as nothing spent.
     const missingFor = b => {
         if (!coverage) return new Set();
-        const ids = new Set(b.year.map(x => x.account_id).filter(id => coverage.matrix[id]));
+        const ids = new Set(b.counted.map(x => x.account_id).filter(id => coverage.matrix[id]));
         const out = new Set();
         if (!ids.size) return out;
         months.forEach(m => {
             if (m >= currentMonth()) return;
-            if (b.year.some(x => x.date.startsWith(m))) return;
+            if (b.counted.some(x => x.date.startsWith(m))) return;
             if ([...ids].some(id => coverage.matrix[id][m] && !coverage.matrix[id][m].imported)) out.add(m);
         });
         return out;
@@ -3279,7 +3381,7 @@ async function viewSpending() {
     const typeKey = row => (fold ? (row.parent_type || row.type) : row.display_type) || 'No type';
     const body = perBook.map(b => {
         // P1.4: a book with no costs in the 12 months folds to one line.
-        if (!b.year.length) {
+        if (!b.counted.length) {
             return `<section class="card sl-folded"><h2>${esc(b.book)}</h2><p>No costs in the 12 months to ${esc(monthName(S.month, { short: true }))}${activeSpendFilters(sp, r).length ? ' that match the filters' : ''}, so there is no chart.</p>
                 <a class="link" href="#/books">Look at ${esc(b.book)} on the balance sheet</a></section>`;
         }
@@ -3293,26 +3395,23 @@ async function viewSpending() {
                 : `<p class="card-empty">No rows in ${esc(spanWords)}.</p>`;
         } else {
             const keyOf = sp.view === 'type' ? typeKey : row => row.service_name || row.description;
-            const groups = groupRows(b.rows, keyOf);
-            const backs = groupRows(b.back, keyOf);
+            const groups = groupRows(b.all, keyOf);
             const noun = sp.view === 'type' ? 'Type' : 'Merchant';
-            const nameCell = g => g.name === 'No type' ? tag('nofig', 'No type') : esc(g.name);
-            content = groups.length || backs.length ? `<div class="table-wrap"><table class="t sl-groups"><thead><tr><th>${noun}</th><th class="r">Rows</th><th class="r">Total</th><th class="r desk-only">Share</th></tr></thead><tbody>
+            const nameCell = g => spendGroupNameCell(g, sp.view, fold, r.types);
+            const whole = sgd(b.by);   // the tile's figure: every share is of it
+            content = groups.length ? `<div class="table-wrap"><table class="t sl-groups"><thead><tr><th>${noun}</th><th class="r">Rows</th><th class="r">Net</th><th class="r desk-only">Share</th></tr></thead><tbody>
                 ${groups.slice(0, 60).map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
-                    <td class="r num">${esc(totalsText(g.by))}</td><td class="r num desk-only">${pct(g.sgd, b.by.SGD || 0)}</td></tr>`).join('')}
+                    <td class="r num">${esc(totalsText(g.by))}</td><td class="r num desk-only">${g.sgd > 0 && whole > 0 ? pct(g.sgd, whole) : '—'}</td></tr>`).join('')}
                 ${groups.length > 60 ? `<tr><td colspan="4" class="muted">…and ${groups.length - 60} more</td></tr>` : ''}
-                ${backs.length ? `<tr class="section"><td colspan="4">Back in: refunds, not spending</td></tr>
-                    ${backs.map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
-                        <td class="r num sl-back">${esc(totalsText(g.by))} back</td><td class="r small muted desk-only">not in the share</td></tr>`).join('')}` : ''}
                 </tbody></table></div>`
                 : `<p class="card-empty">No rows in ${esc(spanWords)}.</p>`;
         }
         const missingWords = b.missing.size ? ` A hatched month has no statement in for some of this book’s accounts; <a class="link" href="#/books/import">import it</a>.` : '';
         return `<section class="card"><div class="section-header"><h2>${esc(b.book)}</h2>
-                <span class="section-header__aside">out <b class="num">${esc(totalsText(b.by))}</b>${b.back.length ? ` · back <b class="num">${esc(totalsText(b.backBy))}</b>` : ''} · ${plural(b.all.length, 'row')}</span></div>
-            <div class="chart-box small sl-chart"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)}, money out by month"></canvas></div>
-            <p class="small muted sl-chart-note">Money out by month, 12 months to ${esc(monthName(S.month, { short: true }))}, on its own scale. Tap a month to look at it.
-                ${b.others.length ? `<b>S$ rows only</b>; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows are shown in the table and its total, not in the chart.` : 'In S$.'}${missingWords}</p>
+                <span class="section-header__aside">net <b class="num">${esc(money(sgd(b.by), 'SGD'))}</b> · spent <b class="num">${esc(money(sgd(b.spentBy), 'SGD'))}</b>${sgd(b.backBy) ? ` · refunded <b class="num">${esc(money(-sgd(b.backBy), 'SGD'))}</b>` : ''}</span></div>
+            <div class="chart-box small sl-chart"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)}, net spending by month"></canvas></div>
+            <p class="small muted sl-chart-note">Net of refunds by month, 12 months to ${esc(monthName(S.month, { short: true }))}, on its own scale; a month with more refunded than spent falls below the axis. Tap a month to look at it.
+                ${b.others.length ? `<b>S$ accounts only</b>; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows are shown in the tables, not in the figures or the chart.` : 'In S$.'}${missingWords}</p>
             ${content}</section>`;
     }).join('');
 
@@ -3403,26 +3502,37 @@ function drawSpendingCharts(perBook, months) {
         const canvas = document.getElementById(`chart-${b.book}`);
         if (!canvas) return;
         const missing = b.missing || new Set();
-        const sums = months.map(m => b.year.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD' && !isRefund(row))
-            .reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0) / 100);
+        // Per month, S$ accounts only, hidden merchants counted: spent, refunded and their net.
+        const monthly = months.map(m => {
+            const inMonth = b.counted.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD');
+            const spentMinor = inMonth.filter(row => !isRefund(row)).reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0);
+            const backMinor = -inMonth.filter(isRefund).reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0);
+            return { spent: spentMinor, back: backMinor, net: spentMinor - backMinor };
+        });
+        const sums = monthly.map(x => x.net / 100);
         const top = Math.max(...sums, 1);
+        const axisWords = v => `${v < 0 ? '−' : ''}S$ ${Math.abs(v) >= 1000 ? (Math.abs(v) / 1000) + 'k' : Math.abs(v)}`;
         const fill = tk.books[i % tk.books.length];
         const label = m => MONTHS[Number(m.slice(5)) - 1];
         charts.push(new Chart(canvas, {
             type: 'bar',
             data: { labels: months.map(m => missing.has(m) ? [label(m), narrow ? '⧗' : '⧗ missing'] : label(m)), datasets: [
-                { label: `${b.book}, money out`, data: sums,
+                { label: `${b.book}, net of refunds`, data: sums,
                     backgroundColor: months.map(m => m === S.month ? tk.current : fill), borderRadius: 4, barPercentage: 0.64, categoryPercentage: 1 },
                 { label: 'no statement in', data: months.map(m => missing.has(m) ? top : null),
                     backgroundColor: hatchPattern(tk.base, tk.surface), borderColor: tk.base, borderWidth: 1, borderRadius: 4, barPercentage: 0.64, categoryPercentage: 1 },
             ] },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false,
-                plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.datasetIndex === 1 ? 'No statement in yet for this month: import it' : money(Math.round(c.raw * 100), 'SGD') } } },
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => {
+                    if (c.datasetIndex === 1) return 'No statement in yet for this month: import it';
+                    const x = monthly[c.dataIndex];
+                    return [`Spent ${money(x.spent, 'SGD')}`, `Refunded ${money(x.back, 'SGD')}`, `Net ${money(x.net, 'SGD')}`];
+                } } } },
                 scales: {
                     x: { stacked: true, grid: { display: false }, border: { color: tk.base },
                         ticks: { font: { family: tk.mono, size: narrow ? 9 : 10 }, maxRotation: 0, autoSkip: false, color: c => missing.has(months[c.index]) ? warn : tk.ink } },
-                    y: { stacked: true, border: { display: false }, grid: { color: tk.grid, lineWidth: 1 }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 }, maxTicksLimit: 5, callback: v => `S$ ${v >= 1000 ? (v / 1000) + 'k' : v}` } },
+                    y: { stacked: true, beginAtZero: true, border: { display: false }, grid: { color: tk.grid, lineWidth: 1 }, ticks: { color: tk.ink, font: { family: tk.mono, size: 10 }, maxTicksLimit: 5, callback: axisWords } },
                 },
                 onClick: (_e, els) => {
                     if (!els.length) return;
@@ -3799,10 +3909,21 @@ async function checkEachRowOn(s, past) {
 // press (Set book). Every write is 12's bulk label: hand-set, one change, one
 // Undo. The head leaves room for a trend chart, drawing none.
 const MP_PAGE = 50;
-const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false };
+const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false, month: null };
+/** The rows narrowed by a trend bar: month is one 'YYYY-MM', or a quarter's months (a list) read as one date range. */
+function monthQuery(month) {
+    const ms = [].concat(month || []);
+    if (!ms.length) return '';
+    if (ms.length === 1) return `&month=${ms[0]}`;
+    return `&start=${ms[0]}-01&end=${monthEnd(ms[ms.length - 1])}`;
+}
 ACT['merchant-page'] = el => { location.hash = `#/books/merchant/${el.dataset.id}`; };
+/** The merchant page's Account cell: the account's name opens its page. */
+function mpAccountCell(x) {
+    return x.account_id ? pageLink('account', x.account_id, x.account_name || '') : esc(x.account_name || '');
+}
 async function viewMerchant(id) {
-    if (merchantPage.id !== id) Object.assign(merchantPage, { id, page: 1, ticks: new Set(), book: '' });
+    if (merchantPage.id !== id) Object.assign(merchantPage, { id, page: 1, ticks: new Set(), book: '', month: null });
     const mp = merchantPage;
     let s;
     try { s = await get(`/api/services/${id}`, { fresh: true }); } catch (err) {
@@ -3811,8 +3932,9 @@ async function viewMerchant(id) {
             <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div></div>`;
     }
     const [r, list, services, varies] = await Promise.all([refs(),
-        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}`, { fresh: true }),
+        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}${monthQuery(mp.month)}`, { fresh: true }),
         servicesList(), get(`/api/services/${id}/book-varies`, { fresh: true })]);
+    afterRender(() => window.mountMerchantTrend?.());
     ACT.__services = new Map(services.map(x => [x.id, x]));
     ACT.__mpRows = new Map(list.transactions.map(x => [x.id, x]));
     const each = !!s.review_each_time;
@@ -3824,7 +3946,7 @@ async function viewMerchant(id) {
         const on = mp.ticks.has(x.id), when = esc(day(x.date)), minor = toMinor(x.amount_sgd, x.currency);
         const mark = x.not_checked ? tag('notchecked', 'not checked') : x.cat_source === 'manual' ? `<span class="handset">${icon('pencil-simple')}hand-set</span>` : '';
         return `<tr${on ? ' class="is-ticked"' : ''} data-tx="${x.id}"><td class="k"><label class="tick"><input type="checkbox" data-change="mp-tick" data-tx="${x.id}"${on ? ' checked' : ''} aria-label="Tick the ${when} row"></label></td>
-            <td class="num dt">${when}</td><td class="ac">${esc(x.account_name || '')}</td>
+            <td class="num dt">${when}</td><td class="ac">${mpAccountCell(x)}</td>
             <td class="stext">${esc(x.description)}${rowMark(x.id)}</td>
             <td class="r num am">${minor == null || minor < 0 ? rowAmount(minor, x.currency) : esc(money(minor, x.currency))}</td>
             <td class="ty"><select class="sel sel--quiet" data-change="mp-type" data-tx="${x.id}" aria-label="Type for the ${when} row"${off}>${typeOptions(r.types, x.type_id)}</select></td>
@@ -4801,6 +4923,24 @@ function labelledBy(found, details) {
     return found.cat_source ? (LABEL_SOURCE_WORDS[found.cat_source] || 'the rules') : 'not yet';
 }
 
+/** The row sheet's line under the figure: direction, date and the account, which opens its page. */
+function rowSheetSubHTML(found, minor) {
+    const account = found.account_name ? ' · ' + (found.account_id ? pageLink('account', found.account_id, found.account_name) : esc(found.account_name)) : '';
+    return `${minor > 0 ? 'Money out' : 'Money in'} · ${esc(day(found.date))}${account}`;
+}
+/** The row sheet's facts. The type opens its page only for a row that has one (`label` is the plain words otherwise);
+ *  a row with no merchant shows "none yet", unlinked. */
+function rowFactsHTML(found, label, by) {
+    const typed = found.type_id && found.display_type && found.flow_type !== 'review' ? pageLink('type', found.type_id, found.display_type) : label;
+    return `<dl class="facts">
+            <div><dt>Book</dt><dd>${esc(found.book || '—')}</dd></div>
+            <div><dt>Type</dt><dd>${typed}${notCheckedTag(found)}</dd></div>
+            ${found.other_side_name ? `<div><dt>Other side</dt><dd>${esc(found.other_side_name)}</dd></div>` : ''}
+            <div><dt>Merchant</dt><dd>${found.service_name && found.service_id ? pageLink('merchant', found.service_id, found.service_name) : '<span class="muted">none yet</span>'}</dd></div>
+            <div><dt>Labelled by</dt><dd>${esc(by)}</dd></div>
+        </dl>`;
+}
+
 // One row: its amount, its facts, its note, the one-off toggle, "This was…", and its history.
 ACT.row = el => openRowSheet(Number(el.dataset.tx));
 async function openRowSheet(txId, opts = {}) {
@@ -4820,14 +4960,8 @@ async function openRowSheet(txId, opts = {}) {
         : `<button class="link" data-act="resolve" data-tx="${found.id}">Change what this was…</button>`;
     sheetBody().innerHTML = `<div class="row-figure-block">
             <div class="row-figure num">${esc(money(-minor, found.currency, { signed: true }))}</div>
-            <p class="row-figure-sub">${minor > 0 ? 'Money out' : 'Money in'} · ${esc(day(found.date))}${found.account_name ? ' · ' + esc(found.account_name) : ''}</p></div>
-        <dl class="facts">
-            <div><dt>Book</dt><dd>${esc(found.book || '—')}</dd></div>
-            <div><dt>Type</dt><dd>${label}${notCheckedTag(found)}</dd></div>
-            ${found.other_side_name ? `<div><dt>Other side</dt><dd>${esc(found.other_side_name)}</dd></div>` : ''}
-            <div><dt>Merchant</dt><dd>${found.service_name ? `<a class="link" href="#/books/merchant/${found.service_id}">${esc(found.service_name)}</a>` : '<span class="muted">none yet</span>'}</dd></div>
-            <div><dt>Labelled by</dt><dd>${esc(labelledBy(found, held.details))}</dd></div>
-        </dl>
+            <p class="row-figure-sub">${rowSheetSubHTML(found, minor)}</p></div>
+        ${rowFactsHTML(found, label, labelledBy(found, held.details))}
         <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off <span class="muted small">(Spending can leave it out)</span></label>
         <label class="field"><span>Note</span><textarea id="row-note">${esc(found.notes || '')}</textarea></label>
         <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}</div>

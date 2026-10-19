@@ -1,0 +1,243 @@
+{
+  "subject": {
+    "kind": "merchant",
+    "id": 101,
+    "name": "Grab"
+  },
+  "start": "2025-11",
+  "end": "2026-10",
+  "stack_by": "type",
+  "series": {
+    "2025-11": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 21000,
+            "back": 0,
+            "net": 21000
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2025-12": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 34400,
+            "back": 2400,
+            "net": 32000
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2026-01": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 22000,
+            "back": 0,
+            "net": 22000
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2026-02": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 22000,
+            "back": 1500,
+            "net": 20500
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2026-03": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 24500,
+            "back": 1500,
+            "net": 23000
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2026-04": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 21500,
+            "back": 0,
+            "net": 21500
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2026-05": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 24000,
+            "back": 0,
+            "net": 24000
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2026-06": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 23760,
+            "back": 1200,
+            "net": 22560
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2026-07": {
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 4200,
+            "back": 0,
+            "net": 4200
+          }
+        }
+      }
+    },
+    "2026-08": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 20800,
+            "back": 1800,
+            "net": 19000
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 3700,
+            "back": 0,
+            "net": 3700
+          }
+        }
+      }
+    },
+    "2026-09": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 21240,
+            "back": 1800,
+            "net": 19440
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 6100,
+            "back": 0,
+            "net": 6100
+          }
+        }
+      }
+    },
+    "2026-10": {
+      "Household": {
+        "Transport": {
+          "SGD": {
+            "spent": 39000,
+            "back": 0,
+            "net": 39000
+          }
+        }
+      },
+      "Larkspur": {
+        "Transport": {
+          "SGD": {
+            "spent": 5240,
+            "back": 0,
+            "net": 5240
+          }
+        }
+      }
+    }
+  }
+}
