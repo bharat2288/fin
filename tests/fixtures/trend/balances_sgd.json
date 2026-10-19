@@ -1,0 +1,151 @@
+{
+  "account": {
+    "id": 31,
+    "name": "Everyday savings",
+    "currency": "SGD",
+    "type": "bank",
+    "part_of": null
+  },
+  "span": "12M",
+  "to": "2026-10",
+  "cur": "SGD",
+  "months": [
+    {
+      "month": "2025-11",
+      "balance": null,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": "Balances start on 1 Jan 2026, as on the balance sheet"
+    },
+    {
+      "month": "2025-12",
+      "balance": null,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": "Balances start on 1 Jan 2026, as on the balance sheet"
+    },
+    {
+      "month": "2026-01",
+      "balance": 5000000,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-02",
+      "balance": 5050000,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-03",
+      "balance": 5100000,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-04",
+      "balance": 5150000,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-05",
+      "balance": 5200000,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-06",
+      "balance": 5230000,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-07",
+      "balance": null,
+      "estimate": 5320000,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": true,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-08",
+      "balance": 5410000,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-09",
+      "balance": 5500000,
+      "estimate": null,
+      "in": 1155000,
+      "out": 1065000,
+      "missing": false,
+      "so_far": false,
+      "rate": null,
+      "note": null
+    },
+    {
+      "month": "2026-10",
+      "balance": null,
+      "estimate": null,
+      "in": 1100000,
+      "out": 1050000,
+      "missing": false,
+      "so_far": true,
+      "rate": null,
+      "note": null
+    }
+  ],
+  "head": {
+    "balance": 5500000,
+    "date": "2026-09-30"
+  },
+  "note": null
+}

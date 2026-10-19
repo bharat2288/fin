@@ -1,0 +1,678 @@
+{
+  "book": "Household",
+  "span": "12M",
+  "to": "2026-10",
+  "currency": "SGD",
+  "months": [
+    "2025-11",
+    "2025-12",
+    "2026-01",
+    "2026-02",
+    "2026-03",
+    "2026-04",
+    "2026-05",
+    "2026-06",
+    "2026-07",
+    "2026-08",
+    "2026-09",
+    "2026-10"
+  ],
+  "types": [
+    {
+      "id": 7,
+      "name": "Dining",
+      "slot": 1,
+      "net": 704000,
+      "points": [
+        {
+          "month": "2025-11",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2025-12",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-01",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-02",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-03",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-04",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-05",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-06",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-07",
+          "net": null,
+          "estimate": null,
+          "missing": true,
+          "so_far": false
+        },
+        {
+          "month": "2026-08",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-09",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-10",
+          "net": 64000,
+          "estimate": null,
+          "missing": false,
+          "so_far": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "Groceries",
+      "slot": 2,
+      "net": 594000,
+      "points": [
+        {
+          "month": "2025-11",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2025-12",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-01",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-02",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-03",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-04",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-05",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-06",
+          "net": 52000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-07",
+          "net": null,
+          "estimate": 54000,
+          "missing": true,
+          "so_far": false
+        },
+        {
+          "month": "2026-08",
+          "net": 56000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-09",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-10",
+          "net": 54000,
+          "estimate": null,
+          "missing": false,
+          "so_far": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "name": "Travel",
+      "slot": 3,
+      "net": 528000,
+      "points": [
+        {
+          "month": "2025-11",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2025-12",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-01",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-02",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-03",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-04",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-05",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-06",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-07",
+          "net": null,
+          "estimate": null,
+          "missing": true,
+          "so_far": false
+        },
+        {
+          "month": "2026-08",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-09",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-10",
+          "net": 48000,
+          "estimate": null,
+          "missing": false,
+          "so_far": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "Education",
+      "slot": 4,
+      "net": 330000,
+      "points": [
+        {
+          "month": "2025-11",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2025-12",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-01",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-02",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-03",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-04",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-05",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-06",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-07",
+          "net": null,
+          "estimate": null,
+          "missing": true,
+          "so_far": false
+        },
+        {
+          "month": "2026-08",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-09",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-10",
+          "net": 30000,
+          "estimate": null,
+          "missing": false,
+          "so_far": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "Insurance",
+      "slot": null,
+      "net": 275000,
+      "points": [
+        {
+          "month": "2025-11",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2025-12",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-01",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-02",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-03",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-04",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-05",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-06",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-07",
+          "net": null,
+          "estimate": null,
+          "missing": true,
+          "so_far": false
+        },
+        {
+          "month": "2026-08",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-09",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-10",
+          "net": 25000,
+          "estimate": null,
+          "missing": false,
+          "so_far": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "Utilities",
+      "slot": null,
+      "net": 198000,
+      "points": [
+        {
+          "month": "2025-11",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2025-12",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-01",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-02",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-03",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-04",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-05",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-06",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-07",
+          "net": null,
+          "estimate": null,
+          "missing": true,
+          "so_far": false
+        },
+        {
+          "month": "2026-08",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-09",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-10",
+          "net": 18000,
+          "estimate": null,
+          "missing": false,
+          "so_far": true
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "Gifts",
+      "slot": null,
+      "net": 66000,
+      "points": [
+        {
+          "month": "2025-11",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2025-12",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-01",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-02",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-03",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-04",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-05",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-06",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-07",
+          "net": null,
+          "estimate": null,
+          "missing": true,
+          "so_far": false
+        },
+        {
+          "month": "2026-08",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-09",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": false
+        },
+        {
+          "month": "2026-10",
+          "net": 6000,
+          "estimate": null,
+          "missing": false,
+          "so_far": true
+        }
+      ]
+    }
+  ],
+  "top": [
+    7,
+    8,
+    9,
+    10
+  ],
+  "missing": {
+    "Household": [
+      "2026-07"
+    ]
+  },
+  "left_out": []
+}

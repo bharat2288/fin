@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trend fixture harness (dev only)</title>
+<!--
+  Dev-only. Not served by fin: Flask only serves /static. Open it from the repo
+  root with any static server, never against fin.db:
+
+      python -m http.server 8470
+      http://localhost:8470/tests/fixtures/trend/harness.html
+
+  It draws each fixture beside it at 1366 and 390 wide, light and dark, so a
+  renderer lane sees the same figures every time. The renderer lanes plug in by
+  defining, in static/trend.js (and the pages' scripts):
+
+      window.trendHarness = { render(el, kind, payload) { ... } }
+
+  `kind` is the fixture's name. Until a renderer exists the frame shows the JSON.
+  The harness copies none of app.js (which would boot the whole app); a renderer
+  that needs its globals (money, toMinor, esc, icon, chartTokens, hatchPattern,
+  store) declares them itself, as C1 must anyway.
+-->
+<link rel="stylesheet" href="../../../static/styles.css">
+<link rel="stylesheet" href="../../../static/trend.css" onerror="this.remove()">
+<style>
+  body { margin: 0; padding: 16px; font: 14px/1.4 system-ui, sans-serif;
+         background: var(--bg, #fff); color: var(--text, #111); }
+  header.bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 16px; }
+  header.bar h1 { font-size: 16px; margin: 0 8px 0 0; }
+  .grp { display: inline-flex; gap: 4px; }
+  .grp button { padding: 4px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent;
+                color: inherit; cursor: pointer; }
+  .grp button[aria-pressed="true"] { background: #8883; font-weight: 600; }
+  .case { margin: 0 0 32px; }
+  .case h2 { font-size: 14px; margin: 0 0 6px; }
+  .frame { border: 1px dashed #8886; padding: 12px; overflow: auto; max-width: 100%;
+           background: var(--bg, #fff); color: var(--text, #111); }
+  .frame pre { margin: 0; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>Trend fixtures</h1>
+  <span class="grp" id="width"></span>
+  <span class="grp" id="theme"></span>
+  <span id="status" role="status"></span>
+</header>
+<main id="cases"></main>
+
+<script>
+(function () {
+  var FIXTURES = ['trend_merchant', 'trend_type', 'trend_types', 'balances_sgd', 'balances_inr',
+                  'trend_series', 'trend_missing'];
+  var WIDTHS = [1366, 390];
+  var THEMES = ['light', 'dark'];
+  var width = WIDTHS[0], theme = THEMES[0];
+  var cache = {};
+
+  function group(id, values, current, onPick) {
+    var host = document.getElementById(id);
+    host.textContent = '';
+    values.forEach(function (v) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = String(v);
+      b.setAttribute('aria-pressed', String(v === current));
+      b.addEventListener('click', function () { onPick(v); });
+      host.appendChild(b);
+    });
+  }
+
+  function draw() {
+    document.documentElement.setAttribute('data-theme', theme);
+    group('width', WIDTHS, width, function (v) { width = v; draw(); });
+    group('theme', THEMES, theme, function (v) { theme = v; draw(); });
+    var main = document.getElementById('cases');
+    main.textContent = '';
+    FIXTURES.forEach(function (name) {
+      var sec = document.createElement('section');
+      sec.className = 'case';
+      var h = document.createElement('h2');
+      h.textContent = name + '  @' + width + ' ' + theme;
+      var frame = document.createElement('div');
+      frame.className = 'frame';
+      frame.style.width = width + 'px';
+      sec.appendChild(h);
+      sec.appendChild(frame);
+      main.appendChild(sec);
+      load(name).then(function (payload) {
+        if (window.trendHarness && typeof window.trendHarness.render === 'function') {
+          window.trendHarness.render(frame, name, payload);
+        } else {
+          var pre = document.createElement('pre');
+          pre.textContent = JSON.stringify(payload, null, 2).slice(0, 4000);
+          frame.appendChild(pre);
+        }
+      }).catch(function (err) {
+        frame.textContent = 'could not load ' + name + ': ' + err.message;
+      });
+    });
+  }
+
+  function load(name) {
+    if (cache[name]) return Promise.resolve(cache[name]);
+    return fetch(name + '.json').then(function (r) {
+      if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+      return r.json();
+    }).then(function (j) { cache[name] = j; return j; });
+  }
+
+  document.getElementById('status').textContent =
+    (window.trendHarness ? 'renderer found' : 'no renderer yet: showing JSON');
+  draw();
+})();
+</script>
+</body>
+</html>
