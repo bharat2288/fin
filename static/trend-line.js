@@ -210,17 +210,21 @@
         if (m.empty) {
             top = `<p class="trend-line__empty">${esc(m.empty)}</p>`;
         } else {
-            const H = phone ? 170 : 200, sc = m.scale, y = v => T + (sc.hi - v) / (sc.hi - sc.lo) * (H - T - B);
+            // The ⧗ marks take the top row (baseline MT) and the end label the one beneath it:
+            // the plot starts at PT, so a last point at the top of the scale puts its label
+            // (10px above the point) clear of the marks.
+            const MT = 11, PT = 34;
+            const H = phone ? 170 : 200, sc = m.scale, y = v => PT + (sc.hi - v) / (sc.hi - sc.lo) * (H - PT - B);
             let s = `<defs>${hatchDef(id)}</defs>`;
             ticks(sc).forEach(v => { s += `<line class="trend-line__grid" x1="${g.L}" x2="${f1(width - g.R)}" y1="${f1(y(v))}" y2="${f1(y(v))}"/>`
                 + `<text class="trend-line__y" x="${g.L - 6}" y="${f1(y(v) + 4)}" text-anchor="end">${esc(short(v, m.cur))}</text>`; });
             m.gaps.forEach(gp => {
                 const a = idx[gp.months[0]], b = idx[gp.months[gp.months.length - 1]];
-                s += `<rect class="trend-line__gap" x="${f1(g.L + a * g.bw + 1)}" y="${T}" width="${f1((b - a + 1) * g.bw - 2)}" height="${H - T - B}" rx="3"><title>${esc(gp.note)}</title></rect>`;
+                s += `<rect class="trend-line__gap" x="${f1(g.L + a * g.bw + 1)}" y="${PT}" width="${f1((b - a + 1) * g.bw - 2)}" height="${H - PT - B}" rx="3"><title>${esc(gp.note)}</title></rect>`;
             });
             m.missing.forEach(x => { const k = idx[x];
-                s += `<rect x="${f1(g.L + k * g.bw + 2)}" y="${T}" width="${f1(Math.max(1, g.bw - 4))}" height="${H - T - B}" rx="3" fill="url(#${id})"/>`
-                    + `<text class="trend-line__miss" x="${f1(g.x(k))}" y="${T - 4}" text-anchor="middle">⧗</text>`; });
+                s += `<rect x="${f1(g.L + k * g.bw + 2)}" y="${PT}" width="${f1(Math.max(1, g.bw - 4))}" height="${H - PT - B}" rx="3" fill="url(#${id})"/>`
+                    + `<text class="trend-line__miss" x="${f1(g.x(k))}" y="${MT}" text-anchor="middle">⧗</text>`; });
             m.solid.forEach(run => { s += `<path class="trend-line__ln trend-line--bal" d="${pathOf(run, idx, g, y, values)}"/>`; });
             m.dashed.forEach(run => { s += `<path class="trend-line__ln trend-line__ln--est trend-line--bal" d="${pathOf(run, idx, g, y, values)}"/>`; });
             m.points.forEach((p, k) => {
@@ -233,8 +237,8 @@
             const endText = v => { const t = money(v, m.cur); return m.cur === 'INR' && Number.isInteger(v) && v % 100 === 0 ? t.replace(/\.00$/, '') : t; };
             if (last) s += `<text class="trend-line__val" x="${f1(g.x(last[1]))}" y="${f1(y(last[0].value) - 10)}" text-anchor="end">${esc(endText(last[0].value))}</text>`;
             s += xLabels(m.months, g, H - B + 15, phone);
-            m.months.forEach((x, k) => { s += `<rect class="trend-line__hit" data-k="${k}" x="${f1(g.L + k * g.bw)}" y="${T}" width="${f1(g.bw)}" height="${H - T - B}"/>`; });
-            top = `<svg class="trend-line__svg" viewBox="0 0 ${width} ${H}" height="${H}" role="img" aria-label="Balance at each month end">${s}</svg>`;
+            m.months.forEach((x, k) => { s += `<rect class="trend-line__hit" data-k="${k}" x="${f1(g.L + k * g.bw)}" y="${PT}" width="${f1(g.bw)}" height="${H - PT - B}"/>`; });
+            top =`<svg class="trend-line__svg" viewBox="0 0 ${width} ${H}" height="${H}" role="img" aria-label="Balance at each month end">${s}</svg>`;
         }
         const notes = m.gaps.map(gp => `<p class="trend-line__note">${esc(label(gp.months[0], 0))}${gp.months.length > 1 ? ' to ' + esc(label(gp.months[gp.months.length - 1], 0)) : ''}: ${esc(gp.note)}</p>`).join('');
         // Money in up, money out down, from one baseline: its own chart, its own scale.

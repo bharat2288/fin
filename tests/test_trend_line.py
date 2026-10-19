@@ -314,3 +314,21 @@ def test_case_39_end_labels_of_lines_ending_close_together_do_not_overlap():
     ys = sorted(float(y) for y in re.findall(r'<text class="trend-line__end" x="[^"]*" y="([^"]*)"', svg(p)))
     assert len(ys) == 4
     assert all(b - a >= 15 for a, b in zip(ys, ys[1:])), ys
+
+
+def test_case_32_the_missing_mark_never_sits_on_the_balance_lines_end_label():
+    # Walk finding (390, Everyday savings): July's ⧗ sat on the "S$ 55,000.00" end label,
+    # a 7 x 7 px overlap: the label rides 10px above the last point, and at the top of the
+    # scale that is the ⧗ row. 11px text spans about 10px above its baseline and 3px below.
+    p = load("balances_sgd")
+    # The check book's months: S$ 900.00 a month up to S$ 55,000.00, the top of the scale.
+    for x, v in zip(p["months"][2:7], (4780000, 4870000, 4960000, 5050000, 5140000)):
+        x["balance"] = v
+    assert model(p)["scale"]["hi"] == 5500000
+    for width in (390, 1366):
+        out = svg(p, width=width)
+        top = out.split("</svg>")[0]
+        val = [float(v) for v in re.findall(r'<text class="trend-line__val" x="[^"]*" y="([^"]*)"', top)]
+        miss = [float(v) for v in re.findall(r'<text class="trend-line__miss" x="[^"]*" y="([^"]*)"', top)]
+        assert val and miss, (width, val, miss)
+        assert all(v - 10 >= g + 3 for v in val for g in miss), (width, val, miss)
