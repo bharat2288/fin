@@ -1,1 +1,86 @@
-/* trend-line.css: shell (fin-surfaces 23). */
+/* trend-line.css (fin-surfaces 38): the line mode — an account's balance with its money in
+   and out, and one book's type lines. Every class is .trend-line…; colours are fin's tokens. */
+
+.trend-line { --tl: var(--chart-1); position: relative; }
+.trend-line--bal, .trend-line--s1 { --tl: var(--chart-1); }
+.trend-line--s2 { --tl: var(--chart-2); }
+.trend-line--s3 { --tl: var(--chart-3); }
+.trend-line--s4 { --tl: var(--chart-5); }
+.trend-line--grey { --tl: var(--border-emphasis); }
+.trend-line--picked { --tl: var(--text-primary); }
+
+.trend-line__title { margin: var(--space-3) 0 0; font-size: var(--t-cap); font-weight: var(--font-bold);
+    letter-spacing: .07em; text-transform: uppercase; color: var(--text-tertiary); }
+.trend-line__chart { position: relative; margin-top: var(--space-2); }
+.trend-line__svg { display: block; width: 100%; overflow: visible; }
+.trend-line__svg text { font-family: var(--font-base); font-size: 11px; fill: var(--text-tertiary);
+    font-variant-numeric: tabular-nums; }
+.trend-line__grid { stroke: var(--border-subtle); stroke-width: 1; }
+.trend-line__base { stroke: var(--border-emphasis); stroke-width: 1; }
+.trend-line__hatch-ground { fill: color-mix(in srgb, var(--text-tertiary) 6%, var(--bg-surface)); }
+.trend-line__hatch-line { stroke: var(--text-tertiary); stroke-width: 1.6; opacity: .45; }
+.trend-line__svg .trend-line__miss { fill: var(--semantic-warning); font-weight: var(--font-semibold); }
+.trend-line__svg .trend-line__so-far { fill: var(--text-tertiary); font-size: 10px; }
+.trend-line__gap { fill: color-mix(in srgb, var(--text-tertiary) 7%, transparent);
+    stroke: var(--border-default); stroke-width: 1; stroke-dasharray: 3 3; }
+
+/* The line, its estimate and its points */
+.trend-line__ln { fill: none; stroke: var(--tl); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.trend-line__ln--est { stroke-width: 1.75; stroke-dasharray: 3 4; opacity: .85; }
+.trend-line__dot { fill: var(--tl); stroke: var(--bg-surface); stroke-width: 2; }
+.trend-line__est { fill: var(--bg-surface); stroke: var(--tl); stroke-width: 2; }
+.trend-line__svg .trend-line__val { fill: var(--text-secondary); font-weight: var(--font-semibold); }
+.trend-line__svg .trend-line__end { fill: var(--text-primary); font-weight: var(--font-semibold); font-size: 12px; }
+.trend-line__hit { fill: transparent; cursor: pointer; }
+.trend-line__hit:hover { fill: color-mix(in srgb, var(--text-primary) 5%, transparent); }
+
+/* Type lines: grey ones thin, the top four in their slot colour; a picked line raised */
+.trend-line--grey .trend-line__ln { stroke-width: 1.25; opacity: .75; }
+.trend-line__series { transition: opacity var(--duration-normal) var(--ease-default); }
+.trend-line__series--dim { opacity: .2; }
+.trend-line__series--picked .trend-line__ln { stroke-width: 3; opacity: 1; }
+.trend-line__ln-hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
+
+/* Money in and out */
+.trend-line__bar--in { fill: var(--k-in); }
+.trend-line__bar--out { fill: var(--k-out); }
+.trend-line__bar--hatched { stroke-width: 1.5; }
+.trend-line__bar--in.trend-line__bar--hatched { stroke: var(--k-in); }
+.trend-line__bar--out.trend-line__bar--hatched { stroke: var(--k-out); }
+.trend-line__bar--so-far { fill-opacity: .45; stroke-dasharray: 3 2; stroke-width: 1; }
+.trend-line__bar--in.trend-line__bar--so-far { stroke: var(--k-in); }
+.trend-line__bar--out.trend-line__bar--so-far { stroke: var(--k-out); }
+
+/* Legend and chips */
+.trend-line__legend { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-top: var(--space-2); }
+.trend-line__key { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-meta); color: var(--text-secondary); }
+.trend-line__key i, .trend-line__chip i { width: 10px; height: 10px; border-radius: 3px; background: var(--tl); flex: none; }
+.trend-line__key--in { --tl: var(--k-in); }
+.trend-line__key--out { --tl: var(--k-out); }
+.trend-line__sub { font-size: var(--t-meta); color: var(--text-tertiary); }
+.trend-line__chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--ctl-sm); padding: 0 10px;
+    border: 1px solid var(--border-default); border-radius: 999px; background: var(--bg-surface);
+    color: var(--text-secondary); font: inherit; font-size: var(--t-meta); cursor: pointer; }
+.trend-line__chip b { color: var(--text-primary); font-weight: var(--font-semibold); font-variant-numeric: tabular-nums; }
+.trend-line__chip[aria-pressed="false"] { color: var(--text-muted); border-style: dashed; }
+.trend-line__chip[aria-pressed="false"] b { color: var(--text-muted); }
+.trend-line__chip[aria-pressed="false"] i { background: transparent; outline: 1.5px solid var(--tl); outline-offset: -1.5px; }
+.trend-line__chip.is-picked { border-color: var(--text-primary); }
+.trend-line__all { min-height: var(--ctl-sm); padding: 0 10px; border: 0; background: none; color: var(--accent-ink);
+    font: inherit; font-size: var(--t-meta); font-weight: var(--font-semibold); cursor: pointer; }
+.trend-line__chip:focus-visible, .trend-line__all:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+
+/* Words: a gap's note, no balance yet, the hover */
+.trend-line__note { margin: var(--space-2) 0 0; font-size: var(--t-meta); color: var(--text-tertiary); }
+.trend-line__empty { margin: var(--space-2) 0 0; padding: var(--space-6) var(--space-4); border: 1px dashed var(--border-default);
+    border-radius: var(--radius-lg); text-align: center; font-size: var(--t-ui); color: var(--text-secondary); }
+.trend-line__tip { position: absolute; top: 0; z-index: 5; min-width: 180px; max-width: 280px; padding: 10px 12px;
+    transform: translateY(-100%); border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+    background: var(--bg-elevated); box-shadow: var(--shadow-md); font-size: var(--t-meta); color: var(--text-secondary);
+    pointer-events: none; }
+.trend-line__tip b { color: var(--text-primary); }
+.trend-line__tip-h { font-size: var(--t-ui); font-weight: var(--font-bold); color: var(--text-primary); margin-bottom: 4px; }
+.trend-line__tip-n { color: var(--text-tertiary); }
+
+@media (prefers-reduced-motion: reduce) { .trend-line__series { transition: none; } }
+@media (max-width: 559px) { .trend-line__chip { min-height: var(--tap); } }
