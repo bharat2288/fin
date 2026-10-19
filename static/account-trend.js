@@ -13,7 +13,9 @@
 //     rows below narrow to it ("Showing September 2026 · Show all"); a hatched month
 //     goes to Import instead (case 25);
 //   - an account deleted elsewhere: R3 answers 404 and the page says so (case 49).
-// The span is the trend pages' remembered one (Trend.span); a chip re-reads R3.
+// The span is the trend pages' remembered one (Trend.span); a chip re-reads R3. The
+// ₹ / S$ switch re-reads R3 with cur=SGD (or the account's own currency) and draws its
+// answer; a chip keeps the currency shown.
 //
 // Globals from app.js (declared, never copied): accountPage, get, rerender, esc, day,
 // monthName, sentence, icon.
@@ -23,15 +25,17 @@
 
     const GONE = 'This account is no longer in fin';
 
-    function balancesUrl(id, span) {
-        return `/api/accounts/${encodeURIComponent(id)}/balances?span=${encodeURIComponent(span)}`;
+    /** R3's URL; `cur` (the ₹ / S$ switch) asks R3 for that currency's figures. */
+    function balancesUrl(id, span, cur) {
+        const asked = cur ? `&cur=${encodeURIComponent(cur)}` : '';
+        return `/api/accounts/${encodeURIComponent(id)}/balances?span=${encodeURIComponent(span)}${asked}`;
     }
 
-    /** "Balance S$ 55,000.00, 30 Sep 2026", in the account's own currency; null with no balance. */
+    /** "Balance S$ 55,000.00, 30 Sep 2026", in the currency R3 answered in; null with no balance. */
     function headText(payload) {
         const head = payload && payload.head;
         if (!head || head.balance === null || head.balance === undefined || !head.date) return null;
-        const cur = (payload.account && payload.account.currency) || payload.cur || 'SGD';
+        const cur = payload.cur || (payload.account && payload.account.currency) || 'SGD';
         return `Balance ${window.Trend.fmt(head.balance, cur)}, ${day(head.date)}`;
     }
 
@@ -76,8 +80,11 @@
         }
     }
 
-    /** Read R3 for the account at the span and draw it into `section`. */
-    async function show(section, id, span) {
+    /** Read R3 for the account at the span, in `cur` (the account's own
+     *  currency when not given), and draw it into `section`. The ₹ / S$
+     *  switch reads R3 again with cur=SGD: the server values each month, the
+     *  page converts nothing. */
+    async function show(section, id, span, cur) {
         span = span || window.Trend.span();
         if (!section.__acctTrend) {
             section.__acctTrend = true;
@@ -85,7 +92,7 @@
         }
         let payload;
         try {
-            payload = await get(balancesUrl(id, span));
+            payload = await get(balancesUrl(id, span, cur));
         } catch (err) {
             if (section.isConnected === false) return;
             if (err && err.status === 404) {
@@ -107,7 +114,8 @@
             mode: 'line',
             onMonth: narrowTo,
             onImport: toImport,
-            onSpan: next => show(section, id, next),
+            onSpan: next => show(section, id, next, cur),
+            onCur: next => show(section, id, span, next),
         });
     }
 

@@ -7,6 +7,7 @@ real static/app.js, never rewritten here, so the ₹ grouping is fin's own.
 Every figure is invented.
 """
 
+import datetime
 import json
 import re
 import shutil
@@ -15,6 +16,11 @@ from pathlib import Path
 
 import pytest
 
+import account_balances_api
+import trend_fixtures as tf
+from test_balances_route import rupee_savings  # noqa: F401  (a fixture)
+
+R3_TODAY = datetime.date(2026, 10, 19)
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 FIXTURES = ROOT / "tests" / "fixtures" / "trend"
@@ -292,15 +298,27 @@ def test_a_currency_fin_keeps_no_rate_for_is_named_in_the_summary():
 
 # --- ₹ / S$ (cases 29, 30) ----------------------------------------------------
 
-def test_case_29_a_rupee_account_opens_in_rupees_with_a_switch_and_an_sgd_one_has_none():
-    got = run("""
+@pytest.fixture
+def rupee_in_sgd(client, rupee_savings, monkeypatch):
+    """R3's own S$ answer (cur=SGD) for test_balances_route's Rupee savings:
+    the server values each month at its month-end rate, the card only draws."""
+    monkeypatch.setattr(account_balances_api, "today", lambda: R3_TODAY)
+    got = client.get(f"/api/accounts/{rupee_savings}/balances?span=12M&to=2026-10&cur=SGD")
+    assert got.status_code == 200, got.get_json()
+    return got.get_json()
+
+
+def test_case_29_a_rupee_account_opens_in_rupees_with_a_switch_and_an_sgd_one_has_none(rupee_in_sgd):
+    got = run(f"const SGD_ANSWER = {json.dumps(rupee_in_sgd)};" + """
       const inr = load('balances_inr');
-      out({ sw: window.Trend.currencySwitch(inr, 'INR'),
-            sgdSw: window.Trend.currencySwitch(load('balances_sgd'), null),
-            inr: window.Trend.accountSummary(inr, 'INR'),
-            sgd: window.Trend.accountSummary(inr, 'SGD') });""")
+      out({ sw: window.Trend.currencySwitch(inr),
+            swSgd: window.Trend.currencySwitch(SGD_ANSWER).current,
+            sgdSw: window.Trend.currencySwitch(load('balances_sgd')),
+            inr: window.Trend.accountSummary(inr),
+            sgd: window.Trend.accountSummary(SGD_ANSWER) });""")
     assert got["sw"] == {"current": "INR", "options": [{"value": "INR", "label": "₹"},
                                                        {"value": "SGD", "label": "S$"}]}
+    assert got["swSgd"] == "SGD"
     assert got["sgdSw"] is None
     assert got["inr"] == {"text": "Balance ₹ 5,20,000 on 30 Sep 2026 · in ₹ 62,400 · out ₹ 48,750",
                           "note": None}
@@ -308,26 +326,47 @@ def test_case_29_a_rupee_account_opens_in_rupees_with_a_switch_and_an_sgd_one_ha
                           "note": "S$ at each month's end-of-month rate"}
 
 
-def test_the_switch_on_the_card_redraws_the_months_in_sgd():
-    got = run(FAKE_EL + """
+def test_the_switch_asks_for_the_other_currency_and_the_card_draws_only_what_it_is_given(rupee_in_sgd):
+    got = run(FAKE_EL + f"const SGD_ANSWER = {json.dumps(rupee_in_sgd)};" + """
       window.Trend.registerMode('line', (plot, view) => drawn.push(view));
       const el = fakeEl();
-      window.Trend.card(el, load('balances_inr'), { mode: 'line' });
+      const asked = [];
+      window.Trend.card(el, load('balances_inr'), { mode: 'line', onCur: cur => asked.push(cur) });
+      press(el, { trend: 'cur', value: 'INR' });
       press(el, { trend: 'cur', value: 'SGD' });
+      const afterPress = drawn.length;
+      window.Trend.card(el, SGD_ANSWER, { mode: 'line', onCur: cur => asked.push(cur) });
       const sep = v => v.months.find(m => m.month === '2026-09');
-      out({ first: [drawn[0].cur, sep(drawn[0]).balance], then: [drawn[1].cur, sep(drawn[1]).balance,
-            drawn[1].months.find(m => m.month === '2026-10').in] });""")
+      out({ asked, afterPress, first: [drawn[0].cur, sep(drawn[0]).balance],
+            then: [drawn[1].cur, sep(drawn[1]).balance, drawn[1].months.find(m => m.month === '2026-10').in] });""")
+    # The currency already shown asks nothing; the other one is asked of the
+    # page, and the card converts nothing itself: no redraw until R3 answers.
+    assert got["asked"] == ["SGD"]
+    assert got["afterPress"] == 1
     assert got["first"] == ["INR", 52_000_000]
-    # October has no saved rate yet, so it has no S$ figure: left out, never guessed.
+    # R3's S$ figures, drawn as given. October has no saved rate yet, so no S$ figure.
     assert got["then"] == ["SGD", 806_000, None]
 
 
-def test_case_30_large_rupee_figures_group_in_lakhs_and_convert_half_even():
-    got = run("""out({ s: window.Trend.toSgd(12450000, '0.0155'), r: window.Trend.fmt(12450000, 'INR'),
-                       half: window.Trend.toSgd(345000, '0.0155'), aug: window.Trend.toSgd(200000, '0.0154'),
-                       paise: window.Trend.fmt(12450050, 'INR'), sgd: window.Trend.fmt(192975, 'SGD') });""")
-    assert got == {"s": 192975, "r": "₹ 1,24,500", "half": 5348, "aug": 3080,
-                   "paise": "₹ 1,24,500.50", "sgd": "S$ 1,929.75"}
+def test_the_card_converts_no_money_itself():
+    assert "toSgd" not in TREND_JS and "inCurrency" not in TREND_JS
+    assert "BigInt" not in TREND_JS
+
+
+def test_case_30_large_rupee_figures_group_in_lakhs_and_convert_on_the_server(client, conn, monkeypatch):
+    monkeypatch.setattr(account_balances_api, "today", lambda: R3_TODAY)
+    savings = tf.account(conn, "Rupee savings", type="bank", currency="INR")
+    tf.statement(conn, savings, "2026-09")
+    tf.anchor(conn, savings, "2026-09-30", 12_450_000)
+    tf.seed_rate(conn, "INR/SGD", "2026-09-30", "0.0155")
+    got = client.get(f"/api/accounts/{savings}/balances?span=12M&to=2026-10&cur=SGD")
+    assert got.status_code == 200, got.get_json()
+    sep = next(m for m in got.get_json()["months"] if m["month"] == "2026-09")
+    # ₹ 1,24,500 at 0.0155 is S$ 1,929.75, valued by R3.
+    assert sep["balance"] == 192_975
+    words = run(f"""out({{ r: window.Trend.fmt(12450000, 'INR'), paise: window.Trend.fmt(12450050, 'INR'),
+                          sgd: window.Trend.fmt({sep["balance"]}, 'SGD') }});""")
+    assert words == {"r": "₹ 1,24,500", "paise": "₹ 1,24,500.50", "sgd": "S$ 1,929.75"}
 
 
 # --- stacked by type or merchant: a colour key, and the book chips claim no colour --
