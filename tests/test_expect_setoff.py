@@ -392,12 +392,7 @@ def test_case_53_a_second_placement_invalid_writes_neither(client, conn, book):
     assert open_of(conn, book.ids["golden"]) == 6400
 
 
-def test_a_set_off_across_currencies_is_refused_until_its_rate_step(client, conn, book):
-    swiggy = mark(conn, book.swiggy, 180000, names=(book.people["Jay"],))
-    before = snapshot(conn)
-    refused(client, conn, place(client, book.jay_0412, (swiggy, "10.00")),
-            "SWIGGY · Mumbai is kept in ₹ and this payment in S$: a set-off across currencies is not open yet",
-            before)
+# Across currencies: tests/test_expect_setoff_fx.py (ticket 39).
 
 
 @pytest.mark.parametrize("body, words", [

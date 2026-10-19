@@ -19,9 +19,18 @@ lock, which app.py holds for every write request. The writes themselves are
 expect_back's guarded ones, so the machine's refusals and words are its.
 
 Amounts are whole minor units of the payment's currency; a request carries
-them as decimal text, parsed by money.parse_minor, never as a float. This
-ticket sets off in one currency: a placement on an item kept in another is
-refused until the rate step (ticket 39) fills it in.
+them as decimal text, parsed by money.parse_minor, never as a float. A
+placement on an item kept in another currency converts at the payment's
+month's rate (placement_rate: an ended month's own month-end rate, or the
+month still running at the latest rate saved by the day of placing), through
+money's one inverse, half-even; the record keeps both amounts, the rate text
+and its date, and is never restated. An ended month with no saved rate is
+refused naming the month, with what the existing rates fetch would save
+(`fetch`). Nothing here fetches.
+
+A request may ask for a preview (`preview: true`): the same write, answered
+and then rolled back, so the drawer's rate line shows exactly what Set off
+would store, from this module's one conversion, and writes nothing.
 """
 
 from __future__ import annotations
@@ -36,6 +45,8 @@ import book_type
 import db
 import expect_back
 import money
+import placement_rate
+import rates
 from expect_back import Refused
 
 # endpoint (without the blueprint's "expect." prefix) -> what the change did
@@ -47,6 +58,7 @@ SUMMARIES: dict[str, str] = {
 NO_PLACEMENTS = "tick at least one item to set this payment off against"
 BAD_PLACEMENT = "each placement names an expectation and an amount"
 NOTHING_YET_LATER = "Nothing yet is not open yet: place the payment, or leave the rest on it"
+BAD_PREVIEW = "preview is true or left out"
 
 # Words a bank puts before the sender's name, and nothing else: a learnt
 # wording is the sender's name as the statement prints it, without them and
@@ -55,6 +67,12 @@ _LEAD_WORDS = frozenset({
     "PAYNOW", "FROM", "TO", "INWARD", "INCOMING", "FAST", "TRANSFER", "TRF", "FUND", "FUNDS",
     "PAYMENT", "GIRO", "IBG", "OTHR", "FT", "IB", "REMITTANCE", "BY",
 })
+
+
+def today() -> str:
+    """The day of placing, YYYY-MM-DD, the server's own. Tests replace this;
+    nothing else here reads the clock."""
+    return date.today().isoformat()
 
 
 class NotFound(LookupError):
@@ -253,13 +271,12 @@ def _brief(conn: sqlite3.Connection, expectation_id: int) -> dict:
             "state": expect_back.state(conn, expectation_id)}
 
 
-def _next_month(day: str) -> str:
-    y, m = int(day[:4]), int(day[5:7])
-    return f"{y + m // 12:04d}-{m % 12 + 1:02d}-01"
-
-
-def _set_offs(conn: sqlite3.Connection, set_off_ids) -> list[dict]:
-    """Set-offs as a write's answer carries them, in the order asked."""
+def _set_offs(conn: sqlite3.Connection, set_off_ids, month_ended: dict[int, bool]) -> list[dict]:
+    """Set-offs as a write's answer carries them, in the order asked.
+    `month_ended` says, for each set-off placed at a rate, whether the
+    payment's month had ended when it was placed (its own month-end rate) or
+    was still running (the latest rate then): the write's own rate answer,
+    never the stored made_at, which is UTC and not the day of placing."""
     ids = [int(i) for i in set_off_ids]
     if not ids:
         return []
@@ -276,14 +293,12 @@ def _set_offs(conn: sqlite3.Connection, set_off_ids) -> list[dict]:
     out = []
     for i in ids:
         r = found[i]
-        # A rate was placed after the payment's month had ended (its own
-        # month-end rate) or while it ran (the latest rate then): placement_rate.
-        month_ended = None if r["rate"] is None else r["made_at"][:10] >= _next_month(r["date"])
         out.append({
             "id": r["id"], "payment_row_id": r["payment_row_id"], "expectation_id": r["expectation_id"],
             "date": r["date"], "amount_minor": r["amount_minor"], "currency": r["currency"],
             "exp_amount_minor": r["item_amount_minor"], "exp_currency": r["exp_currency"] or r["currency"],
-            "rate": r["rate"], "rate_date": r["rate_date"], "rate_month_ended": month_ended,
+            "rate": r["rate"], "rate_date": r["rate_date"],
+            "rate_month_ended": None if r["rate"] is None else month_ended[i],
             "source": r["source"],
             "person": {"account_id": r["person_id"], "name": r["person_name"]} if r["person_id"] else None,
             "note": r["note"], "state": "waiting" if r["expectation_id"] is None else "placed",
@@ -365,6 +380,26 @@ def _learn(conn: sqlite3.Connection, payment: dict, expectation_ids) -> dict | N
     return {"wording": words, "person": {"account_id": person_id, "name": name}}
 
 
+def _convert(conn: sqlite3.Connection, p: dict, payment: dict, placed_on: str) -> None:
+    """Fill in a placement's amount in its item's currency and the rate it
+    was placed at (None in one currency): the payment's month's rate, by
+    placement_rate, which raises NoRate (nothing written) when the rule
+    allows no saved rate."""
+    cur = payment["currency"]
+    if p["currency"] == cur:
+        p["item_amount_minor"], p["rate"] = p["amount_minor"], None
+        return
+    try:
+        placed = placement_rate.place(conn, p["amount_minor"], cur, p["currency"], payment["date"], placed_on)
+    except (rates.InvalidRate, money.UnknownCurrency):
+        raise Refused(f"{p['name']} is kept in {_sign(p['currency'])} and this payment in {_sign(cur)}: "
+                      "fin keeps no rate between them") from None
+    if placed["amount_minor"] <= 0:
+        raise Refused(f"{_full(p['amount_minor'], cur)} is less than {_full(1, p['currency'])} "
+                      f"at {placed['rate']['rate']}")
+    p["item_amount_minor"], p["rate"] = placed["amount_minor"], placed["rate"]
+
+
 def set_off_payment(conn: sqlite3.Connection, tx_id: int, placements, waiting=None) -> dict:
     """Write one Back for... request: every placement, or none. Nothing here
     commits; the route does, once every placement is written, and rolls back
@@ -384,21 +419,30 @@ def set_off_payment(conn: sqlite3.Connection, tx_id: int, placements, waiting=No
     if total > left:
         raise Refused(f"{_short(total, cur)} of {_short(left, cur)} placed · "
                       f"{_short(total - left, cur)} more than the payment")
+    placed_on = today()
     for p in wanted:
-        if p["currency"] != cur:
-            raise Refused(f"{p['name']} is kept in {_sign(p['currency'])} and this payment in {_sign(cur)}: "
-                          "a set-off across currencies is not open yet")
+        _convert(conn, p, payment, placed_on)
         # What the drawer showed open has changed since (another tab placed
         # money on it): say so, rather than the bare figure.
         if p["shown_open_minor"] is not None and expect_back.state(conn, p["expectation_id"]) != expect_back.LET_GO:
             now = expect_back.open_minor(conn, p["expectation_id"])
-            if p["amount_minor"] > now and now != p["shown_open_minor"]:
+            if p["item_amount_minor"] > now and now != p["shown_open_minor"]:
                 raise Refused(f"{p['name']} has {_full(now, p['currency'])} open now")
-    made = [expect_back.insert_set_off(conn, tx_id, p["expectation_id"], p["amount_minor"]) for p in wanted]
+    made, month_ended = [], {}
+    for p in wanted:
+        rate = p["rate"]
+        if rate is None:
+            made.append(expect_back.insert_set_off(conn, tx_id, p["expectation_id"], p["amount_minor"]))
+            continue
+        set_off_id = expect_back.insert_set_off(
+            conn, tx_id, p["expectation_id"], p["amount_minor"], item_amount_minor=p["item_amount_minor"],
+            rate=rate["rate"], rate_date=rate["date"])
+        made.append(set_off_id)
+        month_ended[set_off_id] = not rate["running"]
     learnt = _learn(conn, payment, [p["expectation_id"] for p in wanted])
     return {
         "payment": _parts(_payment(conn, tx_id)),
-        "set_offs": _set_offs(conn, made),
+        "set_offs": _set_offs(conn, made, month_ended),
         "expectations": [_brief(conn, p["expectation_id"]) for p in wanted],
         "learnt": learnt,
     }
@@ -423,9 +467,11 @@ def unlink(conn: sqlite3.Connection, set_off_id: int) -> dict:
 # --- routes -------------------------------------------------------------------
 
 
-def _answer(work):
+def _answer(work, *, preview: bool = False):
     """Run one route's work on its own connection: a refusal or a miss writes
-    nothing (rolled back); otherwise commit, then answer."""
+    nothing (rolled back); a preview is answered and rolled back; otherwise
+    commit, then answer. No saved rate is refused with what the existing rates
+    fetch would save: {"error", "fetch": {"currency", "date"}}."""
     with db.get_db() as conn:
         try:
             out = work(conn)
@@ -435,7 +481,14 @@ def _answer(work):
         except Refused as e:
             conn.rollback()
             return jsonify({"error": str(e)}), 400
-        conn.commit()
+        except placement_rate.NoRate as e:
+            conn.rollback()
+            fetch = {"currency": e.pair.split("/")[0], "date": e.fetch_on}
+            return jsonify({"error": str(e), "fetch": fetch}), 400
+        if preview:
+            conn.rollback()
+        else:
+            conn.commit()
     return jsonify(out)
 
 
@@ -445,12 +498,17 @@ def api_back_for(tx_id: int):
 
 
 def api_set_off(tx_id: int):
-    """POST {placements: [{expectation_id, amount, open_minor?}], waiting: null}:
-    set one payment off against every ticked item, as one change. amount is
-    decimal text in the payment's currency; open_minor, when the drawer sends
-    it, is what it showed open, so a change made since is named as such."""
+    """POST {placements: [{expectation_id, amount, open_minor?}], waiting: null,
+    preview?: true}: set one payment off against every ticked item, as one
+    change. amount is decimal text in the payment's currency; open_minor, when
+    the drawer sends it, is what it showed open, so a change made since is
+    named as such. preview: answer as the write would, and write nothing."""
     data = request.get_json(silent=True) or {}
-    return _answer(lambda conn: set_off_payment(conn, tx_id, data.get("placements"), data.get("waiting")))
+    preview = data.get("preview", False)
+    if not isinstance(preview, bool):
+        return jsonify({"error": BAD_PREVIEW}), 400
+    return _answer(lambda conn: set_off_payment(conn, tx_id, data.get("placements"), data.get("waiting")),
+                   preview=preview)
 
 
 def api_unlink(set_off_id: int):
