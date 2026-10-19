@@ -404,3 +404,17 @@ def test_case_49_a_merchant_gone_from_fin_says_so_and_links_to_lists():
       out(host.innerHTML);""")
     assert "This merchant is no longer in fin" in got
     assert 'href="#/books/lists/merchants"' in got
+
+
+# --- the card's own padding (walk layout finding) ----------------------------------
+
+def test_the_trend_card_is_padded_like_the_merchant_page_card_heads():
+    # The host is "card mp-card mp-trend"; styles.css's ".card.mp-card { padding: 0;
+    # overflow: hidden }" is for the table cards, and left the chips, the axis label and
+    # the summary on the card's edge with the tail's first letter clipped. The merchant
+    # block pads it as the Rows card's head is padded, at a weight that beats that rule.
+    css = (STATIC / "trend.css").read_text(encoding="utf-8")
+    block = css.split("/* ==== reserved: merchant ==== */")[1].split("/* ==== end: merchant ==== */")[0]
+    rule = re.search(r"\.card\.mp-card\.mp-trend\s*\{([^}]*)\}", block)
+    assert rule, "the merchant block pads .card.mp-card.mp-trend"
+    assert re.search(r"padding:\s*var\(--space-4\)\s+var\(--space-5\)", rule.group(1))
