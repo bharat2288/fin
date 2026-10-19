@@ -22,8 +22,9 @@ Every record it writes has source `converted` and names its person. It skips
 a row that already carries an expectation or a set-off, or a hand-made
 refund link; it never skips a row whose flow was set by hand (the review
 route's "a loan to a person" sets that on every row this step converts). No
-row's flow, other side or amount changes, and no reader changes: the records
-are read only from the switch on (expect_back.SWITCHED).
+row's flow, other side or amount changes. Since the switch (ticket 45) the
+sheet reads persons' money from these records alone, so on a book still
+pending this step a person's old line is out of net worth until it runs.
 
 The step's invariant: for every person and every month end since 1 Jan 2026,
 open back - open pay - unplaced money in + unplaced money out (the own parts

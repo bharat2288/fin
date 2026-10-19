@@ -1,12 +1,11 @@
 """The month check's expect-back terms (personal-ledger 23, ticket 31; spec E5).
 
-Behind the gate (expect_back.SWITCHED), the check reads spending and income
-through the own part with the let-go terms, counts the three Books sections
-in net worth (persons staying as they are), and adds a currency-change line
+Since the switch (ticket 45), the check reads spending and income through
+the own part with the let-go terms, counts the three Books sections in net
+worth (persons are no longer lines of it), and adds a currency-change line
 for each open foreign-currency item and the spread on each cross-currency
-set-off. With the gate on, the month ties after every act of the October
-story (case 50), a To pay back let-go (50a) and a rupee item across two month
-ends (50b). With the gate off nothing the check or the sheet says changes.
+set-off. The month ties after every act of the October story (case 50), a To
+pay back let-go (50a) and a rupee item across two month ends (50b).
 
 Seam 2 of the spec: the sheet and the month check as functions on synthetic
 rows. Every name and figure is invented (the case list's specimens).
@@ -31,11 +30,6 @@ def sheet(conn, month: str) -> dict:
 
 def check(conn, month: str = "2026-10") -> dict:
     return month_check.check(conn, month, sheet(conn, month))
-
-
-@pytest.fixture
-def switched(monkeypatch):
-    monkeypatch.setattr(expect_back, "SWITCHED", True)
 
 
 def september_book(conn):
@@ -64,7 +58,7 @@ def ties(shown: dict) -> None:
 # --- case 50: the October story ties after every act ----------------------------
 
 
-def test_case_50_the_month_check_ties_after_every_act(conn, switched):
+def test_case_50_the_month_check_ties_after_every_act(conn):
     b, items = september_book(conn)
     p = b.people
     ties(check(conn))
@@ -118,7 +112,7 @@ def test_case_50_the_month_check_ties_after_every_act(conn, switched):
     assert shown["actual_minor"] - start == -12000 + 2000
 
 
-def test_case_17e_the_waiting_payment_finds_its_row_in_the_next_month(conn, switched):
+def test_case_17e_the_waiting_payment_finds_its_row_in_the_next_month(conn):
     b, _ = september_book(conn)
     lena = row(conn, b, b.savings, "2026-09-30", "PAYNOW FROM LENA 2210", -10000, flow="review")
     waiting = set_off(conn, lena, None, 10000, person_id=b.people["Lena"])
@@ -136,7 +130,7 @@ def test_case_17e_the_waiting_payment_finds_its_row_in_the_next_month(conn, swit
 # --- case 50a: a To pay back let-go ties ----------------------------------------
 
 
-def test_case_50a_a_to_pay_back_let_go_is_income_and_the_check_still_ties(conn, switched):
+def test_case_50a_a_to_pay_back_let_go_is_income_and_the_check_still_ties(conn):
     b, _ = september_book(conn)
     parents = b.people["Parents"]
     loan = row(conn, b, b.savings, "2026-03-01", "FROM PARENTS", -500000, flow="movement", other_side=parents)
@@ -169,7 +163,7 @@ def rupee_story(conn):
     return b, swiggy
 
 
-def test_case_50b_currency_change_and_spread_on_a_rupee_item(conn, switched):
+def test_case_50b_currency_change_and_spread_on_a_rupee_item(conn):
     b, swiggy = rupee_story(conn)
     # October: the Rupee card has no figure, so SWIGGY's S$ 27.00 comes into the check from outside it.
     october = check(conn)
@@ -191,7 +185,7 @@ def test_case_50b_currency_change_and_spread_on_a_rupee_item(conn, switched):
     assert (line["open_minor"], line["sgd_minor"]) == (120000, 1920)
 
 
-def test_a_rupee_item_with_no_rate_is_left_out_of_both_sides_and_said(conn, switched):
+def test_a_rupee_item_with_no_rate_is_left_out_of_both_sides_and_said(conn):
     b, _ = september_book(conn)
     swiggy = mark(conn, row(conn, b, b.rupee_card, "2026-10-06", "SWIGGY · Mumbai", 240000, type_name="Dining"),
                   180000, names=(b.people["Jay"],))
@@ -207,7 +201,7 @@ def test_a_rupee_item_with_no_rate_is_left_out_of_both_sides_and_said(conn, swit
 # --- what crosses the check's edge ---------------------------------------------
 
 
-def test_an_item_marked_on_a_card_left_out_of_the_check_comes_in_from_outside(conn, switched):
+def test_an_item_marked_on_a_card_left_out_of_the_check_comes_in_from_outside(conn):
     b, _ = september_book(conn)
     harbour = mark(conn, row(conn, b, b.everyday_card, "2026-10-02", "HARBOUR GRILL", 30000, type_name="Dining"),
                    20000, names=(b.people["Jay"],))
@@ -223,7 +217,7 @@ def test_an_item_marked_on_a_card_left_out_of_the_check_comes_in_from_outside(co
     assert shown["spending_minor"] == 8000
 
 
-def test_an_opening_figure_dated_in_the_month_is_left_out_as_a_first_figure_is(conn, switched):
+def test_an_opening_figure_dated_in_the_month_is_left_out_as_a_first_figure_is(conn):
     from expect_fixtures import opening
     b, _ = september_book(conn)
     sam = opening(conn, b.people["Sam"], "2026-10-05", 80000)
@@ -244,7 +238,7 @@ def test_an_opening_figure_dated_in_the_month_is_left_out_as_a_first_figure_is(c
     assert november["outside_minor"] == 0
 
 
-def test_the_company_crossing_stays_on_the_whole_amount(conn, switched):
+def test_the_company_crossing_stays_on_the_whole_amount(conn):
     b, _ = september_book(conn)
     supplier = row(conn, b, b.everyday_card, "2026-10-03", "SAMPLE SUPPLIER", 5000, type_name="Dining",
                    book_name="Moom")
@@ -258,27 +252,3 @@ def test_the_company_crossing_stays_on_the_whole_amount(conn, switched):
     lines = {x["name"]: x for s in sheet(conn, "2026-10")["sections"] for x in s["lines"]}
     assert lines["Moom"]["made_of"]["paid_for_minor"] == 5000
 
-
-# --- with the gate off nothing changes ------------------------------------------
-
-
-def test_gate_off_the_records_change_nothing_the_check_or_the_sheet_says(conn):
-    assert expect_back.SWITCHED is False
-    b = check_book(conn)
-    anchor(conn, b.rewards_card, "2026-09-30", -100000, source="supplied")
-    anchor(conn, b.savings, "2026-09-30", 500000, source="supplied")
-    harbour_row = row(conn, b, b.rewards_card, "2026-10-02", "HARBOUR GRILL", 30000, type_name="Dining")
-    jay = row(conn, b, b.savings, "2026-10-10", "PAYNOW FROM JAY TAN 0412", -12000, flow="review")
-    lena = row(conn, b, b.savings, "2026-10-17", "PAYNOW FROM LENA 2210", -10000, flow="review")
-
-    def plain(s):
-        return {k: v for k, v in s.items() if k != "expect"}
-
-    sheet_before, check_before = plain(sheet(conn, "2026-10")), check(conn)
-    harbour = mark(conn, harbour_row, 20000, names=(b.people["Jay"],))
-    set_off(conn, jay, harbour, 12000)
-    set_off(conn, lena, None, 10000, person_id=b.people["Lena"])
-    let_go(conn, harbour, "gift", "2026-10-19")
-    assert plain(sheet(conn, "2026-10")) == sheet_before
-    assert check(conn) == check_before
-    assert check_before["spending_minor"] == 30000  # the row's whole amount until the switch

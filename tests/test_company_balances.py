@@ -1,5 +1,7 @@
-"""The companies-and-people section of the balance sheet: the household's
-money in each company and with each person, and what each balance is made of.
+"""The companies section of the balance sheet: the household's money in each
+company, and what each balance is made of. A person is no line of it since
+the switch (personal-ledger 23): their old line is still worked out, as the
+expect-back conversion's reference, and checked here through it.
 
 Driven through the HTTP interface against the temporary database. Accounts
 are made through the accounts endpoint and opening figures through the
@@ -11,6 +13,7 @@ Amounts are whole cents; a row's amount is positive for money out.
 import pytest
 
 import book_type
+import convert_expect_back
 
 AUGUST = "2026-08"
 SECTION = "companies"
@@ -188,25 +191,20 @@ def test_a_company_with_no_opening_figure_is_counted_since_the_sheet_starts(clie
     )
 
 
-def test_a_persons_balance_is_the_movements_naming_them(client, ledger):
-    friend = line(sheet(client), "Sample Friend")
-
-    assert friend["kind"] == "person"
-    assert friend["balance_minor"] == FRIEND == 200000
-    made_of = friend["made_of"]
-    assert (made_of["paid_for_minor"], made_of["capital_minor"], made_of["paid_back_minor"]) == (
-        0, LENT, REPAID)
-    assert made_of["text"] == "lent S$ 3,000.00 · paid back S$ 1,000.00"
-    assert friend["since_label"] == "since 1 Jan 2026"
-    assert friend["balance_minor"] == made_of["capital_minor"] - made_of["paid_back_minor"]
+def test_a_person_is_no_line_and_their_old_line_is_the_movements_naming_them(client, conn, ledger):
+    assert "Sample Friend" not in [l["name"] for l in section(sheet(client))["lines"]]
+    # The old line the conversion proves its records against: lent less paid back.
+    old = convert_expect_back.person_lines(conn)
+    assert old[(ledger["friend"], "2026-07-31")][0] == FRIEND == 200000
+    assert old[(ledger["friend"], "2026-03-31")][0] == 0
 
 
-def test_a_company_balance_at_an_earlier_month_end_holds_only_the_rows_up_to_it(client, ledger):
+def test_a_company_balance_at_an_earlier_month_end_holds_only_the_rows_up_to_it(client, conn, ledger):
     may = sheet(client, "2026-05")
 
     # Capital and the repayment are June's; the friend's repayment is July's.
     assert line(may, "Moom")["balance_minor"] == OPENING + PAID_FOR_MOOM
-    assert line(may, "Sample Friend")["balance_minor"] == LENT
+    assert convert_expect_back.person_lines(conn)[(ledger["friend"], "2026-05-31")][0] == LENT
     # Before the opening figure's date there is no opening: February counts
     # from the start of the sheet, and says so.
     february = line(sheet(client, "2026-02"), "Moom")
@@ -215,16 +213,16 @@ def test_a_company_balance_at_an_earlier_month_end_holds_only_the_rows_up_to_it(
     assert february["balance_minor"] == 0
 
 
-def test_the_section_lists_companies_and_people_and_joins_net_worth(client, ledger):
+def test_the_section_lists_companies_and_joins_net_worth(client, ledger):
     shown = sheet(client)
     companies = section(shown)
 
-    assert companies["heading"] == "Companies and people (our money in them)"
+    assert companies["heading"] == "Companies (our money in them)"
     assert companies["owed"] is False
-    assert [l["name"] for l in companies["lines"]] == ["Kalesh", "Moom", "Sample Friend"]
+    assert [l["name"] for l in companies["lines"]] == ["Kalesh", "Moom"]
     assert all(l["in_total"] for l in companies["lines"])
-    assert companies["total_minor"] == MOOM + HOSTING + FRIEND == 5985990
-    assert companies["total"] == "S$ 59,859.90"
+    assert companies["total_minor"] == MOOM + HOSTING == 5785990
+    assert companies["total"] == "S$ 57,859.90"
     # The section is one of those net worth adds up. The household's bank and
     # card here have no balance held, so it is all of net worth.
     assert shown["net_worth_minor"] == sum(s["total_minor"] for s in shown["sections"])

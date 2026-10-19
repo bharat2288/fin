@@ -31,7 +31,12 @@ owed negative. A row's amount is positive for money out.
                  (paid for it) and the movement rows naming it (money out is
                  capital, money in is paid back). With no figure it is counted
                  from the day the sheet starts, and the line says so.
-    person       the same, from the movement rows naming the person
+
+A person is no balance on the sheet (personal-ledger 23, the switch): what is
+lent to or owed to a person is the expectations named for them, in Expect
+back's sections. _counterparty_line still works out a person's old line (the
+same sum, from the movement rows naming the person), which the expect-back
+conversion proves its records against; the sheet no longer lists it.
 
 An account kept in another currency (the rupee account) shows its balance in
 its own currency and, beside it, its value in SGD at the saved rate for the
@@ -47,9 +52,8 @@ start of the month (the previous month's end) valued at the end rate, less
 the same balance valued at the start rate, each rate saved in its own month.
 
 Expect back's three sections (books_expect.py: Expected back, Waiting for its
-row, To pay back) ride on the sheet under `expect`, one call. Until the switch
-(expect_back.SWITCHED) they are shown and not in the total, and persons stay
-among the counterparties as they are.
+row, To pay back) ride on the sheet under `expect`, one call, and are in net
+worth: Expected back is ours, Waiting for its row and To pay back are owed.
 
 Everything here is worked out on read; nothing is stored.
 """
@@ -85,10 +89,11 @@ SECTIONS = (
     ("holdings", "Holdings", "holding", False),
 )
 
-# The section for the household's money in companies and with people, and the
-# kinds it lists. A balance here needs no anchor: with none it is counted from
-# the day the sheet starts.
-COUNTERPARTIES = ("companies", "Companies and people (our money in them)", ("company", "person"))
+# The section for the household's money in companies, and the kinds it lists.
+# A balance here needs no anchor: with none it is counted from the day the
+# sheet starts. Persons left it at the switch (personal-ledger 23): their money
+# is Expect back's sections.
+COUNTERPARTIES = ("companies", "Companies (our money in them)", ("company",))
 SINCE_START = f"since {START.day} {START:%b %Y}"
 # The flows of a row a company's book counts as paid for it.
 PAID_FOR_FLOWS = ("expense", "refund")
@@ -482,7 +487,9 @@ def _rests_on(anchor, as_at: date, month: str) -> dict:
 
 def _counterparty_line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -> dict:
     """A company's or a person's line: the household's money in it, and what
-    that is made of.
+    that is made of. The sheet lists companies only; a person's line is
+    worked out for the expect-back conversion, which proves its records
+    against it (persons left the sheet at the switch).
 
     The balance is the opening figure if there is one (the latest figure on or
     before the day), plus the rows dated after it up to the day, on accounts
@@ -676,7 +683,7 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name,
     """The household's balance sheet at the end of a month written YYYY-MM.
 
     Lists the household's own bank, card, loan and holding accounts, then its
-    money in each company and with each person. An archived account is listed
+    money in each company. An archived account is listed
     and counted like any other, its line marked `archived`: archiving changes
     what is shown, never the figure (ruling 6).
     `name_of` is how an account's name is shown. Raises NotShown
@@ -684,13 +691,11 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name,
 
     Under `expect` it carries expect back's three sections (books_expect.py)
     as at the month's end, their ages counted to `today` while the month runs
-    (today's date when not given). Until the switch (expect_back.SWITCHED)
-    they are not in the total, and persons stay among the counterparties;
-    with it, Expected back joins net worth and what is owed (Waiting for its
-    row, To pay back) comes off it.
+    (today's date when not given). Expected back is in net worth and what is
+    owed (Waiting for its row, To pay back) comes off it; an item with no
+    rate is left out and said, as a line with no figure is.
     """
     import books_expect  # imported here: it reads this module
-    import expect_back
 
     as_at = month_end(month)
     sections = []
@@ -744,11 +749,8 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name,
     })
 
     expect = books_expect.sections(conn, as_at.isoformat(), today=today or date.today())
-    net_worth = sum(section["total_minor"] for section in sections)
-    left_out = [entry for section in sections for entry in section["left_out"]]
-    if expect_back.SWITCHED:
-        net_worth += books_expect.net_minor(expect)
-        left_out += books_expect.left_out(expect)
+    net_worth = sum(section["total_minor"] for section in sections) + books_expect.net_minor(expect)
+    left_out = [entry for section in sections for entry in section["left_out"]] + books_expect.left_out(expect)
     return {
         "month": month,
         "as_at": as_at.isoformat(),

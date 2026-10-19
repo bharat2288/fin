@@ -1,12 +1,10 @@
 """Readers A (personal-ledger 23, ticket 29): spending figures read each row's
-own part plus the let-go terms, behind expect_back's gate.
+own part plus the let-go terms (since the switch, ticket 45).
 
 The readers: stat-cards (book sums, paid sums, the out/back sides and their
 3-month averages), monthly, types, 15's trend series and its types-over-time
 route, and the client's totalsByCurrency / groupRows, which sum each row's
-counted_minor. With the gate off every figure is what it was; a test flips the
-gate in-process (monkeypatch on expect_back.SWITCHED) and reads the own-part
-figures. The company book's paid-for sum on the balance sheet stays on the
+counted_minor. The company book's paid-for sum on the balance sheet stays on the
 whole amount, pinned here.
 
 Figures in, figures out: records are seeded through tests/expect_fixtures.py
@@ -46,12 +44,6 @@ HOUSEHOLD = "Household"
 @pytest.fixture
 def story(conn):
     return october(conn)
-
-
-@pytest.fixture
-def switched(monkeypatch):
-    """The gate on, in this process only: the readers read own parts and let-gos."""
-    monkeypatch.setattr(expect_back, "SWITCHED", True)
 
 
 @pytest.fixture(autouse=True)
@@ -136,10 +128,10 @@ def client_js(expr: str):
     return json.loads(done.stdout)
 
 
-def payload_rows(conn, row_ids, *, switched_on: bool) -> list[dict]:
-    """Rows as /api/transactions carries them once ticket 30 lands: the
-    amount, and counted_minor, which the server sets to the own part when
-    switched and to the amount when not (row_parts, the formula's one home)."""
+def payload_rows(conn, row_ids) -> list[dict]:
+    """Rows as /api/transactions carries them: the amount, and
+    counted_minor, which the server sets to the own part (row_parts, the
+    formula's one home)."""
     parts = expect_back.parts(conn, row_ids)
     out = []
     for row_id in row_ids:
@@ -150,7 +142,7 @@ def payload_rows(conn, row_ids, *, switched_on: bool) -> list[dict]:
         p = parts[row_id]
         out.append({"id": row_id, "description": description, "currency": currency,
                     "amount_sgd": money.from_minor(p["amount_minor"], currency),
-                    "counted_minor": p["own_minor"] if switched_on else p["amount_minor"]})
+                    "counted_minor": p["own_minor"]})
     return out
 
 
@@ -171,26 +163,10 @@ def test_the_client_sums_counted_minor_and_falls_back_to_the_amount():
                       {"name": "Entertainment", "by": {"SGD": 3200}, "sgd": 3200}]
 
 
-# --- gate off: every figure as it was ------------------------------------------------
+# --- the own part ----------------------------------------------------------------
 
 
-def test_gate_off_every_figure_is_byte_identical_with_records_present(conn, client, story):
-    before = {m: (stat_cards(client, m), every_reader(client, conn, m)) for m in ("2026-09", "2026-10")}
-    o = harbour_set_against(conn, story)
-    let_go(conn, o["harbour"], "gift", "2026-10-19", to_whom_id=story.people["Kim"])
-    mark(conn, story.golden, 6400, names=(story.people["Jay"], story.people["Lena"]))
-    mark(conn, story.swiggy, 180000, names=(story.people["Jay"],))
-    assert not expect_back.SWITCHED
-    after = {m: (stat_cards(client, m), every_reader(client, conn, m)) for m in ("2026-09", "2026-10")}
-    assert after == before
-    assert before["2026-10"][1]["monthly"] == {"Dining": 30000}
-    assert money.to_minor(before["2026-10"][0]["household"]) == 30000
-
-
-# --- gate on: the own part ----------------------------------------------------------------
-
-
-def test_case_1_part_of_a_dinner_counts_its_own_part_on_every_reader(conn, client, story, switched):
+def test_case_1_part_of_a_dinner_counts_its_own_part_on_every_reader(conn, client, story):
     mark(conn, story.harbour, 20000, names=(story.people["Jay"], story.people["Kim"]))
     readers = every_reader(client, conn, "2026-10")
     assert readers == {"monthly": {"Dining": 10000}, "types": {"Dining": 10000},
@@ -202,11 +178,11 @@ def test_case_1_part_of_a_dinner_counts_its_own_part_on_every_reader(conn, clien
     assert cards["household_out_rows"] == 1
     # The client's sum over the same row, counted_minor as the server sets it.
     if NODE:
-        rows = payload_rows(conn, [story.harbour], switched_on=True)
+        rows = payload_rows(conn, [story.harbour])
         assert client_js(f"totalsByCurrency({json.dumps(rows)})") == {"SGD": 10000}
 
 
-def test_case_2_all_of_it_takes_the_row_out_of_september(conn, client, story, switched):
+def test_case_2_all_of_it_takes_the_row_out_of_september(conn, client, story):
     before = monthly(client, "2026-09")["Entertainment"]
     mark(conn, story.klook, 18000, names=(story.people["Kim"],), note="concert tickets")
     after = every_reader(client, conn, "2026-09")
@@ -219,7 +195,7 @@ def test_case_2_all_of_it_takes_the_row_out_of_september(conn, client, story, sw
     assert cards["household_out_rows"] == 1
 
 
-def test_case_9_marking_an_old_row_changes_its_own_month(conn, client, story, switched):
+def test_case_9_marking_an_old_row_changes_its_own_month(conn, client, story):
     mark(conn, story.golden, 6400, names=(story.people["Jay"], story.people["Lena"]))
     # September Entertainment: KLOOK S$ 180.00 + GOLDEN VILLAGE's own S$ 32.00.
     readers = every_reader(client, conn, "2026-09")
@@ -227,7 +203,7 @@ def test_case_9_marking_an_old_row_changes_its_own_month(conn, client, story, sw
     assert "Entertainment" not in monthly(client, "2026-10")
 
 
-def test_case_9a_a_rupee_row_counts_its_rupee_own_part(conn, client, story, switched):
+def test_case_9a_a_rupee_row_counts_its_rupee_own_part(conn, client, story):
     mark(conn, story.swiggy, 180000, names=(story.people["Jay"],))
     assert series(conn, "2026-10", "INR") == {"Dining": 60000}
     # S$ figures leave rupee rows out, as before: Dining in S$ is HARBOUR alone.
@@ -238,7 +214,7 @@ def test_case_9a_a_rupee_row_counts_its_rupee_own_part(conn, client, story, swit
     assert [(x["currency"], x["month"], x["amount_minor"]) for x in got["left_out"]] == [("INR", "2026-10", 60000)]
 
 
-def test_case_22_undo_the_mark_puts_september_back(conn, client, story, switched):
+def test_case_22_undo_the_mark_puts_september_back(conn, client, story):
     mark(conn, story.klook, 18000, names=(story.people["Kim"],))
     assert monthly(client, "2026-09")["Entertainment"] == 9600
     assert client.post(f"/api/history/{last_entry(conn)}/undo").status_code == 200
@@ -246,10 +222,10 @@ def test_case_22_undo_the_mark_puts_september_back(conn, client, story, switched
     assert {r: v["Entertainment"] for r, v in readers.items()} == dict.fromkeys(readers, 27600)
 
 
-# --- gate on: the let-go terms -------------------------------------------------------------
+# --- the let-go terms -------------------------------------------------------------
 
 
-def test_case_24_a_gift_counts_in_gifts_on_its_own_day_and_dining_stays(conn, client, story, switched):
+def test_case_24_a_gift_counts_in_gifts_on_its_own_day_and_dining_stays(conn, client, story):
     o = harbour_set_against(conn, story)
     let_go(conn, o["harbour"], "gift", "2026-10-19", to_whom_id=story.people["Kim"])
     readers = every_reader(client, conn, "2026-10")
@@ -260,7 +236,7 @@ def test_case_24_a_gift_counts_in_gifts_on_its_own_day_and_dining_stays(conn, cl
     assert money.to_minor(cards["household_out"]) == 12000
 
 
-def test_case_25_mine_after_all_counts_in_a_later_month_and_september_stays(conn, client, story, switched,
+def test_case_25_mine_after_all_counts_in_a_later_month_and_september_stays(conn, client, story,
                                                                             monkeypatch):
     golden = mark(conn, story.golden, 6400, names=(story.people["Jay"], story.people["Lena"]))
     let_go(conn, golden, "mine", "2026-11-03", type_name="Entertainment")
@@ -271,7 +247,7 @@ def test_case_25_mine_after_all_counts_in_a_later_month_and_september_stays(conn
     assert money.to_minor(stat_cards(client, "2026-11")["household"]) == 6400
 
 
-def test_case_26_undo_the_let_go_takes_gifts_back_off(conn, client, story, switched):
+def test_case_26_undo_the_let_go_takes_gifts_back_off(conn, client, story):
     o = harbour_set_against(conn, story)
     let_go(conn, o["harbour"], "gift", "2026-10-19", to_whom_id=story.people["Kim"])
     assert types(client, "2026-10")["Gifts & Donations"] == 2000
@@ -281,7 +257,7 @@ def test_case_26_undo_the_let_go_takes_gifts_back_off(conn, client, story, switc
         assert got == {"Dining": 10000}, name
 
 
-def test_case_26d_a_to_pay_back_let_go_is_never_spending(conn, client, story, switched):
+def test_case_26d_a_to_pay_back_let_go_is_never_spending(conn, client, story):
     b = story.book
     parents = row(conn, b, b.savings, "2026-03-01", "FROM PARENTS", -500000, flow="income")
     owed = mark(conn, parents, 500000, names=(story.people["Parents"],))
@@ -296,10 +272,10 @@ def test_case_26d_a_to_pay_back_let_go_is_never_spending(conn, client, story, sw
     assert money.to_minor(stat_cards(client, "2026-10")["household"]) == 30000
 
 
-# --- gate on: a refund that closes an expectation ---------------------------------------------
+# --- a refund that closes an expectation ---------------------------------------------
 
 
-def test_case_36_and_36a_a_closing_refund_nets_nowhere_and_unlinked_nets_its_month(conn, client, story, switched):
+def test_case_36_and_36a_a_closing_refund_nets_nowhere_and_unlinked_nets_its_month(conn, client, story):
     b = story.book
     klook = mark(conn, story.klook, 18000, names=(story.people["Kim"],))
     set_off(conn, story.kim_7781, klook, 1000)
@@ -342,7 +318,7 @@ def _own_parts_in(conn, month: str) -> tuple[int, list[int]]:
     return sum(p["own_minor"] for p in expect_back.parts(conn, ids).values()), ids
 
 
-def test_case_51_october_household_spending_is_one_figure(conn, client, story, switched):
+def test_case_51_october_household_spending_is_one_figure(conn, client, story):
     b = story.book
     o = harbour_set_against(conn, story)                                   # cases 1, 10, 11
     mark(conn, story.swiggy, 180000, names=(story.people["Jay"],))         # 9a: rupees, outside S$
@@ -367,11 +343,11 @@ def test_case_51_october_household_spending_is_one_figure(conn, client, story, s
     assert figures == dict.fromkeys(figures, expected)
     if NODE:
         # The client sums the rows' counted_minor: the own-part half (let-gos are no row in the list).
-        rows = payload_rows(conn, ids, switched_on=True)
+        rows = payload_rows(conn, ids)
         assert client_js(f"totalsByCurrency({json.dumps(rows)})") == {"SGD": own}
 
 
-def test_the_three_month_averages_read_own_parts(conn, client, story, switched):
+def test_the_three_month_averages_read_own_parts(conn, client, story):
     mark(conn, story.klook, 18000, names=(story.people["Kim"],))
     cards = stat_cards(client, "2026-12")      # averages over Sep, Oct, Nov
     # Sep: GOLDEN 96.00 (KLOOK wholly back); Oct: HARBOUR 300.00; Nov: nothing.
@@ -396,7 +372,6 @@ def test_pin_the_company_paid_for_sum_stays_on_the_whole_amount(conn, client, st
     with entry(conn, "Forced"):
         conn.execute("INSERT INTO expectation (row_id, direction, amount_minor, currency) VALUES (?, 'back', 2000, 'SGD')",
                      (story.company_row,))
-    monkeypatch.setattr(expect_back, "SWITCHED", True)
     after = _moom_line(client)
     assert after == before
     assert after["made_of"]["paid_for_minor"] == 5000

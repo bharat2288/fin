@@ -8,9 +8,8 @@ expect-back tables; this module holds what every writer and reader of them
 shares:
 
 - the own part of a row, through own_sql(), read from the one home of its
-  formula, the view row_parts; and the gate SWITCHED, which keeps every reader
-  on the bare amount until the switch (release 2), so readers migrate with
-  their figures byte-identical;
+  formula, the view row_parts (since the switch, ticket 45, every reader
+  reads it in place of the bare amount);
 - the let-go terms readers add to spending and income (let_go_sql);
 - the eligibility rule: where an expectation (or a set-off's payment) may sit;
 - open_as_at: each expectation's open amount as at a day, and what waits;
@@ -35,11 +34,6 @@ import sqlite3
 import account_kind
 import book_type
 import flow
-
-# The gate. While False every reader reads a row's bare amount and the let-go
-# terms add nothing, so figures stay as they were before the records existed.
-# The switch (ticket 45) removes it.
-SWITCHED = False
 
 BACK = "back"   # on money out: expected back
 PAY = "pay"     # on money in: to pay back
@@ -127,11 +121,9 @@ def _listed(parts: list[str]) -> str:
 
 def own_sql(alias: str = "t") -> str:
     """SQL for a row's own part, for a reader to use in place of
-    `<alias>.amount_minor`. While the gate is off it is the bare amount."""
+    `<alias>.amount_minor`."""
     if alias not in ROW_ALIASES:
         raise ValueError(f"own_sql takes one of {ROW_ALIASES}")
-    if not SWITCHED:
-        return f"{alias}.amount_minor"
     return f"(SELECT rp.own_minor FROM row_parts rp WHERE rp.row_id = {alias}.id)"
 
 
@@ -168,8 +160,8 @@ _LET_GO_ROWS = (
 
 def let_go_sql() -> str:
     """A SELECT of the let-gos as rows a spending or income reader adds to its
-    own (columns above). While the gate is off it yields nothing."""
-    return _LET_GO_ROWS if SWITCHED else _LET_GO_ROWS + " WHERE 0"
+    own (columns above)."""
+    return _LET_GO_ROWS
 
 
 # --- eligibility ---------------------------------------------------------------

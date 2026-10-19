@@ -3125,6 +3125,8 @@ async function viewAccount(id) {
     const figures = supplied.map(a => `<li class="fig-row"><span class="fig-row__date">${esc(day(a.date))}</span><span class="fig-row__amt num">${esc(money(a.amount_minor, cur))}</span>
         <span class="fig-row__note">${esc(a.note || '')}</span>
         <span class="fig-row__acts"><button class="btn sm" data-act="figure-fix" data-id="${a.id}" data-date="${a.date}" data-amount="${a.amount_minor}">Correct</button><button class="quiet-word" data-act="figure-delete" data-id="${a.id}" data-date="${a.date}" data-amount="${a.amount_minor}" data-cur="${esc(cur)}">Delete</button></span></li>`).join('');
+    // A person is no balance since the switch (personal-ledger 23): their page is what is open with them.
+    if (acct.type === 'person') return personAccountPage(acct, figures, supplied.length);
 
     // Rows under the statement (or figure) they tie into, each heading with its money in and out.
     const tieOf = new Map();
@@ -3175,6 +3177,27 @@ async function viewAccount(id) {
         ${pager(rows, 'account-page')}</section>`;
 }
 ACT['account-page'] = el => { accountPage.page = Number(el.dataset.page); rerender(); window.scrollTo(0, 0); };
+/** A person account's page (personal-ledger 23, the switch): a person is no
+ *  balance on Books, so in place of the balance and its trend it lists what is
+ *  open with them, expected back and to pay back, oldest first, each opening its
+ *  expectation's page. Their figures stay listed, to correct one if need be. */
+async function personAccountPage(acct, figures, figureCount) {
+    const open = await get(`/api/expectations?person=${acct.id}`);
+    const items = open.items || [];
+    const words = x => x.direction === 'pay' ? 'to pay back' : 'expected back';
+    const title = x => x.row ? x.row.description : `Opening figure · ${x.opening ? x.opening.name : acct.name}`;
+    const list = items.map(x => `<li class="fig-row"><span class="fig-row__date">${esc(day(x.day))}</span>
+        <span class="fig-row__amt num">${esc(money(x.open_minor, x.currency))}${x.open_minor !== x.amount_minor ? ` of ${esc(money(x.amount_minor, x.currency))}` : ''}</span>
+        <span class="fig-row__note"><a class="link" href="#/books/expectation/${Number(x.id)}">${esc(title(x))}</a> · ${words(x)}</span>
+        <span class="fig-row__acts"></span></li>`).join('');
+    return `${booksNav('sheet')}
+    <div class="page-head"><div><a class="link small back-link" href="#/books">← Balance sheet</a><span class="eyebrow">Books · ${esc(KIND_WORDS[acct.type] || acct.type)}</span><h1>${esc(acct.name)}${accountMark(acct.id)}</h1>
+        <p>A person is no balance on Books: what is lent or owed is what is expected back and to pay back, named for them.</p></div>
+        <div class="row page-head__end">${monthPicker()}</div></div>
+    <section class="card"><div class="section-header"><h2>Open with ${esc(acct.name)}</h2><span class="section-header__aside">${plural(items.length, 'item')} · oldest first</span></div>
+        ${list ? `<ul class="fig-list">${list}</ul>` : `<p class="card-empty">Nothing is open with ${esc(acct.name)}.</p>`}</section>
+    ${figures ? `<section class="card"><div class="section-header"><h2>Your figures</h2><span class="section-header__aside">${plural(figureCount, 'figure')} · no longer read by Books</span></div><ul class="fig-list">${figures}</ul></section>` : ''}`;
+}
 function pager(list, actName) {
     if (!list.pages || list.pages <= 1) return '';
     return `<div class="pager"><span class="small muted">page ${list.page} of ${list.pages}</span>

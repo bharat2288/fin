@@ -23,8 +23,11 @@ comes out at exactly nothing unexplained:
                   they move the company's balance, which is inside net worth,
                   so subtracting them again would count them twice.
     other rows    a transfer or card payoff between two household accounts,
-                  a movement naming a loan, a holding, a company or a person,
-                  moves money between two lines of net worth and is neither.
+                  a movement naming a loan, a holding or a company, moves
+                  money between two lines of net worth and is neither. A
+                  movement naming a person is neither too: what is expected or
+                  placed on it moves Expect back's lines, and money left on it
+                  to label shows as unexplained until it is labelled.
                   A transfer waiting for review counts as nothing, and so
                   shows up as unexplained beside the review list.
 
@@ -53,8 +56,8 @@ up to the whole), never off by a cent of rounding. Otherwise the account is
 left out of both sides: its value is taken out of net worth at each end, its
 rows are not counted, and the check says so.
 
-Expect back (personal-ledger 23, behind expect_back.SWITCHED until the
-switch): a row counts its own part as income or spending, a let-go counts on
+Expect back (personal-ledger 23): a row counts its own part as income or
+spending, a let-go counts on
 its day (a back item's rest as Household spending, a pay item's as income),
 and Books' three sections are lines of net worth read by their keys. Each
 foreign-currency item in the check has its own currency change (its open
@@ -106,7 +109,7 @@ def _rows_by_account(conn: sqlite3.Connection, after: str, upto: str) -> dict:
     income = ", ".join("?" for _ in INCOME_FLOWS)
     spending = ", ".join("?" for _ in SPENDING_FLOWS)
     # A row counts its own part (expect_back.own_sql): its amount less what is
-    # expected or placed on it. Until the switch that is its bare amount.
+    # expected or placed on it.
     own = expect_back.own_sql("t")
     rows = conn.execute(
         "SELECT a.id, "
@@ -155,8 +158,8 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
     card in the check that names a line left out as its other side (a card
     with no statement balance being paid off). Into it: a row on an account
     left out that moves a line in the check which moves only by the rows
-    naming it (a loan, a holding, a company or a person, a bank account with
-    no statement), counted as that line counts it.
+    naming it (a loan, a holding, a company, a bank account with no
+    statement), counted as that line counts it.
     """
     window = f"{balance_sheet.ROW_DAY} > ? AND {balance_sheet.ROW_DAY} <= ?"
     total = 0
@@ -207,11 +210,11 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
                 "AND COALESCE(a.currency, ?) = ?",
                 (*balance_sheet.INTO_UNSTATED_FLOWS, acct, account_kind.HOUSEHOLD, CURRENCY, currency),
             )
-        elif kind in ("company", "person"):
+        elif kind == "company":
             # Only a company that is a book has rows paid for it, as its line counts them.
             name = names[acct]
             is_book = name in book_type.BOOK_NAMES and name != book_type.DEFAULT_BOOK
-            book = name if kind == "company" and is_book else None
+            book = name if is_book else None
             paid = ", ".join("?" for _ in balance_sheet.PAID_FOR_FLOWS)
             entering(
                 "a.owner = ? AND COALESCE(a.currency, ?) = ? AND ("
@@ -302,7 +305,7 @@ def _split(lines: dict) -> tuple[dict, dict]:
 def _expect_terms(conn: sqlite3.Connection, after: str, upto: str, in_check: set, parts: dict,
                   end_keyed: dict, start_keyed: dict) -> dict:
     """The check's expect-back terms for the month after `after` up to `upto`
-    (spec E5), once the three Books sections are in net worth.
+    (spec E5), the three Books sections being in net worth.
 
     Which items are in the check: every item is, unless it has no S$ value
     at an end where it is listed (no rate), it is in another currency with no
@@ -489,7 +492,7 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
     # (card_balance.py), in the check or out of it with that account.
     parts = card_balance.part_of_ids(conn)
     # Expect back's lines (keyed, books_expect.py) are read apart from the
-    # accounts': they are in net worth only once the switch puts them there.
+    # accounts': they carry a key, not an account.
     end_lines, end_keyed = _split(_line_values(end_sheet, parts))
     start_keyed: dict = {}
     if start < balance_sheet.START:
@@ -575,11 +578,11 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
             "spread": _shown(spread),
         })
 
-    # Expect back (spec E5), once its sections are in net worth: spending and
-    # income with the let-gos, money moved across the check's edge by its
-    # items, and each foreign-currency item's currency change and spread.
+    # Expect back (spec E5), its sections in net worth: spending and income
+    # with the let-gos, money moved across the check's edge by its items, and
+    # each foreign-currency item's currency change and spread.
     keyed_out: dict = {}
-    if expect_back.SWITCHED and start_sheet is not None:
+    if start_sheet is not None:
         terms = _expect_terms(conn, after, upto, with_parts, parts, end_keyed, start_keyed)
         income += terms["income"]
         spending += terms["spending"]
