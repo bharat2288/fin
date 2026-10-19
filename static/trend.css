@@ -39,6 +39,12 @@
 /* ==== end: merchant ==== */
 
 /* ==== reserved: account ==== */
+/* The account page's trend (fin-surfaces 46): a card after the top cards. */
+.acct-trend { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; margin-bottom: 16px; }
+.acct-trend > .section-header { margin-bottom: 0; flex-wrap: wrap; gap: var(--space-1) var(--space-3); }
+.acct-trend__head { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.acct-trend__card { min-width: 0; }
+.acct-trend__part, .acct-trend__narrow { margin: 0; color: var(--text-secondary); font-size: var(--t-ui); }
 /* ==== end: account ==== */
 
 /* ==== reserved: type ==== */
