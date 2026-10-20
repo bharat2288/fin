@@ -2,6 +2,29 @@
 
 Flask + vanilla JS + Chart.js. Single-page app, no build step.
 
+## Specs
+
+The three homes every workflow skill asks for. All three resolve through this repo's `specs/` junction.
+
+- **Issue tracker** — `specs/tickets/` (one folder per effort, `issues/NN-slug.md`); the dialect
+  and the mint template are in `specs/tracker.md`.
+- **Decisions** — `specs/decisions.md`, the sole ADR home (`ADR-NNN`, 1–3 sentences + link).
+- **Glossary** — `specs/glossary.md`, this project's vocabulary; read it before changing language.
+- **Rulings** — `specs/rulings.md`, this project's ruling ledger (ADR-031), created at its first ruling;
+  search it before asking, record a ruling there the same turn. House rulings: `house-rulings.md` at the vault root.
+
+`specs/` is a junction into the private specs vault. `specs/tracker.md` §Paths owns the
+vault path; run `python <cws>/scripts/specs_root.py specs` before any write through it.
+
+## Read First
+
+<!-- ≤6 paths, and never the retired status file; state lives in the home page's `## Now`. -->
+
+- `specs/fin-home.md` — `## Now` is the current state
+- `specs/pipeline.md` — the backlog, one line per item
+- `specs/decisions.md` — why things are the way they are
+- `specs/design.md` — what is merged; include only when the file exists
+
 ## Structure
 
 ```
@@ -41,13 +64,15 @@ python seed_mock_data.py         # Generate demo DB (refuses if fin.db exists)
 FIN_LOCAL_DEV=1 python serve.py  # The hosted process on loopback, gate off (port 8000)
 ```
 
-## Specs
+## Don't
 
-Read `specs/` before starting work:
-- `design.md` — scope, architecture, data model
-- `status.md` — current state, recent sessions
-- `pipeline.md` — backlog and priorities
-- `decisions.md` — why we chose what we chose
+- Don't add a build step or framework
+- Don't suggest features marked as deliberately removed in decisions.md
+- Don't modify fin.db schema without checking schema.sql first
+
+## Carried (no template slot)
+
+<!-- Ticket 22: carried verbatim; disposition on touch. -->
 
 ## Key Patterns
 
@@ -55,9 +80,3 @@ Read `specs/` before starting work:
 - **Service-centric model:** services are the central entity. Rules, subscriptions, and transactions all link via `service_id`
 - **No build tools.** No npm, no webpack, no React. Vanilla JS by design.
 - **Dashboard absorbed Services tab** — don't suggest re-adding it (see decisions.md)
-
-## Don't
-
-- Don't add a build step or framework
-- Don't suggest features marked as deliberately removed in decisions.md
-- Don't modify fin.db schema without checking schema.sql first
