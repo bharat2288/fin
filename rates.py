@@ -35,6 +35,9 @@ SOURCE_URL = "https://api.frankfurter.dev/v1/{on}?base={base}&symbols={quote}"
 FETCHED_SOURCE = "European Central Bank reference rate of {effective}, from api.frankfurter.dev"
 OPERATOR_SOURCE = "entered by the operator"
 TIMEOUT_SECONDS = 10
+# The source answers 403 to Python's default agent ("Python-urllib/3.x"), so
+# the request names fin.
+USER_AGENT = "fin/1 (personal finance; +https://fin.bhasuri.ai)"
 
 _COLUMNS = ("pair", "date", "rate", "source", "fetched_at")
 
@@ -89,7 +92,8 @@ def checked_rate(value) -> str:
 
 def _http_get(url: str) -> str:
     """The body of a public page. Tests replace this."""
-    with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as response:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
         return response.read().decode("utf-8")
 
 
