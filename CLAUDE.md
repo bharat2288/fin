@@ -10,6 +10,8 @@ The three homes every workflow skill asks for. All three resolve through this re
   and the mint template are in `specs/tracker.md`.
 - **Decisions** — `specs/decisions.md`, the sole ADR home (`ADR-NNN`, 1–3 sentences + link).
 - **Glossary** — `specs/glossary.md`, this project's vocabulary; read it before changing language.
+- **Rulings** — `specs/rulings.md`, this project's ruling ledger (ADR-031), created at its first ruling;
+  search it before asking, record a ruling there the same turn. House rulings: `house-rulings.md` at the vault root.
 
 `specs/` is a junction into the private specs vault. `specs/tracker.md` §Paths owns the
 vault path; run `python <cws>/scripts/specs_root.py specs` before any write through it.
