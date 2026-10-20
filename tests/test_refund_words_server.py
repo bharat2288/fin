@@ -16,7 +16,9 @@ import mcp_tools
 
 ROOT = Path(__file__).resolve().parent.parent
 OLD_WORDS = ("not taken off", "never taken off", "not in the share")
-NET_WORDS = "net of refunds; a refund counts in the month it arrives; S$ accounts only"
+# 15's words, amended by personal-ledger 44: spending is also net of what is expected back.
+NET_WORDS = ("net of refunds and of what is expected back; a refund counts in the month it arrives; "
+             "S$ accounts only")
 
 
 def _prose(path: Path) -> list[tuple[int, str]]:

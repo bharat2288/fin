@@ -181,6 +181,15 @@ function rowAmount(minor, cur) {
     if (minor < 0) return `${dirTag('in')} <span class="num">${esc(money(-minor, cur))}</span>`;
     return `${dirTag('out')} <span class="num">${esc(money(minor, cur))}</span>`;
 }
+/** A row with part of it expected back or placed (personal-ledger 23), once
+ *  switched: its amount struck, then what it counts, both from the payload
+ *  (counted_minor), never worked out here, and the pill saying why in the
+ *  server's words ("S$ 200 expected back"). The renderers call it only when
+ *  counted_minor differs from the amount. */
+function struckAmount(row) {
+    const cur = row.currency || 'SGD';
+    return `<s class="muted">${esc(money(Math.abs(row.amount_minor), cur))}</s> <span class="num">${esc(money(Math.abs(row.counted_minor), cur))}</span>${row.expect_pill ? ` ${tag('yours', row.expect_pill)}` : ''}`;
+}
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const LONG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 function day(iso, { year = true } = {}) {
@@ -328,7 +337,7 @@ let pastAnswer = null;         // a question waiting on the sheet (askPast): clo
 /** A sheet: a right drawer on the desk, a bottom sheet on a phone (folio's
  *  kit drawer). eyebrow sits over the title; center makes a short confirm;
  *  foot is a row of buttons kept in view under the body. */
-function openSheet(title, body, { sub = '', eyebrow = '', center = false, foot = '' } = {}) {
+function openSheet(title, body, { sub = '', eyebrow = '', center = false, foot = '', focusSheet = false } = {}) {
     closeSheet();
     const root = $('#sheets');
     root.innerHTML = `<div class="scrim" data-act="scrim">
@@ -342,7 +351,9 @@ function openSheet(title, body, { sub = '', eyebrow = '', center = false, foot =
     const keys = e => { if (e.key === 'Escape') closeSheet(); };
     document.addEventListener('keydown', keys);
     sheetCloser = () => document.removeEventListener('keydown', keys);
-    setTimeout(() => (sheet.querySelector('input, select, textarea, .choice, .btn.primary') || sheet).focus(), 30);
+    // focusSheet: the sheet itself takes focus, never one of its answers (a
+    // question whose answers are not preselected, as the preview's are not).
+    setTimeout(() => ((focusSheet ? null : sheet.querySelector('input, select, textarea, .choice, .btn.primary')) || sheet).focus(), 30);
     return sheet;
 }
 function closeSheet() {
@@ -531,6 +542,8 @@ const ROUTES = [
     [/^\/books\/import$/, 'books', () => viewImport()],
     [/^\/changes$/, 'changes', () => viewChanges()],
 ];
+// Expect back's page (personal-ledger 23): expect-page.js fills window.viewExpectation; until then the route draws nothing.
+registerRoute(/^\/books\/expectation\/(\d+)$/, m => window.viewExpectation?.(Number(m[1])) ?? '');
 /** New pages add their route here, so ROUTES stays this file's and a page exists only once its file loads. */
 function registerRoute(pattern, view) { ROUTES.push([pattern, 'books', view]); }
 window.registerRoute = registerRoute;
@@ -665,8 +678,11 @@ function rowItem(row, kind) {
     const cur = row.currency || 'SGD';
     const minor = toMinor(row.amount_sgd, cur);
     const lane = minor < 0 ? 'in' : 'out';
+    // What the row has left to label: the payload's counted figure (its own
+    // part once expect back is switched on), its amount until then.
+    const left = row.counted_minor ?? minor;
     const base = {
-        key: `${kind}-${row.id}`, kind, lane, row, currency: cur, amount: Math.abs(minor), signed: minor,
+        key: `${kind}-${row.id}`, kind, lane, row, currency: cur, amount: Math.abs(left), signed: left,
         title: row.description,
         meta: `${day(row.date)} · ${row.account_name || ''}`,
     };
@@ -1178,8 +1194,12 @@ ACT['home-guess-yes'] = async el => {
     const pattern = suggestPattern(row.description);
     const body = { tx_id: row.id, service_name: el.dataset.merchant || row.service_name || titleCase(pattern || row.description),
         type_id: Number(el.dataset.type), apply_scope: pattern ? 'service_default' : 'transaction', pattern, match_type: 'contains', suggestion_visible: true };
-    const r = await act('POST', '/api/transactions/resolve', body, 'Labelled');
-    if (r) rerender();
+    const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
+    if (r.cancelled) return;
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return; }
+    toast(previewedWords(r, 'Labelled'), { undo: r.change });
+    refreshFrame();
+    rerender();
 };
 
 ACT['looks-right'] = async el => {
@@ -1379,7 +1399,6 @@ function transferGuessWords(g) {
         gift: ['<b>a gift</b>', 'Yes, a gift'],
         own_account: [`<b>a move to my own account</b>, ${other}`, `Yes, a move to ${g.other_side || 'it'}`],
         company: [`<b>money into a company</b>, ${other}`, `Yes, into ${g.other_side || 'the company'}`],
-        loan_to_person: [`<b>a loan to a person</b>, ${other}`, `Yes, a loan to ${g.other_side || 'them'}`],
         loan_repayment: [`<b>a loan repayment</b>, ${other}`, `Yes, repaying ${g.other_side || 'the loan'}`],
         income: [`<b>income</b>, ${esc(g.type || '')}`, `Yes, income`],
     }[g.choice] || [esc(g.choice), 'Yes'];
@@ -1596,7 +1615,16 @@ function pickSaveHTML(card, books) {
     if (!pick) return '';
     return `${eachSegHTMLQ('pick-set', card.key, card.merchant, pick.each)}
         <select class="sel" data-change="pick-book" data-key="${esc(card.key)}" aria-label="${pick.each ? 'Usual book' : 'Book'} for ${esc(card.merchant)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, pick.book, 'Choose book')}</select>${prefillHintHTML(card.prefill, pick.book, 'q-pick-hint')}
-        <button type="button" class="btn sm subtle" data-act="pick-save" data-key="${esc(card.key)}"${pick.book && !queueBusy ? '' : ' disabled'}>${icon('check')}Save</button>`;
+        <button type="button" class="btn sm subtle" data-act="pick-save" data-key="${esc(card.key)}"${pick.book && !queueBusy && !recBlocks(card.key) ? '' : ' disabled'}>${icon('check')}Save</button>`;
+}
+/** Pick a type's line for the rule its save teaches (fin-surfaces 53). */
+function pickRec(card) {
+    const first = card.rows[0];
+    return recShown(card.key, { tx: first.id, txs: card.rows.map(x => x.id), name: resolveBody(first, null).service_name, suggested: suggestPattern(first.description),
+        changed: () => {
+            const go = $('[data-act="pick-save"]', laneCardEl(card.key));
+            if (go) go.disabled = queueBusy || !pickState.get(card.key)?.book || recBlocks(card.key);
+        } });
 }
 function pickCardHTML(card, books) {
     queueGroups.set(card.key, card.rows);
@@ -1606,7 +1634,7 @@ function pickCardHTML(card, books) {
         <div class="qi__w"><p class="qi__t">${esc(card.title)}${rowMark(card.rows[0].id)}</p><p class="qi__m">${qiMeta(card, card.items[0].meta)}</p></div>
         <div class="qi__amt num">${esc(sumByCurrency(card.items))}</div>
         <div class="qi__act"><button type="button" class="btn sm" data-act="resolve" data-tx="${card.rows[0].id}" data-group="${esc(card.key)}">Another type…</button></div>
-        <div class="qi__more"><div class="picks" role="group" aria-label="Jev’s guesses for ${esc(card.merchant)}">${types}</div>
+        <div class="qi__more">${pickRec(card)}<div class="picks" role="group" aria-label="Jev’s guesses for ${esc(card.merchant)}">${types}</div>
             <div class="pick-save"${pick ? '' : ' hidden'}>${pickSaveHTML(card, books)}</div></div>
         ${qiRowsHTML(card)}</article>`;
 }
@@ -1630,7 +1658,7 @@ ACT['pick-book'] = el => {
     const hint = $('.q-pick-hint', laneCardEl(el.dataset.key));
     if (hint) hint.hidden = pick.book !== laneCardByKey.get(el.dataset.key)?.prefill?.book;
     const go = $('[data-act="pick-save"]', laneCardEl(el.dataset.key));
-    if (go) go.disabled = queueBusy || !pick.book;
+    if (go) go.disabled = queueBusy || !pick.book || recBlocks(el.dataset.key);
 };
 // Every row the same or Check each row: the card's rows are saved with the
 // book shown either way (checked, under Check each row); new rows then wait.
@@ -1647,7 +1675,9 @@ ACT['pick-save'] = async el => {
     if (!card || !pick || !pick.book || queueSaveWaits()) return;
     const type = card.guess.types.find(t => t.type_id === pick.typeId);
     queueSaving(laneCardEl(card.key));
-    const res = await saveResolve(resolveBody(card.rows[0], type.type_id, { visible: true, book: pick.book, each: pick.each }), card.rows,
+    if (recBlocks(card.key)) return;
+    const res = await saveResolve(resolveBody(card.rows[0], type.type_id, { visible: true, book: pick.book, each: pick.each,
+        pattern: recWording(card.key, card.rows[0]) }), card.rows,
         { quiet: true, check: pick.each ? () => pick.book : null });
     queueBusy = false;
     if (res.ok) pickState.delete(card.key);
@@ -1658,8 +1688,8 @@ ACT['pick-save'] = async el => {
 // Check each row (fin-surfaces 12): the rows of a merchant set to check each
 // row that are not checked yet, one card per merchant, one line per row with
 // a type and a book picker. A line's ✓ checks that row; Confirm all checks
-// every line as shown. Each is one bulk-label write (hand-set labels): one
-// change, one Undo.
+// every line as shown. Each is one bulk-label write (a field left as fin
+// gave it is checked, one changed is chosen): one change, one Undo.
 const eachPicks = new Map();   // a row's id -> {typeId, book} as changed on its line
 /** fin's book for a line when it beats the row's own (its usual book): the
  *  last book on this account, or a company's own card (book prefill,
@@ -1777,9 +1807,10 @@ async function laneHTML(lane, list, { books, ask, empty }) {
             <div class="step-b" id="q-sec-${key}"${open ? '' : ' hidden'}>${s.k === 'mixed' ? `<p class="step-note">${EACH_NOTE}</p>` : ''}${drawn.join('')}
                 ${more > 0 ? `<div class="q-show"><button type="button" class="btn sm ghost" data-act="queue-more" data-lane="${key}">Show ${more} more</button></div>` : ''}</div></section>`;
     }));
+    const xb = lane === 'in' ? (await window.expectQueueStep?.(list)) || '' : '';
     return `<section class="card q-lane" id="lane-${lane}" aria-labelledby="lh-${lane}">
         <header class="lane-h">${dirSquare(lane)}<h2 id="lh-${lane}">${lane === 'out' ? 'Money out' : 'Money in'}</h2><span class="sub">${list.length} to do · ${plural(rows, 'row')}</span></header>
-        <div class="lane-body">${list.length ? sections.join('') : `<p class="lane-empty">${esc(empty)}</p>`}</div></section>`;
+        <div class="lane-body">${xb}${list.length ? sections.join('') : `<p class="lane-empty">${esc(empty)}</p>`}</div></section>`;
 }
 ACT['q-fold'] = el => {
     const open = el.getAttribute('aria-expanded') !== 'true';
@@ -1790,6 +1821,162 @@ ACT['q-fold'] = el => {
     const body = document.getElementById(el.getAttribute('aria-controls'));
     if (body) body.hidden = !open;
 };
+
+// The rule shown when teaching (fin-surfaces 53; spec 24, cases 27-31):
+// wherever a merchant is taught (the sure card, Pick a type, "This was…")
+// the line says the wording its rule will recognise and how many rows that
+// wording labels, read from the preview function's count (GET
+// /api/rules/reach, debounced while the wording is typed). A wording that
+// matches only the row taught (a booking number kept in it, 19), nothing, or
+// rows another merchant holds says so at once in the warning colour; one
+// that matches nothing cannot be saved. Saving a wording that takes another
+// merchant's rows goes through the preview (resolve answers 409).
+const REC_WAIT = 250;          // ms after the last key before the count is read
+const recWords = new Map();    // a teach's key -> the wording as changed on its line
+const recOpen = new Set();     // the keys whose wording is open to change
+const recFound = new Map();    // a teach's key -> {wording, reach}: reach null while it is read
+const recCtx = new Map();      // a teach's key -> {tx, txs, name, suggested, changed}
+const recTimers = new Map();
+/** The wording a teach saves: as changed on its line, else fin's suggestion. */
+function recWording(key, row) { return recWords.has(key) ? recWords.get(key) : suggestPattern(row.description); }
+/** What a reach warns of, each in the warning colour: only the row taught,
+ *  rows another merchant holds. '' when nothing. */
+function recWarn(reach) {
+    if (!reach || reach.error || !reach.count) return '';
+    const warns = [];
+    if (reach.only_this) warns.push('· only this one: a number in the wording?');
+    if ((reach.others || []).length) warns.push(`· also ${reach.others.map(o => `${plural(o.count, 'row')} now ${o.name}’s`).join(', ')}`);
+    return warns.map(w => `<span class="warn-word">${esc(w)}</span>`).join(' ');
+}
+/** The live count under a wording being changed. */
+function recCountHTML(reach) {
+    if (!reach) return '<span class="muted">counting…</span>';
+    if (reach.error) return `<span class="warn-word">${esc(reach.error)}</span>`;
+    if (!reach.count) return '<span class="warn-word">matches no row: check the wording</span>';
+    const warn = recWarn(reach);
+    return `matches ${plural(reach.count, 'row')}${warn ? ` ${warn}` : ''}`;
+}
+/** The meta line under a sure line's merchant: "recognises INDIGOAIR". */
+function recMiniHTML(wording, key = '') {
+    return wording ? `<span class="rec-mini"${key ? ` data-rec-mini="${esc(key)}"` : ''}>recognises <b class="mono">${esc(wording)}</b></span>` : '';
+}
+/** The line in a teach's detail: "Recognises INDIGOAIR · 6 rows · change",
+ *  or, open to change, the wording in place with its live count. */
+function recLineHTML(key, wording, reach, editing) {
+    const id = `rec-${String(key).replace(/[^A-Za-z0-9]/g, '_')}`;
+    if (editing) {
+        return `<div class="rec rec--edit" data-rec-line="${esc(key)}"><label class="cap" for="${id}">Recognises rows containing</label>
+            <div class="rec__row"><input type="text" id="${id}" class="mono" data-rec="${esc(key)}" value="${esc(wording)}" autocomplete="off" spellcheck="false">
+            <button type="button" class="btn sm subtle" data-act="rec-done" data-key="${esc(key)}">Done</button></div>
+            <p class="rec__n" data-rec-n="${esc(key)}" aria-live="polite">${recCountHTML(reach)}</p></div>`;
+    }
+    const warn = recWarn(reach);
+    const count = !reach ? '' : reach.error || !reach.count ? ` · ${recCountHTML(reach)}` : ` · ${plural(reach.count, 'row')}${warn ? ` ${warn}` : ''}`;
+    return `<div class="rec" data-rec-line="${esc(key)}"><span class="cap">Recognises</span> <b class="mono">${esc(wording)}</b>${count} · <button type="button" class="link" data-act="rec-edit" data-key="${esc(key)}">change</button></div>`;
+}
+function recKeyWording(key) {
+    const ctx = recCtx.get(key);
+    return recWords.has(key) ? recWords.get(key) : ctx ? ctx.suggested : '';
+}
+/** The reach read for the wording a teach shows now; null while it is read. */
+function recReach(key) {
+    const f = recFound.get(key);
+    return f && f.wording === recKeyWording(key) ? f.reach : null;
+}
+/** A teach's wording cannot be saved: it matches no row, or is refused. */
+function recBlocks(key) {
+    const reach = recReach(key);
+    return !!(reach && (reach.error || !reach.count));
+}
+/** Read the count for a wording, after REC_WAIT ms of quiet (0: at once). */
+function recLoad(key, wording, wait = REC_WAIT) {
+    const ctx = recCtx.get(key);
+    clearTimeout(recTimers.get(key));
+    recFound.set(key, { wording, reach: null });
+    if (!ctx) return;
+    recTimers.set(key, setTimeout(async () => {
+        const q = new URLSearchParams({ pattern: wording, match_type: 'contains', service_name: ctx.name || '' });
+        (ctx.txs || [ctx.tx]).slice(0, 200).forEach(id => q.append('tx_id', String(id)));
+        let reach;
+        try { reach = await get(`/api/rules/reach?${q}`); } catch (e) { reach = { error: e.message }; }
+        const now = recFound.get(key);
+        if (!now || now.wording !== wording) return;   // a later wording is being read
+        now.reach = reach;
+        recDraw(key);
+    }, wait));
+}
+/** The line for a teach, as drawn: its wording, its count (read once if not
+ *  yet), open or not. ctx: {tx, txs, name, suggested, changed}: txs the
+ *  rows the save is for (only this one: the wording matches one of them and
+ *  no other row), tx when it is one; changed() draws
+ *  the save's state again once the count is known. '' without a wording. */
+function recShown(key, ctx) {
+    recCtx.set(key, ctx);
+    const wording = recKeyWording(key);
+    if (!wording && !recOpen.has(key)) return '';
+    const f = recFound.get(key);
+    if (wording && (!f || f.wording !== wording)) recLoad(key, wording, 0);
+    return recLineHTML(key, wording, recReach(key), recOpen.has(key));
+}
+/** A teach's line drawn again in place: the count, or the whole line. */
+function recDraw(key, { whole = false } = {}) {
+    const ctx = recCtx.get(key);
+    if (!ctx) return;
+    const box = $$('[data-rec-line]').find(x => x.dataset.recLine === key);
+    if (box && recOpen.has(key) && !whole) {
+        const n = $('.rec__n', box);
+        if (n) n.innerHTML = recCountHTML(recReach(key));
+    } else if (box) {
+        const at = document.createElement('div');
+        at.innerHTML = recLineHTML(key, recKeyWording(key), recReach(key), recOpen.has(key));
+        box.replaceWith(at.firstElementChild);
+    } else recWhenShown(key);
+    $$('[data-rec-mini]').filter(x => x.dataset.recMini === key).forEach(x => { x.outerHTML = recMiniHTML(recKeyWording(key), key); });
+    if (ctx.changed) ctx.changed();
+}
+// A count can come back before its line is in the page: the Queue is built
+// as a string while its other reads finish, then put in. Such a line is
+// drawn again as soon as it is in the page (walk lp-r1, case 31).
+const recLate = new Set();     // the keys whose count came back before their line was in the page
+let recWatch = null;           // the page's observer, kept only while a line is late
+function recWhenShown(key) {
+    recLate.add(key);
+    if (recWatch) return;
+    recWatch = new MutationObserver(() => {
+        [...recLate].forEach(k => {
+            if (!recReach(k)) { recLate.delete(k); return; }   // a later wording is read; its own count draws it
+            if (!$$('[data-rec-line]').some(x => x.dataset.recLine === k)) return;
+            recLate.delete(k);
+            recDraw(k);
+        });
+        if (!recLate.size) { recWatch.disconnect(); recWatch = null; }
+    });
+    recWatch.observe(document.body, { childList: true, subtree: true });
+}
+ACT['rec-edit'] = el => {
+    recOpen.add(el.dataset.key);
+    recDraw(el.dataset.key, { whole: true });
+    const input = $$('[data-rec]').find(x => x.dataset.rec === el.dataset.key);
+    if (input) { input.focus(); input.select(); }
+};
+ACT['rec-done'] = el => {
+    recOpen.delete(el.dataset.key);
+    recDraw(el.dataset.key, { whole: true });
+    $$('[data-act="rec-edit"]').find(x => x.dataset.key === el.dataset.key)?.focus();
+};
+document.addEventListener('input', e => {
+    const el = e.target.closest('[data-rec]');
+    if (!el) return;
+    const key = el.dataset.rec, wording = el.value.trim();
+    recWords.set(key, wording);
+    if (wording) recLoad(key, wording);
+    else recFound.set(key, { wording, reach: { error: 'Say the wording the rule recognises' } });
+    recDraw(key);
+});
+document.addEventListener('keydown', e => {
+    const el = e.target.closest && e.target.closest('[data-rec]');
+    if (el && e.key === 'Enter') { e.preventDefault(); ACT['rec-done']({ dataset: { key: el.dataset.rec } }); }
+});
 
 // The "Jev is sure" card (fin-surfaces 05): one row per merchant group whose
 // stored guess is sure, across both sides, each saved with today's guess save
@@ -1832,7 +2019,7 @@ function sureRows(g) {
     return sureAll.has(g.key) ? rows : rows.slice(0, SURE_ROWS);
 }
 /** Ready to save: a book, and under Check each row a book on every row drawn. */
-function sureReady(g) { return !!sureBook(g) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
+function sureReady(g) { return !!sureBook(g) && !recBlocks(g.key) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
 
 /** The merchant a line's save makes: resolve's name from its first row's
  *  text, or the merchant fin already holds by that name (the save reuses it). */
@@ -1904,7 +2091,9 @@ function sureDetailHTML(g, at) {
         const when = esc(day(x.date)), hint = sureRowHint(x);
         return `<td class="sl-rbk"><select class="sel" data-change="sure-row-book" data-key="${esc(g.key)}" data-tx="${x.id}" aria-label="Book for the ${when} row"${queueBusy ? ' disabled' : ''}>${bookOptions(queueModel.r.books, sureRowBook(g, x), 'Choose book')}</select>${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</td>`;
     };
-    return `<div class="det">
+    const first = g.items[0].row;
+    const rec = recShown(g.key, { tx: first.id, txs: g.items.map(i => i.row.id), name: g.name, suggested: suggestPattern(first.description), changed: drawSureState });
+    return `<div class="det">${rec}
         <div class="det__top"><div class="det__set"><span class="cap" id="nr-${at}">New rows</span>${eachSegHTMLQ('sure-set', g.key, g.name, each, { labelledBy: `nr-${at}` })}</div>
             <button type="button" class="btn sm ghost" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></div>
         <p class="det__say">${sureSay(g)}</p>
@@ -1917,7 +2106,7 @@ function sureRowHTML(g, books, at) {
     const book = sureBook(g), each = sureEach(g);
     const n = g.items.length, open = sureShown.has(g.key), id = `sd-${at}`;
     return `<tr class="sl${open ? ' is-open' : ''}" data-key="${esc(g.key)}" data-at="${at}">
-        <td class="sl-m">${rowDetailToggle({ id, label: g.name, open, act: 'sure-open', data: { key: g.key } })}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
+        <td class="sl-m">${rowDetailToggle({ id, label: g.name, open, act: 'sure-open', data: { key: g.key } })}${recMiniHTML(recWording(g.key, g.items[0].row), g.key)}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
         <td class="r num sl-n">${n}<span class="ph-w"> ${n === 1 ? 'row' : 'rows'}</span></td>
         <td class="r num sl-a">${esc(sumByCurrency(g.items))}</td>
         <td class="sl-ty">${esc(g.type.name)} <em>${Math.round(g.type.probability * 100)}%</em></td>
@@ -2057,7 +2246,8 @@ async function saveSureGroup(g, labelled) {
     if (!rows.length) return { skipped: true };
     const each = sureEach(g);
     const drawn = new Set(sureRows(g).map(x => x.id));
-    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { merchant: g.name, visible: true, book: sureBook(g), each }), rows,
+    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { merchant: g.name, visible: true, book: sureBook(g), each,
+        pattern: recWording(g.key, g.items[0].row) }), rows,
         { quiet: true, check: each ? x => sureRowBook(g, x) : null, onScreen: each ? rows.filter(x => drawn.has(x.id)) : null });
     res.labelledIds.forEach(id => labelled.add(id));
     return res;
@@ -2310,7 +2500,15 @@ async function openStepFor(el) {
 }
 /** notGuess: the type Jev guessed and the operator turned down (the sure
  *  card's Something else…), so the guess is not offered again. */
+/** This was…'s line for the rule its save teaches (fin-surfaces 53): a
+ *  fresh step starts from fin's suggestion. */
+function wwRec() {
+    const { row } = step;
+    return recShown('ww', { tx: row.id, txs: step.group.map(x => x.id), name: ($('#rs-merchant')?.value || '').trim() || step.merchant, suggested: step.pattern,
+        changed: () => { if (step && step.recWords) step.recWords(); } });
+}
 async function openWhatWas(row, group, { mixed = false, notGuess = '' } = {}) {
+    recWords.delete('ww'); recOpen.delete('ww'); recFound.delete('ww');
     const [r, incomeKinds, services, q] = await Promise.all([refs(), get('/api/types?kind=income'), servicesList(), loadQueue()]);
     const minor = toMinor(row.amount_sgd, row.currency);
     const untyped = row.flow_type !== 'review';
@@ -2333,9 +2531,19 @@ async function openWhatWas(row, group, { mixed = false, notGuess = '' } = {}) {
     drawChoices();
 }
 function drawChoices() {
-    const { r, choice } = step;
-    const all = r.review.choices;
-    const tile = c => `<button type="button" class="choice" data-act="ww-pick" data-choice="${esc(c.name)}">
+    const { r, choice, row } = step;
+    // "A loan to a person" retired (personal-ledger 23, the contract). In its
+    // place one row is offered Expect some back… (money out) or Expect to pay
+    // back (money in), which opens the expect drawer on the row.
+    const one = step.group.length === 1;
+    const expect = row.amount_minor < 0
+        ? { label: 'expect to pay back', description: 'money to give back to someone: it is not income' }
+        : { label: 'expect some back…', description: 'part or all of it is coming back from someone: that part is not spending' };
+    const all = one ? r.review.choices.flatMap(c => c.name === 'gift' ? [c, expect] : [c]) : r.review.choices;
+    const tile = c => c === expect
+        ? `<button type="button" class="choice" data-act="expect-mark" data-tx="${row.id}">
+        <strong>${esc(sentence(c.label))}</strong><span>${esc(c.description)}</span></button>`
+        : `<button type="button" class="choice" data-act="ww-pick" data-choice="${esc(c.name)}">
         <strong>${esc(c.name === 'spending' && step.guessed ? 'Spending, another type' : sentence(c.label))}</strong><span>${esc(c.description)}</span></button>`;
     const box = $('#ww-choices');
     if (!box) return;
@@ -2371,10 +2579,6 @@ ACT['ww-pick'] = el => {
     } else if (choice.asks === 'account') {
         const allowed = r.accounts.filter(a => choice.kinds.includes(a.type) && !step.group.some(x => x.account_id === a.id) && a.status !== 'archived');
         fields = `<label class="field"><span>Which account</span><select id="cw-account"><option value="">Choose</option>${allowed.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.currency)})</option>`).join('')}</select></label>`;
-    } else if (choice.asks === 'person') {
-        const people = r.accounts.filter(a => a.type === 'person');
-        fields = `<label class="field"><span>Who</span><select id="cw-person"><option value="">A new name…</option>${people.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></label>
-            <label class="field"><span>New name</span><input type="text" id="cw-person-name" placeholder="Only for someone new"></label>`;
     } else if (choice.asks === 'income_kind') {
         fields = `<label class="field"><span>What kind of income</span><select id="cw-income">${typeOptions(incomeKinds, null, { kind: 'income', blank: 'Choose' })}</select></label>`;
     }
@@ -2390,8 +2594,8 @@ ACT['ww-pick'] = el => {
                 <fieldset class="scope-pick"><legend class="sr-only">Which rows</legend>
                     <label class="check"><input type="radio" name="rs-scope" value="service_default"${deflt === 'service_default' ? ' checked' : ''}> Every row from this merchant</label>
                     <label class="check"><input type="radio" name="rs-scope" value="transaction"${deflt === 'transaction' ? ' checked' : ''}> Only this row</label>
-                    <label class="check"><input type="radio" name="rs-scope" value="rule"> Rows whose text contains</label>
-                    <input type="text" id="rs-pattern" value="${esc(step.pattern)}" aria-label="The text the rows contain"></fieldset></div>`;
+                    <label class="check"><input type="radio" name="rs-scope" value="rule"> Only rows with the wording it recognises</label></fieldset></div>
+            <div id="ww-rec">${wwRec()}</div>`;
     } else if (untyped) {
         scope = `<p class="small muted">${n > 1 ? `Labels these ${n} rows.` : 'Labels this row only.'}</p>`;
     }
@@ -2408,8 +2612,17 @@ ACT['ww-pick'] = el => {
         }
         const name = $('#rs-merchant')?.value.trim() || step.merchant;
         w.textContent = s === 'transaction' ? 'Label only this row'
-            : s === 'rule' ? `Label rows whose text contains ${$('#rs-pattern').value.trim() || '…'}` : `Label every row from ${name} the same way`;
+            : s === 'rule' ? `Label rows whose text contains ${recKeyWording('ww') || '…'}` : `Label every row from ${name} the same way`;
+        // The rule's wording is shown wherever this save teaches one; its
+        // count names other merchants' rows by the merchant taught.
+        const ctx = recCtx.get('ww');
+        if (ctx && ctx.name !== name) { ctx.name = name; if (recKeyWording('ww')) recLoad('ww', recKeyWording('ww')); }
+        const rec = $('#ww-rec');
+        if (rec) rec.hidden = s === 'transaction';
+        const save = $('#ww-save');
+        if (save) save.disabled = s !== 'transaction' && recBlocks('ww');
     };
+    step.recWords = words;
     const saveWords = () => {
         const t = $('#cw-type');
         const picked = t && t.value ? t.options[t.selectedIndex].text : '';
@@ -2463,13 +2676,16 @@ async function saveResolve(body, group = [], { quiet = false, check = null, onSc
         body.past = answer;
         past = { answer, n: svc.rows_to_check };
     }
-    const r = await send('POST', '/api/transactions/resolve', body);
+    // Teaching a merchant fin holds a new default reaches its past rows
+    // through the preview, as the merchant sheet does (fin-surfaces 21).
+    const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
+    if (r.cancelled) return { ok: false, resolved: false, cancelled: true, changes: [], labelled: 0, labelledIds: [], error: 'Nothing was saved.' };
     if (!r.ok) {
         const error = r.data.error || 'That did not work; nothing was changed';
         if (!quiet) toast(error, { bad: true });
         return { ok: false, resolved: false, changes: [], labelled: 0, labelledIds: [], error };
     }
-    if (!quiet) { toast('Saved', { undo: r.change }); refreshFrame(); }
+    if (!quiet) { toast(previewedWords(r, 'Saved'), { undo: r.change }); refreshFrame(); }
     const changes = r.change ? [r.change] : [];
     // The group's other rows the rule did not reach (a merchant text too plain
     // for a rule, or rows whose text the pattern misses) are labelled one by one.
@@ -2515,8 +2731,9 @@ ACT['ww-save'] = async () => {
         const scope = $('input[name="rs-scope"]:checked').value;
         if (!name) { toast('Say which merchant it was', { bad: true }); return; }
         if (!typeId) { toast('Choose a type', { bad: true }); return; }
-        const pattern = (val('rs-pattern') || '').trim();
+        const pattern = scope === 'transaction' ? '' : recWording('ww', row).trim();
         if (scope === 'rule' && !pattern) { toast('Say what text the rows contain', { bad: true }); return; }
+        if (scope !== 'transaction' && recBlocks('ww')) { toast('That wording matches no row: check the wording', { bad: true }); return; }
         const each = scope === 'service_default' && val('cw-set') === 'each';
         const body = resolveBody(row, typeId, { merchant: name, scope, pattern, book: val('cw-book'), visible: step.suggestionVisible,
             each: scope === 'service_default' && val('cw-set') ? each : undefined });
@@ -2540,8 +2757,6 @@ ACT['ww-save'] = async () => {
     if (val('cw-type')) body.type_id = Number(val('cw-type'));
     if (val('cw-book')) body.book = val('cw-book');
     if (val('cw-account')) body.account_id = Number(val('cw-account'));
-    if (val('cw-person')) body.account_id = Number(val('cw-person'));
-    else if (val('cw-person-name')) body.person = val('cw-person-name').trim();
     if (val('cw-income')) body.income_kind_id = Number(val('cw-income'));
     const rows = untyped ? group : [row];
     if (rows.length === 1) {
@@ -2579,11 +2794,16 @@ ACT['review-guess-yes'] = async el => {
     if (r) { closeSheet(); rerender(); }
 };
 
-// "Yes, Shopping · Household": a row not checked yet, checked as it came in (hand-set).
+// "Yes, Shopping · Household": a row not checked yet, checked as it came in.
+/** Accepting what fin offered is a check, not a choice (personal-ledger 24):
+ *  bulk label with the row's own book and type, which marks both checked. */
+function mixedYesBody(row) {
+    return { rows: [{ tx_id: row.id, type_id: row.type_id, book: row.book }] };
+}
 ACT['mixed-yes'] = async el => {
     const row = await findRow(Number(el.dataset.tx));
     if (!row) return;
-    const r = await act('PUT', `/api/transactions/${row.id}`, { type_id: row.type_id, book: row.book }, `Checked: ${row.display_type || 'its type'} · ${row.book}`);
+    const r = await act('POST', '/api/transactions/bulk-label', mixedYesBody(row), `Checked: ${row.display_type || 'its type'} · ${row.book}`);
     if (r) rerender();
 };
 
@@ -2712,20 +2932,20 @@ function rateWords(rate) {
     const unit = (rate.pair || '').split('/')[0] || '';
     return `1 ${unit} = S$ ${rate.rate}, rate saved ${dateWords(rate.date)}`;
 }
-/** A company's or person's balance as a short sum, the zero parts dropped:
+/** A company's balance as a short sum, the zero parts dropped (a person has
+ *  no sheet line since the switch, so never a made_of):
  *  "opening S$ 15,000.00 + paid for it S$ 1,830.99 (23 rows) = S$ 16,830.99". */
 function madeOfSum(line) {
     const m = line.made_of;
     if (!m) return '';
-    const person = line.kind === 'person';
     const parts = [];
     if (m.opening_minor) parts.push(['', 'opening', m.opening_minor]);
-    if (m.paid_for_minor) parts.push(['+', person ? 'lent' : 'paid for it', m.paid_for_minor]);
+    if (m.paid_for_minor) parts.push(['+', 'paid for it', m.paid_for_minor]);
     if (m.capital_minor) parts.push(['+', 'capital', m.capital_minor]);
     if (m.paid_back_minor) parts.push(['−', 'paid back', m.paid_back_minor]);
     if (!parts.length) return 'no money moved yet';
     if (parts.length === 1 && parts[0][0] === '') {
-        return person ? `lent ${money(m.opening_minor)}, nothing paid back` : `opening ${money(m.opening_minor)}, nothing moved since`;
+        return `opening ${money(m.opening_minor)}, nothing moved since`;
     }
     const onlyPaidFor = parts.filter(p => p[1] !== 'opening').length === 1 && m.paid_for_minor;
     const text = parts.map(([op, label, minor], i) => `${i || op ? op + ' ' : ''}${label} ${money(minor)}${onlyPaidFor && op === '+' && line.rows_since ? ` (${plural(line.rows_since, 'row')})` : ''}`).join(' ');
@@ -2844,7 +3064,7 @@ async function viewSheet() {
         ${cc && cc.minor ? `<p class="card-foot">Currency change since ${esc(day(cc.from))}: <b class="num">${esc(money(cc.minor, 'SGD', { signed: true }))}</b></p>` : ''}
         ${cc && cc.minor === null && cc.note ? `<p class="card-foot">${tag('nofig', 'currency change not worked out')} ${esc(dateWords(cc.note))}
             ${[...new Set((cc.lines || []).map(l => l.currency).filter(Boolean))].map(c => `<button class="btn sm" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay(sheet.as_at))}">${esc(c)} rate</button>`).join(' ')}</p>` : ''}
-    </section>
+    </section>${window.expectBooksSections?.(sheet) || ''}
     ${monthCheckHTML(sheet)}`;
 }
 ACT['needs-look'] = el => { S.needsLook = el.dataset.on === '1'; rerender(); };
@@ -3003,11 +3223,12 @@ function acctRowLabel(row) {
 function acctRowTr(row) {
     const minor = toMinor(row.amount_sgd, row.currency);
     const cur = row.currency || 'SGD';
-    const inCell = minor !== null && minor < 0 ? esc(money(-minor, cur)) : '';
-    const outCell = minor !== null && minor >= 0 ? esc(money(minor, cur)) : '';
+    const struck = row.counted_minor != null && row.counted_minor !== row.amount_minor;
+    const inCell = minor !== null && minor < 0 ? (struck ? struckAmount(row) : esc(money(-minor, cur))) : '';
+    const outCell = minor !== null && minor >= 0 ? (struck ? struckAmount(row) : esc(money(minor, cur))) : '';
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num row-date">${esc(day(row.date, { year: false }))}</td>
-        <td class="row-desc">${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${row.book && row.book !== 'Household' ? ` <span class="small muted">· ${esc(row.book)}</span>` : ''}</td>
+        <td class="row-desc">${esc(row.description)}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${row.book && row.book !== 'Household' ? ` <span class="small muted">· ${esc(row.book)}</span>` : ''}</td>
         <td class="row-label">${acctRowLabel(row)}</td>
         <td class="r num row-in">${inCell}</td><td class="r num row-out">${outCell}</td></tr>`;
 }
@@ -3109,6 +3330,8 @@ async function viewAccount(id) {
     const figures = supplied.map(a => `<li class="fig-row"><span class="fig-row__date">${esc(day(a.date))}</span><span class="fig-row__amt num">${esc(money(a.amount_minor, cur))}</span>
         <span class="fig-row__note">${esc(a.note || '')}</span>
         <span class="fig-row__acts"><button class="btn sm" data-act="figure-fix" data-id="${a.id}" data-date="${a.date}" data-amount="${a.amount_minor}">Correct</button><button class="quiet-word" data-act="figure-delete" data-id="${a.id}" data-date="${a.date}" data-amount="${a.amount_minor}" data-cur="${esc(cur)}">Delete</button></span></li>`).join('');
+    // A person is no balance since the switch (personal-ledger 23): their page is what is open with them.
+    if (acct.type === 'person') return personAccountPage(acct, figures, supplied.length);
 
     // Rows under the statement (or figure) they tie into, each heading with its money in and out.
     const tieOf = new Map();
@@ -3159,6 +3382,27 @@ async function viewAccount(id) {
         ${pager(rows, 'account-page')}</section>`;
 }
 ACT['account-page'] = el => { accountPage.page = Number(el.dataset.page); rerender(); window.scrollTo(0, 0); };
+/** A person account's page (personal-ledger 23, the switch): a person is no
+ *  balance on Books, so in place of the balance and its trend it lists what is
+ *  open with them, expected back and to pay back, oldest first, each opening its
+ *  expectation's page. Their figures stay listed, to correct one if need be. */
+async function personAccountPage(acct, figures, figureCount) {
+    const open = await get(`/api/expectations?person=${acct.id}`);
+    const items = open.items || [];
+    const words = x => x.direction === 'pay' ? 'to pay back' : 'expected back';
+    const title = x => x.row ? x.row.description : `Opening figure · ${x.opening ? x.opening.name : acct.name}`;
+    const list = items.map(x => `<li class="fig-row"><span class="fig-row__date">${esc(day(x.day))}</span>
+        <span class="fig-row__amt num">${esc(money(x.open_minor, x.currency))}${x.open_minor !== x.amount_minor ? ` of ${esc(money(x.amount_minor, x.currency))}` : ''}</span>
+        <span class="fig-row__note"><a class="link" href="#/books/expectation/${Number(x.id)}">${esc(title(x))}</a> · ${words(x)}</span>
+        <span class="fig-row__acts"></span></li>`).join('');
+    return `${booksNav('sheet')}
+    <div class="page-head"><div><a class="link small back-link" href="#/books">← Balance sheet</a><span class="eyebrow">Books · ${esc(KIND_WORDS[acct.type] || acct.type)}</span><h1>${esc(acct.name)}${accountMark(acct.id)}</h1>
+        <p>A person is no balance on Books: what is lent or owed is what is expected back and to pay back, named for them.</p></div>
+        <div class="row page-head__end">${monthPicker()}</div></div>
+    <section class="card"><div class="section-header"><h2>Open with ${esc(acct.name)}</h2><span class="section-header__aside">${plural(items.length, 'item')} · oldest first</span></div>
+        ${list ? `<ul class="fig-list">${list}</ul>` : `<p class="card-empty">Nothing is open with ${esc(acct.name)}.</p>`}</section>
+    ${figures ? `<section class="card"><div class="section-header"><h2>Your figures</h2><span class="section-header__aside">${plural(figureCount, 'figure')} · no longer read by Books</span></div><ul class="fig-list">${figures}</ul></section>` : ''}`;
+}
 function pager(list, actName) {
     if (!list.pages || list.pages <= 1) return '';
     return `<div class="pager"><span class="small muted">page ${list.page} of ${list.pages}</span>
@@ -3174,9 +3418,9 @@ function rowTr(row, { account = true, book = false } = {}) {
     const label = flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
-        <td>${esc(row.description)}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
+        <td>${esc(row.description)}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${account ? `<div class="small muted">${esc(row.account_name || '')}</div>` : ''}</td>
         <td>${label}${book || (row.book && row.book !== 'Household') ? ` <span class="small muted">· ${esc(row.book || '')}</span>` : ''}${notCheckedTag(row)}</td>
-        <td class="r">${rowAmount(minor, row.currency)}</td></tr>`;
+        <td class="r">${row.counted_minor != null && row.counted_minor !== row.amount_minor ? `${dirTag(minor < 0 ? 'in' : 'out')} ${struckAmount(row)}` : rowAmount(minor, row.currency)}</td></tr>`;
 }
 ACT['figure-fix'] = async el => {
     const amount = prompt('The corrected figure (what is owed for a loan):', (Math.abs(Number(el.dataset.amount)) / 100).toFixed(2));
@@ -3204,10 +3448,17 @@ ACT['figure-delete-yes'] = async el => {
 // ---------------------------------------------------------------------------
 
 const charts = [];
-/** Net per currency: the signed sum of the rows, money out positive and a refund negative. */
+/** What a row counts in a spending figure, in minor units of its currency: the payload's counted_minor, which the
+ *  server sets to the row's own part once expect back is switched on (its amount less what is expected back on it)
+ *  and to its amount until then. A payload without the field counts the amount, as before. Never worked out here. */
+function countedMinor(row) {
+    const c = row.currency || 'SGD';
+    return Number.isInteger(row.counted_minor) ? row.counted_minor : toMinor(row.amount_sgd, c);
+}
+/** Net per currency: the signed sum of what the rows count, money out positive and a refund negative. */
 function totalsByCurrency(rows) {
     const by = {};
-    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + toMinor(row.amount_sgd, c); });
+    rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + countedMinor(row); });
     return by;
 }
 function totalsText(by) {
@@ -3222,7 +3473,7 @@ function groupRows(rows, keyOf) {
         if (!groups.has(k)) groups.set(k, []);
         groups.get(k).push(row);
     });
-    return [...groups.entries()].map(([name, list]) => ({ name, list, by: totalsByCurrency(list), sgd: totalsByCurrency(list).SGD || 0 }))
+    return [...groups.entries()].map(([name, list]) => { const by = totalsByCurrency(list); return { name, list, by, sgd: by.SGD || 0 }; })
         .sort((a, b) => b.sgd - a.sgd);
 }
 /** A refund: money back on a spending row (a negative amount). */
@@ -3276,12 +3527,13 @@ function spendRowTr(row) {
     const label = row.display_type ? (row.type_id ? pageLink('type', row.type_id, row.display_type) : esc(row.display_type)) : tag('nofig', 'no type');
     const what = row.service_id ? pageLink('merchant', row.service_id, row.description) : esc(row.description);
     const account = row.account_id ? pageLink('account', row.account_id, row.account_name || '') : esc(row.account_name || '');
+    const struck = row.counted_minor != null && row.counted_minor !== row.amount_minor;
     const amount = minor < 0
-        ? `<span class="sl-refund">${icon('arrow-circle-down')}refund</span> <span class="num sl-back">${esc(money(-minor, row.currency))} back</span>`
-        : `<span class="num">${esc(money(minor, row.currency))}</span>`;
+        ? `<span class="sl-refund">${icon('arrow-circle-down')}refund</span> ${struck ? struckAmount(row) : `<span class="num sl-back">${esc(money(-minor, row.currency))} back</span>`}`
+        : struck ? struckAmount(row) : `<span class="num">${esc(money(minor, row.currency))}</span>`;
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
-        <td>${what}${rowMark(row.id)}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${account}</div></td>
+        <td>${what}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}<div class="small muted">${account}</div></td>
         <td>${label}${notCheckedTag(row)}</td>
         <td class="r">${amount}</td></tr>`;
 }
@@ -3505,8 +3757,8 @@ function drawSpendingCharts(perBook, months) {
         // Per month, S$ accounts only, hidden merchants counted: spent, refunded and their net.
         const monthly = months.map(m => {
             const inMonth = b.counted.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD');
-            const spentMinor = inMonth.filter(row => !isRefund(row)).reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0);
-            const backMinor = -inMonth.filter(isRefund).reduce((a, row) => a + toMinor(row.amount_sgd, 'SGD'), 0);
+            const spentMinor = inMonth.filter(row => !isRefund(row)).reduce((a, row) => a + countedMinor(row), 0);
+            const backMinor = -inMonth.filter(isRefund).reduce((a, row) => a + countedMinor(row), 0);
             return { spent: spentMinor, back: backMinor, net: spentMinor - backMinor };
         });
         const sums = monthly.map(x => x.net / 100);
@@ -3746,7 +3998,8 @@ async function viewLists(tab) {
             <p class="card-foot">Stale and missing figures say so, and open their fix. Owed balances are negative.</p></section>`;
     }
     if (tab === 'rules') {
-        const rules = await get('/api/rules');
+        // The drift count (fin-surfaces 51) is a read beside the list: one it cannot give leaves the line undrawn.
+        const [rules, drift] = await Promise.all([get('/api/rules'), get('/api/rules/drift').catch(() => ({ count: 0 }))]);
         const shown = rules.filter(x => !needle || `${x.pattern} ${x.service_name}`.toLowerCase().includes(needle));
         ACT.__rules = new Map(rules.map(x => [x.id, x]));
         const sets = x => {
@@ -3761,7 +4014,7 @@ async function viewLists(tab) {
             <td class="r num sl-fig">${x.rows_labelled ?? ''}<span class="sl-phone-word"> ${x.rows_labelled === 1 ? 'row' : 'rows'}</span></td>
             <td class="sl-sub">${esc(MATCH_WORDS[x.match_type] || x.match_type)} · gives ${esc(x.service_name || '')}${sets(x) ? ' · ' + sets(x) : ''}</td></tr>`).join('');
         return `${head}<section class="card"><div class="section-header">${search('Search patterns or merchants')}
-            <div class="row"><button class="btn" data-act="rerun-rules">${icon('arrows-clockwise')}Re-run every rule</button><button class="btn" data-act="rule" data-id="">${icon('plus')}Add a rule</button></div></div>
+            <div class="row">${driftLine(drift)}<button class="btn" data-act="rule" data-id="">${icon('plus')}Add a rule</button></div></div>
             <p class="card-foot sl-lead">${shown.length} of ${rules.length} rules${shown.length > 200 ? ' · the first 200 shown' : ''}. A rule gives a row its merchant, and with it a book and type.</p>
             <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Pattern</th><th>Match</th><th>Merchant</th><th>Sets</th><th class="r">Rows it labelled</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rule matches.</td></tr>'}</tbody></table></div></section>`;
     }
@@ -3888,6 +4141,108 @@ ACT['past-answer'] = el => {
     closeSheet();
     if (answer) answer(el.dataset.past);
 };
+
+// The preview (fin-surfaces 21): a change that would relabel past rows is
+// answered first by the server with what it would do (409, `preview`), and
+// asked once in the one-confirm drawer: Cancel, Only new rows, or Apply to N
+// past rows, neither answer focused first. The answer goes back with the
+// preview's token; a token that no longer holds is refused by the server.
+const PREVIEW_FIELD = { book: ['book', 'Book'], type_id: ['type', 'Type'], wording: ['wording', 'Recognises'] };
+// A rule's preview (fin-surfaces 50) is titled by what is done to the rule.
+const PREVIEW_TITLE = { add: 'Add the rule', edit: 'Save the rule', delete: 'Delete the rule' };
+/** The drawer's parts for a preview: {eyebrow, title, body, foot}. A
+ *  merchant's book or type, a merge (the merchant line, then each label that
+ *  changes), a rule (its changed fields), or a wording taught from the Queue
+ *  (fin-surfaces 53). The rows another merchant holds, a rule's or a taught
+ *  wording's, are named in one warning line, as mocked (21, screen 2). No See
+ *  all for a rule (its rows sit with several merchants) or for a merchant not
+ *  made yet (it has no page). */
+function previewParts(p) {
+    const name = p.subject.name;
+    const kind = p.subject.kind;
+    if (kind === 'drift') return driftParts(p);
+    const fieldLines = p.change.filter(c => c.label || c.from !== c.to);
+    const words = fieldLines.map(c => (c.label ? [c.label.toLowerCase(), c.label] : (PREVIEW_FIELD[c.field] || [c.field, c.field])));
+    const only = fieldLines.length === 1 ? fieldLines[0] : null;
+    const title = kind === 'rule' ? `${PREVIEW_TITLE[p.subject.verb] || 'Save the rule'} ${esc(name)}?`
+        : kind === 'merge' ? `Merge ${esc(name)} into ${esc(p.subject.into.name)}?`
+        : only && only.field === 'wording' ? `Teach ${esc(name)} the wording ${esc(only.to)}?`
+        : only ? `Change ${esc(name)}’s ${words[0][0]} to ${esc(only.to)}?` : `Change ${esc(name)}’s ${words.map(w => w[0]).join(' and ')}?`;
+    const eyebrow = kind === 'rule' ? 'Rule' : kind === 'merge' ? 'Merge' : `${esc(name)} · ${words.map(w => w[0]).join(' and ')}`;
+    const line = (label, from, to) => `<li>${label}: ${[from != null ? `<s>${esc(from)}</s>` : '', to != null ? `<b>${esc(to)}</b>` : ''].filter(Boolean).join(' → ')}</li>`;
+    const lines = [kind === 'merge' ? line('Merchant', name, p.subject.into.name) : '', ...fieldLines.map((c, i) => line(words[i][1], c.from, c.to))].join('');
+    // Where the rows would move: a rule's merchant, or the merchant taught.
+    const movesTo = esc(kind === 'rule' ? (p.subject.merchant ? p.subject.merchant.name : '') : name);
+    const warns = (p.others || []).length ? `<div class="warnline">${icon('info')}<span><b>${p.others.map(o => `${plural(o.count, 'row')} now ${esc(o.name)}’s`).join(', ')}</b> would move to ${movesTo}.</span></div>` : '';
+    const ruleLines = kind !== 'rule' ? '' : [
+        p.unheld ? `<p class="sub">${plural(p.unheld, 'row')} with no merchant yet would become ${movesTo}.</p>` : '',
+        p.subject.verb === 'delete' && p.labelled ? `<p class="sub">${plural(p.labelled, 'row')} ${p.labelled === 1 ? 'is' : 'are'} labelled by this rule.</p>` : '',
+    ].join('');
+    const span = m => m.first === m.last ? monthName(m.first, { short: true }) : `${monthName(m.first, { short: true })} – ${monthName(m.last, { short: true })}`;
+    const facts = p.money && p.months ? `<div class="prev-facts">
+        <div><span class="cap">Moves</span>${p.money.map(m => `<b class="num">${esc(money(m.amount_minor))}</b><span class="sub">${esc(m.from)} → ${esc(m.to)}</span>`).join('')}</div>
+        <div><span class="cap">Months</span><b class="num">${p.months.count}</b><span class="sub">${esc(span(p.months))}</span></div></div>` : '';
+    const leftOut = (p.left_out || []).length ? `<p class="sub">Not in the S$ figure: ${p.left_out.map(x => `${esc(money(x.amount_minor, x.currency))} in ${esc(monthName(x.month, { short: true }))} (${esc(x.reason)})`).join('; ')}.</p>` : '';
+    const kept = [p.checked ? `Of them, <b>${p.checked} you checked</b>.` : '', p.chosen ? `<b>${p.chosen} you chose</b> stay as they are.` : ''].filter(Boolean).join(' ');
+    const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b>${x.source === 'checked' ? ' <span class="prev-mark">checked</span>' : ''}</td></tr>`);
+    const body = `<ul class="diff">${lines}</ul>
+        <p class="q">This changes ${plural(p.count, 'past row')}</p>
+        ${warns}${facts}${leftOut}${ruleLines}${kept ? `<p class="sub">${kept}</p>` : ''}
+        <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>
+        ${kind === 'rule' || p.subject.id == null ? '' : `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>`}`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`;
+    return { eyebrow, title, body, foot };
+}
+/** The drift's drawer (fin-surfaces 51, mocked as 21's screen 6): the rows
+ *  that differ from their rule, as examples; Leave them writes nothing,
+ *  Apply relabels them. No Only new rows: nothing new is being taught. */
+function driftParts(p) {
+    const one = p.count === 1;
+    const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b></td></tr>`);
+    const body = `<p class="sub">Rows labelled by a rule or a merchant whose label is not what the rules give now. Rows you checked or chose are not counted.</p>
+        <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'row')}</button>`;
+    return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
+}
+/** Ask the preview: 'apply', 'only_new', or null when it is closed. */
+function askPreview(p) {
+    const parts = previewParts(p);
+    return new Promise(done => {
+        openSheet(parts.title, parts.body, { eyebrow: parts.eyebrow, center: true, foot: parts.foot, focusSheet: true });
+        pastAnswer = done;
+    });
+}
+ACT['preview-answer'] = el => ACT['past-answer'](el);
+// See all: the merchant's own page lists every one of its rows, newest first.
+ACT['preview-all'] = el => { closeSheet(); location.hash = `#/books/merchant/${el.dataset.id}`; };
+/** A write that may reach past rows: sent once; when the server answers with
+ *  a preview, the drawer asks, and the answer goes back (under `key`) with
+ *  the preview's token. Returns send's result, or {ok: false, cancelled}
+ *  when the drawer was closed: nothing was written. */
+async function sendPreviewed(method, url, body, { key = 'past' } = {}) {
+    const r = await send(method, url, body);
+    if (r.status !== 409 || !r.data.preview) return r;
+    const answer = await askPreview(r.data.preview);
+    if (!answer) return { ok: false, cancelled: true, status: 409, data: { error: 'Nothing was saved.' }, change: null };
+    const answered = await send(method, url, { ...body, [key]: answer, token: r.data.preview.token });
+    return { ...answered, answered: { past: answer, count: r.data.preview.count } };
+}
+/** What a previewed write did, in words, for its toast. */
+function previewedWords(r, done) {
+    const a = r.answered;
+    if (!a || !a.count) return done;
+    if (a.past === 'apply') return `${done}, and ${plural(a.count, 'past row')} changed. One change in Changes, with Undo.`;
+    return `${done}. Only new rows take it; the ${plural(a.count, 'past row')} keep theirs, marked checked.`;
+}
+/** A previewed write's end: false when the drawer was closed, or the write
+ *  refused (said in a toast); else its toast, with Undo. */
+function previewedDone(r, done) {
+    if (r.cancelled) return false;
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return false; }
+    toast(previewedWords(r, done), { undo: r.change });
+    refreshFrame();
+    return true;
+}
 ACT['each-on'] = async el => {
     const s = await merchantById(Number(el.dataset.id));
     if (!s) { toast('This merchant is no longer in fin', { bad: true }); closeSheet(); return; }
@@ -3906,8 +4261,8 @@ async function checkEachRowOn(s, past) {
 // The merchant page (fin-surfaces 11): one merchant's type, usual book and
 // setting, then all its rows (newest first, a page at a time), each with a
 // type and a book picker that saves at once. Ticked rows take one book in one
-// press (Set book). Every write is 12's bulk label: hand-set, one change, one
-// Undo. The head leaves room for a trend chart, drawing none.
+// press (Set book, which chooses the book). Every write is 12's bulk label:
+// one change, one Undo. The head leaves room for a trend chart, drawing none.
 const MP_PAGE = 50;
 const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false, month: null };
 /** The rows narrowed by a trend bar: month is one 'YYYY-MM', or a quarter's months (a list) read as one date range. */
@@ -3940,18 +4295,19 @@ async function viewMerchant(id) {
     const each = !!s.review_each_time;
     const span = s.rows ? `${plural(s.rows, 'row')} · ${s.first_date === s.last_date ? esc(day(s.first_date)) : `${esc(day(s.first_date))} to ${esc(day(s.last_date))}`} · ${plural(s.accounts, 'account')}` : 'No rows yet';
     const off = mp.busy ? ' disabled' : '';
-    // A row says only what differs from its merchant: not checked, or hand-set.
+    // A row says only what differs from its merchant: not checked, or which
+    // field was checked or chosen (fin-surfaces 52).
     // Money out is the page's default, so only money in carries its mark.
     const rows = list.transactions.map(x => {
         const on = mp.ticks.has(x.id), when = esc(day(x.date)), minor = toMinor(x.amount_sgd, x.currency);
-        const mark = x.not_checked ? tag('notchecked', 'not checked') : x.cat_source === 'manual' ? `<span class="handset">${icon('pencil-simple')}hand-set</span>` : '';
+        const mark = x.not_checked ? tag('notchecked', 'not checked') : sourceTagsHTML(x.sources);
         return `<tr${on ? ' class="is-ticked"' : ''} data-tx="${x.id}"><td class="k"><label class="tick"><input type="checkbox" data-change="mp-tick" data-tx="${x.id}"${on ? ' checked' : ''} aria-label="Tick the ${when} row"></label></td>
             <td class="num dt">${when}</td><td class="ac">${mpAccountCell(x)}</td>
-            <td class="stext">${esc(x.description)}${rowMark(x.id)}</td>
-            <td class="r num am">${minor == null || minor < 0 ? rowAmount(minor, x.currency) : esc(money(minor, x.currency))}</td>
+            <td class="stext">${esc(x.description)}${rowMark(x.id)}${window.expectRowPill?.(x) || ''}</td>
+            <td class="r num am">${x.counted_minor != null && x.counted_minor !== x.amount_minor ? `${minor < 0 ? dirTag('in') + ' ' : ''}${struckAmount(x)}` : minor == null || minor < 0 ? rowAmount(minor, x.currency) : esc(money(minor, x.currency))}</td>
             <td class="ty"><select class="sel sel--quiet" data-change="mp-type" data-tx="${x.id}" aria-label="Type for the ${when} row"${off}>${typeOptions(r.types, x.type_id)}</select></td>
             <td class="bk"><select class="sel sel--quiet" data-change="mp-book" data-tx="${x.id}" aria-label="Book for the ${when} row"${off}>${bookOptions(r.books, x.book, 'Choose book')}</select></td>
-            <td class="st">${mark}</td></tr>`;
+            <td class="st">${mark}${window.expectMerchantRowAction?.(x) || ''}</td></tr>`;
     }).join('');
     const notChecked = each ? s.rows_to_check : 0;
     return `<div class="mp">${mpCrumbs()}
@@ -3966,7 +4322,7 @@ async function viewMerchant(id) {
         <div class="mp-fact"><span class="cap">Rows</span><b class="num">${s.rows || 0}</b>${notChecked ? `<span class="sub">${notChecked} not checked</span>` : ''}</div>
         <div class="mp-fact mp-fact--set"><span class="cap" id="mp-nr">New rows</span>${eachSegHTML(s, 'mp-nr')}</div>
     </div></section>
-    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>Newest first. Each change is a hand-set label, undone in Changes.</p></div>
+    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>Newest first. What you set is chosen and stays; the rest follows ${esc(s.name)}. Each change is undone in Changes.</p></div>
         ${list.transactions.length ? `<div class="bulk"><span class="bulk__n" id="mp-ticked">${mpTickedWords()}</span>
             <select class="sel" data-change="mp-bulk-book" aria-label="Book for the ticked rows">${bookOptions(r.books, mp.book, 'Choose book')}</select>
             <button type="button" class="btn sm primary" data-act="mp-apply" id="mp-apply"${mpCanApply() ? '' : ' disabled'}>Set book for ticked rows</button></div>` : ''}</div>
@@ -4001,12 +4357,17 @@ ACT['mp-untick'] = () => {
     $('#mp-apply').disabled = !mpCanApply();
 };
 ACT['mp-bulk-book'] = el => { merchantPage.book = el.value; $('#mp-apply').disabled = !mpCanApply(); };
+/** Set book for ticked rows is a deliberate act: its book is chosen even
+ *  where it is a row's own (personal-ledger 24), so the request says so. */
+function mpSetBookBody(ids, book) {
+    return { rows: ids.map(tx_id => ({ tx_id, book })), chosen: true };
+}
 /** One write at a time on the page: bulk label, then the toast and a redraw. */
 async function mpLabel(lines, words) {
     if (merchantPage.busy) { toast('One save at a time: wait for the one running to finish.'); return null; }
     merchantPage.busy = true;
     $$('#view .mp-t select, #mp-apply').forEach(b => { b.disabled = true; });
-    const r = await send('POST', '/api/transactions/bulk-label', { rows: lines });
+    const r = await send('POST', '/api/transactions/bulk-label', Array.isArray(lines) ? { rows: lines } : lines);
     merchantPage.busy = false;
     if (r.ok) toast(words, { undo: r.change });
     else toast(r.data.error || 'That did not work; nothing was changed', { bad: true, ms: 9000 });
@@ -4017,7 +4378,7 @@ ACT['mp-apply'] = async () => {
     const mp = merchantPage, name = $('#view h1')?.textContent || 'this merchant';
     if (!mpCanApply()) return;
     const ids = [...mp.ticks];
-    const r = await mpLabel(ids.map(tx_id => ({ tx_id, book: mp.book })), `${mp.book} on ${plural(ids.length, 'row')} of ${name}`);
+    const r = await mpLabel(mpSetBookBody(ids, mp.book), `${mp.book} on ${plural(ids.length, 'row')} of ${name}`);
     if (r) { mp.ticks.clear(); askBookVaries(mp.id); }
 };
 ACT['mp-type'] = el => {
@@ -4033,7 +4394,7 @@ ACT['mp-book'] = el => {
 };
 
 // fin suggests Check each row (fin-surfaces 14): once two rows of an Every
-// row the same merchant are hand-set to another book, fin asks, after the
+// row the same merchant have their book chosen as another, fin asks, after the
 // change (a toast that stays until answered) and on the merchant page. Yes
 // runs the setting's offer (each-set); No is kept for good, and fin does not
 // ask again for that merchant. The server decides (book-varies).
@@ -4092,7 +4453,7 @@ ACT.merchant = async el => {
     const others = [...ACT.__services.values()].filter(x => x.id !== s.id);
     openSheet(esc(s.name), `<div class="fields">${merchantFields(r, s)}
         <label class="check"><input type="checkbox" id="mc-oneoff"${s.is_one_off ? ' checked' : ''}> One-off</label>
-        <p class="small muted">${plural(s.txn_count, 'row')} · ${plural(s.rule_count, 'rule')}${(s.rules || []).length ? ': ' + s.rules.map(x => esc(x.pattern)).join(', ') : ''}. A change of book or type is written to the rows that take their label from it.</p></div>
+        <p class="small muted">${plural(s.txn_count, 'row')} · ${plural(s.rule_count, 'rule')}${(s.rules || []).length ? ': ' + s.rules.map(x => esc(x.pattern)).join(', ') : ''}. A change of book or type that reaches its past rows is shown first, to apply to them or to new rows only.</p></div>
         <button class="btn primary block" data-act="merchant-save" data-id="${s.id}">Save</button>
         <hr class="rule"><h3>Clean up</h3>
         <div class="sl-merge"><label class="field"><span>Merge into</span><select id="mc-target"><option value="">Choose a merchant</option>${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>
@@ -4103,15 +4464,25 @@ ACT['merchant-save'] = async el => {
     const body = { name: $('#mc-name').value.trim(), book: $('#mc-book').value || null, type_id: $('#mc-type').value ? Number($('#mc-type').value) : null,
         notes: $('#mc-notes').value.trim() || null,
         exclude_from_expense_views: $('#mc-hidden').checked ? 1 : 0, is_one_off: $('#mc-oneoff').checked ? 1 : 0 };
-    const r = await act('PUT', `/api/services/${el.dataset.id}`, body, 'Merchant saved');
-    if (r) { closeSheet(); rerender(); }
+    const r = await sendPreviewed('PUT', `/api/services/${el.dataset.id}`, body);
+    if (r.cancelled) return;
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return; }
+    toast(previewedWords(r, 'Merchant saved'), { undo: r.change });
+    refreshFrame();
+    closeSheet(); rerender();
 };
 ACT['merchant-merge'] = async el => {
     const target = $('#mc-target').value;
     if (!target) { toast('Choose the merchant to merge into', { bad: true }); return; }
-    const r = await act('POST', `/api/services/${el.dataset.id}/merge`, { target_id: Number(target) }, 'Merged');
-    if (r) { closeSheet(); rerender(); }
+    const r = await sendPreviewed('POST', `/api/services/${el.dataset.id}/merge`, { target_id: Number(target) });
+    if (previewedDone(r, 'Merged')) { closeSheet(); afterMerge(Number(el.dataset.id), Number(target)); }
 };
+/** After a merge: on the merged-away merchant's own page, its page is gone,
+ *  so go to the page of the one it merged into; anywhere else, draw again. */
+function afterMerge(source, target) {
+    if (location.hash === `#/books/merchant/${source}`) location.hash = `#/books/merchant/${target}`;
+    else rerender();
+}
 ACT['merchant-delete'] = async el => {
     if (!confirm('Delete this merchant? You can undo it from Changes.')) return;
     const r = await act('DELETE', `/api/services/${el.dataset.id}`, undefined, 'Merchant deleted');
@@ -4130,7 +4501,7 @@ ACT.rule = async el => {
         <div class="fields two"><label class="field"><span>Only from (S$)</span><input type="text" inputmode="decimal" id="rl-min" value="${x?.min_amount ?? ''}"></label>
             <label class="field"><span>Only up to (S$)</span><input type="text" inputmode="decimal" id="rl-max" value="${x?.max_amount ?? ''}"></label></div></div>
         ${x ? `<p class="small muted">It labels ${plural(x.rows_labelled ?? 0, 'row')} now.</p>` : ''}
-        <p class="small muted">Rows already labelled by hand keep their labels. Re-run every rule to apply a change to the rows the rules labelled.</p>`,
+        <p class="small muted">A change that reaches past rows is shown first, to apply to them or to new rows only. Rows you chose keep their labels.</p>`,
     { eyebrow: x ? 'Rule' : 'Rules', foot: `${x ? `<button class="btn danger" data-act="rule-delete" data-id="${x.id}">${icon('trash')}Delete</button>` : ''}<button class="btn primary" data-act="rule-save" data-id="${x ? x.id : ''}">Save</button>` });
 };
 ACT['rule-save'] = async el => {
@@ -4138,18 +4509,36 @@ ACT['rule-save'] = async el => {
     if (!v('rl-svc')) { toast('Choose the merchant', { bad: true }); return; }
     const body = { pattern: v('rl-pattern'), match_type: v('rl-match'), service_id: Number(v('rl-svc')), book_override: v('rl-book') || null,
         type_override_id: v('rl-type') ? Number(v('rl-type')) : null, min_amount: v('rl-min') || null, max_amount: v('rl-max') || null };
-    const r = el.dataset.id ? await act('PUT', `/api/rules/${el.dataset.id}`, body, 'Rule saved') : await act('POST', '/api/rules', body, 'Rule added');
-    if (r) { closeSheet(); rerender(); }
+    const r = await sendPreviewed(el.dataset.id ? 'PUT' : 'POST', el.dataset.id ? `/api/rules/${el.dataset.id}` : '/api/rules', body);
+    if (previewedDone(r, el.dataset.id ? 'Rule saved' : 'Rule added')) { closeSheet(); rerender(); }
 };
+// A delete that would relabel past rows asks in the preview; one that would
+// not is done at once, with Undo in its toast.
 ACT['rule-delete'] = async el => {
-    if (!confirm('Delete this rule? You can undo it from Changes.')) return;
-    const r = await act('DELETE', `/api/rules/${el.dataset.id}`, undefined, 'Rule deleted');
-    if (r) { closeSheet(); rerender(); }
+    const r = await sendPreviewed('DELETE', `/api/rules/${el.dataset.id}`, {});
+    if (previewedDone(r, 'Rule deleted')) { closeSheet(); rerender(); }
 };
-ACT['rerun-rules'] = async () => {
-    if (!confirm('Re-run every rule on the rows the rules labelled? Rows you labelled by hand are left alone. It is one change in Changes, with Undo.')) return;
-    const r = await act('POST', '/api/rules/recategorize', {}, 'Rules re-run');
-    if (r) rerender();
+// Re-running every rule is retired (fin-surfaces 21 and 51). Lists › Rules says
+// how many rows differ from what their rule says now (fields from the
+// merchant, a rule or the wording; never one checked or chosen), drawn only
+// above 0, and opens the one-confirm drawer: Leave them, or Apply.
+/** The drift line in the rules card's head: a quiet ghost button, or nothing at 0. */
+function driftLine(d) {
+    if (!d || !d.count) return '';
+    const one = d.count === 1;
+    return `<button type="button" class="btn sm ghost" data-act="rule-drift">${plural(d.count, 'row')} ${one ? 'differs' : 'differ'} from what ${one ? 'its' : 'their'} rule says now ›</button>`;
+}
+ACT['rule-drift'] = async () => {
+    const p = await get('/api/rules/drift', { fresh: true }).catch(() => null);
+    if (!p) { toast('fin could not count the rows just now; nothing was changed', { bad: true }); return; }
+    if (!p.count) { toast('No row differs from its rule now.'); rerender(); return; }
+    if (await askPreview(p) !== 'apply') return;
+    const r = await send('POST', '/api/rules/drift', { past: 'apply', token: p.token });
+    closeSheet();
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); rerender(); return; }
+    toast(`${plural(r.data.recategorized, 'row')} relabelled. One change in Changes, with Undo.`, { undo: r.change });
+    refreshFrame();
+    rerender();
 };
 
 ACT['account-edit'] = async el => {
@@ -4346,7 +4735,7 @@ function importPreviewHTML(p) {
 }
 /** The choices a confirm may carry for one previewed row (app.py
  *  _CONFIRM_ROW_CHOICES); its facts stay on the server. */
-const IMPORT_CHOICES = ['book', 'type_id', 'service_id', 'flow_type', 'other_side_id', '_skip', 'is_one_off', 'cat_source'];
+const IMPORT_CHOICES = ['book', 'type_id', 'service_id', 'flow_type', 'other_side_id', '_skip', 'is_one_off'];
 function importChoices(t) {
     const out = {};
     IMPORT_CHOICES.forEach(k => { if (k in t) out[k] = t[k]; });
@@ -4409,7 +4798,8 @@ function dayHeading(iso) {
     return iso ? day(iso) : 'Earlier';
 }
 
-const SKIP_FIELDS = new Set(['id', 'created_at', 'cat_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
+// A field's source is shown by fin-surfaces 52's marks, not as a changed field.
+const SKIP_FIELDS = new Set(['id', 'created_at', 'book_source', 'type_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
 const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'kind', is_one_off: 'one-off', notes: 'note',
     amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'check each row',
     exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement' };
@@ -4490,6 +4880,7 @@ function changeWords(first, ctx, { rows = 1, subject = null } = {}) {
     const acct = esc(accountOf(c, ctx) || 'an account');
     if (c.table === 'statements' && c.op === 'insert') return `imported the ${acct} statement of ${esc(day(a.statement_date))}`;
     if (c.table === 'statements' && c.op === 'delete') return `took out the ${acct} statement of ${esc(day(b.statement_date))}`;
+    const xw = window.expectChangeWords?.(c, ctx, { rows, subject }); if (xw) return xw;  // expect back's seven tables (expect-mark.js)
     const many = rows > 1;
     if (many && !first.same_change) return '';
     if (c.table === 'transactions') {
@@ -4911,16 +5302,59 @@ async function openTimeline(table, rowId, opts) {
     sheetBody().innerHTML = await timelineHTML(table, rowId, opts);
 }
 
-const LABEL_SOURCE_WORDS = { manual: 'by hand', service_default: 'its merchant', rule_override: 'a rule', fallback: 'its wording', derived: 'worked out from figures', auto: 'the rules' };
 const LABEL_FIELDS = ['type_id', 'service_id', 'flow_type', 'book'];
-/** Who labelled a row and when, from its own history (walk C8.2). */
+/** Who labelled a row and when, from its own history (walk C8.2); '' for a
+ *  row whose book or type has a source, which sourceLinesHTML says per field
+ *  (spec 24: one line per field on the row sheet). With neither and no label
+ *  change in its history: by hand when its kind was set by hand, not yet for
+ *  a row still waiting or untyped, else the rules, which worked out its kind. */
 function labelledBy(found, details) {
+    if (found.sources && (found.sources.book || found.sources.type)) return '';
     for (const d of details) {
         if (d.undone_by) continue;
         const c = d.changes.find(x => x.table === 'transactions' && x.row_id === found.id && x.op === 'update');
         if (c && changedFields(c).some(k => LABEL_FIELDS.includes(k))) return `${whoName(d)}${d.undoes ? ', by an undo' : ''}, ${when(d.at)}`;
     }
-    return found.cat_source ? (LABEL_SOURCE_WORDS[found.cat_source] || 'the rules') : 'not yet';
+    if (found.flow_type_manual) return 'by hand';
+    const waiting = found.flow_type === 'review' || (!found.type_id && ['expense', 'refund'].includes(found.flow_type));
+    return waiting ? 'not yet' : 'the rules';
+}
+
+/** A history time's day in the viewer's own time: "12 Oct 2026". */
+function historyDay(utc) {
+    if (!utc) return '—';
+    const t = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(utc) ? utc : utc.replace(' ', 'T') + 'Z');
+    if (Number.isNaN(t.getTime())) return day(utc);
+    return `${t.getDate()} ${MONTHS[t.getMonth()]} ${t.getFullYear()}`;
+}
+// Where a row's book and type came from (fin-surfaces 52; spec 24's marks). The
+// server gives each field's source and, for checked or chosen, the change entry
+// that set it so (set_by); these only word them.
+const SOURCE_WORDS = { wording: 'from its wording', derived: 'worked out from figures' };
+/** The merchant page's state column: a dashed tag for a field checked, a solid one for chosen, nothing for one fin gave. */
+function sourceTagsHTML(sources) {
+    const tags = [['book', sources?.book], ['type', sources?.type]].filter(([, src]) => src === 'checked' || src === 'chosen')
+        .map(([field, src]) => `<span class="src-tag${src === 'chosen' ? ' is-chosen' : ''}">${field} ${src}</span>`);
+    return tags.length ? `<span class="srcs">${tags.join('')}</span>` : '';
+}
+/** One field's source in words: "from IndigoAir", "checked by you, 9 Oct 2026; follows IndigoAir",
+ *  "chosen by Claude in chat, 12 Oct 2026 · see the change", "chosen, before fin kept a history". */
+function sourceLineWords(source, by, merchant) {
+    const name = merchant ? esc(merchant) : '';
+    if (source === 'merchant') return name ? `from ${name}` : 'from its merchant';
+    if (source === 'rule') return name ? `from a rule for ${name}` : 'from a rule';
+    if (source !== 'checked' && source !== 'chosen') return SOURCE_WORDS[source] || esc(source);
+    const said = by ? `${source} by ${whoName(by, { cap: false })}${by.via === 'chat' ? ' in chat' : ''}, ${esc(historyDay(by.at))}`
+        : `${source}, before fin kept a history`;
+    if (source === 'checked') return name ? `${said}; follows ${name}` : said;
+    return by ? `${said} · <button type="button" class="link" data-act="goto-change" data-entry="${Number(by.entry_id)}">see the change</button>` : said;
+}
+/** The row sheet's source lines: one per field that has a value. */
+function sourceLinesHTML(found) {
+    const sources = found.sources || {}, by = found.set_by || {};
+    const lines = [['Book', 'book'], ['Type', 'type']].filter(([, key]) => sources[key])
+        .map(([cap, key]) => `<li><span class="cap">${cap}</span> ${sourceLineWords(sources[key], by[key], found.service_name)}</li>`);
+    return lines.length ? `<ul class="srcline" aria-label="Where the book and type came from">${lines.join('')}</ul>` : '';
 }
 
 /** The row sheet's line under the figure: direction, date and the account, which opens its page. */
@@ -4937,12 +5371,16 @@ function rowFactsHTML(found, label, by) {
             <div><dt>Type</dt><dd>${typed}${notCheckedTag(found)}</dd></div>
             ${found.other_side_name ? `<div><dt>Other side</dt><dd>${esc(found.other_side_name)}</dd></div>` : ''}
             <div><dt>Merchant</dt><dd>${found.service_name && found.service_id ? pageLink('merchant', found.service_id, found.service_name) : '<span class="muted">none yet</span>'}</dd></div>
-            <div><dt>Labelled by</dt><dd>${esc(by)}</dd></div>
+            ${by ? `<div><dt>Labelled by</dt><dd>${esc(by)}</dd></div>` : ''}
         </dl>`;
 }
 
 // One row: its amount, its facts, its note, the one-off toggle, "This was…", and its history.
 ACT.row = el => openRowSheet(Number(el.dataset.tx));
+// Expect back's reserved entry points (personal-ledger 23): a button with one of these data-acts opens a drawer an expect-*.js shell fills.
+ACT['expect-mark'] = el => window.openExpectMark?.(Number(el.dataset.tx), el);
+ACT['back-for'] = el => window.openBackFor?.(Number(el.dataset.tx), el);
+ACT['let-go'] = el => window.openLetGo?.(Number(el.dataset.id), el);
 async function openRowSheet(txId, opts = {}) {
     openSheet('A row', '<p class="loading">Loading…</p>', { eyebrow: 'One row' });
     const found = (await get(`/api/transactions?tx_id=${txId}`, { fresh: true })).transactions[0];
@@ -4962,9 +5400,10 @@ async function openRowSheet(txId, opts = {}) {
             <div class="row-figure num">${esc(money(-minor, found.currency, { signed: true }))}</div>
             <p class="row-figure-sub">${rowSheetSubHTML(found, minor)}</p></div>
         ${rowFactsHTML(found, label, labelledBy(found, held.details))}
+        ${sourceLinesHTML(found)}
         <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off <span class="muted small">(Spending can leave it out)</span></label>
         <label class="field"><span>Note</span><textarea id="row-note">${esc(found.notes || '')}</textarea></label>
-        <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}</div>
+        <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}${window.expectRowActions?.(found) || ''}</div>
         <h3 class="history-head">Its own history</h3><div id="row-history"><p class="loading">Loading…</p></div>`;
     $('#row-history').innerHTML = await timelineHTML('transactions', txId, opts, held);
     if (opts.blocker) $('#row-history .blocker')?.scrollIntoView({ block: 'center' });

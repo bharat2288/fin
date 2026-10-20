@@ -337,7 +337,7 @@ def test_the_sheet_shows_each_line_its_anchor_and_check_and_adds_up(client, bank
         ("cards", "Cards (owed)", True),
         ("loans", "Loans (owed)", True),
         ("holdings", "Holdings", False),
-        ("companies", "Companies and people (our money in them)", False),
+        ("companies", "Companies (our money in them)", False),
     ]
     assert {
         name: (line["kind"], line["balance"], line["rests_on"] and (
@@ -411,14 +411,14 @@ def test_only_the_households_own_accounts_are_on_the_sheet_archived_ones_include
 
     shown = sheet(client, "2026-08")
 
-    # A company's own account is not; the household's money in a company and
-    # with a person is, in its own section. An archived account still holds
-    # its balance (ruling 6): it is listed, marked, and in the total.
-    assert list(lines(shown)) == [BANK, "Sample Closed 0004", "Sample Company", "Sample Friend"]
-    assert [line["archived"] for line in lines(shown).values()] == [False, True, False, False]
-    assert [line["name"] for line in section(shown, "companies")["lines"]] == [
-        "Sample Company", "Sample Friend"]
-    assert shown["net_worth_minor"] == 350000
+    # A company's own account is not; the household's money in a company is,
+    # in its own section. A person is no line since the switch (personal-ledger
+    # 23): their money is Expect back's. An archived account still holds its
+    # balance (ruling 6): it is listed, marked, and in the total.
+    assert list(lines(shown)) == [BANK, "Sample Closed 0004", "Sample Company"]
+    assert [line["archived"] for line in lines(shown).values()] == [False, True, False]
+    assert [line["name"] for line in section(shown, "companies")["lines"]] == ["Sample Company"]
+    assert shown["net_worth_minor"] == 250000
 
 
 def test_the_sheet_says_how_many_transfers_wait_for_review(client, bank):

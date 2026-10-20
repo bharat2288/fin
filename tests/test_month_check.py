@@ -259,7 +259,10 @@ def test_a_complete_month_with_every_kind_of_movement_leaves_nothing_unexplained
 def test_a_planted_missing_row_is_the_unexplained_amount_to_the_cent(client, conn):
     build_month(client)
     # The groceries never reached fin: the card's statement balance still
-    # says they were spent.
+    # says they were spent. Its refund was linked to it at import
+    # (personal-ledger 38), so the link goes with it.
+    conn.execute("DELETE FROM refund_link WHERE purchase_row_id IN "
+                 "(SELECT id FROM transactions WHERE description = ?)", (GROCER,))
     conn.execute("DELETE FROM transactions WHERE description = ?", (GROCER,))
     conn.commit()
 

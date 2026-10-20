@@ -1,0 +1,12 @@
+{
+  "request": {},
+  "response": {
+    "dismissal": {
+      "id": 31,
+      "row_id": 201,
+      "kind": "payback",
+      "purchase_row_id": null,
+      "made_at": "2026-10-19 09:00:00"
+    }
+  }
+}

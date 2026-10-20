@@ -658,6 +658,43 @@ li.empty { list-style: none; margin-top: 8px; }
 .sheet-body .diff b { color: var(--text-primary); }
 .sheet-body .say { font-size: var(--t-ui); color: var(--text-secondary); }
 .sheet-foot .sp { flex: 1 1 auto; }
+/* the preview (fin-surfaces 21): the money moved and the months as two tiles, two across on the desk and on
+   the phone; the checked and chosen line; three examples in a banded table */
+.sheet-body .sub { font-size: var(--t-ui); color: var(--text-secondary); }
+.prev-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border-subtle); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl); overflow: hidden; }
+.prev-facts > div { display: grid; gap: 2px; align-content: start; min-width: 0; padding: var(--space-3); background: var(--bg-surface); }
+.prev-facts b { font-size: var(--t-title); color: var(--text-primary); }
+.prev-facts .sub { font-size: var(--t-meta); color: var(--text-tertiary); overflow-wrap: anywhere; }
+.ex-shell .bt th { padding: 6px 10px; }
+.ex-shell .bt td { padding: 7px 10px; }
+.ex-shell .bt td:last-child { white-space: normal; }
+.ex-shell .bt td b { color: var(--text-primary); }
+.prev-mark { display: inline-block; padding: 1px 6px; border: 1px dashed var(--border-emphasis); border-radius: var(--radius-md);
+    font-size: var(--t-cap); font-weight: var(--font-semibold); color: var(--text-secondary); white-space: nowrap; }
+.sheet-body > .link { align-self: flex-start; }
+/* a taught wording that takes another merchant's rows names them: one warning line (fin-surfaces 53) */
+.warnline { display: flex; gap: var(--space-2); align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-xl);
+    background: var(--warn-subtle); color: var(--text-primary); font-size: var(--t-ui); overflow-wrap: anywhere; }
+.warnline > svg { flex: none; width: 16px; height: 16px; margin-top: 2px; color: var(--semantic-warning); }
+/* the rule shown when teaching (fin-surfaces 53): "Recognises INDIGOAIR · 6 rows · change", opening the wording in place
+   with a live count; "recognises INDIGOAIR" under a sure line's merchant */
+.rec { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0;
+    font-size: var(--t-ui); color: var(--text-secondary); overflow-wrap: anywhere; }
+.rec b { color: var(--text-primary); }
+.rec--edit { display: grid; gap: var(--space-1); }
+.rec__row { display: flex; gap: var(--space-2); align-items: center; min-width: 0; }
+.rec__row input { flex: 1 1 auto; min-width: 0; max-width: 360px; }
+.rec__n { font-size: var(--t-meta); color: var(--text-secondary); }
+.rec .warn-word, .rec__n .warn-word { font-weight: var(--font-semibold); }
+.rec-mini { display: block; margin-left: 22px; font-size: var(--t-meta); color: var(--text-tertiary); overflow-wrap: anywhere; }
+.rec-mini b { font-weight: var(--font-semibold); color: var(--text-secondary); }
+.qi__more > .rec { margin-bottom: var(--space-2); }
+#ww-rec[hidden] { display: none; }
+@media (max-width: 720px) {
+    .rec-mini { margin-left: 0; }
+    .rec .link { display: inline-flex; align-items: center; min-height: var(--tap); }
+}
 /* choices inside a sheet: folio's check tiles; the chosen one a whole ink border and a check */
 .choices { display: grid; gap: 8px; }
 .choice { position: relative; display: block; width: 100%; text-align: left; min-height: 52px; padding: 10px 40px 10px 12px; border-radius: var(--radius-xl);
@@ -1803,7 +1840,7 @@ table.sl-stack td.sl-sub { display: none; }
 /* the rows: fixed columns, money right in tabular figures */
 table.t.mp-t { table-layout: fixed; }
 .mp-t col.c-k { width: 44px; } .mp-t col.c-d { width: 104px; } .mp-t col.c-ac { width: 176px; } .mp-t col.c-a { width: 100px; }
-.mp-t col.c-ty { width: 130px; } .mp-t col.c-bk { width: 132px; } .mp-t col.c-s { width: 140px; }
+.mp-t col.c-ty { width: 130px; } .mp-t col.c-bk { width: 132px; } .mp-t col.c-s { width: 176px; }
 table.t.mp-t th { padding: 7px var(--space-3); font-weight: var(--font-bold); letter-spacing: 0.07em; }   /* the band, as .bt th */
 table.t.mp-t td { padding: 9px var(--space-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 table.t.mp-t th:first-child, table.t.mp-t td:first-child { padding-left: var(--space-5); padding-right: 0; font-weight: inherit; }
@@ -1813,12 +1850,20 @@ table.t.mp-t td.dt, table.t.mp-t td.am { color: var(--text-primary); }
 table.t.mp-t td.am { font-weight: var(--font-semibold); }
 table.t.mp-t td.ty, table.t.mp-t td.bk, table.t.mp-t td.st { overflow: visible; }
 table.t.mp-t td.st { padding-left: var(--space-2); }
+/* The state column: a row's source tags, then its action, each on its own line (fin-surfaces 52). */
+table.t.mp-t td.st { white-space: normal; }
+.mp-t td.st .srcs { display: flex; }
+.mp-t td.st .srcs + * { margin-top: 4px; }
 .mp-t .sel--quiet { width: calc(100% + 6px); margin-left: -6px; }
 table.t.mp-t tr.is-ticked > td { background: color-mix(in srgb, var(--accent-primary-subtle) 55%, var(--bg-surface)); }
 .mp-t .tick { display: inline-grid; place-items: center; width: 24px; height: 24px; cursor: pointer; vertical-align: middle; }
 .mp-t .tick input { width: 16px; height: 16px; }
-.handset { display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--t-meta); color: var(--text-tertiary); }
-.handset svg { width: 12px; height: 12px; }
+/* A field's source (fin-surfaces 52): dashed for checked, solid for chosen; nothing for one fin gave. */
+.src-tag { display: inline-block; padding: 1px 6px; border-radius: var(--radius-md); border: 1px dashed var(--border-emphasis); font-size: var(--t-cap); font-weight: var(--font-semibold); color: var(--text-secondary); white-space: nowrap; }
+.src-tag.is-chosen { border-style: solid; border-color: var(--text-secondary); color: var(--text-primary); }
+.srcs { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.srcline { margin: var(--space-3) 0 0; padding: 10px 12px; list-style: none; display: grid; gap: 6px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-surface); font-size: var(--t-ui); color: var(--text-secondary); overflow-wrap: anywhere; }
+.srcline .cap { display: inline-block; width: 44px; color: var(--text-tertiary); }
 .stext { font-family: "SF Mono", Monaco, Consolas, monospace; font-size: var(--t-meta); color: var(--text-secondary); overflow-wrap: anywhere; }
 
 @media (max-width: 960px) {

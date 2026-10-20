@@ -26,7 +26,7 @@ def test_case_15_each_row_takes_its_own_book_one_change_each_and_one_undo_over_a
     conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (shop,))
     conn.commit()
     txs = [row(conn, statement, "SAMPLE BAZAAR MKTPLACE", amount, book="Household", type_name="Shopping",
-               service_id=shop, cat_source="service_default", day=f"2026-04-1{i}")
+               service_id=shop, mark="service_default", day=f"2026-04-1{i}")
            for i, amount in enumerate((45.90, 219.00, 49.90))]
     assert mixed_ids(client) == sorted(txs)
 
@@ -52,7 +52,7 @@ def test_a_refused_row_writes_nothing_and_leaves_the_rows_before_it_saved(client
     conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (shop,))
     conn.commit()
     first, second = (row(conn, statement, "SAMPLE BAZAAR MKTPLACE", 20.0, book="Household", type_name="Shopping",
-                         service_id=shop, cat_source="service_default", day=f"2026-04-1{i}") for i in range(2))
+                         service_id=shop, mark="service_default", day=f"2026-04-1{i}") for i in range(2))
     shopping = type_id(conn, "Shopping")
 
     assert client.put(f"/api/transactions/{first}", json={"type_id": shopping, "book": "Kalesh"}).status_code == 200

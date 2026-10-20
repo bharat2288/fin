@@ -15,7 +15,10 @@ The rule (spec, Pair matching):
   - of several candidates the nearest date wins; an exact tie pairs nothing;
   - an amount that differs at all is not matched.
 
-A row that was set by hand is never read as a candidate and never written.
+A row that was set by hand is never read as a candidate and never written;
+nor is a row an expectation or a set-off rests on (spec 23, Flow writers
+respect the records): the money on it is already placed, and pairing it would
+count it twice.
 A paired row names its other side, so it is not a candidate again: running
 the match twice changes nothing.
 """
@@ -36,6 +39,14 @@ PAIRED_WITH_CARD = "payment"
 PAIRED_FLOW = "transfer"
 
 
+# A row no expectation and no set-off rests on; {row} is how the query names
+# the transactions table.
+_NO_RECORDS = (
+    "NOT EXISTS (SELECT 1 FROM expectation e WHERE e.row_id = {row}.id) "
+    "AND NOT EXISTS (SELECT 1 FROM set_off so WHERE so.payment_row_id = {row}.id)"
+)
+
+
 def _open_rows(conn) -> list[dict]:
     """The rows still looking for a pair, oldest first."""
     rows = conn.execute(
@@ -50,6 +61,7 @@ def _open_rows(conn) -> list[dict]:
         "  AND COALESCE(t.flow_type_manual, 0) = 0 "
         "  AND t.other_side_id IS NULL "
         "  AND t.amount_minor IS NOT NULL AND t.amount_minor != 0 "
+        f"  AND {_NO_RECORDS.format(row='t')} "
         "ORDER BY t.date, t.id",
         (account_kind.HOUSEHOLD, *account_kind.STATEMENT_KINDS, *PAIRABLE_FLOWS),
     ).fetchall()
@@ -125,11 +137,13 @@ def match_pairs(conn) -> int:
         in_rows = [r for r in rows if r["amount_minor"] < 0]
         for out, back in _pairs_among(out_rows, in_rows):
             for row, other in ((out, back), (back, out)):
-                # The guard is repeated on the write: a row set by hand, or
-                # already naming an other side, is not changed.
+                # The guard is repeated on the write: a row set by hand,
+                # already naming an other side, or carrying a record, is not
+                # changed.
                 conn.execute(
                     "UPDATE transactions SET flow_type = ?, other_side_id = ? "
-                    "WHERE id = ? AND COALESCE(flow_type_manual, 0) = 0 AND other_side_id IS NULL",
+                    "WHERE id = ? AND COALESCE(flow_type_manual, 0) = 0 AND other_side_id IS NULL "
+                    f"AND {_NO_RECORDS.format(row='transactions')}",
                     (_paired_flow(row, other), other["account_id"], row["id"]),
                 )
             made += 1

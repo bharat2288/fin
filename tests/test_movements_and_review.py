@@ -234,8 +234,6 @@ def test_a_label_that_is_not_one_of_the_choices_is_refused(client, waiting):
     {"choice": "own_account"},                               # no account
     {"choice": "own_account", "account_id": 987654},
     {"choice": "company"},
-    {"choice": "loan_to_person"},                            # nobody named
-    {"choice": "loan_to_person", "person": "   "},
     {"choice": "loan_repayment"},
 ])
 def test_a_label_missing_what_it_asks_for_is_refused_and_changes_nothing(client, waiting, body):
@@ -256,7 +254,6 @@ def test_a_label_missing_what_it_asks_for_is_refused_and_changes_nothing(client,
     ("company", CARD),
     ("loan_repayment", "Moom"),
     ("loan_repayment", "Crypto held outside fin"),
-    ("loan_to_person", "Kalesh"),
 ])
 def test_a_label_naming_an_account_of_the_wrong_kind_is_refused(client, waiting, choice, wrong):
     before = listed(client)
@@ -437,7 +434,6 @@ def test_the_choices_are_listed_with_a_description_each(client):
         ("gift", "expense"),
         ("own_account", "transfer"),
         ("company", "movement"),
-        ("loan_to_person", "movement"),
         ("loan_repayment", "movement"),
         ("income", "income"),
     ]
@@ -448,7 +444,7 @@ def test_labelled_spending_takes_its_type_and_counts_as_household_spending(clien
     tx = labelled(client, TRANSFERS[2][1], choice="spending", type_id=spending_type(client, "Education"))
 
     assert what_it_is(tx) == ("expense", None, "Household", "Education")
-    assert (tx["flow_type_manual"], tx["cat_source"]) == (1, "manual")
+    assert (tx["flow_type_manual"], tx["book_source"], tx["type_source"]) == (1, "chosen", "chosen")
     assert household_spend(client) == 12080.75  # 80.25 + 12,000.50, to the cent
     assert len(review_list(client)) == 2
 
@@ -507,34 +503,6 @@ def test_money_into_a_company_is_a_movement_naming_the_company(client, waiting):
     assert tx["flow_type_manual"] == 1
 
 
-def test_a_loan_to_a_new_person_creates_their_account(client, waiting):
-    assert account_named(client, "Sample Friend") is None
-
-    resp = label(client, TRANSFERS[2][1], choice="loan_to_person", person="  Sample Friend ")
-
-    assert resp.status_code == 200, resp.get_json()
-    friend = account_named(client, "Sample Friend")
-    assert (friend["type"], friend["owner"], friend["anchor"]) == ("person", "Household", None)
-    assert resp.get_json()["created_account"] is True
-    tx = row(client, TRANSFERS[2][1])
-    assert what_it_is(tx) == ("movement", "Sample Friend", "Household", "")
-    assert tx["other_side_id"] == friend["id"]
-
-
-def test_a_second_loan_to_the_same_person_uses_the_account_they_have(client, waiting):
-    labelled(client, TRANSFERS[2][1], choice="loan_to_person", person="Sample Friend")
-    people = len(client.get("/api/accounts").get_json())
-
-    by_name = label(client, TRANSFERS[1][1], choice="loan_to_person", person="sample friend")
-    friend = account_named(client, "Sample Friend")
-    by_account = label(client, TRANSFERS[0][1], choice="loan_to_person", account_id=friend["id"])
-
-    assert (by_name.status_code, by_account.status_code) == (200, 200)
-    assert by_name.get_json()["created_account"] is False
-    assert len(client.get("/api/accounts").get_json()) == people
-    assert {tx["other_side_id"] for tx in listed(client) if tx["flow_type"] == "movement"} == {friend["id"]}
-
-
 def test_a_loan_repayment_is_a_movement_naming_the_loan(client, waiting):
     tx = labelled(client, TRANSFERS[2][1], choice="loan_repayment", account_id=waiting["DBS auto loan"])
 
@@ -559,7 +527,7 @@ def test_labelling_every_row_empties_the_list_and_moves_no_money(client, waiting
     before = total_of(listed(client))
 
     labelled(client, TRANSFERS[0][1], choice="company", account_id=waiting["Moom"])
-    labelled(client, TRANSFERS[1][1], choice="loan_to_person", person="Sample Friend")
+    labelled(client, TRANSFERS[1][1], choice="company", account_id=waiting["Kalesh"])
     labelled(client, TRANSFERS[2][1], choice="gift")
 
     assert review_list(client) == []
@@ -578,22 +546,22 @@ def test_a_label_can_be_changed_and_the_last_one_stands(client, waiting):
 
 
 def test_an_account_named_as_an_other_side_cannot_be_deleted(client, waiting):
-    labelled(client, TRANSFERS[2][1], choice="loan_to_person", person="Sample Friend")
-    friend = account_named(client, "Sample Friend")["id"]
+    venture = make_account(client, "Sample Venture", "company")
+    labelled(client, TRANSFERS[2][1], choice="company", account_id=venture)
 
-    resp = client.delete(f"/api/accounts/{friend}")
+    resp = client.delete(f"/api/accounts/{venture}")
 
     assert resp.status_code == 400
-    assert account_named(client, "Sample Friend") is not None
+    assert account_named(client, "Sample Venture") is not None
 
 
 # --- replay: a rule re-run leaves what was set by hand -----------------------------
 
 
-def test_recategorize_all_and_a_rule_rerun_leave_hand_set_rows_unchanged(client, waiting):
+def test_the_drift_apply_and_a_rule_rerun_leave_hand_set_rows_unchanged(client, waiting):
     bring_in(client, BANK, [(9, "INWARD PAYNOW FROM SAMPLE SENDER REF 4410", -3100.00)])
     labelled(client, TRANSFERS[0][1], choice="company", account_id=waiting["Moom"])
-    labelled(client, TRANSFERS[1][1], choice="loan_to_person", person="Sample Friend")
+    labelled(client, TRANSFERS[1][1], choice="company", account_id=waiting["Kalesh"])
     labelled(client, TRANSFERS[2][1], choice="spending", type_id=spending_type(client, "Education"))
     labelled(
         client, "INWARD PAYNOW FROM SAMPLE SENDER REF 4410",
@@ -612,9 +580,9 @@ def test_recategorize_all_and_a_rule_rerun_leave_hand_set_rows_unchanged(client,
         "name": "Sample Catch-all", "book": "Household", "type_id": spending_type(client, "Shopping"),
     }).get_json()["id"]
     rule = client.post("/api/rules", json={"pattern": "REF", "service_id": svc}).get_json()["id"]
-    first = client.post("/api/rules/recategorize")
+    first = client.post("/api/rules/drift", json={"past": "apply"})
     rerun = client.put(f"/api/rules/{rule}", json={"priority": 5})
-    second = client.post("/api/rules/recategorize")
+    second = client.post("/api/rules/drift", json={"past": "apply"})
 
     assert (first.status_code, rerun.status_code, second.status_code) == (200, 200, 200)
     assert rerun.get_json()["recategorized"] == 0
@@ -622,14 +590,14 @@ def test_recategorize_all_and_a_rule_rerun_leave_hand_set_rows_unchanged(client,
     assert row(client, "SAMPLE BISTRO 0042")["flow_type"] == "movement"
 
 
-def test_recategorize_all_keeps_the_other_side_the_rules_gave(client, loan_merchants):
+def test_the_drift_count_keeps_the_other_side_the_rules_gave(client, loan_merchants):
     bring_in(client, BANK, RULED + TRANSFERS)
     before = listed(client, sort="date", sort_dir="asc")
 
-    first = client.post("/api/rules/recategorize").get_json()
-    second = client.post("/api/rules/recategorize").get_json()
+    counted = client.get("/api/rules/drift").get_json()["count"]
+    first = client.post("/api/rules/drift", json={"past": "apply"}).get_json()
 
-    assert (first["updated"], second["updated"]) == (0, 0)
+    assert (counted, first["recategorized"]) == (0, 0)
     assert listed(client, sort="date", sort_dir="asc") == before
 
 
@@ -637,9 +605,9 @@ def test_a_new_rule_takes_a_waiting_row_off_the_review_list(client, waiting):
     svc = client.post("/api/services", json={
         "name": "Sample Payee", "book": "Household", "type_id": spending_type(client, "Home"),
     }).get_json()["id"]
-    client.post("/api/rules", json={"pattern": "SAMPLE PAYEE", "service_id": svc})
+    client.post("/api/rules", json={"pattern": "SAMPLE PAYEE", "service_id": svc, "past": "apply"})
 
-    client.post("/api/rules/recategorize")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     assert what_it_is(row(client, TRANSFERS[2][1])) == ("expense", None, "Household", "Home")
     assert [tx["description"] for tx in review_list(client)] == [TRANSFERS[0][1], TRANSFERS[1][1]]

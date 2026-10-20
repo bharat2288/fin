@@ -20,6 +20,23 @@ Rulings this module carries:
   already off; no tool turns it on: only the operator, in fin's app.
 - A change over MANY_ROWS that stands on the operator's agreed count is
   recorded as asked first (history.record_asked), so Changes can say so.
+- The preview (fin-surfaces 21 and 51): change_merchant, change_rule,
+  add_rule, delete_rule and merge_merchants take `past` (apply | only_new)
+  and the preview's `token`. Without `past`, when past rows would change,
+  nothing is written and the answer carries the preview's numbers for Claude
+  to ask the operator. An answer sent back with the preview's token stands
+  on the count the preview gave (the operator's yes to it), as expected_count
+  does, and is recorded as asked first; one with no token is asked the count
+  as any write.
+- Permission changes (fin-surfaces 51): rerun_rules is removed, as Re-run
+  every rule is retired; rule_drift, a read, gives the rows that differ from
+  what their rule says now in its place. Applying them is the operator's, on
+  Lists › Rules: no chat tool writes them.
+- Expect back (personal-ledger 23, E8): seven write tools (mark_expect_back, undo_mark,
+  set_off, unlink_set_off, let_go, undo_let_go, not_a_payback) are thin wrappers over the
+  routes the app's drawers call, and expected_back reads the open list and an item's page;
+  Claude does what the app does, one change each, stamped as the chat's, under the switch.
+  A let-go must name mine or a gift: there is no default.
 - No tool imports a statement, changes or deletes an imported row, edits an
   account other than adding a company or a person, sends merchants to the
   type-suggestion service, runs a conversion or touches subscriptions.
@@ -83,6 +100,29 @@ _EXPECTED = {
 }
 
 
+# The preview's answer (fin-surfaces 21 and 51): a merchant or rule change
+# that would relabel past rows writes nothing until it is told what the past
+# rows do, and the preview it answers with is the operator's to answer.
+_PAST = {
+    "past": {
+        "type": "string", "enum": ["apply", "only_new"],
+        "description": "The operator's answer to the preview: apply (the past rows change too) "
+                       "or only_new (only new rows take it; the past rows keep their labels, marked checked).",
+    },
+    "token": {"type": "string", "description": "The preview's token, sent back with its answer."},
+}
+_PAST_SAID = (
+    "When past rows would change and past is not given, nothing is written: the answer carries "
+    "the preview (how many past rows, how many of them the operator checked, how many they chose "
+    "stay as they are, for a book the money that moves and the months, three examples, and a "
+    "token). Ask the operator, with those numbers, whether the past rows change too or only new "
+    "rows take it, unless they already said; then call again with past and the preview's token. "
+    "A token from a preview that no longer holds is refused: look again."
+)
+# The tools that answer with the preview.
+_PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})
+
+
 def _pick(args: dict, *names: str) -> dict:
     return {k: args[k] for k in names if k in args and args[k] is not None}
 
@@ -93,12 +133,20 @@ def _get(path: str, *names: str):
 
 # --- reads -------------------------------------------------------------------
 
+
+def _expected_back_request(a: dict) -> tuple[str, str, dict | None]:
+    if a.get("expectation_id") is not None:
+        return "GET", f"/api/expectations/{int(a['expectation_id'])}", {}
+    return "GET", "/api/expectations", _pick(a, "direction", "person", "currency", "near", "payment")
+
+
 _READS = [
     Tool(
         "balance_sheet",
-        "The household's balance sheet at the end of a month: every account, loan, holding, "
-        "company and person with its balance, the anchor it rests on (date, statement or "
-        "typed figure), whether its rows tie; net worth and what it leaves out; currency "
+        "The household's balance sheet at the end of a month: every account, loan, holding "
+        "and company with its balance, the anchor it rests on (date, statement or typed "
+        "figure), whether its rows tie; what is expected back, waiting for its row and to pay "
+        "back (a person's money is these, never a balance); net worth and what it leaves out; currency "
         "change; and the month check (net-worth change against income less spending plus "
         "currency change, the unexplained difference, the transfers waiting for review).",
         _schema({"month": _MONTH}),
@@ -107,8 +155,8 @@ _READS = [
     ),
     Tool(
         "spending_cards",
-        "One month's spending figures, net of refunds; a refund counts in the month it "
-        "arrives; S$ accounts only: household spending (Household book, household-owned "
+        "One month's spending figures, net of refunds and of what is expected back; a refund "
+        "counts in the month it arrives; S$ accounts only: household spending (Household book, household-owned "
         "accounts), each company's costs paid from household accounts, loan principal repaid, "
         "and what is held out waiting for review (money out and in apart), against the "
         "three-month average. Each book's <book>_out is its money out and <book>_back the "
@@ -119,14 +167,14 @@ _READS = [
     ),
     Tool(
         "spending_by_type",
-        "Spending totals by type over a date range, for one book or all: net of refunds; a refund counts in the month it arrives; S$ accounts only.",
+        "Spending totals by type over a date range, for one book or all: net of refunds and of what is expected back; a refund counts in the month it arrives; S$ accounts only.",
         _schema({"start": _DAY, "end": _DAY, "book": _S, "exclude_one_off": _B, "group_parent": _B}),
         False,
         _get("/api/dashboard/types", "start", "end", "book", "exclude_one_off", "group_parent"),
     ),
     Tool(
         "spending_by_month",
-        "Spending by type per month (or week or quarter) over a date range: net of refunds; a refund counts in the month it arrives; S$ accounts only.",
+        "Spending by type per month (or week or quarter) over a date range: net of refunds and of what is expected back; a refund counts in the month it arrives; S$ accounts only.",
         _schema({"start": _DAY, "end": _DAY, "book": _S, "granularity": _S, "group_parent": _B}),
         False,
         _get("/api/dashboard/monthly", "start", "end", "book", "granularity", "group_parent"),
@@ -134,7 +182,10 @@ _READS = [
     Tool(
         "transactions",
         "Rows, newest first unless sorted: date, the bank's description, amount, account, "
-        "book, type, flow, other side, merchant, note. Filter by date range, month, account, "
+        "book, type, flow, other side, merchant, note; and the row's parts in whole minor units "
+        "of its account's currency (amount_minor; expected_minor: what is expected back or to "
+        "pay back on it; placed_minor: what it has set off against others; own_minor: what is "
+        "left of its own, which is what spending or income counts). Filter by date range, month, account, "
         "book, types (comma-separated ids), flow (e.g. review, movement, expense), or search text.",
         _schema({
             "start": _DAY, "end": _DAY, "month": _MONTH, "account_id": _I, "book": _S,
@@ -183,6 +234,17 @@ _READS = [
         _get("/api/rules"),
     ),
     Tool(
+        "rule_drift",
+        "The rows whose label differs from what the merchant rules give now (re-running the "
+        "rules is retired; this count is what replaces it): how many, the newest three as "
+        "examples (now and after). Only labels from a merchant, a rule or the wording count; "
+        "a row the operator checked or chose never does. Applying it is the operator's, on "
+        "Lists › Rules in fin, where the count opens the same preview.",
+        _schema(),
+        False,
+        _get("/api/rules/drift"),
+    ),
+    Tool(
         "types",
         "The type list (one list for every book, with sub-types and what each covers).",
         _schema(),
@@ -221,6 +283,21 @@ _READS = [
         False,
         lambda a: ("GET", f"/api/history/{int(a['entry_id'])}", None),
     ),
+    Tool(
+        "expected_back",
+        "What is expected back from people, or to pay back to them (an expectation sits on one "
+        "row). Give expectation_id alone for one item's page: its amount, what is set off, what "
+        "is open, and its lines, each with the id the write tools take (a set-off's id for "
+        "unlink_set_off); the filters are then ignored. Otherwise the open items (something still open, nothing let go), "
+        "oldest first, each with id, row, amount, open_minor, names and age; filters: direction "
+        "back (yours, held by others) or pay (owed by the household); person (an account id); "
+        "currency; near (a day, nearest first); payment (a money row's id: what that payment "
+        "can be set off against).",
+        _schema({"expectation_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]},
+                 "person": _I, "currency": _S, "near": _DAY, "payment": _I}),
+        False,
+        lambda a: _expected_back_request(a),
+    ),
 ]
 
 
@@ -238,8 +315,8 @@ def _account_body(a: dict) -> dict:
 _WRITES = [
     _w(
         "set_label",
-        "Set one row's book and/or type (type_id from the types tool). Marked as set by hand: "
-        "no rule changes it afterwards.",
+        "Set one row's book and/or type (type_id from the types tool). Each one sent is marked "
+        "chosen: no later merchant or rule change reaches it. One not sent keeps its source.",
         {"tx_id": _I, "book": _S, "type_id": _I, "is_one_off": _B},
         ("tx_id",),
         lambda a: ("PUT", f"/api/transactions/{int(a['tx_id'])}", _pick(a, "book", "type_id", "is_one_off")),
@@ -255,13 +332,13 @@ _WRITES = [
         "label_review",
         "Say what a transfer waiting for review was. choice: spending (type_id; book where the "
         "type proposes none), gift, own_account (account_id), company (account_id), "
-        "loan_to_person (account_id, or person: a name; a new name creates the person), "
-        "loan_repayment (account_id of a loan), income (income_kind_id).",
-        {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I,
-         "person": _S, "income_kind_id": _I},
+        "loan_repayment (account_id of a loan), income (income_kind_id). A person is no "
+        "movement's other side: money lent to or owed to a person is mark_expect_back on the row "
+        "(direction back on money out, pay on money in), named for them.",
+        {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I, "income_kind_id": _I},
         ("tx_id", "choice"),
         lambda a: ("POST", f"/api/review/{int(a['tx_id'])}/label",
-                   _pick(a, "choice", "type_id", "book", "account_id", "person", "income_kind_id")),
+                   _pick(a, "choice", "type_id", "book", "account_id", "income_kind_id")),
     ),
     _w(
         "enter_figure",
@@ -289,58 +366,54 @@ _WRITES = [
     _w(
         "add_rule",
         "Add a merchant rule: rows whose description matches the pattern take the merchant "
-        "(service_id) and its book and type, or the rule's own overrides.",
+        "(service_id) and its book and type, or the rule's own overrides. " + _PAST_SAID,
         {"pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I},
+         "type_override_id": _I, "priority": _I, **_PAST},
         ("pattern", "service_id"),
         lambda a: ("POST", "/api/rules", _pick(a, "pattern", "service_id", "match_type",
-                                              "book_override", "type_override_id", "priority")),
+                                              "book_override", "type_override_id", "priority",
+                                              *_PAST)),
     ),
     _w(
         "change_rule",
-        "Change a merchant rule.",
+        "Change a merchant rule. " + _PAST_SAID,
         {"rule_id": _I, "pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I},
+         "type_override_id": _I, "priority": _I, **_PAST},
         ("rule_id",),
         lambda a: ("PUT", f"/api/rules/{int(a['rule_id'])}",
                    _pick(a, "pattern", "service_id", "match_type", "book_override",
-                         "type_override_id", "priority")),
+                         "type_override_id", "priority", *_PAST)),
     ),
     _w(
         "delete_rule",
-        "Delete a merchant rule.",
-        {"rule_id": _I},
+        "Delete a merchant rule. " + _PAST_SAID,
+        {"rule_id": _I, **_PAST},
         ("rule_id",),
-        lambda a: ("DELETE", f"/api/rules/{int(a['rule_id'])}", None),
-    ),
-    _w(
-        "rerun_rules",
-        "Re-run every merchant rule over the rows. Rows set by hand are left alone.",
-        {},
-        (),
-        lambda a: ("POST", "/api/rules/recategorize", {}),
+        lambda a: ("DELETE", f"/api/rules/{int(a['rule_id'])}", _pick(a, *_PAST)),
     ),
     _w(
         "change_merchant",
-        "Change a merchant: its name, default book and type (its rows that take the default "
-        "follow), note, one-off, hidden from spending views, or review each time.",
+        "Change a merchant: its name, default book and type, note, one-off, hidden from "
+        "spending views, or review each time. A new book or type reaches its past rows that "
+        "take the default (never one the operator chose). " + _PAST_SAID,
         {"service_id": _I, "name": _S, "book": _S, "type_id": _I, "notes": _S, "is_one_off": _B,
-         "exclude_from_expense_views": _B, "review_each_time": _B},
+         "exclude_from_expense_views": _B, "review_each_time": _B, **_PAST},
         ("service_id",),
         lambda a: ("PUT", f"/api/services/{int(a['service_id'])}",
                    _pick(a, "name", "book", "type_id", "notes", "is_one_off",
-                         "exclude_from_expense_views", "review_each_time")),
+                         "exclude_from_expense_views", "review_each_time", *_PAST)),
     ),
     _w(
         "merge_merchants",
-        "Merge one merchant into another: its rows and rules move to the target.",
-        {"source_id": _I, "target_id": _I},
+        "Merge one merchant into another: its rows and rules move to the target. " + _PAST_SAID,
+        {"source_id": _I, "target_id": _I, **_PAST},
         ("source_id", "target_id"),
-        lambda a: ("POST", f"/api/services/{int(a['source_id'])}/merge", _pick(a, "target_id")),
+        lambda a: ("POST", f"/api/services/{int(a['source_id'])}/merge", _pick(a, "target_id", *_PAST)),
     ),
     _w(
         "add_company_or_person",
-        "Add a company or a person, so movements can name them as their other side.",
+        "Add a company (so movements can name it as their other side) or a person (to name on "
+        "what is expected back or to pay back).",
         {"kind": {"type": "string", "enum": ["company", "person"]}, "name": _S},
         ("kind", "name"),
         lambda a: ("POST", "/api/accounts", _account_body(a)),
@@ -366,6 +439,89 @@ _WRITES = [
         {"currency": _S, "date": _DAY, "rate": _S},
         ("currency", "date", "rate"),
         lambda a: ("PUT", "/api/rates", _pick(a, "currency", "date", "rate")),
+    ),
+    _w(
+        "mark_expect_back",
+        "Expect some of a row back (direction back, on money out: a dinner paid for others) or "
+        "mark money in as to pay back (direction pay: a loan from family, a friend who paid "
+        "first). Give all: true for the whole row, or amount (text in whole units of the row's "
+        "currency, e.g. \"200.00\") for a part; names: person account ids; new_names: names "
+        "of people not yet in fin (found or made); note. The part expected back stops being "
+        "spending at once. Marking a row that is already marked edits its mark; undo_mark "
+        "removes it (this is not the undo tool).",
+        {"tx_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]}, "all": _B,
+         "amount": _S, "names": {"type": "array", "items": _I},
+         "new_names": {"type": "array", "items": _S}, "note": _S},
+        ("tx_id", "direction"),
+        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/expectation",
+                   _pick(a, "direction", "all", "amount", "names", "new_names", "note")),
+    ),
+    _w(
+        "undo_mark",
+        "Remove the mark on an expectation (expectation_id from expected_back): the row counts "
+        "whole again. Refused, naming what is set against it, until those are unlinked; refused "
+        "after a let-go until that is undone. This is not the undo tool (that takes a change).",
+        {"expectation_id": _I},
+        ("expectation_id",),
+        lambda a: ("DELETE", f"/api/expectations/{int(a['expectation_id'])}", None),
+    ),
+    _w(
+        "set_off",
+        "Set a payment (a money row, tx_id) off against what is expected back: placements, each "
+        "{expectation_id, amount} with amount text in whole units of the payment's currency; "
+        "one request places the payment against several items, all or none. What is left of "
+        "the payment stays its own to label. waiting {person_id?, note?, amount?} leaves that "
+        "much of the payment (all that is left without amount) waiting for its row, as money "
+        "that arrived before its purchase; with a waiting part, placements may be empty. "
+        "Money in sets off expected back; money out sets off to pay back. Never income or spending.",
+        {"tx_id": _I,
+         "placements": {"type": "array", "items": {
+             "type": "object", "properties": {"expectation_id": _I, "amount": _S},
+             "required": ["expectation_id", "amount"], "additionalProperties": False}},
+         "waiting": {"type": "object", "properties": {"person_id": _I, "note": _S, "amount": _S},
+                     "additionalProperties": False}},
+        ("tx_id",),
+        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/set-offs",
+                   {"placements": a.get("placements", []), **_pick(a, "waiting")}),
+    ),
+    _w(
+        "unlink_set_off",
+        "Unlink one set-off (set_off_id from an expectation's page in expected_back): the "
+        "payment's part returns to the payment and the item's open amount to the item. A "
+        "waiting set-off unlinks too, and the payment returns to its own. Refused after a "
+        "let-go until that is undone.",
+        {"set_off_id": _I},
+        ("set_off_id",),
+        lambda a: ("DELETE", f"/api/set-offs/{int(a['set_off_id'])}", None),
+    ),
+    _w(
+        "let_go",
+        "Let the whole open rest of an expectation go (the operator's call: ask before using "
+        "it). became must be named, with no default: mine (it was the household's spending "
+        "after all: counted in the row's book and type, type_id when the row has none) or "
+        "gift (Gifts & Donations, to_id the person it went to, if any). On an item to pay "
+        "back only gift is offered, and type_id is the income type it counts as. Counted on "
+        "today.",
+        {"expectation_id": _I, "became": {"type": "string", "enum": ["mine", "gift"]},
+         "to_id": _I, "type_id": _I},
+        ("expectation_id", "became"),
+        lambda a: ("POST", f"/api/expectations/{int(a['expectation_id'])}/let-go",
+                   _pick(a, "became", "to_id", "type_id")),
+    ),
+    _w(
+        "undo_let_go",
+        "Undo a let-go: the open rest is open again. (This is not the undo tool.)",
+        {"expectation_id": _I},
+        ("expectation_id",),
+        lambda a: ("DELETE", f"/api/expectations/{int(a['expectation_id'])}/let-go", None),
+    ),
+    _w(
+        "not_a_payback",
+        "Say a money-in row is not a payback: it is not suggested for set-off again and stays "
+        "a row to label.",
+        {"tx_id": _I},
+        ("tx_id",),
+        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/not-a-payback", {}),
     ),
     _w(
         "undo",
@@ -449,7 +605,15 @@ def _answer(resp) -> dict:
         body = None
     if resp.status_code >= 400:
         message = body.get("error") if isinstance(body, dict) else None
-        return {"ok": False, "error": message if isinstance(message, str) else FIXED_ERROR}
+        answer = {"ok": False, "error": message if isinstance(message, str) else FIXED_ERROR}
+        # A change that would relabel past rows and was not answered: the
+        # preview's numbers, for Claude to ask with; a stale answer says so.
+        if resp.status_code == 409 and isinstance(body, dict):
+            if isinstance(body.get("preview"), dict):
+                answer["preview"] = _hidden_out(body["preview"])
+            if body.get("stale") is True:
+                answer["stale"] = True
+        return answer
     return {"ok": True, "result": _hidden_out(body)}
 
 
@@ -517,7 +681,13 @@ def call(name: str, args: dict | None, actor: str) -> dict:
         if entry_id is None:
             return answer
         rows = int(resp.headers.get("X-Fin-Change-Rows", "0"))
-        if rows > MANY_ROWS and expected != rows:
+        # An answer to a preview, sent back with its token, stands on the
+        # count the operator was asked: the route wrote only because the
+        # token still held, so the change is the one the preview showed
+        # (fin-surfaces 51). An answer with no token behind it is asked the
+        # count as any other write.
+        answered = name in _PREVIEWED and args.get("past") is not None and args.get("token") is not None
+        if rows > MANY_ROWS and expected != rows and not answered:
             conn = db.get_connection()
             try:
                 history.discard(conn, int(entry_id))

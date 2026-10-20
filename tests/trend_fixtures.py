@@ -114,17 +114,16 @@ def row(
     type_name: str | None = None,
     flow: str = "expense",
     day: str = "2026-04-10",
-    cat_source: str = "auto",
 ) -> int:
     """A row of `amount_minor` (positive = money out, negative = a refund) in
     its account's currency. A book of None is stored NULL and reads as
     Household."""
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_minor,"
-        " book, type_id, service_id, cat_source, flow_type)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " book, type_id, service_id, flow_type)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (statement_id, day, description, amount_minor, book,
-         type_id(conn, type_name) if type_name else None, service_id, cat_source, flow),
+         type_id(conn, type_name) if type_name else None, service_id, flow),
     )
     conn.commit()
     return _last_id(conn)

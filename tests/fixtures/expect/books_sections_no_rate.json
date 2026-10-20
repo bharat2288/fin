@@ -1,0 +1,60 @@
+{
+  "as_at": "2026-10-19",
+  "rate": null,
+  "sections": [
+    {
+      "key": "expected_back",
+      "heading": "Expected back",
+      "owed": false,
+      "in_total": false,
+      "total_minor": 80000,
+      "left_out": [
+        {
+          "key": "expectation:7",
+          "title": "SWIGGY · Mumbai",
+          "currency": "INR",
+          "open_minor": 180000,
+          "reason": "no rate"
+        }
+      ],
+      "lines": [
+        {
+          "key": "expectation:9",
+          "expectation_id": 9,
+          "title": "Opening figure · Sam",
+          "date": "2026-01-01",
+          "names": [
+            "Sam"
+          ],
+          "open_minor": 80000,
+          "amount_minor": 80000,
+          "currency": "SGD",
+          "sgd_minor": 80000,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 291,
+          "old": true,
+          "last_set_off": null
+        },
+        {
+          "key": "expectation:7",
+          "expectation_id": 7,
+          "title": "SWIGGY · Mumbai",
+          "date": "2026-10-06",
+          "names": [
+            "Jay"
+          ],
+          "open_minor": 180000,
+          "amount_minor": 240000,
+          "currency": "INR",
+          "sgd_minor": null,
+          "rate": null,
+          "no_rate": true,
+          "age_days": 13,
+          "old": false,
+          "last_set_off": null
+        }
+      ]
+    }
+  ]
+}

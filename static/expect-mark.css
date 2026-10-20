@@ -1,0 +1,34 @@
+/* Expect back: the shared namespace and the Expect some back… drawer (D1).
+   A shell from personal-ledger 26, filled by personal-ledger 34. Every class here is prefixed .xb-
+   (tests/test_expect_contract.py), so no rule reaches a page it was not written for. */
+
+/* The row's pill: "S$ 200 expected back" beside its text, as the mockup's open-pill. */
+.xb-pill { display: inline-flex; align-items: center; padding: 0 8px; border-radius: 999px;
+    background: var(--accent-pop-subtle); color: var(--accent-pop); font-size: var(--t-meta);
+    font-weight: var(--font-bold); line-height: 20px; white-space: nowrap; vertical-align: 1px; }
+
+/* The drawer. */
+.xb-target { color: var(--text-secondary); font-size: var(--t-ui); }
+.xb-target b { color: var(--text-primary); }
+.xb-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.xb-lbl { font-size: var(--t-ui); font-weight: var(--font-semibold); color: var(--text-primary); }
+.xb-opt { font-weight: var(--font-medium); color: var(--text-tertiary); }
+.xb-amount { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.xb-input { height: var(--ctl); padding: 0 10px; border: 1px solid var(--border-default); border-radius: var(--radius-md);
+    background: var(--bg-elevated); color: var(--text-primary); font: inherit; font-size: var(--t-body); min-width: 0; }
+.xb-input--num { width: 130px; text-align: right; font-variant-numeric: tabular-nums; }
+.xb-input--name { flex: 1 1 160px; }
+.xb-input--note { width: 100%; }
+.xb-input:focus { outline: 2px solid var(--accent-primary-subtle); border-color: var(--accent-primary); }
+.xb-yours { min-height: 1.4em; margin: 0; font-size: var(--t-ui); color: var(--text-secondary); }
+.xb-yours--bad { color: var(--bad); }
+.xb-people { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.xb-new { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.xb-new[hidden] { display: none; }
+.xb-sp { flex: 1 1 auto; }
+
+@media (max-width: 640px) {
+    .xb-people { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+    .xb-people::-webkit-scrollbar { display: none; }
+    .xb-input--num { flex: 1 1 120px; width: auto; }
+}

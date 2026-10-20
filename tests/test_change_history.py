@@ -80,7 +80,7 @@ def test_a_label_set_in_the_app_is_one_entry_with_before_and_after(imported):
     [change] = shown["changes"]
     assert (change["table"], change["row_id"], change["op"]) == ("transactions", tx["id"], "update")
     assert change["before"]["book"] != "Moom"
-    assert (change["after"]["book"], change["after"]["cat_source"]) == ("Moom", "manual")
+    assert (change["after"]["book"], change["after"]["book_source"]) == ("Moom", "chosen")
 
 
 def test_a_write_that_changes_nothing_leaves_no_entry(imported):
@@ -166,7 +166,8 @@ def test_undo_puts_a_label_back_and_is_itself_an_entry(imported):
     assert resp.status_code == 200, resp.get_json()
     back = next(t for t in imported.get("/api/transactions?per_page=50").get_json()["transactions"]
                 if t["id"] == tx["id"])
-    assert (back["book"], back["notes"], back["cat_source"]) == (tx["book"], tx["notes"], tx["cat_source"])
+    assert (back["book"], back["notes"], back["book_source"], back["type_source"]) == (
+        tx["book"], tx["notes"], tx["book_source"], tx["type_source"])
     undo_entry, original = entries(imported)[:2]
     assert undo_entry["summary"] == "Undid: Changed a row's labels"
     assert (undo_entry["undoes"], original["undone_by"]) == (changed["id"], undo_entry["id"])

@@ -1,7 +1,9 @@
-"""Where a row's book and type came from (cat_source), and which writers may
-overwrite which rows."""
+"""Where a row's book and type came from (book_source, type_source), and
+which writers may overwrite which rows."""
 
 import db
+import label_source
+from test_book_and_type_switch import SOURCES_OF_MARK
 
 
 def _type_id(conn, name: str) -> int:
@@ -40,7 +42,8 @@ def test_match_merchant_uses_service_default_provenance(conn):
 
     assert (found["book"], found["type_id"]) == ("Household", dining_id)
     assert found["service_id"] == service_id
-    assert found["cat_source"] == "service_default"
+    rule = db.first_rule("Mixed Merchant Orchard", conn, 1200)
+    assert label_source.rule_sources(rule) == ("merchant", "merchant")
 
 
 def test_match_merchant_uses_rule_override_provenance(conn):
@@ -67,15 +70,15 @@ def test_match_merchant_uses_rule_override_provenance(conn):
     # The rule overrides the type; the book is still the merchant's.
     assert (found["book"], found["type_id"]) == ("Household", shopping_id)
     assert found["service_id"] == service_id
-    assert found["cat_source"] == "rule_override"
+    rule = db.first_rule("Mixed Override Apparel", conn, 8000)
+    assert label_source.rule_sources(rule) == ("merchant", "rule")
 
 
 def test_match_merchant_with_no_rule_gives_nothing(conn):
     found = db.match_merchant("NO SUCH SAMPLE MERCHANT", conn, amount_minor=500)
 
     assert found == {
-        "book": None, "type_id": None, "service_id": None,
-        "cat_source": None, "review_each_time": False,
+        "book": None, "type_id": None, "service_id": None, "review_each_time": False,
     }
 
 
@@ -98,20 +101,21 @@ def test_service_type_update_only_relabels_service_default_rows(client):
             ("2026-04-02", "Scoped Merchant Shirt", shopping_id, "rule_override"),
             ("2026-04-03", "Scoped Merchant Gift", shopping_id, "manual"),
         ]
-        for tx_date, description, type_id, cat_source in rows:
+        for tx_date, description, type_id, mark in rows:
             conn.execute(
                 """
                 INSERT INTO transactions
-                    (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
-                VALUES (?, ?, ?, 2500, 'Household', ?, ?, ?)
+                    (statement_id, date, description, amount_minor, book, type_id, service_id,
+                     book_source, type_source)
+                VALUES (?, ?, ?, 2500, 'Household', ?, ?, ?, ?)
                 """,
-                (statement_id, tx_date, description, type_id, service_id, cat_source),
+                (statement_id, tx_date, description, type_id, service_id, *SOURCES_OF_MARK[mark]),
             )
         conn.commit()
     finally:
         conn.close()
 
-    resp = client.put(f"/api/services/{service_id}", json={"type_id": groceries_id})
+    resp = client.put(f"/api/services/{service_id}", json={"type_id": groceries_id, "past": "apply"})
     assert resp.status_code == 200
     assert resp.get_json()["recategorized"] == 1
 
@@ -119,7 +123,7 @@ def test_service_type_update_only_relabels_service_default_rows(client):
     try:
         rows = conn.execute(
             """
-            SELECT description, type_id, cat_source
+            SELECT description, type_id, book_source, type_source
             FROM transactions
             WHERE service_id = ?
             ORDER BY date
@@ -129,10 +133,10 @@ def test_service_type_update_only_relabels_service_default_rows(client):
     finally:
         conn.close()
 
-    by_desc = {row["description"]: (row["type_id"], row["cat_source"]) for row in rows}
-    assert by_desc["Scoped Merchant Lunch"] == (groceries_id, "service_default")
-    assert by_desc["Scoped Merchant Shirt"] == (shopping_id, "rule_override")
-    assert by_desc["Scoped Merchant Gift"] == (shopping_id, "manual")
+    by_desc = {row["description"]: (row["type_id"], row["book_source"], row["type_source"]) for row in rows}
+    assert by_desc["Scoped Merchant Lunch"] == (groceries_id, "merchant", "merchant")
+    assert by_desc["Scoped Merchant Shirt"] == (shopping_id, "merchant", "rule")
+    assert by_desc["Scoped Merchant Gift"] == (shopping_id, "chosen", "chosen")
 
 
 def test_resolve_transaction_scope_does_not_mutate_service_default(client):
@@ -150,8 +154,8 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
         conn.execute(
             """
             INSERT INTO transactions
-                (statement_id, date, description, amount_minor, type_id, service_id, cat_source)
-            VALUES (?, '2026-04-04', 'Scoped Resolve Merchant Apparel', 8800, NULL, NULL, 'auto')
+                (statement_id, date, description, amount_minor, type_id, service_id)
+            VALUES (?, '2026-04-04', 'Scoped Resolve Merchant Apparel', 8800, NULL, NULL)
             """,
             (statement_id,),
         )
@@ -186,7 +190,7 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
             (service_id,),
         ).fetchone()[0]
         tx = conn.execute(
-            "SELECT book, type_id, service_id, cat_source FROM transactions WHERE id = ?",
+            "SELECT book, type_id, service_id, book_source, type_source FROM transactions WHERE id = ?",
             (tx_id,),
         ).fetchone()
     finally:
@@ -194,15 +198,10 @@ def test_resolve_transaction_scope_does_not_mutate_service_default(client):
 
     assert (service["book"], service["type_id"]) == ("Household", dining_id)
     assert rule_count == 0
-    assert (tx["book"], tx["type_id"], tx["service_id"], tx["cat_source"]) == (
-        "Household",
-        shopping_id,
-        service_id,
-        "manual",
-    )
+    assert tuple(tx) == ("Household", shopping_id, service_id, "chosen", "chosen")
 
 
-def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
+def test_the_drift_apply_recomputes_inferred_and_preserves_manual(client):
     conn = db.get_connection()
     try:
         dining_id = _type_id(conn, "Dining")
@@ -229,14 +228,15 @@ def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
             ("2026-04-05", "Recat Merchant Order", dining_id, service_id, "service_default"),
             ("2026-04-06", "Recat Merchant Manual", groceries_id, service_id, "manual"),
         ]
-        for tx_date, description, type_id, tx_service_id, cat_source in rows:
+        for tx_date, description, type_id, tx_service_id, mark in rows:
             conn.execute(
                 """
                 INSERT INTO transactions
-                    (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
-                VALUES (?, ?, ?, 4200, 'Household', ?, ?, ?)
+                    (statement_id, date, description, amount_minor, book, type_id, service_id,
+                     book_source, type_source)
+                VALUES (?, ?, ?, 4200, 'Household', ?, ?, ?, ?)
                 """,
-                (statement_id, tx_date, description, type_id, tx_service_id, cat_source),
+                (statement_id, tx_date, description, type_id, tx_service_id, *SOURCES_OF_MARK[mark]),
             )
         conn.execute(
             "UPDATE merchant_rules SET type_override_id = ? WHERE id = ?",
@@ -248,17 +248,16 @@ def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
 
     db.invalidate_rules_cache()
 
-    resp = client.post("/api/rules/recategorize", json={})
+    assert client.get("/api/rules/drift").get_json()["count"] == 1   # the manual row is not counted
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
     assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["updated"] == 1
-    assert data["skipped_manual"] == 1
+    assert resp.get_json()["recategorized"] == 1
 
     conn = db.get_connection()
     try:
         rows = conn.execute(
             """
-            SELECT description, type_id, service_id, cat_source
+            SELECT description, type_id, service_id, book_source, type_source
             FROM transactions
             WHERE service_id = ?
             ORDER BY date
@@ -269,11 +268,11 @@ def test_recategorize_all_recomputes_inferred_and_preserves_manual(client):
         conn.close()
 
     by_desc = {
-        row["description"]: (row["type_id"], row["service_id"], row["cat_source"])
+        row["description"]: (row["type_id"], row["service_id"], row["book_source"], row["type_source"])
         for row in rows
     }
-    assert by_desc["Recat Merchant Order"] == (shopping_id, service_id, "rule_override")
-    assert by_desc["Recat Merchant Manual"] == (groceries_id, service_id, "manual")
+    assert by_desc["Recat Merchant Order"] == (shopping_id, service_id, "merchant", "rule")
+    assert by_desc["Recat Merchant Manual"] == (groceries_id, service_id, "chosen", "chosen")
 
 
 def test_rule_update_can_apply_type_override_and_relabel(client):
@@ -300,8 +299,9 @@ def test_rule_update_can_apply_type_override_and_relabel(client):
         conn.execute(
             """
             INSERT INTO transactions
-                (statement_id, date, description, amount_minor, book, type_id, service_id, cat_source)
-            VALUES (?, '2026-04-07', 'Rule Update Merchant Apparel', 5100, 'Household', ?, ?, 'service_default')
+                (statement_id, date, description, amount_minor, book, type_id, service_id,
+                 book_source, type_source)
+            VALUES (?, '2026-04-07', 'Rule Update Merchant Apparel', 5100, 'Household', ?, ?, 'merchant', 'merchant')
             """,
             (statement_id, dining_id, service_id),
         )
@@ -312,7 +312,7 @@ def test_rule_update_can_apply_type_override_and_relabel(client):
 
     resp = client.put(
         f"/api/rules/{rule_id}",
-        json={"type_override_id": shopping_id},
+        json={"type_override_id": shopping_id, "past": "apply"},
     )
     assert resp.status_code == 200
     assert resp.get_json()["recategorized"] == 1
@@ -324,19 +324,14 @@ def test_rule_update_can_apply_type_override_and_relabel(client):
             (rule_id,),
         ).fetchone()
         tx = conn.execute(
-            "SELECT book, type_id, service_id, cat_source FROM transactions WHERE id = ?",
+            "SELECT book, type_id, service_id, book_source, type_source FROM transactions WHERE id = ?",
             (tx_id,),
         ).fetchone()
     finally:
         conn.close()
 
     assert rule["type_override_id"] == shopping_id
-    assert (tx["book"], tx["type_id"], tx["service_id"], tx["cat_source"]) == (
-        "Household",
-        shopping_id,
-        service_id,
-        "rule_override",
-    )
+    assert tuple(tx) == ("Household", shopping_id, service_id, "merchant", "rule")
 
 
 def test_rule_create_can_persist_type_override(client):

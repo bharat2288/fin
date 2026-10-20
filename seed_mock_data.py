@@ -15,6 +15,7 @@ import sys
 from datetime import date, timedelta
 
 import book_type
+import label_source
 from db import DB_PATH, get_connection, init_db, match_merchant
 
 # ---------------------------------------------------------------------------
@@ -305,8 +306,9 @@ def create_transactions(conn, account_ids: dict):
             tx_date = random_date_in_month(year, month)
             stmt_id = get_statement_id(conn, acct_id, tx_date.isoformat())
 
-            # Determine cat_source — mostly auto, ~5% manual
-            cat_source = "manual" if random.random() < 0.05 else "auto"
+            # Where the book and type came from: mostly the merchant (or, with
+            # no merchant, as a field with no source reads), ~5% chosen by hand
+            source = label_source.CHOSEN if random.random() < 0.05 else label_source.NO_SOURCE
 
             # One-off flag — ~2% of transactions
             is_one_off = 1 if random.random() < 0.02 else 0
@@ -314,8 +316,8 @@ def create_transactions(conn, account_ids: dict):
             conn.execute(
                 "INSERT INTO transactions "
                 "(statement_id, date, description, amount_minor, book, type_id, "
-                "service_id, is_one_off, cat_source, flow_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'expense')",
+                "service_id, is_one_off, book_source, type_source, flow_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'expense')",
                 (
                     stmt_id,
                     tx_date.isoformat(),
@@ -325,7 +327,8 @@ def create_transactions(conn, account_ids: dict):
                     type_id,
                     service_id,
                     is_one_off,
-                    cat_source,
+                    label_source.given(book, source),
+                    label_source.given(type_id, source),
                 ),
             )
             month_txns += 1
@@ -347,8 +350,8 @@ def create_transactions(conn, account_ids: dict):
             conn.execute(
                 "INSERT INTO transactions "
                 "(statement_id, date, description, amount_minor, type_id, "
-                "service_id, is_one_off, cat_source, flow_type) "
-                "VALUES (?, ?, ?, ?, NULL, NULL, 0, 'auto', 'expense')",
+                "service_id, is_one_off, flow_type) "
+                "VALUES (?, ?, ?, ?, NULL, NULL, 0, 'expense')",
                 (stmt_id, tx_date.isoformat(), desc, amount),
             )
             month_txns += 1

@@ -17,11 +17,13 @@ import convert_change_history
 import convert_account_kinds
 import convert_book_type
 import convert_minor_units
+import convert_label_source
 import convert_printed_statements
 import db
 import history
 import retire_categories
 import retire_float_amounts
+import retire_single_mark
 
 DAY = date(2026, 3, 14)
 OLD_SCHEMA = Path(__file__).parent / "schema_before_book_and_type.sql"
@@ -256,6 +258,13 @@ def test_a_database_through_every_step_has_the_shape_of_a_new_one(old, tmp_path)
     conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.close()
 
+    # Columns a step after these adds (convert_label_source.py) are not
+    # there yet: the shape is the new one's without them.
+    later = conversion.added_after("printed-statements")
+    # And those a step after these drops (retire_single_mark.py): kept until it does.
+    for table, retired in conversion.retired_after("printed-statements").items():
+        later[table] = set(later.get(table, ())) | {column for column, _ in retired}
+
     def shape(path: Path) -> dict:
         tables = [r[0] for r in query(
             path, "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -263,8 +272,9 @@ def test_a_database_through_every_step_has_the_shape_of_a_new_one(old, tmp_path)
         )]
         return {
             "tables": {
-                t: query(path, f"SELECT name, type, \"notnull\", dflt_value, pk"
-                               f" FROM pragma_table_info('{t}') ORDER BY cid")
+                t: [c for c in query(path, f"SELECT name, type, \"notnull\", dflt_value, pk"
+                                           f" FROM pragma_table_info('{t}') ORDER BY cid")
+                    if c[0] not in later.get(t, ())]
                 for t in tables
             },
             "foreign_keys": {
@@ -433,16 +443,18 @@ def test_the_app_serves_a_converted_database_by_book_and_type(old, started_on, m
     conversion.run_step(old, convert_account_kinds.STEP, today=DAY)
     conversion.run_step(old, convert_printed_statements.STEP, today=DAY)
 
-    # And the change history, the last step of the chain.
+    # And the change history, and the label sources after it.
     conversion.run_step(old, convert_change_history.STEP)
+    conversion.run_step(old, convert_label_source.STEP)
+    conversion.run_step(old, retire_single_mark.STEP)
     client = started_on(old)
 
     rows = {t["id"]: t for t in client.get("/api/transactions?per_page=50").get_json()["transactions"]}
-    assert (rows[1]["book"], rows[1]["display_type"], rows[1]["cat_source"]) == (
-        "Household", "Dining", "service_default",
+    assert (rows[1]["book"], rows[1]["display_type"], rows[1]["sources"]) == (
+        "Household", "Dining", {"book": "merchant", "type": "merchant"},
     )
-    assert (rows[2]["book"], rows[2]["display_type"], rows[2]["cat_source"]) == (
-        "Moom", "Software & AI tools", "manual",
+    assert (rows[2]["book"], rows[2]["display_type"], rows[2]["sources"]["book"]) == (
+        "Moom", "Software & AI tools", "checked",
     )
     # Marked for review, and a row that never had a category: no type, the
     # household's until the operator says otherwise.

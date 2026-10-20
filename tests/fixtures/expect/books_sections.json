@@ -1,0 +1,227 @@
+{
+  "as_at": "2026-10-19",
+  "rate": {
+    "text": "0.0155",
+    "date": "2026-09-30"
+  },
+  "sections": [
+    {
+      "key": "expected_back",
+      "heading": "Expected back",
+      "owed": false,
+      "in_total": false,
+      "total_minor": 262490,
+      "left_out": [],
+      "lines": [
+        {
+          "key": "expectation:9",
+          "expectation_id": 9,
+          "title": "Opening figure · Sam",
+          "date": "2026-01-01",
+          "names": [
+            "Sam"
+          ],
+          "open_minor": 80000,
+          "amount_minor": 80000,
+          "currency": "SGD",
+          "sgd_minor": 80000,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 291,
+          "old": true,
+          "last_set_off": null
+        },
+        {
+          "key": "expectation:5",
+          "expectation_id": 5,
+          "title": "Loan to Ravi",
+          "date": "2026-06-03",
+          "names": [
+            "Ravi"
+          ],
+          "open_minor": 150000,
+          "amount_minor": 200000,
+          "currency": "SGD",
+          "sgd_minor": 150000,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 138,
+          "old": true,
+          "last_set_off": "2026-08-15"
+        },
+        {
+          "key": "expectation:4",
+          "expectation_id": 4,
+          "title": "AIRBNB",
+          "date": "2026-06-28",
+          "names": [
+            "Lena"
+          ],
+          "open_minor": 4000,
+          "amount_minor": 62000,
+          "currency": "SGD",
+          "sgd_minor": 4000,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 113,
+          "old": true,
+          "last_set_off": "2026-09-26"
+        },
+        {
+          "key": "expectation:6",
+          "expectation_id": 6,
+          "title": "PURPLE LOTUS MUMBAI",
+          "date": "2026-09-04",
+          "names": [
+            "Jay"
+          ],
+          "open_minor": 19355,
+          "amount_minor": 600000,
+          "currency": "INR",
+          "sgd_minor": 300,
+          "rate": {
+            "text": "0.0155",
+            "date": "2026-09-30"
+          },
+          "no_rate": false,
+          "age_days": 45,
+          "old": false,
+          "last_set_off": "2026-09-22"
+        },
+        {
+          "key": "expectation:3",
+          "expectation_id": 3,
+          "title": "GOLDEN VILLAGE",
+          "date": "2026-09-21",
+          "names": [
+            "Jay",
+            "Lena"
+          ],
+          "open_minor": 6400,
+          "amount_minor": 6400,
+          "currency": "SGD",
+          "sgd_minor": 6400,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 28,
+          "old": false,
+          "last_set_off": null
+        },
+        {
+          "key": "expectation:2",
+          "expectation_id": 2,
+          "title": "KLOOK TRAVEL",
+          "date": "2026-09-28",
+          "names": [
+            "Kim"
+          ],
+          "open_minor": 17000,
+          "amount_minor": 18000,
+          "currency": "SGD",
+          "sgd_minor": 17000,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 21,
+          "old": false,
+          "last_set_off": "2026-10-15"
+        },
+        {
+          "key": "expectation:1",
+          "expectation_id": 1,
+          "title": "HARBOUR GRILL",
+          "date": "2026-10-02",
+          "names": [
+            "Jay",
+            "Kim"
+          ],
+          "open_minor": 2000,
+          "amount_minor": 20000,
+          "currency": "SGD",
+          "sgd_minor": 2000,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 17,
+          "old": false,
+          "last_set_off": "2026-10-15"
+        },
+        {
+          "key": "expectation:7",
+          "expectation_id": 7,
+          "title": "SWIGGY · Mumbai",
+          "date": "2026-10-06",
+          "names": [
+            "Jay"
+          ],
+          "open_minor": 180000,
+          "amount_minor": 240000,
+          "currency": "INR",
+          "sgd_minor": 2790,
+          "rate": {
+            "text": "0.0155",
+            "date": "2026-09-30"
+          },
+          "no_rate": false,
+          "age_days": 13,
+          "old": false,
+          "last_set_off": null
+        }
+      ]
+    },
+    {
+      "key": "waiting",
+      "heading": "Waiting for its row",
+      "owed": true,
+      "in_total": false,
+      "total_minor": 10000,
+      "left_out": [],
+      "lines": [
+        {
+          "key": "waiting:16",
+          "set_off_id": 16,
+          "title": "PAYNOW FROM LENA 2210",
+          "date": "2026-10-17",
+          "names": [
+            "Lena"
+          ],
+          "note": "for the BBQ, when it is charged",
+          "open_minor": 10000,
+          "amount_minor": 10000,
+          "currency": "SGD",
+          "sgd_minor": 10000,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 2,
+          "old": false
+        }
+      ]
+    },
+    {
+      "key": "to_pay_back",
+      "heading": "To pay back",
+      "owed": true,
+      "in_total": false,
+      "total_minor": 400000,
+      "left_out": [],
+      "lines": [
+        {
+          "key": "expectation:8",
+          "expectation_id": 8,
+          "title": "From Parents",
+          "date": "2026-03-01",
+          "names": [
+            "Parents"
+          ],
+          "open_minor": 400000,
+          "amount_minor": 500000,
+          "currency": "SGD",
+          "sgd_minor": 400000,
+          "rate": null,
+          "no_rate": false,
+          "age_days": 232,
+          "old": true,
+          "last_set_off": "2026-08-01"
+        }
+      ]
+    }
+  ]
+}

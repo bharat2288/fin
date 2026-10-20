@@ -22,6 +22,38 @@ BOOK_NAMES = tuple(name for name, _ in BOOKS)
 # household's until the operator says otherwise.
 DEFAULT_BOOK = "Household"
 
+# Where a row's book, and separately its type, came from (personal-ledger 24,
+# ADR-008). Each field carries its own source; a field with no value has none.
+# Declared here, once, beside the books; every writer of a source validates
+# against this declaration through `checked_source`, and schema.sql's CHECK on
+# the two columns holds the same list (a test holds the two together).
+# (name, description).
+SOURCES = (
+    ("merchant", "from the merchant: its default book or type"),
+    ("rule", "from a rule: the book or type a rule override sets"),
+    ("wording", "from the wording: the PayNow wording fallback"),
+    ("checked", "checked: the operator accepted the value fin offered; a later fix still reaches it"),
+    ("chosen", "chosen: the operator, or Claude in chat, set the value; nothing automatic changes it"),
+    ("derived", "worked out: loan interest worked out from figures (loan_interest.py)"),
+)
+
+SOURCE_NAMES = tuple(name for name, _ in SOURCES)
+
+
+class UnknownSource(ValueError):
+    """A writer was handed a book or type source that is not declared."""
+
+
+def checked_source(value) -> str | None:
+    """A source as a writer may store it: one of the declared sources, or None
+    for a field that is empty."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in SOURCE_NAMES:
+        raise UnknownSource(f"unknown source: {value!r}")
+    return value
+
+
 RUNNING = "running"
 ONE_OFF = "one-off"
 

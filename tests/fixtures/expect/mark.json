@@ -1,0 +1,90 @@
+{
+  "request": {
+    "direction": "back",
+    "all": false,
+    "amount": "200.00",
+    "names": [
+      31,
+      32
+    ],
+    "new_names": [],
+    "note": null
+  },
+  "request_all": {
+    "direction": "back",
+    "all": true,
+    "amount": null,
+    "names": [
+      32
+    ],
+    "new_names": [],
+    "note": "concert tickets"
+  },
+  "request_new_name": {
+    "direction": "back",
+    "all": false,
+    "amount": "200.00",
+    "names": [
+      31
+    ],
+    "new_names": [
+      "Mei"
+    ],
+    "note": null
+  },
+  "response": {
+    "expectation": {
+      "id": 1,
+      "direction": "back",
+      "amount_minor": 20000,
+      "currency": "SGD",
+      "note": null,
+      "source": "hand",
+      "made_at": "2026-10-19 09:00:00",
+      "day": "2026-10-02",
+      "names": [
+        {
+          "account_id": 31,
+          "name": "Jay"
+        },
+        {
+          "account_id": 32,
+          "name": "Kim"
+        }
+      ],
+      "set_off_minor": 0,
+      "let_go_minor": 0,
+      "open_minor": 20000,
+      "state": "open",
+      "row": {
+        "id": 101,
+        "date": "2026-10-02",
+        "description": "HARBOUR GRILL",
+        "account_id": 11,
+        "account_name": "Rewards card",
+        "amount_minor": 30000,
+        "currency": "SGD",
+        "book": "Household",
+        "type_id": 7,
+        "display_type": "Dining"
+      },
+      "opening": null
+    },
+    "row": {
+      "id": 101,
+      "amount_minor": 30000,
+      "currency": "SGD",
+      "expected_minor": 20000,
+      "placed_minor": 0,
+      "own_minor": 10000
+    },
+    "spending_change": {
+      "month": "2026-10",
+      "minor": -20000,
+      "currency": "SGD"
+    }
+  },
+  "refusal": {
+    "error": "more than the row's S$ 300.00"
+  }
+}

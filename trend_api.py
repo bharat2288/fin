@@ -397,10 +397,12 @@ def trend(conn: sqlite3.Connection, kind, ref, *, span=None, to=None, stack=None
         c = counts.setdefault(f["row_book"], [0, f["last_date"]])
         c[0] += f["n"]
         c[1] = max(c[1], f["last_date"])
+    # A book whose figure in the span is a let-go alone (personal-ledger 23: a
+    # gift let go counts in Gifts & Donations on its day) has no row in it.
     books = [{"book": r["book"], "net": r["net"], "spent": r["spent"], "back": r["back"],
               "avg": r["avg"], "months_counted": r["months_counted"],
-              "vs_prev_pct": r["vs_prev_pct"], "rows": counts[r["book"]][0],
-              "last_date": counts[r["book"]][1]} for r in figures]
+              "vs_prev_pct": r["vs_prev_pct"], "rows": counts.get(r["book"], [0, None])[0],
+              "last_date": counts.get(r["book"], [0, None])[1]} for r in figures]
     names = [b["book"] for b in books]
     if book is not None and names and book not in names:
         raise trend_span.SpanError(f"book must be one of {', '.join(names)}")

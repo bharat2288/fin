@@ -11,7 +11,7 @@ name is invented.
 import pytest
 
 from test_book_and_type_switch import (  # noqa: F401 (statement is a fixture)
-    label, merchant, row, rule, shown, statement, type_id,
+    label, mark_of, merchant, row, rule, shown, statement, type_id,
 )
 
 
@@ -34,7 +34,7 @@ def indigoair(conn, statement) -> tuple[int, list[int]]:
     conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (svc,))
     conn.commit()
     txs = [row(conn, statement, f"SAMPLE AIRWAYS 312-{i}", 400.0 + i, book="Household", type_name="Travel",
-               service_id=svc, cat_source="manual" if i < 2 else "service_default", day=f"2026-0{i + 6}-02")
+               service_id=svc, mark="manual" if i < 2 else "service_default", day=f"2026-0{i + 6}-02")
            for i in range(4)]
     conn.execute("UPDATE transactions SET book = 'Moom' WHERE id = ?", (txs[1],))
     other = merchant(conn, "Sample Bazaar", "Household", "Shopping")
@@ -62,7 +62,8 @@ def test_case_17_its_rows_newest_first_each_with_its_marks(client, indigoair):
     payload = rows_of(client, svc)
 
     assert [t["id"] for t in payload["transactions"]] == list(reversed(txs))
-    marks = [(t["book"], t["cat_source"], t["not_checked"]) for t in payload["transactions"]]
+    marks = [(t["book"], mark_of(t["book_source"], t["type_source"]), t["not_checked"])
+             for t in payload["transactions"]]
     assert marks == [("Household", "service_default", True), ("Household", "service_default", True),
                      ("Moom", "manual", False), ("Household", "manual", False)]
 

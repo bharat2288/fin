@@ -1,0 +1,102 @@
+{
+  "as_at": "2026-10-19",
+  "expectation": {
+    "id": 2,
+    "direction": "back",
+    "amount_minor": 18000,
+    "currency": "SGD",
+    "note": "concert tickets",
+    "source": "hand",
+    "made_at": "2026-10-19 09:00:00",
+    "day": "2026-09-28",
+    "names": [
+      {
+        "account_id": 32,
+        "name": "Kim"
+      }
+    ],
+    "set_off_minor": 4000,
+    "let_go_minor": 0,
+    "open_minor": 14000,
+    "state": "partly_back",
+    "row": {
+      "id": 102,
+      "date": "2026-09-28",
+      "description": "KLOOK TRAVEL",
+      "account_id": 12,
+      "account_name": "Everyday card",
+      "amount_minor": 18000,
+      "currency": "SGD",
+      "book": "Household",
+      "type_id": 8,
+      "display_type": "Entertainment"
+    },
+    "opening": null
+  },
+  "own_minor": 0,
+  "age_days": 21,
+  "back_pct": 22,
+  "lines": [
+    {
+      "kind": "marked",
+      "id": 2,
+      "date": "2026-09-28",
+      "amount_minor": 18000,
+      "currency": "SGD",
+      "actions": [
+        "undo_mark"
+      ]
+    },
+    {
+      "kind": "refund",
+      "id": 13,
+      "date": "2026-10-04",
+      "purchase_date": "2026-09-28",
+      "amount_minor": 3000,
+      "currency": "SGD",
+      "refund": {
+        "id": 405,
+        "description": "KLOOK TRAVEL REFUND",
+        "amount_minor": -3000,
+        "currency": "SGD"
+      },
+      "actions": [
+        "unlink"
+      ]
+    },
+    {
+      "kind": "set_off",
+      "id": 12,
+      "date": "2026-10-15",
+      "person": "Kim",
+      "amount_minor": 1000,
+      "currency": "SGD",
+      "payment": {
+        "id": 202,
+        "description": "PAYNOW FROM KIM L 7781",
+        "amount_minor": -7000,
+        "currency": "SGD"
+      },
+      "elsewhere": [
+        {
+          "expectation_id": 1,
+          "title": "HARBOUR GRILL",
+          "amount_minor": 6000,
+          "currency": "SGD"
+        }
+      ],
+      "actions": [
+        "unlink"
+      ]
+    },
+    {
+      "kind": "open",
+      "amount_minor": 14000,
+      "currency": "SGD",
+      "name": null,
+      "actions": [
+        "let_go"
+      ]
+    }
+  ]
+}

@@ -16,8 +16,10 @@ import app as fin_app
 import book_type
 import conversion
 import convert_change_history
+import convert_label_source
 import convert_account_kinds
 import convert_movements
+import retire_single_mark
 import db
 import history
 import money
@@ -105,10 +107,13 @@ def dump(path: Path) -> str:
 
 
 def old_schema() -> str:
-    """Today's schema without the column this step adds."""
+    """Today's schema without the column this step adds, nor those a later
+    step adds (conversion.added_after)."""
+    later = conversion.added_after("movements").get("transactions", set())
     lines = history.without_history(db.SCHEMA_PATH.read_text()).splitlines()
-    kept = [line for line in lines if not line.strip().startswith("other_side_id ")]
-    assert len(kept) == len(lines) - 1
+    kept = [line for line in lines if not line.strip().startswith("other_side_id ")
+            and line.strip().split(" ", 1)[0] not in later]
+    assert len(kept) == len(lines) - 1 - len(later)
     return "\n".join(kept)
 
 
@@ -118,6 +123,10 @@ def old(tmp_path: Path) -> Path:
     path = tmp_path / "ledger.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(old_schema())
+    # And the columns a later step retires, which a book from then still held.
+    for table, retired in conversion.retired_after("movements").items():
+        for column, declaration in retired:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
     conn.executemany(
         "INSERT INTO accounts (id, name, short_name, type, owner) VALUES (?, ?, ?, ?, ?)",
         [(i, name, name, kind, owner) for i, name, kind, owner in ACCOUNTS],
@@ -132,11 +141,10 @@ def old(tmp_path: Path) -> Path:
     )
     conn.executemany(
         "INSERT INTO transactions (id, statement_id, date, description, amount_minor, flow_type, "
-        "flow_type_manual, service_id, type_id, book, cat_source) VALUES (?, ?, '2026-08-15', ?, ?, ?, ?, ?, ?, ?, ?)",
+        "flow_type_manual, service_id, type_id, book) VALUES (?, ?, '2026-08-15', ?, ?, ?, ?, ?, ?, ?)",
         [
             (i, account, description, money.to_minor(amount), flow, manual, service,
-             900 if typed else None, book,
-             "manual" if manual else "auto")
+             900 if typed else None, book)
             for (i, account, description, amount, flow, manual, service, typed, book), _ in ROWS
         ],
     )
@@ -185,7 +193,7 @@ def test_a_row_with_a_manual_flow_is_never_touched(old):
 def test_nothing_but_the_flow_and_the_other_side_changes(old):
     everything_else = (
         "SELECT id, statement_id, date, description, amount_minor, service_id, type_id, book, "
-        "cat_source, flow_type_manual, is_one_off, notes FROM transactions ORDER BY id"
+        "flow_type_manual, is_one_off, notes FROM transactions ORDER BY id"
     )
     before = query(old, everything_else)
 
@@ -220,7 +228,12 @@ def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
 
     shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('transactions')"
     foreign_keys = "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('transactions') ORDER BY 1, 2"
-    assert query(old, shape) == query(new, shape)
+    # Less the columns a later step adds (convert_label_source.py).
+    later = conversion.added_after("movements").get("transactions", set())
+    # And those a later step drops (retire_single_mark.py), which it still holds.
+    retired = {column for column, _ in conversion.retired_after("movements").get("transactions", ())}
+    assert [c for c in query(old, shape) if c[0] not in retired] == [
+        c for c in query(new, shape) if c[0] not in later]
     assert query(old, foreign_keys) == query(new, foreign_keys)
 
 
@@ -328,8 +341,10 @@ def test_the_app_will_not_start_on_a_database_from_before_the_step(old, started_
 def test_the_app_shows_the_converted_rows_and_their_other_sides(old, started_on):
     convert(old)
 
-    # And the change history, the last step of the chain.
+    # And the change history, and the label sources after it.
     conversion.run_step(old, convert_change_history.STEP)
+    conversion.run_step(old, convert_label_source.STEP)
+    conversion.run_step(old, retire_single_mark.STEP)
     client = started_on(old)
 
     waiting = client.get("/api/transactions?flow=review&sort=amount&sort_dir=desc").get_json()["transactions"]

@@ -16,6 +16,7 @@ import book_type
 import db
 import money
 import parsers
+import retire_single_mark
 from flow import ClassifierContext, classify_flow
 from parse_dbs import ParsedStatement, ParsedTransaction
 
@@ -64,6 +65,43 @@ def rule(conn, pattern: str, service_id: int) -> int:
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
+# The book and type sources a row carries for a mark in the old single
+# mark's words (retired, personal-ledger 51), as the label-source step gave
+# them where the rules agree (personal-ledger 24): a hand-set row is chosen in
+# both fields, a rule override sets the type. These older cases still speak
+# those words; the rows hold only the two sources.
+SOURCES_OF_MARK = {
+    "auto": ("merchant", "merchant"),
+    "service_default": ("merchant", "merchant"),
+    "rule_override": ("merchant", "rule"),
+    "fallback": ("wording", "wording"),
+    "manual": ("chosen", "chosen"),
+    "derived": ("derived", "derived"),
+}
+
+
+def sources_of(mark, book, typed) -> tuple:
+    """(book source, type source) for a seeded row. An empty field has none,
+    but the source the mark read for it where that was not from the merchant,
+    as the step that retired the mark wrote it (retire_single_mark)."""
+    book_source, type_source = SOURCES_OF_MARK.get(mark or "auto", (None, None))
+    empty = retire_single_mark.EXPAND_READING.get(mark or "auto")
+    return (book_source if book is not None else empty, type_source if typed is not None else empty)
+
+
+# A row's two sources in the old mark's words, first match wins, as fin wrote
+# the mark in step with them while it was kept (label_source, expand).
+_MARK_OF = ((("checked", "chosen"), "manual"), (("derived",), "derived"), (("wording",), "fallback"),
+            (("rule",), "rule_override"), (("merchant",), "service_default"))
+
+
+def mark_of(book_source, type_source) -> str:
+    for sources, name in _MARK_OF:
+        if book_source in sources or type_source in sources:
+            return name
+    return "auto"
+
+
 def row(
     conn,
     statement_id: int,
@@ -73,17 +111,19 @@ def row(
     book: str | None = None,
     type_name: str | None = None,
     service_id: int | None = None,
-    cat_source: str = "auto",
+    mark: str = "auto",
     flow: str = "expense",
     day: str = "2026-04-10",
 ) -> int:
-    """A row of `amount` dollars, stored as its whole cents."""
+    """A row of `amount` dollars, stored as its whole cents, with the
+    sources `mark` stands for (SOURCES_OF_MARK)."""
+    typed = type_id(conn, type_name) if type_name else None
     conn.execute(
         "INSERT INTO transactions (statement_id, date, description, amount_minor,"
-        " book, type_id, service_id, cat_source, flow_type)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (statement_id, day, description, money.exact_minor(amount), book,
-         type_id(conn, type_name) if type_name else None, service_id, cat_source, flow),
+        " book, type_id, service_id, flow_type, book_source, type_source)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (statement_id, day, description, money.exact_minor(amount), book, typed, service_id,
+         flow, *sources_of(mark, book, typed)),
     )
     conn.commit()
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -96,9 +136,10 @@ def shown(client, tx_id: int) -> dict:
 
 
 def label(client, tx_id: int) -> tuple:
-    """(book, type, provenance) of one row, as the transaction list serves it."""
+    """(book, type, provenance) of one row, as the transaction list serves
+    it: the provenance its two sources give, in the old mark's words."""
     tx = shown(client, tx_id)
-    return (tx["book"], tx["display_type"], tx["cat_source"])
+    return (tx["book"], tx["display_type"], mark_of(tx["book_source"], tx["type_source"]))
 
 
 def merchant_shown(client, service_id: int) -> dict:
@@ -186,6 +227,9 @@ def test_resolve_fills_matching_rows_that_have_the_merchant_but_no_type(
         "type_id": type_id(conn, "Advertising"),
         "pattern": "SAMPLE*ADS",
         "apply_scope": "service_default",
+        # The typed row is a past row the new default would relabel
+        # (fin-surfaces 21): only new rows, so it keeps its type.
+        "past_rows": "only_new",
     })
 
     assert resp.status_code == 200, resp.get_json()
@@ -353,7 +397,7 @@ def test_transaction_update_writes_book_and_type_and_marks_the_row_manual(
 ):
     cafe = merchant(conn, "Sample Cafe", "Household", "Dining")
     tx = row(conn, statement, "SAMPLE CAFE", book="Household", type_name="Dining",
-             service_id=cafe, cat_source="service_default")
+             service_id=cafe, mark="service_default")
 
     resp = client.put(f"/api/transactions/{tx}", json={
         "book": "Moom", "type_id": type_id(conn, "Office"),
@@ -388,7 +432,7 @@ def test_transaction_update_refuses_an_unknown_book_or_type(client, conn, statem
 
 def test_a_note_alone_leaves_the_label_and_its_provenance(client, conn, statement):
     tx = row(conn, statement, "SAMPLE CAFE", book="Household", type_name="Dining",
-             cat_source="service_default")
+             mark="service_default")
 
     resp = client.put(f"/api/transactions/{tx}", json={"notes": "sample note"})
 
@@ -452,12 +496,12 @@ def test_rule_update_rewrites_book_and_type_on_its_rows_and_leaves_manual_ones(
     market = merchant(conn, "Sample Market", "Household", "Shopping")
     rule_id = rule(conn, "SAMPLE MARKET", market)
     inherited = row(conn, statement, "SAMPLE MARKET 0042", book="Household",
-                    type_name="Shopping", service_id=market, cat_source="service_default")
+                    type_name="Shopping", service_id=market, mark="service_default")
     by_hand = row(conn, statement, "SAMPLE MARKET 0077", book="Kalesh",
-                  type_name="Equipment", service_id=market, cat_source="manual")
+                  type_name="Equipment", service_id=market, mark="manual")
 
     resp = client.put(f"/api/rules/{rule_id}", json={
-        "type_override_id": type_id(conn, "Stock purchases"), "book_override": "Moom",
+        "type_override_id": type_id(conn, "Stock purchases"), "book_override": "Moom", "past": "apply",
     })
 
     assert resp.status_code == 200, resp.get_json()
@@ -467,7 +511,7 @@ def test_rule_update_rewrites_book_and_type_on_its_rows_and_leaves_manual_ones(
 
     # Taking the override off again hands the rows back to the merchant.
     resp = client.put(f"/api/rules/{rule_id}", json={
-        "type_override_id": None, "book_override": None,
+        "type_override_id": None, "book_override": None, "past": "apply",
     })
     assert resp.status_code == 200, resp.get_json()
     assert label(client, inherited) == ("Household", "Shopping", "service_default")
@@ -478,47 +522,47 @@ def test_a_rule_overriding_the_type_alone_keeps_the_merchants_book(client, conn,
     hosting = merchant(conn, "Sample Hosting", "Kalesh", "Software & AI tools")
     rule_id = rule(conn, "SAMPLE HOSTING", hosting)
     tx = row(conn, statement, "SAMPLE HOSTING HARDWARE", service_id=hosting,
-             cat_source="service_default")
+             mark="service_default")
 
     resp = client.put(f"/api/rules/{rule_id}", json={
-        "type_override_id": type_id(conn, "Equipment"),
+        "type_override_id": type_id(conn, "Equipment"), "past": "apply",
     })
 
     assert resp.status_code == 200, resp.get_json()
     assert label(client, tx) == ("Kalesh", "Equipment", "rule_override")
 
 
-# --- P4: recategorize-all ------------------------------------------------------
+# --- P4: the rows that differ from their rule (Re-run every rule retired, fin-surfaces 51) ---
 
 
-def test_recategorize_all_writes_book_and_type_from_the_rules_and_keeps_manual_rows(
+def test_applying_the_drift_writes_book_and_type_from_the_rules_and_keeps_manual_rows(
     client, conn, statement
 ):
     ads = merchant(conn, "Sample Ads", "Moom", "Advertising")
     rule(conn, "SMPL ADS", ads)
     unlabelled = row(conn, statement, "SMPL ADS 0042")
     stale = row(conn, statement, "SMPL ADS 0077", book="Household", type_name="Shopping",
-                cat_source="service_default")
+                mark="service_default")
     by_hand = row(conn, statement, "SMPL ADS 0099", book="Kalesh", type_name="Advertising",
-                  cat_source="manual")
+                  mark="manual")
 
-    resp = client.post("/api/rules/recategorize")
+    assert client.get("/api/rules/drift").get_json()["count"] == 2   # the hand-set row is not counted
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
-    body = resp.get_json()
-    assert (body["updated"], body["skipped_manual"]) == (2, 1)
+    assert resp.get_json()["recategorized"] == 2
     for tx in (unlabelled, stale):
         assert label(client, tx) == ("Moom", "Advertising", "service_default")
         assert shown(client, tx)["service_id"] == ads
     assert label(client, by_hand) == ("Kalesh", "Advertising", "manual")
     assert shown(client, by_hand)["service_id"] is None
 
-    # Run again: nothing left to change.
-    again = client.post("/api/rules/recategorize").get_json()
-    assert (again["updated"], again["unchanged"]) == (0, 2)
+    # Nothing left that differs.
+    assert client.get("/api/rules/drift").get_json()["count"] == 0
+    assert client.post("/api/rules/drift", json={"past": "apply"}).get_json()["recategorized"] == 0
 
 
-def test_recategorize_all_applies_a_rules_override(client, conn, statement):
+def test_applying_the_drift_applies_a_rules_override(client, conn, statement):
     market = merchant(conn, "Sample Market", "Household", "Shopping")
     rule_id = rule(conn, "SAMPLE MARKET WHOLESALE", market)
     conn.execute(
@@ -529,7 +573,7 @@ def test_recategorize_all_applies_a_rules_override(client, conn, statement):
     db.invalidate_rules_cache()
     tx = row(conn, statement, "SAMPLE MARKET WHOLESALE 0042")
 
-    client.post("/api/rules/recategorize")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     assert label(client, tx) == ("Moom", "Stock purchases", "rule_override")
 
@@ -540,7 +584,7 @@ def test_the_paynow_fallback_gives_a_type_and_the_book_its_type_proposes(
     # No merchant rule knows this payee; the fixed PayNow wording list does.
     tx = row(conn, statement, "PayNow Transfer 0042 To: INLAND REVENUE AUTHORITY", 310.0)
 
-    client.post("/api/rules/recategorize")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     assert label(client, tx) == ("Household", "Tax", "fallback")
     assert shown(client, tx)["service_id"] is None
@@ -554,24 +598,26 @@ def test_service_update_writes_book_and_type_to_its_inherited_rows_only(
 ):
     hosting = merchant(conn, "Sample Hosting", "Household", "Subscriptions")
     inherited = row(conn, statement, "SAMPLE HOSTING 1", book="Household",
-                    type_name="Subscriptions", service_id=hosting, cat_source="service_default")
+                    type_name="Subscriptions", service_id=hosting, mark="service_default")
     unlabelled = row(conn, statement, "SAMPLE HOSTING 2", service_id=hosting)
     by_rule = row(conn, statement, "SAMPLE HOSTING 3", book="Household", type_name="Equipment",
-                  service_id=hosting, cat_source="rule_override")
+                  service_id=hosting, mark="rule_override")
     by_hand = row(conn, statement, "SAMPLE HOSTING 4", book="Moom", type_name="Office",
-                  service_id=hosting, cat_source="manual")
+                  service_id=hosting, mark="manual")
 
     resp = client.put(f"/api/services/{hosting}", json={
-        "book": "Kalesh", "type_id": type_id(conn, "Software & AI tools"),
+        "book": "Kalesh", "type_id": type_id(conn, "Software & AI tools"), "past": "apply",
     })
 
     assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["recategorized"] == 2
+    assert resp.get_json()["recategorized"] == 3
     changed = merchant_shown(client, hosting)
     assert (changed["book"], changed["display_type"]) == ("Kalesh", "Software & AI tools")
     assert label(client, inherited) == ("Kalesh", "Software & AI tools", "service_default")
     assert label(client, unlabelled)[:2] == ("Kalesh", "Software & AI tools")
-    assert label(client, by_rule) == ("Household", "Equipment", "rule_override")
+    # Each field on its own (personal-ledger 24): the rule set the type, the
+    # book came from the merchant and follows it.
+    assert label(client, by_rule) == ("Kalesh", "Equipment", "rule_override")
     assert label(client, by_hand) == ("Moom", "Office", "manual")
 
 
@@ -580,9 +626,9 @@ def test_service_update_of_the_book_alone_moves_its_rows_to_that_book(
 ):
     hosting = merchant(conn, "Sample Hosting", "Household", "Software & AI tools")
     tx = row(conn, statement, "SAMPLE HOSTING", book="Household",
-             type_name="Software & AI tools", service_id=hosting, cat_source="service_default")
+             type_name="Software & AI tools", service_id=hosting, mark="service_default")
 
-    resp = client.put(f"/api/services/{hosting}", json={"book": "Kalesh"})
+    resp = client.put(f"/api/services/{hosting}", json={"book": "Kalesh", "past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     assert label(client, tx) == ("Kalesh", "Software & AI tools", "service_default")
@@ -647,14 +693,14 @@ def test_service_merge_writes_the_targets_book_and_type_to_the_rows_it_takes(
     target = merchant(conn, "Sample Hosting", "Kalesh", "Software & AI tools")
     rule(conn, "SMPL*HOSTING", source)
     inherited = row(conn, statement, "SMPL*HOSTING 1", book="Household", type_name="Shopping",
-                    service_id=source, cat_source="service_default")
+                    service_id=source, mark="service_default")
     by_hand = row(conn, statement, "SMPL*HOSTING 2", book="Moom", type_name="Office",
-                  service_id=source, cat_source="manual")
+                  service_id=source, mark="manual")
     already = row(conn, statement, "SAMPLE HOSTING 3", book="Kalesh",
                   type_name="Software & AI tools", service_id=target,
-                  cat_source="service_default")
+                  mark="service_default")
 
-    resp = client.post(f"/api/services/{source}/merge", json={"target_id": target})
+    resp = client.post(f"/api/services/{source}/merge", json={"target_id": target, "past": "apply"})
 
     assert resp.status_code == 200, resp.get_json()
     merged = resp.get_json()["merged"]
@@ -762,14 +808,14 @@ def test_import_confirm_writes_the_label_the_operator_set_on_a_row(
     fake_statement([("2026-04-04", "CORNER STALL", 4.20)])
     preview = upload(client)
     entry = preview["groups"][0]["transactions"][0]
-    entry.update(book="Kalesh", type_id=type_id(conn, "Office"), cat_source="manual")
+    entry.update(book="Kalesh", type_id=type_id(conn, "Office"))
 
     resp = confirm(client, preview)
 
     assert resp.status_code == 200, resp.get_json()
     saved = by_description(client)["CORNER STALL"]
-    assert (saved["book"], saved["display_type"], saved["cat_source"]) == (
-        "Kalesh", "Office", "manual",
+    assert (saved["book"], saved["display_type"], saved["book_source"], saved["type_source"]) == (
+        "Kalesh", "Office", "chosen", "chosen",
     )
 
 
@@ -837,11 +883,13 @@ def test_import_preview_falls_back_to_the_paynow_wording_for_a_type(
 ):
     fake_statement([("2026-04-05", "PayNow Transfer 0042 To: INLAND REVENUE AUTHORITY", 310.0)])
 
-    entry = upload(client)["groups"][0]["transactions"][0]
+    preview = upload(client)
+    entry = preview["groups"][0]["transactions"][0]
 
-    assert (entry["book"], entry["type_name"], entry["cat_source"], entry["service_id"]) == (
-        "Household", "Tax", "fallback", None,
-    )
+    assert (entry["book"], entry["type_name"], entry["service_id"]) == ("Household", "Tax", None)
+    assert confirm(client, preview).status_code == 200
+    saved = by_description(client)["PayNow Transfer 0042 To: INLAND REVENUE AUTHORITY"]
+    assert (saved["book_source"], saved["type_source"]) == ("wording", "wording")
 
 
 # --- the merchant's review-each-time mark -----------------------------------------
@@ -1175,7 +1223,7 @@ def test_a_refund_is_known_by_its_wording_and_no_category_name_makes_one():
     ) == "income"
 
 
-def test_resolve_and_recategorize_keep_a_flow_set_by_hand(client, conn, statement):
+def test_resolve_and_the_drift_apply_keep_a_flow_set_by_hand(client, conn, statement):
     cafe = merchant(conn, "Sample Cafe", "Household", "Dining")
     rule(conn, "SAMPLE CAFE", cafe)
     tx = row(conn, statement, "SAMPLE CAFE CREDIT", -9.0, flow="refund")
@@ -1186,7 +1234,7 @@ def test_resolve_and_recategorize_keep_a_flow_set_by_hand(client, conn, statemen
     client.post("/api/transactions/resolve", json={
         "tx_id": tx, "service_id": cafe, "apply_scope": "transaction",
     })
-    client.post("/api/rules/recategorize")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     # Set by hand: kept. Derived: read again from the wording.
     assert shown(client, tx)["flow_type"] == "refund"

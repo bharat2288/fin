@@ -58,9 +58,21 @@ CHAIN = (
     ("flows", "convert_null_flows"),
     ("vantage-header-label", "convert_vantage_label"),
     ("change-history", "convert_change_history"),
+    # Personal-ledger 23: loans to and from people become expectations. After
+    # change-history, which makes the records it writes.
+    ("expect-back", "convert_expect_back"),
+    # Personal-ledger 24: a source for a row's book and for its type, filled
+    # from the row's one mark. After expect-back, one conversion at a time.
+    ("label-source", "convert_label_source"),
+    # Personal-ledger 51: the one mark dropped (contract), once nothing reads it.
+    ("retire-single-mark", "retire_single_mark"),
 )
 
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+
+# The record of steps that have run (schema.sql declares it; its one home).
+SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+_STEPS_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS conversion_steps \([^;]*\);")
 
 
 class ConversionRefused(Exception):
@@ -94,6 +106,104 @@ def not_applied(conn: sqlite3.Connection, names=None) -> list[str]:
         if not applied:
             waiting.append(name)
     return waiting
+
+
+def added_after(step_name: str) -> dict[str, set[str]]:
+    """The columns, per table, that the steps after `step_name` in the chain
+    add (each module's ADDS_COLUMNS). schema.sql declares them already, so a
+    step that builds from schema.sql leaves out those a book does not have
+    yet: the step that adds them fills them."""
+    names = [name for name, _ in CHAIN]
+    later: dict[str, set[str]] = {}
+    for _, module_name in CHAIN[names.index(step_name) + 1:]:
+        for table, columns in getattr(importlib.import_module(module_name), "ADDS_COLUMNS", {}).items():
+            later.setdefault(table, set()).update(columns)
+    return later
+
+
+def retired_after(step_name: str) -> dict[str, tuple[tuple[str, str], ...]]:
+    """The columns, per table, that the steps after `step_name` in the chain
+    drop (each module's RETIRES_COLUMNS: (column, declaration) pairs).
+    schema.sql no longer declares them, so a step that rebuilds a table from
+    schema.sql keeps those a book still has, as declared there: the step
+    that drops them drops them."""
+    names = [name for name, _ in CHAIN]
+    later: dict[str, tuple[tuple[str, str], ...]] = {}
+    for _, module_name in CHAIN[names.index(step_name) + 1:]:
+        for table, columns in getattr(importlib.import_module(module_name), "RETIRES_COLUMNS", {}).items():
+            later[table] = later.get(table, ()) + tuple(columns)
+    return later
+
+
+def record_applied(conn: sqlite3.Connection, step_name: str) -> None:
+    """Record that a step has run on this book. Called by the step's apply,
+    on the runner's connection, so the record is in the one transaction with
+    the step's writes: committed with them, or rolled back with them. The
+    table is made here when the book is older than it (schema.sql's own
+    statement). Recording twice changes nothing."""
+    if not _has_steps_table(conn):
+        conn.execute(_STEPS_TABLE.search(SCHEMA_PATH.read_text()).group(0))
+    conn.execute("INSERT OR IGNORE INTO conversion_steps (step) VALUES (?)", (step_name,))
+
+
+def recorded(conn: sqlite3.Connection, step_name: str) -> bool:
+    """Whether the book records that this step has run. False on a book
+    older than the record."""
+    if not _has_steps_table(conn):
+        return False
+    return conn.execute("SELECT 1 FROM conversion_steps WHERE step = ?", (step_name,)).fetchone() is not None
+
+
+def _has_steps_table(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversion_steps'"
+    ).fetchone() is not None
+
+
+def read_copy(db_path: Path | str) -> sqlite3.Connection:
+    """A copy of the book in memory, for a plan: the file is opened
+    read-only and never written. With no -wal beside it the book is opened
+    immutable, so SQLite makes no -wal or -shm file either; with one, read-only
+    through it, so committed rows not yet folded in are read."""
+    db_path = Path(db_path).resolve()
+    wal = db_path.with_name(db_path.name + "-wal")
+    mode = "mode=ro" if wal.exists() and wal.stat().st_size else "mode=ro&immutable=1"
+    source = sqlite3.connect(f"{db_path.as_uri()}?{mode}", uri=True)
+    try:
+        copy = sqlite3.connect(":memory:", isolation_level=None)
+        source.backup(copy)
+    finally:
+        source.close()
+    copy.row_factory = sqlite3.Row
+    return copy
+
+
+def plan_copy(db_path: Path | str, step_name: str) -> tuple[sqlite3.Connection, list[str]]:
+    """The book as the chain would hand it to `step_name`, in memory: a
+    read_copy with every step before it that does not read as applied run on
+    the copy (no backup: nothing is kept). Returns the copy and the steps run
+    on it. ConversionRefused when one of them would refuse."""
+    copy = read_copy(db_path)
+    ran = []
+    modules = dict(CHAIN)
+    try:
+        for name in _earlier(step_name):
+            step = chain_step(modules[name])
+            try:
+                applied = step.is_applied(copy)
+            except sqlite3.Error:
+                applied = False
+            if applied:
+                continue
+            why = step.refusal(copy)
+            if why:
+                raise ConversionRefused(f"step {name} will not run: {why}")
+            step.apply(copy)
+            ran.append(name)
+    except BaseException:
+        copy.close()
+        raise
+    return copy, ran
 
 
 def _earlier(step_name: str) -> list[str]:
@@ -179,6 +289,11 @@ class Step:
                  already there. This is what makes a second run a no-op, and
                  it reads the data itself, so it stays true for a database
                  restored from a backup or created fresh in the new shape.
+                 A step whose work the operator's own acts can later undo
+                 row by row, or leave looking undone (expect-back,
+                 label-source, retire-single-mark), records that it ran
+                 instead (record_applied, inside apply) and reads that
+                 (recorded), never what is left in the rows.
     invariant  — given the measurements before and after, returns a list of
                  problems (empty when it holds). Defaults to `unchanged`.
     measure    — reads the database and returns the measurements the

@@ -71,7 +71,7 @@ def listed(client, query: str = "") -> list[dict]:
 
 def derived(client) -> list[dict]:
     """The derived interest rows, oldest first, as the transaction list shows them."""
-    rows = [t for t in listed(client) if t["cat_source"] == "derived"]
+    rows = [t for t in listed(client) if t["book_source"] == "derived"]
     return sorted(rows, key=lambda t: t["date"])
 
 
@@ -274,12 +274,12 @@ def test_an_instalment_labelled_afterwards_replaces_the_derived_rows(client, con
     assert len(derived(client)) == 2
 
 
-def test_re_running_the_rules_leaves_the_derived_rows_alone(client, conn):
+def test_the_drift_apply_leaves_the_derived_rows_alone(client, conn):
     made = setup(client, conn)
     enter(client, made["loan"], OWED_AUG, "2026-08-31")
     before = derived(client)
 
-    assert client.post("/api/rules/recategorize").status_code == 200
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
     assert derived(client) == before
 

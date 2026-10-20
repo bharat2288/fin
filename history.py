@@ -32,6 +32,14 @@ TRACKED = (
     "rates",
     "statements",
     "subscriptions",
+    # Expect back (personal-ledger 23; expect_back.py).
+    "expectation",
+    "expectation_name",
+    "set_off",
+    "let_go",
+    "refund_link",
+    "sender_wording",
+    "dismissal",
 )
 
 # Where a change came from.
@@ -55,10 +63,15 @@ class UndoRefused(Exception):
     """The entry was not undone. Nothing was changed."""
 
 
-def schema_statements() -> list[str]:
+def schema_statements(leave_out: dict[str, tuple[str, ...]] | None = None) -> list[str]:
     """The history block of schema.sql (tables, indexes, triggers), one
     statement each, for a caller that must run them inside its own
-    transaction (executescript would commit)."""
+    transaction (executescript would commit).
+
+    `leave_out` names, per tracked table, columns a database does not have
+    yet because a later conversion step adds them: that table's triggers then
+    record every other column, and the later step puts the full triggers in
+    place when it adds the columns."""
     block = _BLOCK.search(SCHEMA_PATH.read_text()).group(1)
     statements, current = [], ""
     for line in block.splitlines(keepends=True):
@@ -66,9 +79,27 @@ def schema_statements() -> list[str]:
             continue
         current += line
         if sqlite3.complete_statement(current):
-            statements.append(current.strip())
+            statements.append(_leaving_out(current.strip(), leave_out or {}))
             current = ""
     return statements
+
+
+def table_triggers(table: str) -> list[str]:
+    """The three history triggers schema.sql declares on one tracked table."""
+    if table not in TRACKED:
+        raise ValueError(f"not a tracked table: {table!r}")
+    return [s for s in schema_statements() if s.startswith(f"CREATE TRIGGER IF NOT EXISTS history_{table}_")]
+
+
+def _leaving_out(statement: str, leave_out: dict[str, tuple[str, ...]]) -> str:
+    for table, columns in leave_out.items():
+        if not statement.startswith(f"CREATE TRIGGER IF NOT EXISTS history_{table}_"):
+            continue
+        for column in columns:
+            if not re.fullmatch(r"\w+", column):
+                raise ValueError(f"not a column name: {column!r}")
+            statement = re.sub(rf", '{column}', (?:NEW|OLD)\.{column}\b", "", statement)
+    return statement
 
 
 def has_shape(conn: sqlite3.Connection) -> bool:
@@ -126,13 +157,26 @@ def row_count(conn: sqlite3.Connection, entry_id: int) -> int:
     ).fetchone()[0]
 
 
-def _shown(tbl: str, data: str | None) -> dict | None:
+def _shown(tbl: str, data: str | None, held: set[str]) -> dict | None:
+    """A recorded row as the history shows it: the fields its table `held`
+    now, never a hidden one. A row recorded before a contract step dropped a
+    column still carries it; it is not shown, as undo never writes it back."""
     if data is None:
         return None
-    row = json.loads(data)
-    for field in HIDDEN_FIELDS.get(tbl, ()):
-        row.pop(field, None)
-    return row
+    hidden = HIDDEN_FIELDS.get(tbl, ())
+    return {k: v for k, v in json.loads(data).items() if k in held and k not in hidden}
+
+
+class _Held(dict):
+    """Each tracked table's columns, read once per call."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        super().__init__()
+        self.conn = conn
+
+    def __missing__(self, tbl: str) -> set[str]:
+        self[tbl] = _columns(self.conn, tbl) if tbl in TRACKED else set()
+        return self[tbl]
 
 
 def _entry(conn: sqlite3.Connection, r) -> dict:
@@ -193,13 +237,14 @@ def entry(conn: sqlite3.Connection, entry_id: int) -> dict | None:
     if r is None:
         return None
     shown = _entry(conn, r)
+    held = _Held(conn)
     shown["changes"] = [
         {
             "table": c["tbl"],
             "row_id": c["row_id"],
             "op": c["op"],
-            "before": _shown(c["tbl"], c["before"]),
-            "after": _shown(c["tbl"], c["after"]),
+            "before": _shown(c["tbl"], c["before"], held[c["tbl"]]),
+            "after": _shown(c["tbl"], c["after"], held[c["tbl"]]),
         }
         for c in conn.execute(
             "SELECT tbl, row_id, op, before, after FROM change_rows WHERE entry_id = ? ORDER BY id",
@@ -216,17 +261,18 @@ def brief(conn: sqlite3.Connection, entry_id: int, scan: int = 400) -> dict | No
     same name (same_label). An entry that changed one row twice counts it
     once, from its first before to its last after. None for no rows."""
     rows: dict[tuple[str, int], dict] = {}
+    held = _Held(conn)
     for tbl, row_id, op, before, after in conn.execute(
         "SELECT tbl, row_id, op, before, after FROM change_rows WHERE entry_id = ? ORDER BY id LIMIT ?",
         (entry_id, scan),
     ):
         key = (tbl, row_id)
         if key in rows:
-            rows[key]["after"] = _shown(tbl, after)
+            rows[key]["after"] = _shown(tbl, after, held[tbl])
             rows[key]["op"] = "delete" if after is None else rows[key]["op"]
         else:
             rows[key] = {"table": tbl, "row_id": row_id, "op": op,
-                         "before": _shown(tbl, before), "after": _shown(tbl, after)}
+                         "before": _shown(tbl, before, held[tbl]), "after": _shown(tbl, after, held[tbl])}
     if not rows:
         return None
     shown = list(rows.values())
@@ -326,7 +372,9 @@ def _write_back(conn: sqlite3.Connection, entry_id: int) -> None:
 def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     """Undo an entry inside the open entry `undo_entry_id`, and commit.
     Refused, changing nothing, when the entry is unknown, still open, already
-    undone, or a later entry changed one of its rows."""
+    undone, or a later entry changed one of its rows; and, naming it, when it
+    would leave an expect-back record pointing at nothing or broken
+    (expect_back.refusal_to_undo, expect_back.invariant_check)."""
     r = conn.execute("SELECT * FROM change_entries WHERE id = ?", (entry_id,)).fetchone()
     if r is None or r["open"]:
         raise UndoRefused("no such change")
@@ -338,11 +386,25 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
             f"a later change touched the same rows: change {later['id']} "
             f"({later['summary'] or 'no summary'}, {later['at']}). Undo that one first."
         )
+    # The expect-back records link rows to rows and to each other, so a change
+    # can be undone without touching a later change's rows and still break
+    # them (spec 23, E0): refused by name before writing, and checked again
+    # after writing back, before the commit. Imported here: expect_back reads
+    # the balance sheet, which this module must not load at import.
+    import expect_back
+
+    dangling = expect_back.refusal_to_undo(conn, entry_id)
+    if dangling:
+        raise UndoRefused(dangling)
     try:
         _write_back(conn, entry_id)
     except sqlite3.IntegrityError:
         conn.rollback()
         raise UndoRefused("undoing this change would break a link between rows; nothing was changed") from None
+    broken = expect_back.invariant_check(conn, entry_id)
+    if broken:
+        conn.rollback()
+        raise UndoRefused(broken)
     conn.execute(
         "UPDATE change_entries SET undoes = ?, summary = ? WHERE id = ?",
         (entry_id, f"Undid: {r['summary'] or 'change ' + str(entry_id)}", undo_entry_id),
