@@ -2,8 +2,17 @@
 
 Book says whose spending a row is; type says what kind of thing the money
 was spent on. One type list serves every book. Both vocabularies are declared
-here, once, with a plain description for each member; the `types` table is
-filled from this declaration and nothing else.
+here, once, with a plain description for each member, and a new book's
+`types` table is filled from this declaration.
+
+Once a book exists, its `types` table is the home of each type's wording
+(fin RUL-002): the operator may add a spending type and fix a type's wording
+(covers, not for) in the app, each one entry in the change history. A later
+change to a declared type's wording here does not reach a book already
+seeded, as `seed_types` never overwrites; such a change goes in as a
+conversion step, as a rename does. Renaming, merging and removing a type,
+and every book, stay code changes. The types code reads by name are LOCKED:
+the app does not fix their wording either.
 """
 
 from __future__ import annotations
@@ -191,6 +200,15 @@ PROPOSES_MOOM = ("Advertising", "Stock purchases", "Payment fees")
 ASKS_FOR_BOOK = ("Software & AI tools",)
 
 
+# The types code reads by name, so their meaning is the code's: the app
+# neither renames them nor fixes their wording. The book-proposing lists above,
+# loan interest's type (loan_interest.TYPE_NAME), a gift given
+# (review.GIFT_GIVEN_TYPE, letgo_api.GIFTS), and Other, which means "not
+# placed yet" and is never asked of Jev (suggest.NOT_ASKED). A test fails
+# when code reads a type by a name not in this list.
+LOCKED = PROPOSES_MOOM + ASKS_FOR_BOOK + ("Bank & government fees", "Gifts & Donations", "Other")
+
+
 def proposed_book(type_name: str | None) -> str | None:
     """The book proposed for a type (its display name); None means ask."""
     if type_name in ASKS_FOR_BOOK:
@@ -226,8 +244,10 @@ def display_name(name: str, parent: str | None) -> str:
 def seed_types(conn: sqlite3.Connection) -> None:
     """Add every declared type and income kind the table does not hold yet.
 
-    Safe to run again: a name already present is left as it is. One statement
-    at a time and no commit, so it can run inside a caller's transaction.
+    Safe to run again: a name already present is left as it is, wording and
+    all, so a type added in the app and a wording fixed there survive every
+    start; nothing is overwritten or deleted. One statement at a time and no
+    commit, so it can run inside a caller's transaction.
     """
     held = {
         (row[0], row[1]): row[2]
@@ -274,3 +294,169 @@ def spending_type_ids(conn: sqlite3.Connection) -> dict[str, int]:
 def spending_type_names(conn: sqlite3.Connection) -> dict[int, str]:
     """Each spending type's display name ('Fitness > Golf'), keyed by its id."""
     return {type_id: name for name, type_id in spending_type_ids(conn).items()}
+
+
+# --- the app's two type writes (fin RUL-002) ---------------------------------
+
+NAME_MOST = 40
+WORDING_MOST = 300
+WORDING_FIELDS = ("covers", "not_for")
+ADD_FIELDS = ("name", "parent_id", "one_off", "covers", "not_for", "kind")
+CODE_CHANGE = "renaming, merging or removing a type is a code change"
+
+# Every column that points at a type, as schema.sql declares it: a type added
+# in the app is taken out again, by Undo, only while none of them names it. A
+# test holds this list to schema.sql's foreign keys.
+USED_BY = (
+    ("transactions", "type_id"),
+    ("subscriptions", "type_id"),
+    ("services", "type_id"),
+    ("merchant_rules", "type_override_id"),
+    ("suggestion_answers", "chosen_type_id"),
+    ("let_go", "type_id"),
+)
+
+
+class TypeRefused(ValueError):
+    """A type write was refused. Nothing was written."""
+
+
+class NoSuchType(LookupError):
+    """No type has that id."""
+
+
+def _words(value, what: str) -> str | None:
+    """Words as stored: trimmed, and None for none."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeRefused(f"{what} must be words")
+    return value.strip() or None
+
+
+def _covers(value) -> str:
+    covers = _words(value, "covers")
+    if covers is None:
+        raise TypeRefused("a type needs words for what it covers")
+    if len(covers) > WORDING_MOST:
+        raise TypeRefused(f"what a type covers can be at most {WORDING_MOST} characters")
+    return covers
+
+
+def _not_for(value) -> str | None:
+    not_for = _words(value, "not_for")
+    if not_for is not None and len(not_for) > WORDING_MOST:
+        raise TypeRefused(f"what a type is not for can be at most {WORDING_MOST} characters")
+    return not_for
+
+
+def _spending_named(conn: sqlite3.Connection, name: str) -> str | None:
+    """The display name of the spending type with this name, ignoring case,
+    wherever it sits in the list; None when there is none."""
+    wanted = name.casefold()
+    for held, parent in conn.execute(
+        "SELECT t.name, p.name FROM types t LEFT JOIN types p ON p.id = t.parent_id WHERE t.kind = ?",
+        (SPENDING,),
+    ):
+        if held.casefold() == wanted:
+            return display_name(held, parent)
+    return None
+
+
+def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
+    """Add a spending type the operator named, and return its id. The name is
+    unique ignoring case across every spending type (the table holds names
+    unique, whatever the parent); the parent, when there is one, is a
+    top-level spending type. Refused, writing nothing, with the reason in
+    words. No commit: the caller owns it."""
+    import suggest  # imported here: it imports this module
+
+    unknown = [k for k in data if k not in ADD_FIELDS]
+    if unknown:
+        raise TypeRefused(f"unknown field: {unknown[0]}")
+    if data.get("kind", SPENDING) != SPENDING:
+        raise TypeRefused("only a spending type can be added here")
+    name = _words(data.get("name"), "name")
+    if name is None:
+        raise TypeRefused("a type needs a name")
+    if ">" in name:
+        raise TypeRefused('a type\'s name cannot hold ">"')
+    if len(name) > NAME_MOST:
+        raise TypeRefused(f"a type's name can be at most {NAME_MOST} characters")
+    if " ".join(name.replace("_", " ").split()).casefold() == suggest.NONE_OF_THESE.replace("_", " "):
+        raise TypeRefused('"None of these" is what Jev answers when no type fits')
+    held = _spending_named(conn, name)
+    if held is not None:
+        raise TypeRefused(f"{held} is already a type")
+    parent_id = data.get("parent_id")
+    if parent_id is not None:
+        top = None
+        if isinstance(parent_id, int) and not isinstance(parent_id, bool):
+            top = conn.execute(
+                "SELECT id FROM types WHERE id = ? AND kind = ? AND parent_id IS NULL",
+                (parent_id, SPENDING),
+            ).fetchone()
+        if top is None:
+            raise TypeRefused("a type can go only under a top-level spending type")
+    one_off = data.get("one_off", False)
+    if not isinstance(one_off, bool):
+        raise TypeRefused("one_off must be true or false")
+    covers, not_for = _covers(data.get("covers")), _not_for(data.get("not_for"))
+    try:
+        cur = conn.execute(
+            "INSERT INTO types (kind, name, parent_id, default_one_off, covers, not_for)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (SPENDING, name, parent_id, 1 if one_off else 0, covers, not_for),
+        )
+    except sqlite3.IntegrityError:
+        raise TypeRefused(f"{name} is already a type") from None
+    return cur.lastrowid
+
+
+def fix_wording(conn: sqlite3.Connection, type_id: int, data: dict) -> None:
+    """Fix a spending type's wording: what it covers, what it is not for, or
+    both. Anything else in the request is a code change and refused, as is a
+    locked type and an income kind; nothing is written. No commit."""
+    found = conn.execute(
+        "SELECT t.kind, t.name, p.name AS parent, t.covers, t.not_for FROM types t"
+        " LEFT JOIN types p ON p.id = t.parent_id WHERE t.id = ?",
+        (type_id,),
+    ).fetchone()
+    if found is None:
+        raise NoSuchType(type_id)
+    kind, name, parent, covers, not_for = found
+    if kind != SPENDING:
+        raise TypeRefused("income kinds are set in code")
+    if any(k not in WORDING_FIELDS for k in data):
+        raise TypeRefused(CODE_CHANGE)
+    shown = display_name(name, parent)
+    if shown in LOCKED:
+        raise TypeRefused(f"{shown} is set in code: fin reads it by name")
+    if not data:
+        raise TypeRefused("say what the type covers or what it is not for")
+    if "covers" in data:
+        covers = _covers(data["covers"])
+    if "not_for" in data:
+        not_for = _not_for(data["not_for"])
+    conn.execute("UPDATE types SET covers = ?, not_for = ? WHERE id = ?", (covers, not_for, type_id))
+
+
+def refusal_to_undo(conn: sqlite3.Connection, entry_id: int) -> str | None:
+    """Why undoing an entry would take out a type something still uses, in
+    words; None when it would not. Read before anything is written back."""
+    added = [r[0] for r in conn.execute(
+        "SELECT DISTINCT row_id FROM change_rows WHERE entry_id = ? AND tbl = 'types' AND op = 'insert'",
+        (entry_id,),
+    )]
+    names = spending_type_names(conn)
+    for type_id in added:
+        shown = names.get(type_id)
+        if shown is None:
+            continue  # gone already, or an income kind, which the app never adds
+        for table, column in USED_BY:
+            # Both names come from USED_BY above, never from a request.
+            if conn.execute(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", (type_id,)).fetchone():
+                return f"a merchant or row still uses {shown}; change those first"
+        if conn.execute("SELECT 1 FROM types WHERE parent_id = ? LIMIT 1", (type_id,)).fetchone():
+            return f"a type still sits under {shown}; undo that one first"
+    return None

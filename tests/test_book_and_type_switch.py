@@ -1174,10 +1174,12 @@ def test_the_books_are_served_from_their_one_declaration(client):
     assert all(b["description"] for b in books)
 
 
-def test_the_type_list_is_not_added_to_from_the_app(client):
+def test_the_type_list_is_added_to_from_the_app_only_with_its_wording(client):
+    # fin RUL-002: the app may add a type, with what it covers
+    # (tests/test_types_in_app.py); a bare name adds nothing.
     resp = client.post("/api/types", json={"name": "Hobbies"})
 
-    assert resp.status_code == 405
+    assert resp.status_code == 400
     assert len(client.get("/api/types").get_json()) == 36
 
 

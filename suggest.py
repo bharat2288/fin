@@ -169,13 +169,19 @@ def merchant_string(description: str | None, flow_type: str | None,
 # --- the question ------------------------------------------------------------
 
 
-def question() -> dict:
-    """The one pick-one question: every type but `Other`, plus none of these,
-    each described by what it covers and what it is not for. From the type
-    list's one declaration; it names no merchant."""
+def question(conn: sqlite3.Connection) -> dict:
+    """The one pick-one question: every spending type but `Other`, plus none
+    of these, each described by what it covers and what it is not for. Read
+    from the book's type list, the home of each type's wording once a book
+    exists (fin RUL-002), so a type added in fin is one Jev can pick; it
+    names no merchant."""
     criteria = {}
-    for name, parent, _default, covers, not_for in book_type.SPENDING_TYPES:
-        if name in NOT_ASKED:
+    for name, parent, covers, not_for in conn.execute(
+        "SELECT t.name, p.name, t.covers, t.not_for FROM types t"
+        " LEFT JOIN types p ON p.id = t.parent_id WHERE t.kind = ? ORDER BY t.id",
+        (book_type.SPENDING,),
+    ):
+        if parent is None and name in NOT_ASKED:
             continue
         described = {"what": covers}
         if not_for:
@@ -219,9 +225,10 @@ class BadAnswer(Exception):
     """The reply did not have the shape of an answer to the question."""
 
 
-def ask(merchant: str, api_key: str) -> dict:
-    """One request for one merchant string; the full answer as a record."""
-    asked = question()
+def ask(merchant: str, api_key: str, conn: sqlite3.Connection) -> dict:
+    """One request for one merchant string; the full answer as a record. The
+    answer is checked against the very question sent."""
+    asked = question(conn)
     body = {"state": {"merchant": merchant}, "model": MODEL_ID, "questions": {"type": asked}}
     started = time.perf_counter()
     reply = post(body, api_key)
