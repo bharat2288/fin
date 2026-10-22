@@ -40,7 +40,15 @@ TRACKED = (
     "refund_link",
     "sender_wording",
     "dismissal",
+    # Types in the app (fin RUL-002): an added type and a fixed wording.
+    "types",
 )
+
+# Tracked tables whose triggers a start puts in place itself: the table was
+# there, with every column its triggers record, before it was tracked, so
+# schema.sql's CREATE TRIGGER IF NOT EXISTS gives a book them on its next
+# start and no conversion step is owed. has_shape does not ask for them.
+ADDED_ON_START = ("types",)
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens
@@ -104,10 +112,11 @@ def _leaving_out(statement: str, leave_out: dict[str, tuple[str, ...]]) -> str:
 
 def has_shape(conn: sqlite3.Connection) -> bool:
     """Whether the database keeps the history: its two tables and every
-    tracked table's three triggers."""
+    tracked table's three triggers, but those a start adds (ADDED_ON_START)."""
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger')")}
     wanted = {"change_entries", "change_rows"} | {
-        f"history_{t}_{op}" for t in TRACKED for op in ("insert", "update", "delete")
+        f"history_{t}_{op}" for t in TRACKED if t not in ADDED_ON_START
+        for op in ("insert", "update", "delete")
     }
     return wanted <= names
 
@@ -374,7 +383,8 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     Refused, changing nothing, when the entry is unknown, still open, already
     undone, or a later entry changed one of its rows; and, naming it, when it
     would leave an expect-back record pointing at nothing or broken
-    (expect_back.refusal_to_undo, expect_back.invariant_check)."""
+    (expect_back.refusal_to_undo, expect_back.invariant_check), or take out
+    a type something still uses (book_type.refusal_to_undo)."""
     r = conn.execute("SELECT * FROM change_entries WHERE id = ?", (entry_id,)).fetchone()
     if r is None or r["open"]:
         raise UndoRefused("no such change")
@@ -396,6 +406,12 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     dangling = expect_back.refusal_to_undo(conn, entry_id)
     if dangling:
         raise UndoRefused(dangling)
+    # A type added in the app is taken out again only while nothing uses it.
+    import book_type
+
+    in_use = book_type.refusal_to_undo(conn, entry_id)
+    if in_use:
+        raise UndoRefused(in_use)
     try:
         _write_back(conn, entry_id)
     except sqlite3.IntegrityError:
