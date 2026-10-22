@@ -4089,9 +4089,15 @@ ACT['rename-save'] = async () => {
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'ls-search') { listState.search = e.target.value.trim(); rerender(); } });
 document.addEventListener('search', e => { if (e.target.id === 'ls-search') { listState.search = e.target.value.trim(); rerender(); } }, true);
 
+// The empty book choice reads the same in both sheets; the line under it says
+// what it does in each. Adding, the route gives the type's usual book
+// (_book_or_proposed); editing, no book is saved, and a row with no book is
+// read as Household (scope.book_expr) unless its rule or the operator gave it one.
 function merchantFields(r, s) {
+    const bookLine = s ? 'With no book chosen, its rows are read as Household, unless a rule or you give one another book.'
+        : 'With a type chosen, fin gives it the type’s usual book when you add it.';
     return `<label class="field"><span>Name</span><input type="text" id="mc-name" value="${esc(s?.name || '')}"></label>
-        <div class="fields two"><label class="field"><span>Book</span><select id="mc-book">${bookOptions(r.books, s?.book, s ? '—' : 'As the type says')}</select></label>
+        <div class="fields two"><label class="field"><span>Book</span><select id="mc-book">${bookOptions(r.books, s?.book, 'No book chosen')}</select><span class="hint">${esc(bookLine)}</span></label>
             <label class="field"><span>Type</span><select id="mc-type">${typeOptions(r.types, s?.type_id, { blank: 'No type' })}</select></label></div>
         <label class="field"><span>Note</span><textarea id="mc-notes" rows="2" placeholder="Anything worth remembering about it">${esc(s?.notes || '')}</textarea></label>
         ${s ? eachSettingHTML(s) : '<label class="check"><input type="checkbox" id="mc-each"> Check each row: each new row waits in the Queue for you to check it</label>'}
