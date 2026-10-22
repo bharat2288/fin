@@ -295,8 +295,17 @@ function claudeMark(entryId) {
     if (!entryId) return '';
     return `<button type="button" class="cmark" data-act="goto-change" data-entry="${esc(entryId)}" title="Changed by Claude since you last looked" aria-label="Changed by Claude since you last looked: see change ${esc(entryId)}"><span aria-hidden="true"></span></button>`;
 }
-function rowMark(rowId) { return claudeMark(S.marks.rows[rowId]); }
-function accountMark(accountId) { return claudeMark(S.marks.accounts[accountId]); }
+// A page draws with the marks as last read, each in a slot of its own; the
+// router's fresh read fills the slots once it arrives (applyMarks), so the
+// marks never hold up a page's first draw.
+function rowMark(rowId) { return `<span class="cmark-at" data-mark-row="${esc(rowId)}">${claudeMark(S.marks.rows[rowId])}</span>`; }
+function accountMark(accountId) { return `<span class="cmark-at" data-mark-account="${esc(accountId)}">${claudeMark(S.marks.accounts[accountId])}</span>`; }
+/** Put the marks just read into every slot drawn: a dot appears, or goes. */
+function applyMarks(marks) {
+    S.marks = marks;
+    $$('[data-mark-row]').forEach(el => { el.innerHTML = claudeMark(marks.rows[el.dataset.markRow]); });
+    $$('[data-mark-account]').forEach(el => { el.innerHTML = claudeMark(marks.accounts[el.dataset.markAccount]); });
+}
 
 async function refs() {
     const [types, books, accounts, review, kinds] = await Promise.all([
@@ -304,6 +313,7 @@ async function refs() {
     ]);
     const typeById = new Map(types.map(t => [t.id, t]));
     const accountById = new Map(accounts.map(a => [a.id, a]));
+    window.__accountById = accountById;   // for the helpers that draw an account's fix, kept by whoever read last
     return { types, books, accounts, review, kinds, typeById, accountById };
 }
 async function servicesList() { return get('/api/services'); }
@@ -556,13 +566,17 @@ async function render() {
     $$('[data-place]').forEach(a => { if (a.dataset.place === route[1]) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
     const token = ++renderToken;
     const view = $('#view');
+    // The marks are read beside the page, not before it: the page draws with the
+    // marks as last read and the fresh ones fill its slots when they come.
+    let marksNow = null;
+    get('/api/changes/marks', { fresh: true }).catch(() => null)
+        .then(marks => { marksNow = marks || { rows: {}, accounts: {} }; if (token === renderToken) applyMarks(marksNow); });
     try {
-        const [rr, marks] = await Promise.all([refs(), get('/api/changes/marks', { fresh: true }).catch(() => null)]);
-        window.__accountById = rr.accountById;
-        S.marks = marks || { rows: {}, accounts: {} };
-        const html = await route[2](match);
+        // The shared lists start with the page's own reads (the page's refs() shares them), not before them.
+        const [html] = await Promise.all([route[2](match), refs()]);
         if (token !== renderToken) return;
         if (typeof html === 'string') view.innerHTML = html;
+        if (marksNow) applyMarks(marksNow);   // read before this draw was put in
         if (view.__after) { const after = view.__after; view.__after = null; after(); }
         if (afterNextRender) { const next = afterNextRender; afterNextRender = null; setTimeout(next, 60); }
     } catch (err) {
@@ -4022,7 +4036,6 @@ async function viewLists(tab) {
     const services = await servicesList();
     const filters = { all: () => true, untyped: s => !s.type_id, each: s => s.review_each_time, hidden: s => s.exclude_from_expense_views, unused: s => !s.txn_count };
     const shown = services.filter(filters[listState.filter] || filters.all).filter(s => !needle || s.name.toLowerCase().includes(needle));
-    ACT.__services = new Map(services.map(s => [s.id, s]));
     const renaming = listState.renaming;
     const nameCell = s => renaming
         ? `<td class="sl-name sl-wide"><input type="text" class="rename-input" data-rename="${s.id}" data-orig="${esc(s.name)}" value="${esc(listState.renames[s.id] ?? s.name)}" aria-label="New name for ${esc(s.name)}"></td>`
@@ -4280,17 +4293,17 @@ function mpAccountCell(x) {
 async function viewMerchant(id) {
     if (merchantPage.id !== id) Object.assign(merchantPage, { id, page: 1, ticks: new Set(), book: '', month: null });
     const mp = merchantPage;
-    let s;
-    try { s = await get(`/api/services/${id}`, { fresh: true }); } catch (err) {
-        if (err.status !== 404) throw err;
+    // Every read at once, none waiting on another; the page draws once all are in.
+    // A merchant gone (deleted in another tab) answers 404 to its own reads.
+    const gone = err => { if (err.status === 404) return null; throw err; };
+    const [s, r, list, varies] = await Promise.all([get(`/api/services/${id}`, { fresh: true }).catch(gone), refs(),
+        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}${monthQuery(mp.month)}`, { fresh: true }),
+        get(`/api/services/${id}/book-varies`, { fresh: true }).catch(gone)]);
+    if (!s) {
         return `<div class="mp">${mpCrumbs()}<div class="page-head"><div><h1>Merchant</h1></div></div>
             <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div></div>`;
     }
-    const [r, list, services, varies] = await Promise.all([refs(),
-        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}${monthQuery(mp.month)}`, { fresh: true }),
-        servicesList(), get(`/api/services/${id}/book-varies`, { fresh: true })]);
     afterRender(() => window.mountMerchantTrend?.());
-    ACT.__services = new Map(services.map(x => [x.id, x]));
     ACT.__mpRows = new Map(list.transactions.map(x => [x.id, x]));
     const each = !!s.review_each_time;
     const span = s.rows ? `${plural(s.rows, 'row')} · ${s.first_date === s.last_date ? esc(day(s.first_date)) : `${esc(day(s.first_date))} to ${esc(day(s.last_date))}`} · ${plural(s.accounts, 'account')}` : 'No rows yet';
@@ -4314,7 +4327,7 @@ async function viewMerchant(id) {
     <div class="page-head"><div><h1>${esc(s.name)}</h1>
         <p>${span} · ${plural(s.rule_count, 'rule')}</p></div>
         <button type="button" class="btn" data-act="merchant" data-id="${s.id}">Edit the merchant</button></div>
-    ${varies.suggest ? `<div class="attn" role="status"><span class="attn__ic">${icon('info')}</span><p>${esc(bookVariesWords(s.name, varies))}</p>
+    ${varies?.suggest ? `<div class="attn" role="status"><span class="attn__ic">${icon('info')}</span><p>${esc(bookVariesWords(s.name, varies))}</p>
         <div class="attn__act">${bookVariesButtons(s.id)}</div></div>` : ''}
     <section class="card mp-card" aria-label="${esc(s.name)}"><div class="mp-facts">
         <div class="mp-fact"><span class="cap">Type</span><b>${s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type')}</b></div>
@@ -4447,10 +4460,12 @@ ACT['merchant-create'] = async () => {
     const r = await act('POST', '/api/services', body, 'Merchant added');
     if (r) { closeSheet(); rerender(); }
 };
+// Edit the merchant reads the merchants list itself (cached): Merge into offers every other merchant.
 ACT.merchant = async el => {
-    const r = await refs();
-    const s = ACT.__services.get(Number(el.dataset.id));
-    const others = [...ACT.__services.values()].filter(x => x.id !== s.id);
+    const [r, services] = await Promise.all([refs(), servicesList()]);
+    const s = services.find(x => x.id === Number(el.dataset.id));
+    if (!s) { toast('This merchant is no longer in fin', { bad: true }); return; }
+    const others = services.filter(x => x.id !== s.id);
     openSheet(esc(s.name), `<div class="fields">${merchantFields(r, s)}
         <label class="check"><input type="checkbox" id="mc-oneoff"${s.is_one_off ? ' checked' : ''}> One-off</label>
         <p class="small muted">${plural(s.txn_count, 'row')} · ${plural(s.rule_count, 'rule')}${(s.rules || []).length ? ': ' + s.rules.map(x => esc(x.pattern)).join(', ') : ''}. A change of book or type that reaches its past rows is shown first, to apply to them or to new rows only.</p></div>
@@ -4579,7 +4594,8 @@ ACT['account-save'] = async el => {
 
 const importState = { preview: null, done: null, busy: false, showEmpty: false };
 async function viewImport() {
-    const [past, coverage] = await Promise.all([get('/api/import/history').catch(() => []), get('/api/statements/coverage?months=6').catch(() => null)]);
+    // refs() beside the page's reads: the coverage grid names each account from window.__accountById, which refs() fills.
+    const [, past, coverage] = await Promise.all([refs(), get('/api/import/history').catch(() => []), get('/api/statements/coverage?months=6').catch(() => null)]);
     const p = importState.preview;
     afterRender(wireDrop);
     return `${booksNav('import')}
