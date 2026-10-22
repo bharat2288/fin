@@ -1862,21 +1862,26 @@ function recWarn(reach) {
     if ((reach.others || []).length) warns.push(`· also ${reach.others.map(o => `${plural(o.count, 'row')} now ${o.name}’s`).join(', ')}`);
     return warns.map(w => `<span class="warn-word">${esc(w)}</span>`).join(' ');
 }
-/** The live count under a wording being changed. */
+/** The live count under a wording being changed: the whole book's rows the
+ *  wording matches, "matches 3 rows in the book". */
 function recCountHTML(reach) {
     if (!reach) return '<span class="muted">counting…</span>';
     if (reach.error) return `<span class="warn-word">${esc(reach.error)}</span>`;
     if (!reach.count) return '<span class="warn-word">matches no row: check the wording</span>';
     const warn = recWarn(reach);
-    return `matches ${plural(reach.count, 'row')}${warn ? ` ${warn}` : ''}`;
+    return `matches ${plural(reach.count, 'row')} in the book${warn ? ` ${warn}` : ''}`;
 }
-/** The meta line under a sure line's merchant: "recognises INDIGOAIR". */
+/** The meta line under a folded sure line's merchant: "recognises INDIGOAIR".
+ *  Opened, the detail's line says it, so this one is not shown. */
 function recMiniHTML(wording, key = '') {
     return wording ? `<span class="rec-mini"${key ? ` data-rec-mini="${esc(key)}"` : ''}>recognises <b class="mono">${esc(wording)}</b></span>` : '';
 }
-/** The line in a teach's detail: "Recognises INDIGOAIR · 6 rows · change",
- *  or, open to change, the wording in place with its live count. */
-function recLineHTML(key, wording, reach, editing) {
+/** The line in a teach's detail: "Recognises rows containing INDIGOAIR ·
+ *  3 rows in the book, 2 of them here · change", or, open to change, the
+ *  wording in place with its live count. The count is the whole book's;
+ *  here is the rows the teach holds (the sure card's line), named only when
+ *  they are fewer. A teach with no here says only "N rows in the book". */
+function recLineHTML(key, wording, reach, editing, here) {
     const id = `rec-${String(key).replace(/[^A-Za-z0-9]/g, '_')}`;
     if (editing) {
         return `<div class="rec rec--edit" data-rec-line="${esc(key)}"><label class="cap" for="${id}">Recognises rows containing</label>
@@ -1885,8 +1890,9 @@ function recLineHTML(key, wording, reach, editing) {
             <p class="rec__n" data-rec-n="${esc(key)}" aria-live="polite">${recCountHTML(reach)}</p></div>`;
     }
     const warn = recWarn(reach);
-    const count = !reach ? '' : reach.error || !reach.count ? ` · ${recCountHTML(reach)}` : ` · ${plural(reach.count, 'row')}${warn ? ` ${warn}` : ''}`;
-    return `<div class="rec" data-rec-line="${esc(key)}"><span class="cap">Recognises</span> <b class="mono">${esc(wording)}</b>${count} · <button type="button" class="link" data-act="rec-edit" data-key="${esc(key)}">change</button></div>`;
+    const some = here && here < reach?.count ? `, ${here} of them here` : '';
+    const count = !reach ? '' : reach.error || !reach.count ? ` · ${recCountHTML(reach)}` : ` · ${plural(reach.count, 'row')} in the book${some}${warn ? ` ${warn}` : ''}`;
+    return `<div class="rec" data-rec-line="${esc(key)}"><span class="cap">Recognises rows containing</span> <b class="mono">${esc(wording)}</b>${count} · <button type="button" class="link" data-act="rec-edit" data-key="${esc(key)}">change</button></div>`;
 }
 function recKeyWording(key) {
     const ctx = recCtx.get(key);
@@ -1920,7 +1926,7 @@ function recLoad(key, wording, wait = REC_WAIT) {
     }, wait));
 }
 /** The line for a teach, as drawn: its wording, its count (read once if not
- *  yet), open or not. ctx: {tx, txs, name, suggested, changed}: txs the
+ *  yet), open or not. ctx: {tx, txs, name, suggested, changed, here}: txs the
  *  rows the save is for (only this one: the wording matches one of them and
  *  no other row), tx when it is one; changed() draws
  *  the save's state again once the count is known. '' without a wording. */
@@ -1930,7 +1936,7 @@ function recShown(key, ctx) {
     if (!wording && !recOpen.has(key)) return '';
     const f = recFound.get(key);
     if (wording && (!f || f.wording !== wording)) recLoad(key, wording, 0);
-    return recLineHTML(key, wording, recReach(key), recOpen.has(key));
+    return recLineHTML(key, wording, recReach(key), recOpen.has(key), ctx.here);
 }
 /** A teach's line drawn again in place: the count, or the whole line. */
 function recDraw(key, { whole = false } = {}) {
@@ -1942,7 +1948,7 @@ function recDraw(key, { whole = false } = {}) {
         if (n) n.innerHTML = recCountHTML(recReach(key));
     } else if (box) {
         const at = document.createElement('div');
-        at.innerHTML = recLineHTML(key, recKeyWording(key), recReach(key), recOpen.has(key));
+        at.innerHTML = recLineHTML(key, recKeyWording(key), recReach(key), recOpen.has(key), ctx.here);
         box.replaceWith(at.firstElementChild);
     } else recWhenShown(key);
     $$('[data-rec-mini]').filter(x => x.dataset.recMini === key).forEach(x => { x.outerHTML = recMiniHTML(recKeyWording(key), key); });
@@ -2106,7 +2112,8 @@ function sureDetailHTML(g, at) {
         return `<td class="sl-rbk"><select class="sel" data-change="sure-row-book" data-key="${esc(g.key)}" data-tx="${x.id}" aria-label="Book for the ${when} row"${queueBusy ? ' disabled' : ''}>${bookOptions(queueModel.r.books, sureRowBook(g, x), 'Choose book')}</select>${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</td>`;
     };
     const first = g.items[0].row;
-    const rec = recShown(g.key, { tx: first.id, txs: g.items.map(i => i.row.id), name: g.name, suggested: suggestPattern(first.description), changed: drawSureState });
+    const rec = recShown(g.key, { tx: first.id, txs: g.items.map(i => i.row.id), name: g.name, suggested: suggestPattern(first.description),
+        here: g.items.length, changed: drawSureState });
     return `<div class="det">${rec}
         <div class="det__top"><div class="det__set"><span class="cap" id="nr-${at}">New rows</span>${eachSegHTMLQ('sure-set', g.key, g.name, each, { labelledBy: `nr-${at}` })}</div>
             <button type="button" class="btn sm ghost" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></div>
@@ -2120,7 +2127,7 @@ function sureRowHTML(g, books, at) {
     const book = sureBook(g), each = sureEach(g);
     const n = g.items.length, open = sureShown.has(g.key), id = `sd-${at}`;
     return `<tr class="sl${open ? ' is-open' : ''}" data-key="${esc(g.key)}" data-at="${at}">
-        <td class="sl-m">${rowDetailToggle({ id, label: g.name, open, act: 'sure-open', data: { key: g.key } })}${recMiniHTML(recWording(g.key, g.items[0].row), g.key)}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
+        <td class="sl-m">${rowDetailToggle({ id, label: g.name, open, act: 'sure-open', data: { key: g.key } })}${open ? '' : recMiniHTML(recWording(g.key, g.items[0].row), g.key)}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
         <td class="r num sl-n">${n}<span class="ph-w"> ${n === 1 ? 'row' : 'rows'}</span></td>
         <td class="r num sl-a">${esc(sumByCurrency(g.items))}</td>
         <td class="sl-ty">${esc(g.type.name)} <em>${Math.round(g.type.probability * 100)}%</em></td>
@@ -2234,6 +2241,10 @@ ACT['sure-open'] = el => {
     if (open) sureShown.add(g.key); else sureShown.delete(g.key);
     // Drawn afresh: the usual book may have changed while it was folded.
     if (open) box.cells[0].innerHTML = sureDetailHTML(g, Number(tr.dataset.at));
+    // "recognises" is said once: under the name folded, in the detail opened.
+    const mini = $('[data-rec-mini]', tr);
+    if (open) mini?.remove();
+    else if (!mini) el.insertAdjacentHTML('afterend', recMiniHTML(recWording(g.key, g.items[0].row), g.key));
     toggleRowDetail(el);
     tr.classList.toggle('is-open', open);
     if (open) drawSureState();
