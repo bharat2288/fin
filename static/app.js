@@ -4037,15 +4037,7 @@ async function viewLists(tab) {
     const filters = { all: () => true, untyped: s => !s.type_id, each: s => s.review_each_time, hidden: s => s.exclude_from_expense_views, unused: s => !s.txn_count };
     const shown = services.filter(filters[listState.filter] || filters.all).filter(s => !needle || s.name.toLowerCase().includes(needle));
     const renaming = listState.renaming;
-    const nameCell = s => renaming
-        ? `<td class="sl-name sl-wide"><input type="text" class="rename-input" data-rename="${s.id}" data-orig="${esc(s.name)}" value="${esc(listState.renames[s.id] ?? s.name)}" aria-label="New name for ${esc(s.name)}"></td>`
-        : `<td class="sl-name"><b>${esc(s.name)}</b></td>`;
-    const typeCell = s => s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type', { act: 'merchant', data: { id: s.id }, title: 'Give it a type' });
-    const marks = s => `${s.review_each_time ? tag('', 'Check each row') : ''} ${s.exclude_from_expense_views ? tag('yours', 'hidden') : ''} ${s.is_one_off ? tag('yours', 'one-off') : ''}`.trim();
-    const rows = shown.slice(0, 200).map(s => `<tr${renaming ? '' : ` class="clickable" data-act="merchant-page" data-id="${s.id}"`}>${nameCell(s)}<td>${esc(s.book || '')}</td>
-        <td>${typeCell(s)}</td><td class="r num${renaming ? '' : ' sl-fig'}">${s.txn_count}<span class="sl-phone-word"> ${s.txn_count === 1 ? 'row' : 'rows'}</span></td><td class="r num">${s.rule_count}</td>
-        <td>${marks(s)}</td>
-        ${renaming ? '' : `<td class="sl-sub">${esc(s.book || 'no book')} · ${typeCell(s)} · ${plural(s.rule_count, 'rule')} ${marks(s)}</td>`}</tr>`).join('');
+    const rows = shown.slice(0, 200).map(s => merchantListRow(s, { renaming, renames: listState.renames })).join('');
     const chip = (k, l, n) => `<button class="chip" data-act="list-filter" data-f="${k}" aria-pressed="${listState.filter === k}">${l} <span class="n">${n}</span></button>`;
     const pending = Object.keys(listState.renames).length;
     const ask = !renaming && services.some(filters.untyped) && (await suggestionsOn()) ? suggestEntryHTML({ lists: true }) : '';
@@ -4055,8 +4047,23 @@ async function viewLists(tab) {
                 : `<button class="btn" data-act="rename-mode" data-on="1">${icon('pencil-simple')}Rename several</button><button class="btn" data-act="merchant-add">${icon('plus')}Add a merchant</button>`}</div></div>
         ${renaming ? '<p class="card-foot sl-lead">Type the new names, then save them together: one change in Changes, with Undo. Rules and rows keep pointing at the same merchant.</p>' : ''}
         ${ask}<div class="chips sl-chips">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('each', 'Check each row', services.filter(filters.each).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
-        <div class="table-wrap"><table class="t sl-stack${renaming ? ' sl-renaming' : ''}"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty sl-name">None.</td></tr>'}</tbody></table></div>
+        <div class="table-wrap"><table class="t sl-stack${renaming ? ' sl-renaming' : ''}"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th>${renaming ? '' : '<th><span class="sr-only">Edit</span></th>'}</tr></thead><tbody>${rows || `<tr><td colspan="${renaming ? 6 : 7}" class="empty sl-name">None.</td></tr>`}</tbody></table></div>
         ${shown.length > 200 ? `<p class="card-foot">The first 200 of ${shown.length}; search to narrow.</p>` : ''}</section>`;
+}
+/** One row of Lists › Merchants. The row opens the merchant's page; the pencil at its end
+ *  opens Edit the merchant in place (its own data-act, so the row's never sees the click).
+ *  While renaming several, the name is an input, and the row and the pencil are gone. */
+function merchantListRow(s, { renaming, renames }) {
+    const nameCell = renaming
+        ? `<td class="sl-name sl-wide"><input type="text" class="rename-input" data-rename="${s.id}" data-orig="${esc(s.name)}" value="${esc(renames[s.id] ?? s.name)}" aria-label="New name for ${esc(s.name)}"></td>`
+        : `<td class="sl-name"><b>${esc(s.name)}</b></td>`;
+    const typeCell = s.type_id ? esc(s.display_type || s.type_name) : tag('nofig', 'no type', { act: 'merchant', data: { id: s.id }, title: 'Give it a type' });
+    const marks = `${s.review_each_time ? tag('', 'Check each row') : ''} ${s.exclude_from_expense_views ? tag('yours', 'hidden') : ''} ${s.is_one_off ? tag('yours', 'one-off') : ''}`.trim();
+    return `<tr${renaming ? '' : ` class="clickable" data-act="merchant-page" data-id="${s.id}"`}>${nameCell}<td>${esc(s.book || '')}</td>
+        <td>${typeCell}</td><td class="r num${renaming ? '' : ' sl-fig'}">${s.txn_count}<span class="sl-phone-word"> ${s.txn_count === 1 ? 'row' : 'rows'}</span></td><td class="r num">${s.rule_count}</td>
+        <td>${marks}</td>
+        ${renaming ? '' : `<td class="sl-sub">${esc(s.book || 'no book')} · ${typeCell} · ${plural(s.rule_count, 'rule')} ${marks}</td>
+        <td class="r sl-end"><button type="button" class="btn sm subtle icon" data-act="merchant" data-id="${s.id}" aria-label="Edit ${esc(s.name)}" title="Edit ${esc(s.name)}">${icon('pencil-simple')}</button></td>`}</tr>`;
 }
 ACT['list-filter'] = el => { listState.filter = el.dataset.f; rerender(); };
 listState.renaming = false;
