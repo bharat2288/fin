@@ -12,7 +12,8 @@
 // (pageLinkKinds.type), so a type name never opened a page that did not exist.
 //
 // It reads these app.js globals by name, at call time, and copies none:
-/* global registerRoute, pageLinkKinds, pageLink, afterRender, get, esc, money, icon, day, monthName, monthEnd, plural, spendRowTr, pager, ACT, SIGNS */
+/* global registerRoute, pageLinkKinds, pageLink, afterRender, get, esc, money, icon, day, monthName, monthEnd, plural, spendRowTr, pager, ACT, SIGNS,
+   sortOf, sortRows, sortHead, sortServer, SORT_REDRAW */
 (function () {
     'use strict';
 
@@ -21,6 +22,12 @@
     // book picked for the table (null: the first on), the months a bar narrowed
     // to (null: the whole span) and the rows' page.
     const state = { id: null, span: null, stack: 'book', picked: null, months: null, label: null, page: 1, payload: null };
+
+    // The merchants sort here; the rows, a page at a time, on the server (each key is in its allowlist).
+    const MERCHANT_SORT = { name: { label: 'Merchant', kind: 'text', of: r => r.name }, net: { label: 'Net', kind: 'money', of: r => r.net },
+        share: { label: 'Share', kind: 'number', of: r => r.share_pct } };
+    const ROW_SORT = { date: { label: 'Date', kind: 'date' }, description: { label: 'Statement text', kind: 'text' }, type: { label: 'Type', kind: 'text' },
+        amount: { label: 'Amount', kind: 'money' } };
 
     const SPAN_WORDS = { '6M': 'the last 6 months', '12M': 'the last 12 months', YTD: 'this year so far', '2Y': 'the last 2 years', All: 'any month' };
 
@@ -45,7 +52,7 @@
         return `/api/transactions?${query({
             types: payload.subject.name, expense_only: 'true', book,
             start: ends ? `${ends[0]}-01` : null, end: ends ? monthEnd(ends[1]) : null,
-            sort: 'date', sort_dir: 'desc', per_page: ROWS_PAGE, page: s.page })}`;
+            ...sortServer('tp-rows', ROW_SORT), per_page: ROWS_PAGE, page: s.page })}`;
     }
 
     /** The book the table follows: the one picked while it is on, else the first on. */
@@ -95,26 +102,26 @@
         const picker = ctx.on.length > 1
             ? `<label class="field tp-pick"><span class="sr-only">Book for the merchants</span><select class="sel" data-change="tp-book">${ctx.on.map(b =>
                 `<option value="${esc(b)}"${b === book ? ' selected' : ''}>${esc(b)}</option>`).join('')}</select></label>` : '';
-        const rows = (m.rows || []).map(r => `<tr><td>${r.id ? pageLink('merchant', r.id, r.name) : esc(r.name)}${paidIn(r.paid_in)}</td>
+        const rows = sortRows('tp-merchants', m.rows || [], MERCHANT_SORT).map(r => `<tr><td>${r.id ? pageLink('merchant', r.id, r.name) : esc(r.name)}${paidIn(r.paid_in)}</td>
             <td class="r num">${esc(money(r.net, cur))}</td>${shareCell(r.share_pct)}</tr>`);
         if (m.others && m.others.count) {
             rows.push(`<tr class="tp-others"><td>${esc(plural(m.others.count, 'other'))}</td>
                 <td class="r num">${esc(money(m.others.net, cur))}</td>${shareCell(m.others.share_pct)}</tr>`);
         }
         return `<section class="card tp-merchants" aria-labelledby="tp-m-h"><div class="card-head"><div><h2 id="tp-m-h">Merchants in ${esc(payload.subject.name)}</h2>
-            <p>${esc(book)} · ${esc(ctx.label || payload.span)} · largest first</p></div>${picker}</div>
-            ${rows.length ? `<div class="table-wrap"><table class="t tp-t"><thead><tr><th scope="col">Merchant</th><th scope="col" class="r">Net</th><th scope="col">Share</th></tr></thead>
+            <p>${esc(book)} · ${esc(ctx.label || payload.span)}${sortOf('tp-merchants').key ? '' : ' · largest first'}</p></div>${picker}</div>
+            ${rows.length ? `<div class="table-wrap"><table class="t tp-t"><thead><tr><th scope="col">${sortHead('tp-merchants', 'name', MERCHANT_SORT)}</th><th scope="col" class="r">${sortHead('tp-merchants', 'net', MERCHANT_SORT)}</th><th scope="col">${sortHead('tp-merchants', 'share', MERCHANT_SORT)}</th></tr></thead>
             <tbody>${rows.join('')}</tbody></table></div>` : `<p class="card-empty">No ${esc(payload.subject.name)} rows in ${esc(book || 'this book')} here.</p>`}</section>`;
     }
 
     function rowsHtml(payload, list, book) {
         const body = list.transactions.length
             ? `<div class="table-wrap"><table class="t tp-rows"><caption class="sr-only">${esc(payload.subject.name)} rows</caption>
-                <thead><tr><th scope="col">Date</th><th scope="col">Statement text</th><th scope="col">Type</th><th scope="col" class="r">Amount</th></tr></thead>
-                <tbody>${list.transactions.map(spendRowTr).join('')}</tbody></table></div>${pager(list, 'tp-page')}`
+                <thead><tr>${Object.keys(ROW_SORT).map(k => `<th scope="col"${k === 'amount' ? ' class="r"' : ''}>${sortHead('tp-rows', k, ROW_SORT)}</th>`).join('')}</tr></thead>
+                <tbody>${list.transactions.map(spendRowTr).join('')}</tbody></table></div>${pager(list, 'tp-page', !!sortOf('tp-rows').key)}`
             : '<p class="card-empty">No rows here.</p>';
         return `<section class="card tp-rows-card" aria-labelledby="tp-r-h"><div class="card-head"><div><h2 id="tp-r-h">Rows</h2>
-            <p>${esc(book || '')} · newest first</p></div></div>${body}</section>`;
+            <p>${esc(book || '')}${sortOf('tp-rows').key ? '' : ' · newest first'}</p></div></div>${body}</section>`;
     }
 
     function narrowHtml() {
@@ -204,6 +211,8 @@
 
     ACT['tp-book'] = el => { state.picked = el.value; state.page = 1; return drawBelow(); };
     ACT['tp-all'] = () => { state.months = null; state.label = null; state.page = 1; return drawBelow(); };
+    SORT_REDRAW['tp-merchants'] = () => drawBelow();
+    SORT_REDRAW['tp-rows'] = () => { state.page = 1; return drawBelow(); };
     ACT['tp-page'] = el => { state.page = Number(el.dataset.page); return drawBelow(); };
 
     registerRoute(/^\/books\/type\/(\d+)$/, m => view(Number(m[1])));

@@ -1444,6 +1444,9 @@ table.t.coverage th.target { color: var(--accent-ink); }
     .sheet-card .section-header .row { width: 100%; }
     .sheet-card .seg { flex: 1 1 100%; }
     .sheet-sort { flex: 1 1 100%; }
+    /* a table that stacks into rows sorts from one select above it, as the sheet does: its headings are hidden */
+    label.field.sort-pick { display: flex !important; flex-direction: row; align-items: center; gap: 8px; margin: 0 0 10px; }
+    label.field.sort-pick select { flex: 1 1 auto; min-width: 0; }
     .page-head .field:has(select[data-change="month"]) { min-width: 0; width: 100%; }
     .page-head__end { width: 100%; }
     .page-head__end > * { flex: 1 1 100%; }

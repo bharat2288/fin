@@ -95,7 +95,6 @@ const store = {
 
 const S = {
     month: null,               // the as-at month: the balance sheet's and the period filter's
-    sheetSort: { key: null, dir: 'asc' },
     needsLook: false,
     spending: store.get('spending', { book: 'all', view: 'type', span: 'month', search: '', type: '', oneOffs: true, account: '' }),
     changes: { who: 'all', state: 'any', newOnly: false, asked: false, open: new Set() },
@@ -1260,6 +1259,72 @@ function toggleRowDetail(el) {
     el.setAttribute('aria-expanded', String(open));
     return open;
 }
+
+// ---------------------------------------------------------------------------
+// Sorting a table by its columns: the balance sheet's heading, for every list.
+// A table names its sortable columns once, as {key: {label, kind, of}}: kind
+// is text, money (its S$ figure, in minor units), date or number; of reads a
+// row's value. A heading cycles ↕ → ↑ → ↓ → the table's own order; a table
+// that stacks on a phone gets a Sort select above it. A table the server pages
+// sends the key as its sort (sortServer): the server's allowlist reaches SQL.
+// ---------------------------------------------------------------------------
+
+/** Each table's sort, by the table's name: kept while the page is open, gone on reload. */
+const SORTS = {};
+/** A table that redraws itself on a new sort (a page of rows, a change opened); the rest rerender. */
+const SORT_REDRAW = {};
+function sortOf(table) { return SORTS[table] || { key: null, dir: 'asc' }; }
+/** The next sort after a heading click: ↑ first, then ↓, then the table's own order. */
+function nextSort(now, key) {
+    if (now.key !== key) return { key, dir: 'asc' };
+    return now.dir === 'asc' ? { key, dir: 'desc' } : { key: null, dir: 'asc' };
+}
+/** The value a cell sorts by, or null when it is empty. */
+function sortValue(kind, v) {
+    if (v === null || v === undefined || v === '') return null;
+    if (kind === 'text') return String(v).trim().toLowerCase() || null;
+    const n = kind === 'date' ? Date.parse(v) : Number(v);
+    return Number.isNaN(n) ? null : n;
+}
+/** Two values of one kind in a direction: text A to Z ignoring case; empties last both ways. */
+function sortCompare(kind, a, b, dir = 'asc') {
+    const x = sortValue(kind, a), y = sortValue(kind, b);
+    if (x === null || y === null) return x === y ? 0 : x === null ? 1 : -1;
+    const d = kind === 'text' ? x.localeCompare(y, undefined, { numeric: true }) : x < y ? -1 : x > y ? 1 : 0;
+    return dir === 'desc' ? -d : d;
+}
+/** The rows in the table's sort, or as they came when it has none. */
+function sortRows(table, rows, cols) {
+    const s = sortOf(table), col = cols[s.key];
+    return col ? [...rows].sort((a, b) => sortCompare(col.kind, col.of(a), col.of(b), s.dir)) : rows;
+}
+/** A cell drawn as HTML (a marker, a tag), as the words it sorts by. */
+const plainText = html => String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+/** A server-paged table's order as the server's sort and sort_dir, or its own order. */
+function sortServer(table, cols, own = { sort: 'date', sort_dir: 'desc' }) {
+    const s = sortOf(table), col = cols[s.key];
+    if (!col) return own;
+    const desc = (s.dir === 'desc') !== !!col.flip;   // flip: a column read the other way from the server's (money in)
+    return { sort: col.server || s.key, sort_dir: desc ? 'desc' : 'asc' };
+}
+/** A heading that sorts its table; the arrow beside it is the stylesheet's. */
+function sortHead(table, key, cols) {
+    const s = sortOf(table);
+    return `<button type="button" data-act="sort" data-table="${table}" data-key="${key}"${s.key === key ? ` data-dir="${s.dir}"` : ''}>${esc(cols[key].label)}</button>`;
+}
+const SORT_WORDS = { text: ['A to Z', 'Z to A'], money: ['smallest first', 'largest first'], number: ['fewest first', 'most first'], date: ['oldest first', 'newest first'] };
+/** The phone's Sort select, for a table that stacks into rows: each column both ways, or the
+ *  table's own choices ([value, words]; a bare key is that column ↑). */
+function sortPicker(table, cols, { own = 'As listed', cls = 'sort-pick', choices = null } = {}) {
+    const s = sortOf(table);
+    const list = choices || Object.entries(cols).flatMap(([k, c]) => SORT_WORDS[c.kind].map((w, i) => [`${k}:${i ? 'desc' : 'asc'}`, `${c.label}: ${w}`]));
+    const on = v => { const [k, d = 'asc'] = v.split(':'); return k === s.key && d === s.dir; };
+    return `<label class="field phone-only ${cls}">${cls === 'sort-pick' ? '<span>Sort</span>' : ''}<select data-change="sort-pick" data-table="${table}" aria-label="Sort">
+        <option value="">${esc(own)}</option>${list.map(([v, w]) => `<option value="${v}"${on(v) ? ' selected' : ''}>${esc(w)}</option>`).join('')}</select></label>`;
+}
+function setSort(table, s) { SORTS[table] = s; (SORT_REDRAW[table] || rerender)(); }
+ACT.sort = el => setSort(el.dataset.table, nextSort(sortOf(el.dataset.table), el.dataset.key));
+ACT['sort-pick'] = el => { const [key, dir = 'asc'] = el.value.split(':'); setSort(el.dataset.table, key ? { key, dir: dir === 'desc' ? 'desc' : 'asc' } : { key: null, dir: 'asc' }); };
 
 // ---------------------------------------------------------------------------
 // Queue
@@ -2984,6 +3049,9 @@ function sortKey(line, key) {
     if (key === 'value') return -(line.value_minor ?? -Infinity);
     return 0;
 }
+/** The sheet's sortable columns: each by its sortKey, as the sheet has always sorted. */
+const SHEET_SORT = { value: { label: 'In S$', kind: 'number', of: l => sortKey(l, 'value') }, rests: { label: 'Rests on', kind: 'number', of: l => sortKey(l, 'rests') },
+    check: { label: 'Check', kind: 'number', of: l => sortKey(l, 'check') } };
 
 function marginNote(line, refused, asAt, { rate = true } = {}) {
     const notes = [];
@@ -3017,13 +3085,9 @@ async function viewSheet() {
     const refusedBy = q.refusedBy;
     const allLines = sheet.sections.flatMap(s => s.lines);
     const needCount = allLines.filter(l => lineNeedsLook(l, refusedBy)).length;
-    const sorted = lines => {
-        if (!S.sheetSort.key) return lines;
-        const dir = S.sheetSort.dir === 'asc' ? 1 : -1;
-        return [...lines].sort((a, b) => (sortKey(a, S.sheetSort.key) - sortKey(b, S.sheetSort.key)) * dir);
-    };
+    const sorted = lines => sortRows('sheet', lines, SHEET_SORT);
     const shown = line => !S.needsLook || lineNeedsLook(line, refusedBy);
-    const sortBtn = (key, label) => `<button data-act="sheet-sort" data-key="${key}"${S.sheetSort.key === key ? ` data-dir="${S.sheetSort.dir}"` : ''}>${label}</button>`;
+    const sortBtn = key => sortHead('sheet', key, SHEET_SORT);
     const owedNote = section => section.owed ? ' <span class="sec-note">negative: what we owe</span>' : '';
 
     const table = sheet.sections.map(section => {
@@ -3076,11 +3140,9 @@ async function viewSheet() {
             <div class="row"><div class="seg" role="group" aria-label="Which lines">
                 <button data-act="needs-look" data-on="0" aria-pressed="${!S.needsLook}">All lines</button>
                 <button data-act="needs-look" data-on="1" aria-pressed="${S.needsLook}">${icon('warning')}Needs a look · ${needCount}</button></div>
-                <label class="field phone-only sheet-sort"><select data-change="sheet-sort-select" aria-label="Sort">
-                    <option value="">Sheet order</option><option value="rests"${S.sheetSort.key === 'rests' ? ' selected' : ''}>Rests on: oldest first</option>
-                    <option value="check"${S.sheetSort.key === 'check' ? ' selected' : ''}>Check: worst first</option></select></label></div></div>
+                ${sortPicker('sheet', SHEET_SORT, { own: 'Sheet order', cls: 'sheet-sort', choices: [['rests', 'Rests on: oldest first'], ['check', 'Check: worst first']] })}</div></div>
         <div class="table-shell sheet-table"><table class="t">
-            <thead><tr><th style="min-width:170px">Account</th><th class="r">In its currency</th><th class="r">${sortBtn('value', 'In S$')}</th><th class="tick-cell"><span class="sr-only">Tick</span></th><th>${sortBtn('rests', 'Rests on')}</th><th>${sortBtn('check', 'Check')}</th><th>Margin note</th></tr></thead>
+            <thead><tr><th style="min-width:170px">Account</th><th class="r">In its currency</th><th class="r">${sortBtn('value')}</th><th class="tick-cell"><span class="sr-only">Tick</span></th><th>${sortBtn('rests')}</th><th>${sortBtn('check')}</th><th>Margin note</th></tr></thead>
             <tbody>${table || '<tr><td colspan="7" class="empty">Nothing needs a look.</td></tr>'}</tbody>
             ${S.needsLook ? '' : `<tfoot><tr class="total"><td>Net worth</td><td></td><td class="r num">${esc(money(sheet.net_worth_minor, 'SGD'))}</td><td colspan="4"></td></tr></tfoot>`}</table></div>
         <div class="sheet-lines">${cards || '<p class="card-empty">Nothing needs a look.</p>'}
@@ -3093,14 +3155,6 @@ async function viewSheet() {
     ${monthCheckHTML(sheet)}`;
 }
 ACT['needs-look'] = el => { S.needsLook = el.dataset.on === '1'; rerender(); };
-ACT['sheet-sort'] = el => {
-    const key = el.dataset.key;
-    if (S.sheetSort.key === key) {
-        if (S.sheetSort.dir === 'asc') S.sheetSort.dir = 'desc'; else S.sheetSort = { key: null, dir: 'asc' };
-    } else S.sheetSort = { key, dir: 'asc' };
-    rerender();
-};
-ACT['sheet-sort-select'] = el => { S.sheetSort = { key: el.value || null, dir: 'asc' }; rerender(); };
 
 /** Nothing moved in the month: no income, spending, currency change or money
  *  moved to accounts left out. */
@@ -3278,7 +3332,25 @@ function betweenFigures(t, cur) {
         </tbody></table>`;
 }
 
+/** An account's tie lines, sortable. One account is one currency, so its own figures stand in for S$. */
+const tieWorked = t => t.opening_minor !== null && t.opening_minor !== undefined;
+const TIE_SORT = {
+    date: { label: 'Statement', kind: 'date', of: t => t.date },
+    opening: { label: 'Opening', kind: 'money', of: t => tieWorked(t) ? t.opening_minor : null },
+    in: { label: '+ money in', kind: 'money', of: t => tieWorked(t) ? t.in_minor || 0 : null },
+    out: { label: '− money out', kind: 'money', of: t => tieWorked(t) ? t.out_minor || 0 : null },
+    made: { label: '= works out to', kind: 'money', of: t => tieWorked(t) ? t.opening_minor + (t.in_minor || 0) - (t.out_minor || 0) : null },
+    says: { label: 'Statement says', kind: 'money', of: t => t.closing_minor },
+    check: { label: 'Check', kind: 'text', of: t => t.status },
+};
+/** An account's rows sort on the server (a page at a time). Money in is a negative amount,
+ *  so its largest first is the server's amount ascending (flip). */
+const ACCT_ROW_SORT = {
+    date: { label: 'Date', kind: 'date' }, description: { label: 'Description', kind: 'text' }, type: { label: 'Labelled', kind: 'text' },
+    in: { label: 'Money in', kind: 'money', server: 'amount', flip: true }, out: { label: 'Money out', kind: 'money', server: 'amount' },
+};
 const accountPage = { page: 1, month: null };
+SORT_REDRAW['acct-rows'] = () => { accountPage.page = 1; rerender(); };
 async function viewAccount(id) {
     const [r, sheet, ties, anchorsList, refused] = await Promise.all([
         refs(), sheetFor(S.month), get(`/api/accounts/${id}/ties`), get(`/api/anchors?account_id=${id}`), get(`/api/statements/refused?account_id=${id}`),
@@ -3286,7 +3358,8 @@ async function viewAccount(id) {
     const acct = r.accountById.get(id);
     if (!acct) throw new Error('No such account');
     if (accountPage.id !== id) { accountPage.id = id; accountPage.page = 1; accountPage.month = null; }
-    const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}${accountPage.month ? `&month=${accountPage.month}` : ''}`);
+    const order = sortOf('acct-rows').key ? `&${new URLSearchParams(sortServer('acct-rows', ACCT_ROW_SORT))}` : '';
+    const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}${accountPage.month ? `&month=${accountPage.month}` : ''}${order}`);
     const line = sheet.sections.flatMap(s => s.lines).find(l => l.account_id === id);
     const cur = acct.currency || 'SGD';
     const asAtShort = day(sheet.as_at, { year: false });
@@ -3327,7 +3400,7 @@ async function viewAccount(id) {
             <p class="card-foot">Nothing checks a figure you enter; this only shows what moved between them.</p></section>` : '';
     } else {
         const dash = '<span class="muted">—</span>';
-        const tieRows = ties.ties.map(t => {
+        const tieRows = sortRows('acct-ties', ties.ties, TIE_SORT).map(t => {
             const worked = t.opening_minor !== null && t.opening_minor !== undefined;
             const made = worked ? t.opening_minor + (t.in_minor || 0) - (t.out_minor || 0) : null;
             const title = t.status === 'your figure' ? 'Your figure' : 'Statement';
@@ -3342,7 +3415,8 @@ async function viewAccount(id) {
                 <td class="tie-check" data-label="Check">${tieTag(t, cur)}</td></tr>`;
         }).join('');
         tieCard = `<section class="card ties-card"><div class="section-header"><h2>Tie lines</h2><span class="section-header__aside">each statement drawn as a sum</span></div>
-            ${tieRows ? `<div class="table-shell"><table class="t cells ties-table"><thead><tr><th>Statement</th><th class="r">Opening</th><th class="r">+ money in</th><th class="r">− money out</th><th class="r">= works out to</th><th class="r">Statement says</th><th>Check</th></tr></thead><tbody>${tieRows}</tbody></table></div>`
+            ${tieRows ? `${sortPicker('acct-ties', TIE_SORT, { own: 'Newest first' })}<div class="table-shell"><table class="t cells ties-table"><thead><tr>${Object.keys(TIE_SORT).map(k =>
+                `<th${TIE_SORT[k].kind === 'money' ? ' class="r"' : ''}>${sortHead('acct-ties', k, TIE_SORT)}</th>`).join('')}</tr></thead><tbody>${tieRows}</tbody></table></div>`
                 : '<p class="card-empty">No balances held.</p>'}</section>`;
     }
 
@@ -3372,11 +3446,12 @@ async function viewAccount(id) {
         const upto = oldestFirst.find(x => x.date >= row.date);
         return upto && daysBetween(row.date, upto.date) <= 31 ? { key: upto.date, t: upto, loose: true } : { key: 'none' };
     };
+    // Sorted, the rows are one list: a tie line's heading groups only rows in date order.
     let lastKey = null;
     const rowList = rows.transactions.map(row => {
         const g = groupOf(row);
         let headRow = '';
-        if (g.key !== lastKey) {
+        if (!order && g.key !== lastKey) {
             lastKey = g.key;
             let words;
             if (g.key === 'since') words = `Since the ${g.since.status === 'your figure' ? 'figure' : 'statement'} of ${esc(day(g.since.date))}`;
@@ -3403,8 +3478,9 @@ async function viewAccount(id) {
     ${refusedHTML ? `<section class="card"><div class="section-header"><h2>Refused at upload</h2><span class="section-header__aside">a statement that does not tie is kept out whole</span></div>${refusedHTML}</section>` : ''}
     ${figures ? `<section class="card"><div class="section-header"><h2>Your figures</h2><span class="section-header__aside">${plural(supplied.length, 'figure')} · each the fact</span></div><ul class="fig-list">${figures}</ul></section>` : ''}
     <section class="card"><div class="section-header"><h2>Rows</h2><span class="section-header__aside">${plural(rows.total, 'row')} · tap a row for its note, one-off and history</span></div>
-        <div class="table-shell"><table class="t rows acct-rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Money in</th><th class="r">Money out</th></tr></thead><tbody>${rowList || '<tr><td colspan="5" class="empty">No rows.</td></tr>'}</tbody></table></div>
-        ${pager(rows, 'account-page')}</section>`;
+        ${sortPicker('acct-rows', ACCT_ROW_SORT, { own: 'Newest first' })}<div class="table-shell"><table class="t rows acct-rows"><thead><tr>${Object.keys(ACCT_ROW_SORT).map(k =>
+            `<th${ACCT_ROW_SORT[k].kind === 'money' ? ' class="r"' : ''}>${sortHead('acct-rows', k, ACCT_ROW_SORT)}</th>`).join('')}</tr></thead><tbody>${rowList || '<tr><td colspan="5" class="empty">No rows.</td></tr>'}</tbody></table></div>
+        ${pager(rows, 'account-page', !!order)}</section>`;
 }
 ACT['account-page'] = el => { accountPage.page = Number(el.dataset.page); rerender(); window.scrollTo(0, 0); };
 /** A person account's page (personal-ledger 23, the switch): a person is no
@@ -3428,11 +3504,12 @@ async function personAccountPage(acct, figures, figureCount) {
         ${list ? `<ul class="fig-list">${list}</ul>` : `<p class="card-empty">Nothing is open with ${esc(acct.name)}.</p>`}</section>
     ${figures ? `<section class="card"><div class="section-header"><h2>Your figures</h2><span class="section-header__aside">${plural(figureCount, 'figure')} · no longer read by Books</span></div><ul class="fig-list">${figures}</ul></section>` : ''}`;
 }
-function pager(list, actName) {
+function pager(list, actName, sorted = false) {
     if (!list.pages || list.pages <= 1) return '';
+    // Newer and Older hold only in the rows' own order, newest first; sorted, the pages are just before and after.
     return `<div class="pager"><span class="small muted">page ${list.page} of ${list.pages}</span>
-        <button class="btn sm" data-act="${actName}" data-page="${list.page - 1}"${list.page <= 1 ? ' disabled' : ''}>Newer</button>
-        <button class="btn sm" data-act="${actName}" data-page="${list.page + 1}"${list.page >= list.pages ? ' disabled' : ''}>Older</button></div>`;
+        <button class="btn sm" data-act="${actName}" data-page="${list.page - 1}"${list.page <= 1 ? ' disabled' : ''}>${sorted ? 'Previous' : 'Newer'}</button>
+        <button class="btn sm" data-act="${actName}" data-page="${list.page + 1}"${list.page >= list.pages ? ' disabled' : ''}>${sorted ? 'Next' : 'Older'}</button></div>`;
 }
 /** A row of a Check each row merchant that nobody has checked yet: it counts
  *  in its usual book meanwhile, and waits in the Queue. */
@@ -3575,6 +3652,10 @@ function spendGroupNameCell(g, view, fold, types) {
     return id ? pageLink('type', id, g.name) : esc(g.name);
 }
 
+/** Spending's Every row columns. Amount sorts by the row's counted S$ part; a row on an
+ *  account in another currency has none, and goes last. */
+const SPEND_ROW_SORT = { date: { label: 'Date', kind: 'date', of: x => x.date }, description: { label: 'Description', kind: 'text', of: x => x.description },
+    type: { label: 'Type', kind: 'text', of: x => x.display_type }, amount: { label: 'Amount', kind: 'money', of: x => (x.currency || 'SGD') === 'SGD' ? x.counted_minor ?? x.amount_minor : null } };
 async function viewSpending() {
     const sp = spendState();
     const r = await refs();
@@ -3666,8 +3747,9 @@ async function viewSpending() {
         let content;
         if (sp.view === 'flat') {
             const list = b.all;
-            content = list.length ? `<div class="table-wrap"><table class="t rows sl-rows"><thead><tr><th>Date</th><th>Description</th><th>Type</th><th class="r">Amount</th></tr></thead>
-                <tbody>${list.slice(0, 300).map(spendRowTr).join('')}</tbody></table></div>
+            const head = k => sortHead('spend-rows', k, SPEND_ROW_SORT);
+            content = list.length ? `${sortPicker('spend-rows', SPEND_ROW_SORT, { own: 'Newest first' })}<div class="table-wrap"><table class="t rows sl-rows"><thead><tr><th>${head('date')}</th><th>${head('description')}</th><th>${head('type')}</th><th class="r">${head('amount')}</th></tr></thead>
+                <tbody>${sortRows('spend-rows', list, SPEND_ROW_SORT).slice(0, 300).map(spendRowTr).join('')}</tbody></table></div>
                 <p class="card-foot">Every row here is money out unless it says refund.${list.length > 300 ? ` The first 300 of ${list.length} rows; narrow the filters to see the rest.` : ''}</p>`
                 : `<p class="card-empty">No rows in ${esc(spanWords)}.</p>`;
         } else {
@@ -3676,8 +3758,12 @@ async function viewSpending() {
             const noun = sp.view === 'type' ? 'Type' : 'Merchant';
             const nameCell = g => spendGroupNameCell(g, sp.view, fold, r.types);
             const whole = sgd(b.by);   // the tile's figure: every share is of it
-            content = groups.length ? `<div class="table-wrap"><table class="t sl-groups"><thead><tr><th>${noun}</th><th class="r">Rows</th><th class="r">Net</th><th class="r desk-only">Share</th></tr></thead><tbody>
-                ${groups.slice(0, 60).map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
+            // Net and Share sort by the S$ part, which every share is of.
+            const cols = { name: { label: noun, kind: 'text', of: g => g.name }, rows: { label: 'Rows', kind: 'number', of: g => g.list.length },
+                net: { label: 'Net', kind: 'money', of: g => g.sgd }, share: { label: 'Share', kind: 'money', of: g => g.sgd } };
+            const head = k => sortHead('spend-groups', k, cols);
+            content = groups.length ? `<div class="table-wrap"><table class="t sl-groups"><thead><tr><th>${head('name')}</th><th class="r">${head('rows')}</th><th class="r">${head('net')}</th><th class="r desk-only">${head('share')}</th></tr></thead><tbody>
+                ${sortRows('spend-groups', groups, cols).slice(0, 60).map(g => `<tr class="clickable" data-act="spend-drill" data-key="${esc(g.name)}" data-view="${sp.view}"><td>${nameCell(g)}</td><td class="r num">${g.list.length}</td>
                     <td class="r num">${esc(totalsText(g.by))}</td><td class="r num desk-only">${g.sgd > 0 && whole > 0 ? pct(g.sgd, whole) : '—'}</td></tr>`).join('')}
                 ${groups.length > 60 ? `<tr><td colspan="4" class="muted">…and ${groups.length - 60} more</td></tr>` : ''}
                 </tbody></table></div>`
@@ -3833,6 +3919,16 @@ function billEvery(s) {
 function billMissedTag(s, missed) {
     return `<button type="button" class="tag stale" data-act="bill-queue" data-id="${s.id}" title="Open it in the queue">${icon('hourglass')}no payment seen for ${esc(day(missed.due, { year: false }))}</button>`;
 }
+/** Bills' sortable columns. Amount sorts by its S$ figure: a bill in another currency has none on it, so goes last. */
+const BILL_SORT = {
+    name: { label: 'Bill', kind: 'text', of: x => x.s.service_name || x.s.match_pattern },
+    amount: { label: 'Amount', kind: 'money', of: x => (x.s.currency || 'SGD') === 'SGD' ? toMinor(x.s.amount, 'SGD') : null },
+    often: { label: 'How often', kind: 'text', of: x => billEvery(x.s) },
+    month: { label: 'A month', kind: 'money', of: x => toMinor(x.s.monthly_sgd, 'SGD') },
+    from: { label: 'Paid from', kind: 'text', of: x => x.s.account_name },
+    last: { label: 'Last paid', kind: 'date', of: x => x.s.tx_last_paid || x.s.last_paid },
+    next: { label: 'Next', kind: 'date', of: x => x.s.status === 'active' ? x.s.computed_renewal : null },
+};
 async function viewBills() {
     const [subs, r] = await Promise.all([get('/api/subscriptions'), refs()]);
     ACT.__subs = new Map(subs.map(s => [s.id, s]));
@@ -3864,6 +3960,8 @@ async function viewBills() {
             || String(a.s.computed_renewal || '').localeCompare(String(b.s.computed_renewal || '')));
         const head = `<tr class="section sl-book"><td colspan="5" class="sl-name">${esc(book)}</td>
             <td colspan="3" class="r sl-fig">${esc(money(monthly, 'SGD'))} a month · ${list.length ? (missed.length ? `${missed.length} of ${list.length} not seen` : plural(list.length, 'bill')) : 'no bills'}</td></tr>`;
+        // Sorted, a book's bills are one list (a missed one still says so); else missed first, then paid.
+        if (sortOf('bills').key) return head + sortRows('bills', list, BILL_SORT).map(row).join('');
         return head + missed.map(row).join('')
             + (missed.length && paid.length ? '<tr class="section sl-sub-head"><td colspan="8" class="sl-name">Paid as expected</td></tr>' : '')
             + paid.map(row).join('');
@@ -3871,7 +3969,8 @@ async function viewBills() {
     return `${booksNav('bills')}
     <div class="page-head"><div><span class="eyebrow">Books</span><h1>Bills</h1><p>What renews and when, from the rows that pay it. A renewal with no payment seen also waits in the queue.</p></div>
         <div class="row"><button class="btn" data-act="bills-refresh">${icon('arrows-clockwise')}Refresh from rows</button><button class="btn" data-act="bill" data-id="">${icon('plus')}Add a bill</button></div></div>
-    <section class="card"><div class="table-wrap"><table class="t sl-stack sl-bills"><thead><tr><th>Bill</th><th class="r">Amount</th><th>How often</th><th class="r">A month</th><th>Paid from</th><th>Last paid</th><th>Next</th></tr></thead>
+    <section class="card">${sortPicker('bills', BILL_SORT, { own: 'Missed first' })}<div class="table-wrap"><table class="t sl-stack sl-bills"><thead><tr>${Object.keys(BILL_SORT).map(k =>
+        `<th${BILL_SORT[k].kind === 'money' ? ' class="r"' : ''}>${sortHead('bills', k, BILL_SORT)}</th>`).join('')}</tr></thead>
         <tbody>${subs.length ? groups : '<tr><td colspan="8" class="empty sl-name">No bills yet.</td></tr>'}</tbody></table></div>
         <p class="card-foot">Monthly figures in S$ at each bill’s own rate. Each book’s bills are their own total; no line adds the books.</p></section>`;
 }
@@ -3977,20 +4076,27 @@ async function viewLists(tab) {
         const row = t => `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b></td><td class="small">${esc(plainWords(t.covers))}</td>
             <td class="small muted">${esc(plainWords(t.not_for || ''))}</td><td class="small">${t.kind === 'income' ? '' : `${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}</td>
             <td class="sl-sub">${esc(plainWords(t.covers))}${t.kind === 'income' ? '' : ` · ${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}${t.not_for ? `<div>Not for: ${esc(plainWords(t.not_for))}</div>` : ''}</td></tr>`;
+        const cols = name => ({ name: { label: name, kind: 'text', of: t => t.display_name || t.name }, covers: { label: 'Covers', kind: 'text', of: t => plainWords(t.covers) },
+            notfor: { label: 'Not for', kind: 'text', of: t => plainWords(t.not_for) } });
+        const TYPE_SORT = { ...cols('Type'), book: { label: 'Usual book', kind: 'text', of: t => t.proposed_book } }, KIND_SORT = cols('Kind');
+        const heads = (table, c) => Object.keys(c).map(k => `<th>${sortHead(table, k, c)}</th>`).join('');
         return `${head}<section class="card"><div class="section-header"><div><h2>Types</h2><p>One list serves every book. To add or rename a type, ask Claude in chat.</p></div></div>
-            <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Type</th><th>Covers</th><th>Not for</th><th>Usual book</th></tr></thead><tbody>${r.types.filter(t => t.kind === 'spending').map(row).join('')}</tbody></table></div>
-            ${income.length ? `<h3 class="sl-subhead">Income kinds</h3><div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Kind</th><th>Covers</th><th>Not for</th><th></th></tr></thead><tbody>${income.map(row).join('')}</tbody></table></div>`
+            ${sortPicker('types', TYPE_SORT)}<div class="table-wrap"><table class="t sl-stack"><thead><tr>${heads('types', TYPE_SORT)}</tr></thead><tbody>${sortRows('types', r.types.filter(t => t.kind === 'spending'), TYPE_SORT).map(row).join('')}</tbody></table></div>
+            ${income.length ? `<h3 class="sl-subhead">Income kinds</h3>${sortPicker('income-kinds', KIND_SORT)}<div class="table-wrap"><table class="t sl-stack"><thead><tr>${heads('income-kinds', KIND_SORT)}<th></th></tr></thead><tbody>${sortRows('income-kinds', income, KIND_SORT).map(row).join('')}</tbody></table></div>`
                 : '<p class="card-foot">Income kinds: none set up yet.</p>'}</section>`;
     }
     if (tab === 'rates') {
         const saved = await get('/api/rates');
         const foreign = [...new Set(r.accounts.filter(a => a.currency && a.currency !== 'SGD').map(a => a.currency))];
-        const rows = saved.slice(0, 200).map(x => `<tr><td class="num sl-name">${esc(day(x.date))}</td><td>${esc(x.pair)}</td><td class="r num sl-fig">${esc(x.rate)}</td><td class="small muted">${esc(plainWords(x.source))}</td>
+        const RATE_SORT = { day: { label: 'Day', kind: 'date', of: x => x.date }, pair: { label: 'Pair', kind: 'text', of: x => x.pair },
+            rate: { label: 'Rate', kind: 'number', of: x => x.rate }, source: { label: 'Where from', kind: 'text', of: x => plainWords(x.source) } };
+        // The newest 200 are listed, and those sort.
+        const rows = sortRows('rates', saved.slice(0, 200), RATE_SORT).map(x => `<tr><td class="num sl-name">${esc(day(x.date))}</td><td>${esc(x.pair)}</td><td class="r num sl-fig">${esc(x.rate)}</td><td class="small muted">${esc(plainWords(x.source))}</td>
             <td class="sl-sub">${esc(x.pair)}${x.source ? ' · ' + esc(plainWords(x.source)) : ''}</td>
             <td class="r sl-end"><button class="btn sm" data-act="rate" data-currency="${esc(String(x.pair).split('/')[0])}" data-date="${esc(x.date)}">Change</button></td></tr>`).join('');
         return `${head}<section class="card"><div class="section-header"><div><h2>Rates</h2><p>S$ for one unit, by day. A balance in another currency joins the S$ totals at the rate for its day, or the latest saved before it.</p></div>
             <div class="row">${(foreign.length ? foreign : ['INR']).map(c => `<button class="btn" data-act="rate" data-currency="${esc(c)}" data-date="${esc(rateDay())}">Fetch or enter a ${esc(c)} rate</button>`).join('')}</div></div>
-            <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Day</th><th>Pair</th><th class="r">Rate</th><th>Where from</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rate saved yet.</td></tr>'}</tbody></table></div>
+            ${sortPicker('rates', RATE_SORT, { own: 'Newest first' })}<div class="table-wrap"><table class="t sl-stack"><thead><tr><th>${sortHead('rates', 'day', RATE_SORT)}</th><th>${sortHead('rates', 'pair', RATE_SORT)}</th><th class="r">${sortHead('rates', 'rate', RATE_SORT)}</th><th>${sortHead('rates', 'source', RATE_SORT)}</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rate saved yet.</td></tr>'}</tbody></table></div>
             ${saved.length > 200 ? `<p class="card-foot">The newest 200 of ${saved.length}.</p>` : ''}</section>`;
     }
     if (tab === 'accounts') {
@@ -4013,13 +4119,18 @@ async function viewLists(tab) {
             const check = line && line.check && line.rests_on?.source !== 'supplied' ? checkMarker(line) : '';
             return `statement ${esc(date)} ${check} ${enter}`;
         };
-        const rows = r.accounts.map(a => `<tr><td class="sl-name"><a href="#/books/account/${a.id}"><b>${esc(a.name)}</b></a>${accountMark(a.id)}</td><td>${esc(a.type)}</td><td>${esc(a.owner)}</td><td>${esc(a.currency)}</td>
+        // Latest balance held sorts by its S$ figure: the sheet's, or the figure itself in an S$ account.
+        const ACCOUNT_SORT = { name: { label: 'Account', kind: 'text', of: a => a.name }, kind: { label: 'Kind', kind: 'text', of: a => a.type },
+            whose: { label: 'Whose', kind: 'text', of: a => a.owner }, currency: { label: 'Currency', kind: 'text', of: a => a.currency },
+            rests: { label: 'What its balance rests on', kind: 'date', of: a => a.anchor?.date },
+            balance: { label: 'Latest balance held', kind: 'money', of: a => lineOf.get(a.id)?.value_minor ?? (a.currency === 'SGD' ? a.anchor?.amount_minor : null) } };
+        const rows = sortRows('accounts', r.accounts, ACCOUNT_SORT).map(a => `<tr><td class="sl-name"><a href="#/books/account/${a.id}"><b>${esc(a.name)}</b></a>${accountMark(a.id)}</td><td>${esc(a.type)}</td><td>${esc(a.owner)}</td><td>${esc(a.currency)}</td>
             <td class="small sl-rests">${restsCell(a)}</td>
             <td class="r num sl-fig">${a.anchor ? `<span class="${a.anchor.amount_minor < 0 ? 'neg' : ''}">${esc(money(a.anchor.amount_minor, a.currency))}</span>` : ''}</td>
             <td class="sl-sub">${esc(a.type)} · ${restsCell(a)}</td>
             <td class="r sl-end"><button class="btn sm" data-act="account-edit" data-id="${a.id}">Edit</button></td></tr>`).join('');
         return `${head}<section class="card"><div class="section-header"><h2>Accounts</h2><button class="btn" data-act="account-edit" data-id="">${icon('plus')}Add an account</button></div>
-            <div class="table-wrap"><table class="t sl-stack sl-accounts"><thead><tr><th>Account</th><th>Kind</th><th>Whose</th><th>Currency</th><th>What its balance rests on</th><th class="r">Latest balance held</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+            ${sortPicker('accounts', ACCOUNT_SORT)}<div class="table-wrap"><table class="t sl-stack sl-accounts"><thead><tr>${['name', 'kind', 'whose', 'currency', 'rests'].map(k => `<th>${sortHead('accounts', k, ACCOUNT_SORT)}</th>`).join('')}<th class="r">${sortHead('accounts', 'balance', ACCOUNT_SORT)}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
             <p class="card-foot">Stale and missing figures say so, and open their fix. Owed balances are negative.</p></section>`;
     }
     if (tab === 'rules') {
@@ -4034,21 +4145,24 @@ async function viewLists(tab) {
                 ? `only ${x.min_amount !== null ? esc(money(toMinor(x.min_amount), 'SGD')) : 'any amount'} to ${x.max_amount !== null ? esc(money(toMinor(x.max_amount), 'SGD')) : 'any amount'}` : '';
             return [book, type, range].filter(Boolean).join(' · ') + (x.book_override || x.type_override_id ? ' ' + tag('yours', 'overrides') : '');
         };
-        const rows = shown.slice(0, 200).map(x => `<tr class="clickable" data-act="rule" data-id="${x.id}"><td class="sl-name"><b class="mono-ish">${esc(x.pattern)}</b></td><td class="small">${esc(MATCH_WORDS[x.match_type] || x.match_type)}</td>
+        const RULE_SORT = { pattern: { label: 'Pattern', kind: 'text', of: x => x.pattern }, match: { label: 'Match', kind: 'text', of: x => MATCH_WORDS[x.match_type] || x.match_type },
+            merchant: { label: 'Merchant', kind: 'text', of: x => x.service_name }, sets: { label: 'Sets', kind: 'text', of: x => plainText(sets(x)) },
+            rows: { label: 'Rows it labelled', kind: 'number', of: x => x.rows_labelled } };
+        const rows = sortRows('rules', shown, RULE_SORT).slice(0, 200).map(x => `<tr class="clickable" data-act="rule"data-id="${x.id}"><td class="sl-name"><b class="mono-ish">${esc(x.pattern)}</b></td><td class="small">${esc(MATCH_WORDS[x.match_type] || x.match_type)}</td>
             <td>${esc(x.service_name || '')}</td><td class="small">${sets(x)}</td>
             <td class="r num sl-fig">${x.rows_labelled ?? ''}<span class="sl-phone-word"> ${x.rows_labelled === 1 ? 'row' : 'rows'}</span></td>
             <td class="sl-sub">${esc(MATCH_WORDS[x.match_type] || x.match_type)} · gives ${esc(x.service_name || '')}${sets(x) ? ' · ' + sets(x) : ''}</td></tr>`).join('');
         return `${head}<section class="card"><div class="section-header">${search('Search patterns or merchants')}
             <div class="row">${driftLine(drift)}<button class="btn" data-act="rule" data-id="">${icon('plus')}Add a rule</button></div></div>
             <p class="card-foot sl-lead">${shown.length} of ${rules.length} rules${shown.length > 200 ? ' · the first 200 shown' : ''}. A rule gives a row its merchant, and with it a book and type.</p>
-            <div class="table-wrap"><table class="t sl-stack"><thead><tr><th>Pattern</th><th>Match</th><th>Merchant</th><th>Sets</th><th class="r">Rows it labelled</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rule matches.</td></tr>'}</tbody></table></div></section>`;
+            ${sortPicker('rules', RULE_SORT)}<div class="table-wrap"><table class="t sl-stack"><thead><tr>${['pattern', 'match', 'merchant', 'sets'].map(k => `<th>${sortHead('rules', k, RULE_SORT)}</th>`).join('')}<th class="r">${sortHead('rules', 'rows', RULE_SORT)}</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty sl-name">No rule matches.</td></tr>'}</tbody></table></div></section>`;
     }
     // merchants
     const services = await servicesList();
     const filters = { all: () => true, untyped: s => !s.type_id, each: s => s.review_each_time, hidden: s => s.exclude_from_expense_views, unused: s => !s.txn_count };
     const shown = services.filter(filters[listState.filter] || filters.all).filter(s => !needle || s.name.toLowerCase().includes(needle));
     const renaming = listState.renaming;
-    const rows = shown.slice(0, 200).map(s => merchantListRow(s, { renaming, renames: listState.renames })).join('');
+    const rows = sortRows('merchants', shown, MERCHANT_SORT).slice(0, 200).map(s => merchantListRow(s, { renaming, renames: listState.renames })).join('');
     const chip = (k, l, n) => `<button class="chip" data-act="list-filter" data-f="${k}" aria-pressed="${listState.filter === k}">${l} <span class="n">${n}</span></button>`;
     const pending = Object.keys(listState.renames).length;
     const ask = !renaming && services.some(filters.untyped) && (await suggestionsOn()) ? suggestEntryHTML({ lists: true }) : '';
@@ -4058,9 +4172,13 @@ async function viewLists(tab) {
                 : `<button class="btn" data-act="rename-mode" data-on="1">${icon('pencil-simple')}Rename several</button><button class="btn" data-act="merchant-add">${icon('plus')}Add a merchant</button>`}</div></div>
         ${renaming ? '<p class="card-foot sl-lead">Type the new names, then save them together: one change in Changes, with Undo. Rules and rows keep pointing at the same merchant.</p>' : ''}
         ${ask}<div class="chips sl-chips">${chip('all', 'All', services.length)}${chip('untyped', 'No type', services.filter(filters.untyped).length)}${chip('each', 'Check each row', services.filter(filters.each).length)}${chip('hidden', 'Hidden', services.filter(filters.hidden).length)}${chip('unused', 'No rows', services.filter(filters.unused).length)}</div>
-        <div class="table-wrap"><table class="t sl-stack${renaming ? ' sl-renaming' : ''}"><thead><tr><th>Merchant</th><th>Book</th><th>Type</th><th class="r">Rows</th><th class="r">Rules</th><th></th>${renaming ? '' : '<th><span class="sr-only">Edit</span></th>'}</tr></thead><tbody>${rows || `<tr><td colspan="${renaming ? 6 : 7}" class="empty sl-name">None.</td></tr>`}</tbody></table></div>
+        ${sortPicker('merchants', MERCHANT_SORT)}<div class="table-wrap"><table class="t sl-stack${renaming ? ' sl-renaming' : ''}"><thead><tr>${['name', 'book', 'type'].map(k => `<th>${sortHead('merchants', k, MERCHANT_SORT)}</th>`).join('')}<th class="r">${sortHead('merchants', 'rows', MERCHANT_SORT)}</th><th class="r">${sortHead('merchants', 'rules', MERCHANT_SORT)}</th><th></th>${renaming ? '' : '<th><span class="sr-only">Edit</span></th>'}</tr></thead><tbody>${rows || `<tr><td colspan="${renaming ? 6 : 7}" class="empty sl-name">None.</td></tr>`}</tbody></table></div>
         ${shown.length > 200 ? `<p class="card-foot">The first 200 of ${shown.length}; search to narrow.</p>` : ''}</section>`;
 }
+/** Lists › Merchants' sortable columns; the marks and the pencil do not sort. */
+const MERCHANT_SORT = { name: { label: 'Merchant', kind: 'text', of: s => s.name }, book: { label: 'Book', kind: 'text', of: s => s.book },
+    type: { label: 'Type', kind: 'text', of: s => s.type_id ? s.display_type || s.type_name : null },
+    rows: { label: 'Rows', kind: 'number', of: s => s.txn_count }, rules: { label: 'Rules', kind: 'number', of: s => s.rule_count } };
 /** One row of Lists › Merchants. The row opens the merchant's page; the pencil at its end
  *  opens Edit the merchant in place (its own data-act, so the row's never sees the click).
  *  While renaming several, the name is an input, and the row and the pencil are gone. */
@@ -4302,6 +4420,11 @@ async function checkEachRowOn(s, past) {
 // one change, one Undo. The head leaves room for a trend chart, drawing none.
 const MP_PAGE = 50;
 const merchantPage = { id: null, page: 1, ticks: new Set(), book: '', busy: false, month: null };
+/** The merchant page's rows sort on the server, a page at a time; each key is a column the server's
+ *  allowlist holds. The tick, Book and state columns do not sort (the allowlist has no book). */
+const MP_SORT = { date: { label: 'Date', kind: 'date' }, account: { label: 'Account', kind: 'text' }, description: { label: 'Statement text', kind: 'text' },
+    amount: { label: 'Amount', kind: 'money' }, type: { label: 'Type', kind: 'text' } };
+SORT_REDRAW.mp = () => { merchantPage.page = 1; rerender(); };
 /** The rows narrowed by a trend bar: month is one 'YYYY-MM', or a quarter's months (a list) read as one date range. */
 function monthQuery(month) {
     const ms = [].concat(month || []);
@@ -4321,7 +4444,7 @@ async function viewMerchant(id) {
     // A merchant gone (deleted in another tab) answers 404 to its own reads.
     const gone = err => { if (err.status === 404) return null; throw err; };
     const [s, r, list, varies] = await Promise.all([get(`/api/services/${id}`, { fresh: true }).catch(gone), refs(),
-        get(`/api/transactions?service_id=${id}&expense_only=true&sort=date&sort_dir=desc&per_page=${MP_PAGE}&page=${mp.page}${monthQuery(mp.month)}`, { fresh: true }),
+        get(`/api/transactions?service_id=${id}&expense_only=true&${new URLSearchParams(sortServer('mp', MP_SORT))}&per_page=${MP_PAGE}&page=${mp.page}${monthQuery(mp.month)}`, { fresh: true }),
         get(`/api/services/${id}/book-varies`, { fresh: true }).catch(gone)]);
     if (!s) {
         return `<div class="mp">${mpCrumbs()}<div class="page-head"><div><h1>Merchant</h1></div></div>
@@ -4359,14 +4482,14 @@ async function viewMerchant(id) {
         <div class="mp-fact"><span class="cap">Rows</span><b class="num">${s.rows || 0}</b>${notChecked ? `<span class="sub">${notChecked} not checked</span>` : ''}</div>
         <div class="mp-fact mp-fact--set"><span class="cap" id="mp-nr">New rows</span>${eachSegHTML(s, 'mp-nr')}</div>
     </div></section>
-    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>Newest first. What you set is chosen and stays; the rest follows ${esc(s.name)}. Each change is undone in Changes.</p></div>
+    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>${sortOf('mp').key ? '' : 'Newest first. '}What you set is chosen and stays; the rest follows ${esc(s.name)}. Each change is undone in Changes.</p></div>
         ${list.transactions.length ? `<div class="bulk"><span class="bulk__n" id="mp-ticked">${mpTickedWords()}</span>
             <select class="sel" data-change="mp-bulk-book" aria-label="Book for the ticked rows">${bookOptions(r.books, mp.book, 'Choose book')}</select>
             <button type="button" class="btn sm primary" data-act="mp-apply" id="mp-apply"${mpCanApply() ? '' : ' disabled'}>Set book for ticked rows</button></div>` : ''}</div>
-        ${list.transactions.length ? `<table class="t mp-t"><caption class="sr-only">${esc(s.name)}’s rows</caption>
+        ${list.transactions.length ? `${sortPicker('mp', MP_SORT, { own: 'Newest first' })}<table class="t mp-t"><caption class="sr-only">${esc(s.name)}’s rows</caption>
             <colgroup><col class="c-k"><col class="c-d"><col class="c-ac"><col><col class="c-a"><col class="c-ty"><col class="c-bk"><col class="c-s"></colgroup>
-            <thead><tr><th scope="col" class="k"><span class="sr-only">Tick</span></th><th scope="col">Date</th><th scope="col">Account</th><th scope="col">Statement text</th><th scope="col" class="r">Amount</th><th scope="col">Type</th><th scope="col">Book</th><th scope="col"><span class="sr-only">State</span></th></tr></thead>
-            <tbody>${rows}</tbody></table>${pager(list, 'mp-page')}`
+            <thead><tr><th scope="col" class="k"><span class="sr-only">Tick</span></th><th scope="col">${sortHead('mp', 'date', MP_SORT)}</th><th scope="col">${sortHead('mp', 'account', MP_SORT)}</th><th scope="col">${sortHead('mp', 'description', MP_SORT)}</th><th scope="col" class="r">${sortHead('mp', 'amount', MP_SORT)}</th><th scope="col">${sortHead('mp', 'type', MP_SORT)}</th><th scope="col">Book</th><th scope="col"><span class="sr-only">State</span></th></tr></thead>
+            <tbody>${rows}</tbody></table>${pager(list, 'mp-page', !!sortOf('mp').key)}`
         : '<p class="card-empty">No spending rows from this merchant yet.</p>'}</section></div>`;
 }
 /** Where the page sits: Books › Lists › Merchants (folio's crumbs). */
@@ -4660,13 +4783,18 @@ function pastResult(b) {
         return tag(kind, text, s.account_id ? { href: `#/books/account/${s.account_id}`, title: 'See the tie line' } : {});
     }).join('')}</div>`;
 }
+/** Past imports' sortable columns; What happened and Result sort by their words. */
+const PAST_SORT = { when: { label: 'When', kind: 'date', of: b => b.created_at }, accounts: { label: 'Accounts', kind: 'text', of: b => (b.accounts || []).join(', ') },
+    rows: { label: 'Rows', kind: 'number', of: b => b.total_lines }, state: { label: 'What happened', kind: 'text', of: b => plainText(pastState(b)) },
+    result: { label: 'Result', kind: 'text', of: b => plainText(pastResult(b)) } };
 function pastImportsHTML(past) {
     const empty = past.filter(b => !b.total_lines && !(b.accounts || []).length && !(b.statements || []).length);
     const listed = importState.showEmpty ? past : past.filter(b => !empty.includes(b));
-    const rows = listed.map(b => `<tr><td data-label="When">${esc(when(b.created_at))}</td><td data-label="Accounts">${b.accounts.length ? b.accounts.map(esc).join(', ') : '<span class="muted">none read</span>'}</td>
+    const rows = sortRows('imports', listed, PAST_SORT).map(b => `<tr><td data-label="When">${esc(when(b.created_at))}</td><td data-label="Accounts">${b.accounts.length ? b.accounts.map(esc).join(', ') : '<span class="muted">none read</span>'}</td>
         <td class="r num" data-label="Rows">${b.total_lines}</td><td data-label="What happened">${pastState(b)}</td><td data-label="Result">${pastResult(b)}</td></tr>`).join('');
     return `<section class="card"><div class="section-header"><h2>Past imports</h2><span class="section-header__aside">${plural(past.length - empty.length, 'import')}</span></div>
-        <div class="table-shell"><table class="t cells past-table"><thead><tr><th>When</th><th>Accounts</th><th class="r">Rows</th><th>What happened</th><th>Result</th></tr></thead><tbody>
+        ${sortPicker('imports', PAST_SORT, { own: 'Newest first' })}<div class="table-shell"><table class="t cells past-table"><thead><tr>${Object.keys(PAST_SORT).map(k =>
+            `<th${k === 'rows' ? ' class="r"' : ''}>${sortHead('imports', k, PAST_SORT)}</th>`).join('')}</tr></thead><tbody>
         ${rows || '<tr><td colspan="5" class="empty">None yet.</td></tr>'}</tbody></table></div>
         ${empty.length ? `<p class="card-foot">${importState.showEmpty ? `${plural(empty.length, 'empty look')} with no file read ${empty.length === 1 ? 'is' : 'are'} shown.` : `${plural(empty.length, 'empty look')} with no file read ${empty.length === 1 ? 'is' : 'are'} hidden.`}
             <button class="link" data-act="past-empty">${importState.showEmpty ? 'Hide them' : 'Show them'}</button></p>` : ''}</section>`;
@@ -5187,7 +5315,10 @@ async function changeRowsHTML(entry) {
     const changes = entry.changes;
     const out = [];
     const txRows = new Set(changes.filter(c => c.table === 'transactions').map(c => c.row_id));
-    for (const c of changes.slice(0, 60)) {
+    // A changed row sorts by its name, account or amount; its field lines stay together under it.
+    const cols = { row: { label: 'Row', kind: 'text', of: c => rowName(c) }, account: { label: 'Account', kind: 'text', of: c => accountOf(c, ctx) },
+        amount: { label: 'Amount', kind: 'money', of: c => { const row = c.after || c.before || {}; return c.table === 'transactions' && (c.currency || 'SGD') === 'SGD' && !isEmpty(row.amount_minor) ? -row.amount_minor : null; } } };
+    for (const c of sortRows('change-rows', changes, cols).slice(0, 60)) {
         const row = c.after || c.before;
         const name = c.table === 'transactions' && txRows.size > 1
             ? `<button class="link" data-act="row" data-tx="${c.row_id}">${esc(row.description)}</button> <span class="muted">· ${esc(day(row.date, { year: false }))}</span>`
@@ -5206,9 +5337,11 @@ async function changeRowsHTML(entry) {
     const more = changes.length > 60 ? `<p class="small muted">+ ${changes.length - 60} more rows.</p>` : '';
     const one = txRows.size === 1 ? changes.find(c => c.table === 'transactions') : null;
     const open = one ? `<p class="detail-foot"><button class="link" data-act="row" data-tx="${one.row_id}">Open ${esc(rowName(one))}</button> for its note, one-off and its own history</p>` : '';
-    return `<div class="table-shell"><table class="t table-tight diff-table"><thead><tr><th>Row</th><th class="c-acct">Account</th><th>What changed</th><th>Before</th><th>After</th><th class="r c-amt">Amount</th></tr></thead>
+    const head = k => sortHead('change-rows', k, cols);
+    return `${sortPicker('change-rows', cols)}<div class="table-shell"><table class="t table-tight diff-table"><thead><tr><th>${head('row')}</th><th class="c-acct">${head('account')}</th><th>What changed</th><th>Before</th><th>After</th><th class="r c-amt">${head('amount')}</th></tr></thead>
         <tbody>${out.join('')}</tbody></table></div>${more}${open}`;
 }
+SORT_REDRAW['change-rows'] = () => S.changes.open.forEach(id => fillEntry(id));
 async function fillEntry(id) {
     const box = $(`#detail-${id}`);
     if (!box) return;

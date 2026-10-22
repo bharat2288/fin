@@ -79,6 +79,7 @@ const sourceTagsHTML = () => ''; const rowAmount = () => ''; const struckAmount 
 const typeOptions = () => ''; const bookOptions = () => ''; const eachSegHTML = () => ''; const pager = () => '';
 const mpTickedWords = () => ''; const mpCanApply = () => false; const bookVariesWords = () => ''; const bookVariesButtons = () => '';
 const mpAccountCell = () => ''; const rowMark = id => `<mark data-row="${id}"></mark>`; const afterRender = () => {};
+const sortOf = () => ({ key: null }); const sortServer = () => ({ sort: 'date', sort_dir: 'desc' }); const sortHead = (t, k) => k; const sortPicker = () => ''; const MP_SORT = {};
 const S = { marks: { rows: {}, accounts: {} } };
 const ACT = {};
 """

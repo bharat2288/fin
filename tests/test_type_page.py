@@ -70,7 +70,9 @@ def run(body, *, answers=None):
               _function("groupFor"), _function("money"), _function("toMinor"), _function("esc"),
               _const("store"), _const("MONTHS"), _const("LONG_MONTHS"), _function("day"),
               _function("monthName"), _function("plural"), _function("monthEnd"),
-              _const("pageLinkKinds"), _function("pageLink"), _function("pager")]
+              _const("pageLinkKinds"), _function("pageLink"), _function("pager"),
+              _const("SORTS"), _const("SORT_REDRAW"), _function("sortOf"), _function("nextSort"), _function("sortValue"),
+              _function("sortCompare"), _function("sortRows"), _function("sortServer"), _function("sortHead")]
     default = {"/api/trend": FIX, "/api/transactions": ROWS}
     code = "\n".join([
         "globalThis.window = globalThis;",

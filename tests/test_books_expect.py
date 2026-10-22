@@ -13,6 +13,7 @@ is invented (the case list's specimens).
 """
 
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -295,6 +296,19 @@ const money = (minor, cur = 'SGD') => minor === null || minor === undefined ? 'â
 const day = iso => 'D' + String(iso);
 const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
 """
+
+
+def _app_sort_helper() -> str:
+    """app.js's table sort (sortRows, sortHead and what they call), lifted as written."""
+    app = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    out = [re.search(r"^const SORTS = .*?;$", app, re.M).group(0)]
+    for name in ("sortOf", "sortValue", "sortCompare", "sortRows", "sortHead"):
+        m = re.search(rf"^function {name}\(.*\}}$", app, re.M) or re.search(rf"^function {name}\(.*?^\}}$", app, re.M | re.S)
+        out.append(m.group(0))
+    return "\n".join(out) + "\n"
+
+
+PRELUDE += _app_sort_helper()
 
 
 def _draw(sheet: dict) -> str:
