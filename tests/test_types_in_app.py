@@ -130,6 +130,12 @@ def test_21_a_one_off_top_level_type_with_no_not_for_is_added(client):
     ({"name": "Child\ncare"}, "a type's name cannot hold a line break or control character"),
     ({"name": "Child\x00care"}, "a type's name cannot hold a line break or control character"),
     ({"name": "Childcare", "covers": "nannies\x1b[2J"}, "the wording cannot hold control characters"),
+    # Lookalikes: a name that reads as one already held is that name; an invisible
+    # or direction-turning character is refused, in the name and in the wording.
+    ({"name": "Dining\u200b"}, "a type's name cannot hold a line break or control character"),
+    ({"name": "Child\u202ecare"}, "a type's name cannot hold a line break or control character"),
+    ({"name": "Childcare", "covers": "nannies\u200d"}, "the wording cannot hold control characters"),
+    ({"name": "Childcare", "not_for": "\u2066schools"}, "the wording cannot hold control characters"),
 ])
 def test_22_an_add_that_breaks_a_rule_is_refused_in_words_and_writes_nothing(client, temp_db, body, reason):
     before = book_rows(temp_db)
@@ -138,6 +144,20 @@ def test_22_an_add_that_breaks_a_rule_is_refused_in_words_and_writes_nothing(cli
 
     assert resp.status_code == 400
     assert resp.get_json()["error"] == reason
+    assert book_rows(temp_db) == before
+
+
+@pytest.mark.parametrize("lookalike", ["Day  care", "Day\u00a0care", " day \u2003care "])
+def test_22_a_name_spaced_like_one_held_is_that_name_and_is_refused(client, temp_db, lookalike):
+    resp = add(client, name="Day   care", covers="nurseries")
+    assert resp.status_code == 201, resp.get_json()
+    assert "Day care" in types(client)
+    before = book_rows(temp_db)
+
+    resp = add(client, name=lookalike, covers="something")
+
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "Day care is already a type"
     assert book_rows(temp_db) == before
 
 
@@ -250,6 +270,7 @@ def test_25_an_income_kind_is_refused(client, temp_db):
     ({"covers": "c" * 301}, "what a type covers can be at most 300 characters"),
     ({}, "say what the type covers or what it is not for"),
     ({"covers": 7}, "covers must be words"),
+    ({"not_for": "groceries\u202e"}, "the wording cannot hold control characters"),
 ])
 def test_25_a_wording_that_breaks_a_rule_is_refused(client, temp_db, body, reason):
     before = book_rows(temp_db)

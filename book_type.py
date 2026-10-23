@@ -336,8 +336,10 @@ def _words(value, what: str) -> str | None:
 
 
 def _controls(text: str) -> bool:
-    """Whether words hold a control character (a line break, a tab, an escape)."""
-    return any(unicodedata.category(c) == "Cc" for c in text)
+    """Whether words hold a control character (a line break, a tab, an escape)
+    or a format character: one that shows nothing (a zero-width space) or turns
+    the text after it around (a right-to-left override)."""
+    return any(unicodedata.category(c) in ("Cc", "Cf") for c in text)
 
 
 def _wording(value, what: str) -> str | None:
@@ -405,6 +407,8 @@ def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
         raise TypeRefused('a type\'s name cannot hold "<"')
     if _controls(name):
         raise TypeRefused("a type's name cannot hold a line break or control character")
+    # A run of spaces, of any width, is one space: two names that read alike are one name.
+    name = " ".join(name.split())
     if len(name) > NAME_MOST:
         raise TypeRefused(f"a type's name can be at most {NAME_MOST} characters")
     if " ".join(name.replace("_", " ").split()).casefold() == suggest.NONE_OF_THESE.replace("_", " "):

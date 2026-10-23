@@ -222,6 +222,8 @@ function pct(part, whole) {
     return `${Math.round(p)}%`;
 }
 function sentence(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+// Mid-sentence: only the first letter drops, so a name inside keeps its capitals.
+function lowerFirst(s) { return s ? s.charAt(0).toLowerCase() + s.slice(1) : s; }
 
 // ---------------------------------------------------------------------------
 // The API
@@ -5156,7 +5158,7 @@ function refusalWords(e, ctx) {
     const target = e.rows === 1 ? 'this row' : 'the same rows';
     const what = did && by.first && by.first.table === 'transactions' && e.rows === 1
         ? `${whoName(by, { cap: false })} ${did} ${timeWords(by.at)}`
-        : `${esc(sentence(String(by.summary || 'a change')).toLowerCase())} ${timeWords(by.at)}`;
+        : `${esc(lowerFirst(String(by.summary || 'a change')))} ${timeWords(by.at)}`;
     return `${whoName(by)} changed ${target} after it: ${what}. Undo ${yours} first.`;
 }
 function entryState(e) {

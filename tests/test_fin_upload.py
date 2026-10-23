@@ -182,6 +182,9 @@ def test_a_redirect_is_never_followed_so_the_token_goes_nowhere_else(monkeypatch
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             asked.append((self.path, self.headers.get("CF-Access-Client-Secret")))
+            # Read the body before answering: closing on unread bytes resets the
+            # connection on Windows, and the sender sees an abort, not the 302.
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(302)
             self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/elsewhere")
             self.send_header("Content-Length", "0")

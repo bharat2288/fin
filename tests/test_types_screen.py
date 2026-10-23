@@ -302,6 +302,19 @@ def test_changes_names_an_added_type_by_its_display_name(server, api):
     assert words(covers.group(1)) == "not there" and words(covers.group(2)) == "nannies"
 
 
+def test_a_refused_undo_names_the_type_that_blocks_it_as_every_screen_does(server, api):
+    kids = listed(api)["Kids"]["id"]
+    resp = api.post("/api/types", json={"name": "Childcare", "parent_id": kids, "covers": "nannies"})
+    assert resp.status_code == 201
+    resp = api.put(f"/api/types/{listed(api)['Kids > Childcare']['id']}", json={"covers": "nannies, creches"})
+    assert resp.status_code == 200
+    html = run(server, "return await viewChanges();")
+    refusal = re.search(r'<div class="notice bad refusal">(.*?)<button', html, re.S)
+    assert refusal, html
+    said = words(refusal.group(1))
+    assert "fixed the wording of Kids > Childcare" in said, said
+
+
 # --- the phone -------------------------------------------------------------------
 
 
