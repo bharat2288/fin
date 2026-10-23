@@ -540,6 +540,7 @@ _CHANGE_SUMMARIES = {
     "api_services_delete": "Deleted a merchant",
     "api_update_transaction": "Changed a row's labels",
     "api_resolve_transaction": "Gave a row a merchant and type",
+    "api_plans_apply": "Applied a plan",
     "api_import_upload": "Read a statement for import",
     "api_import_confirm": "Imported a statement",
     "api_rules_create": "Added a merchant rule",
@@ -3090,20 +3091,27 @@ def api_bulk_label():
                 why = _relabel_refusal(conn, line["tx_id"], book)
                 if why:
                     return jsonify({"error": why}), 400
-        for line in lines:
-            held = conn.execute(
-                f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (line["tx_id"],)
-            ).fetchone()
-            sets = {}
-            for field, column in label_source.FIELDS.items():
-                sent = line.get(field)
-                if sent in (None, ""):
-                    continue
-                sets[field] = sent
-                sets[column] = label_source.bulk(field, sent, held[field], _source(held, column), chosen)
-            _write_label(conn, held, sets)
+        _label_lines(conn, lines, chosen)
         conn.commit()
     return jsonify({"success": True, "labelled": len(ids), "ids": ids})
+
+
+def _label_lines(conn, lines: list[dict], chosen: bool) -> None:
+    """Bulk-label's write, its lines already checked: each field sent is
+    checked where it is the row's own value and chosen where it differs (or
+    chosen whatever it is, with `chosen`). Not committed."""
+    for line in lines:
+        held = conn.execute(
+            f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (line["tx_id"],)
+        ).fetchone()
+        sets = {}
+        for field, column in label_source.FIELDS.items():
+            sent = line.get(field)
+            if sent in (None, ""):
+                continue
+            sets[field] = sent
+            sets[column] = label_source.bulk(field, sent, held[field], _source(held, column), chosen)
+        _write_label(conn, held, sets)
 
 
 def _resolved_sources(held, apply_scope: str, book, type_id, merchant_book) -> tuple:
@@ -3166,7 +3174,32 @@ def api_resolve_transaction():
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
+    with get_db() as conn:
+        try:
+            taught, _ = _teach(conn, data)
+        except TeachRefused as e:
+            conn.rollback()
+            return jsonify(e.body), e.status
+        conn.commit()
+    invalidate_rules_cache()
+    return jsonify(taught)
 
+
+class TeachRefused(Exception):
+    """A teach was refused: `body` and `status` are the route's answer. The
+    caller rolls back, so nothing of it stands."""
+
+    def __init__(self, body: dict, status: int = 400):
+        super().__init__(body.get("error"))
+        self.body, self.status = body, status
+
+
+def _teach(conn, data: dict) -> tuple[dict, "relabel_preview.Plan | None"]:
+    """The resolve route's teach (its body, `data`) on `conn`, not committed:
+    the caller commits, so a plan can run many teaches in one change
+    (chat-plan-apply 01). Returns what the route answers and the preview's
+    plan the teach was asked about (None where nothing asked). Raises
+    TeachRefused, whatever it wrote then the caller's to roll back."""
     tx_id = data.get("tx_id")
     service_name = (data.get("service_name") or "").strip()
     service_id = data.get("service_id")
@@ -3175,30 +3208,30 @@ def api_resolve_transaction():
     apply_scope = data.get("apply_scope") or "service_default"
 
     if not tx_id:
-        return jsonify({"error": "tx_id required"}), 400
+        raise TeachRefused({"error": "tx_id required"})
     if not service_name and not service_id:
-        return jsonify({"error": "service_name or service_id required"}), 400
+        raise TeachRefused({"error": "service_name or service_id required"})
     if apply_scope == "rule" and not pattern:
-        return jsonify({"error": "pattern required for rule override"}), 400
+        raise TeachRefused({"error": "pattern required for rule override"})
     check_each_row = data.get("check_each_row")
     if check_each_row is not None and not isinstance(check_each_row, bool):
-        return jsonify({"error": "check_each_row must be true or false"}), 400
+        raise TeachRefused({"error": "check_each_row must be true or false"})
     if check_each_row is not None and apply_scope != "service_default":
-        return jsonify({"error": "Check each row is a merchant setting: it goes with every row from this merchant"}), 400
+        raise TeachRefused({"error": "Check each row is a merchant setting: it goes with every row from this merchant"})
     past = data.get("past")
     if past is not None and (check_each_row is not True or past not in CHECK_EACH_ROW_PAST):
-        return jsonify({"error": f"past goes with check_each_row true, as one of {', '.join(CHECK_EACH_ROW_PAST)}"}), 400
+        raise TeachRefused({"error": f"past goes with check_each_row true, as one of {', '.join(CHECK_EACH_ROW_PAST)}"})
     try:
         past_rows = relabel_preview.checked_answer(data.get("past_rows"), "past_rows")
     except relabel_preview.Refused as e:
-        return jsonify({"error": str(e)}), 400
+        raise TeachRefused({"error": str(e)})
     pattern_error = _rule_pattern_error(pattern)
     if pattern and apply_scope in {"rule", "service_default"} and pattern_error:
-        return jsonify({"error": pattern_error}), 400
+        raise TeachRefused({"error": pattern_error})
     try:
         wordings = _other_wordings(data.get("wordings"), pattern, apply_scope)
     except BadWording as e:
-        return jsonify({"error": str(e)}), 400
+        raise TeachRefused({"error": str(e)})
     # Every wording the teach's rules recognise: the pattern, then the others.
     taught_words = [pattern, *wordings] if pattern and apply_scope in {"rule", "service_default"} else []
     flow_type = data.get("flow_type")
@@ -3206,216 +3239,451 @@ def api_resolve_transaction():
         try:
             flow.checked_flow(flow_type)
         except flow.UnknownFlow as e:
-            return jsonify({"error": str(e)}), 400
+            raise TeachRefused({"error": str(e)})
 
+    try:
+        book = _checked_book(data.get("book"))
+        type_id = _checked_type_id(conn, data.get("type_id"))
+    except UnknownLabel as e:
+        raise TeachRefused({"error": str(e)})
+    # A flow edit that would make a row naming a person a movement names
+    # the person as a movement's other side: refused since the contract
+    # (personal-ledger 23), before anything is written.
+    if flow_type == flow.MOVEMENT and conn.execute(
+        "SELECT 1 FROM transactions t JOIN accounts o ON o.id = t.other_side_id "
+        "WHERE t.id = ? AND o.type = 'person'", (tx_id,)
+    ).fetchone():
+        raise TeachRefused({"error": review.PERSON_MOVEMENT_REFUSED})
+
+    try:
+        # Step 1: Resolve service — find existing or create new
+        if service_id:
+            svc = conn.execute(
+                "SELECT id, book, type_id, review_each_time FROM services WHERE id = ?", (service_id,)
+            ).fetchone()
+            if not svc:
+                raise TeachRefused({"error": f"Service ID {service_id} not found"}, 404)
+        else:
+            # Look up by name (case-insensitive)
+            svc = conn.execute(
+                "SELECT id, book, type_id, review_each_time FROM services WHERE UPPER(name) = ?",
+                (service_name.upper(),),
+            ).fetchone()
+
+        if svc:
+            service_id = svc["id"]
+            # Whatever the request leaves out is the merchant's own.
+            if type_id is None:
+                type_id = svc["type_id"]
+            if book is None:
+                book = svc["book"]
+            book = _book_or_proposed(conn, book, type_id)
+            merchant_book = book if apply_scope == "service_default" else svc["book"]
+        else:
+            # Create new service — the type is required
+            if not type_id:
+                raise TeachRefused({"error": "type_id required for new service"})
+            book = _book_or_proposed(conn, book, type_id)
+            merchant_book = book
+
+        # Service-default resolution can update the merchant's default,
+        # and then its past rows go through the preview, as the merchant
+        # sheet's do (fin-surfaces 21); so does a wording that would take
+        # rows another merchant holds (fin-surfaces 53). Without past_rows
+        # nothing is written and the preview comes back, one question for
+        # both. Before any write, so a refusal leaves the book as it was.
+        merchant_plan = taken_plan = None
+        if svc and apply_scope == "service_default" and (
+            (book, type_id) != (svc["book"], svc["type_id"])
+        ):
+            moved = {f: v for f, v in (("book", book), ("type_id", type_id)) if v != svc[f]}
+            merchant_plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id},
+                                                             teaching=True)
+        if taught_words:
+            reach = relabel_preview.together([
+                relabel_preview.wording_reach(conn, w, match_type, service_id if svc else None) for w in taught_words])
+            if reach.others:
+                shown_name = conn.execute(
+                    "SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()[0] if svc else service_name
+                taken_plan = relabel_preview.taking(
+                    conn, reach, shown_name, {"book": book, "type_id": type_id},
+                    label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book)))
+        plan = relabel_preview.joined(merchant_plan, taken_plan)
+        if plan is not None:
+            # Where the teach asks anyway, the merchant's own rows still
+            # waiting for a type that it labels itself in the same change,
+            # whatever the answer (its backfill), are counted too, as the
+            # merchant sheet counts them (case 13): so the count is the
+            # past rows the change writes. Rows with no merchant are the
+            # teach's own, waiting as the row taught is, never counted
+            # (case 29); where nothing else asks, so are these.
+            if plan.count and svc and taught_words:
+                taught = label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book))
+                fills = {}
+                for wording in taught_words:
+                    for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
+                        sets = {"service_id": service_id, **sets}
+                        if held["id"] not in fills and held["service_id"] == service_id and _would_change(held, sets):
+                            fills[held["id"]] = sets
+                plan = relabel_preview.with_fills(conn, plan, fills)
+            refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
+            if refused is not None:
+                raise TeachRefused(refused[0].get_json(), refused[1])
+        if merchant_plan is not None:
+            conn.execute(
+                "UPDATE services SET book = ?, type_id = ? WHERE id = ?",
+                (book, type_id, service_id),
+            )
+            _write_plan(conn, merchant_plan, past_rows)
+        if not svc:
+            conn.execute(
+                "INSERT INTO services (name, book, type_id, review_each_time) VALUES (?, ?, ?, ?)",
+                (service_name, book, type_id, _new_checks_each_row(conn, type_id)),
+            )
+            service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        if taken_plan is not None:
+            _write_taken(conn, taken_plan, past_rows, service_id)
+
+        # The setting, as taught: Check each row, or Every row the same.
+        # A merchant fin already held, newly set to check each row, has
+        # its past rows answered by the screen's offer (past): leave marks
+        # them checked, as the setting route's "Not now" does; queue, or no
+        # answer, leaves them waiting. Before the backfill, so the rows
+        # this save labels wait whatever the answer.
+        if past == "leave" and svc and not svc["review_each_time"]:
+            _accept_past(conn, f"t.service_id = ? AND t.id != ? AND {LABELLED_ROWS}", (service_id, tx_id))
+        if check_each_row is not None:
+            conn.execute("UPDATE services SET review_each_time = ? WHERE id = ?",
+                         (1 if check_each_row else 0, service_id))
+
+        # Step 2: Create a merchant rule for each wording, the pattern's
+        # first (none for a PayNow/transfer taught without one).
+        # A rule override carries the type, and the book only where it
+        # is not the merchant's.
+        rule_ids = []
+        backfilled_ids = []
+        overrides = _taught_overrides(apply_scope, book, type_id, merchant_book)
+        override_type_id, override_book = overrides["type_override_id"], overrides["book_override"]
+        taught = label_source.rule_sources(overrides)
+        for wording in taught_words:
+            rule_exists = conn.execute(
+                "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
+                (wording.upper(),),
+            ).fetchone()
+            if not rule_exists:
+                conn.execute(
+                    "INSERT INTO merchant_rules (pattern, service_id, book_override, "
+                    "type_override_id, match_type, confidence) "
+                    "VALUES (?, ?, ?, ?, ?, 'confirmed')",
+                    (wording, service_id, override_book, override_type_id, match_type),
+                )
+                rule_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            else:
+                rule_ids.append(rule_exists["id"])
+                conn.execute(
+                    "UPDATE merchant_rules SET service_id = ?, book_override = ?, "
+                    "type_override_id = ? WHERE id = ?",
+                    (service_id, override_book, override_type_id, rule_exists["id"]),
+                )
+
+            # Backfill the other rows matching this wording that have no
+            # merchant, or have this merchant but still no type: the
+            # rows a preview, where one was asked, counted as the teach's
+            # own (_teach_fills).
+            for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
+                if _write_label(conn, held, {"service_id": service_id, **sets}):
+                    backfilled_ids.append(held["id"])
+        rule_id = rule_ids[0] if rule_ids else None
+        backfilled = len(backfilled_ids)
+
+        # Step 3: Update the target transaction with explicit provenance.
+        # flow_type override is independent of the label (ADR v2):
+        #   - if caller supplies flow_type, set it + mark flow_type_manual=1
+        #   - otherwise leave a hand-set flow alone and re-derive the rest
+        tx_row = conn.execute(
+            f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
+        ).fetchone()
+        label = (book, type_id, service_id,
+                 *_resolved_sources(tx_row, apply_scope, book, type_id, merchant_book))
+        written = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, book_source = ?, type_source = ?"
+        if flow_type is not None:
+            conn.execute(
+                f"{written}, flow_type = ?, flow_type_manual = 1 WHERE id = ?",
+                (*label, flow_type, tx_id),
+            )
+        elif tx_row and not tx_row["flow_type_manual"]:
+            flow_type, other_side = _classify_flow_for_tx(
+                conn, tx_row["description"], tx_row["amount_minor"],
+                tx_id=tx_id, service_id=service_id, labelled=True,
+            )
+            conn.execute(
+                f"{written}, flow_type = ?, other_side_id = ? WHERE id = ?",
+                (*label, flow_type, other_side, tx_id),
+            )
+        else:
+            conn.execute(f"{written} WHERE id = ?", (*label, tx_id))
+
+        # Afterwards, for a merchant the model was asked about: the type
+        # the operator chose and whether the suggestion was on screen.
+        suggest.record_choice(
+            conn, tx_id, type_id, data.get("suggestion_visible") is True,
+        )
+
+        return {
+            "success": True,
+            "service_id": service_id,
+            "rule_id": rule_id,
+            "rule_ids": rule_ids,
+            "book": book,
+            "type_id": type_id,
+            "backfilled": backfilled,
+            "backfilled_ids": backfilled_ids,
+        }, plan
+    except TeachRefused:
+        raise
+    except BookNeeded as e:
+        raise TeachRefused({"error": str(e)}) from None
+    except Exception as e:
+        app.logger.warning("Failed to resolve transaction: %s", e)
+        raise TeachRefused({"error": "Failed to resolve transaction"}) from None
+
+
+# ---------------------------------------------------------------------------
+# A plan: a batch of Queue teaches, previewed, then applied as one change
+# (chat-plan-apply 01). Each item is what a Queue card's save sends resolve,
+# its rows as tx_ids; the apply runs those teaches and nothing else.
+# ---------------------------------------------------------------------------
+
+MAX_PLAN_ITEMS = 20
+# What an item takes: resolve's body for a card, its rows in place of its row.
+_PLAN_ITEM_KEYS = frozenset({
+    "tx_ids", "service_name", "service_id", "pattern", "wordings", "match_type",
+    "type_id", "book", "check_each_row", "past", "past_rows",
+})
+_PLAN_ITEM_TEXT = ("service_name", "pattern", "match_type", "book", "past", "past_rows")
+PLAN_STALE = "the book changed since the preview: preview again"
+# Columns a write stamps with the clock: left out of the token, so a preview
+# and its apply a second later stamp the same.
+_CLOCK_COLUMNS = frozenset({"created_at"})
+
+
+class PlanRefused(ValueError):
+    """A plan the routes cannot take as sent; nothing was run."""
+
+
+def _plan_items(data) -> list[dict]:
+    """The items as sent, checked for shape before anything runs: 1 to
+    MAX_PLAN_ITEMS, each with its own rows, no row in two items."""
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_PLAN_ITEMS:
+        raise PlanRefused(f"items must be a list of 1 to {MAX_PLAN_ITEMS} merchants' teaches")
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise PlanRefused("each item is one merchant's teach")
+        unknown = set(item) - _PLAN_ITEM_KEYS
+        if unknown:
+            raise PlanRefused(f"an item does not take {', '.join(sorted(unknown))}")
+        said = [k for k in _PLAN_ITEM_TEXT if item.get(k) is not None and not isinstance(item[k], str)]
+        if said:
+            raise PlanRefused(f"{said[0]} must be text")
+        if item.get("match_type") not in (None, *relabel_preview.MATCH_TYPES):
+            raise PlanRefused(f"match_type must be one of {', '.join(relabel_preview.MATCH_TYPES)}")
+        rows = item.get("tx_ids")
+        if not isinstance(rows, list) or not rows or not all(
+                isinstance(i, int) and not isinstance(i, bool) for i in rows):
+            raise PlanRefused("each item needs tx_ids, the rows it labels")
+        for tx in rows:
+            if tx in seen:
+                raise PlanRefused(f"row {tx} is in the plan twice")
+            seen.add(tx)
+    return items
+
+
+def _plan_item_name(conn, item: dict) -> str:
+    """The merchant an item names: its name, or the held merchant's."""
+    name = item.get("service_name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    svc = item.get("service_id")
+    found = conn.execute("SELECT name FROM services WHERE id = ?", (svc,)).fetchone() if isinstance(svc, int) else None
+    return found[0] if found else "a merchant"
+
+
+def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None"]:
+    """One item's teach, as a Queue card's save makes it (static/app.js
+    saveResolve): resolve on its first row with the wording and the other
+    wordings; each of its other rows the rules did not reach, this row only;
+    taught as Check each row, its rows then checked with their book. Rows
+    another merchant holds that a wording reaches change only on past_rows
+    apply; left unanswered, only new rows take it. A wording that matches no
+    row is refused, as the card refuses it. Returns the merchant and the
+    preview's plan. Not committed; raises TeachRefused."""
+    tx_ids = item["tx_ids"]
+    marks = ",".join("?" * len(tx_ids))
+    held = {r[0] for r in conn.execute(f"SELECT id FROM transactions WHERE id IN ({marks})", tx_ids)}
+    gone = [tx for tx in tx_ids if tx not in held]
+    if gone:
+        raise TeachRefused({"error": f"row {gone[0]} is no longer in fin"})
+    pattern = item.get("pattern") if isinstance(item.get("pattern"), str) else ""
+    body = {k: v for k, v in item.items() if k != "tx_ids"}
+    body.update(tx_id=tx_ids[0], apply_scope="service_default" if pattern.strip() else "transaction")
+    if body["apply_scope"] == "service_default":
+        if body.get("past_rows") is None:
+            body["past_rows"] = relabel_preview.ONLY_NEW
+        others = item.get("wordings") if isinstance(item.get("wordings"), list) else []
+        for wording in [pattern, *others]:
+            if isinstance(wording, str) and wording.strip() and not relabel_preview.wording_reach(
+                    conn, wording, item.get("match_type") or "contains").count:
+                raise TeachRefused({"error": f"The wording {wording.strip()} matches no row"})
+    taught, plan = _teach(conn, body)
+    service_id, label = taught["service_id"], {"book": taught["book"], "type_id": taught["type_id"]}
+    for tx in tx_ids[1:]:
+        if conn.execute("SELECT type_id FROM transactions WHERE id = ?", (tx,)).fetchone()[0] is None:
+            _teach(conn, {"tx_id": tx, "service_id": service_id, "apply_scope": "transaction", **label})
+    if item.get("check_each_row") is True:
+        lines = [{"tx_id": tx, **label} for tx in tx_ids if conn.execute(
+            "SELECT service_id FROM transactions WHERE id = ?", (tx,)).fetchone()[0] == service_id]
+        for line in lines:
+            why = _relabel_refusal(conn, line["tx_id"], line["book"])
+            if why:
+                raise TeachRefused({"error": why})
+        _label_lines(conn, lines, chosen=False)
+    return service_id, plan
+
+
+def _stable(data: str | None) -> tuple | None:
+    """A recorded row as the token stamps it: every field but the clock's."""
+    if data is None:
+        return None
+    return tuple(sorted((k, v) for k, v in json.loads(data).items() if k not in _CLOCK_COLUMNS))
+
+
+def _run_plan(conn, items: list[dict]) -> dict:
+    """Every item's teach, in order, on `conn` and not committed: what the
+    preview shows is what the apply writes, read back from the rows this
+    request's change entry recorded. Each item runs in its own savepoint, so
+    a refused one is taken back whole and named, and the rest still run: the
+    preview names every refusal. The caller commits or rolls back.
+
+    The token stamps the items as sent, each teach's preview token (the
+    rows it read), and every row the plan changes, before and after: a
+    preview's token holds for its apply only while the same items would make
+    the same change to the same rows, so a row changed since, or a second
+    apply of the same plan, is refused (relabel_preview._stamp)."""
+    entry_id = g.get("change_entry")
+    if entry_id is None:
+        raise RuntimeError("a plan runs inside a request's change entry")
+    if not conn.in_transaction:
+        conn.execute("BEGIN")   # so releasing an item's savepoint never commits
+    shown, refusals, stamped, rows = [], [], [], set()
+    for n, item in enumerate(items):
+        name = _plan_item_name(conn, item)
+        mark = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_rows").fetchone()[0]
+        conn.execute("SAVEPOINT plan_item")
+        try:
+            service_id, plan = _teach_item(conn, item)
+        except TeachRefused as e:
+            conn.execute("ROLLBACK TO plan_item")
+            refusals.append({"item": n, "merchant": name, "error": e.body.get("error") or "refused"})
+            continue
+        finally:
+            conn.execute("RELEASE plan_item")
+            invalidate_rules_cache()   # it may hold this item's rules, not yet committed
+        changes = conn.execute(
+            "SELECT tbl, row_id, op, before, after FROM change_rows WHERE entry_id = ? AND id > ? ORDER BY id",
+            (entry_id, mark),
+        ).fetchall()
+        stamped.append((n, plan.token if plan is not None else None,
+                        [(c["tbl"], c["row_id"], c["op"], _stable(c["before"]), _stable(c["after"])) for c in changes]))
+        labelled = {}
+        for c in changes:
+            if c["tbl"] != "transactions":
+                continue
+            rows.add(c["row_id"])
+            after = json.loads(c["after"]) if c["after"] else {}
+            if after.get("service_id") == service_id:
+                labelled[c["row_id"]] = {k: after.get(k) for k in ("id", "date", "description", "amount_minor")}
+        new = any(c["tbl"] == "services" and c["op"] == "insert" and c["row_id"] == service_id for c in changes)
+        preview = None
+        if plan is not None and plan.count:
+            preview = {k: v for k, v in relabel_preview.summary(conn, plan).items() if k != "token"}
+        shown.append({
+            "item": n,
+            "merchant": name,
+            "new_merchant": new,
+            # A merchant the plan makes has no id until it is applied.
+            "service_id": None if new else service_id,
+            "rows": sorted(labelled.values(), key=lambda r: (r["date"] or "", r["id"])),
+            "count": len(labelled),
+            "overlaps": list(plan.others) if plan is not None else [],
+            # The answer the past rows take: unanswered, only new rows.
+            "past_rows": (item.get("past_rows") or relabel_preview.ONLY_NEW) if preview else None,
+            "preview": preview,
+        })
+    token = None if refusals else relabel_preview._stamp(
+        "plan", json.dumps(items, sort_keys=True), stamped)
+    return {"items": shown, "refusals": refusals, "merchants": len(items), "rows": len(rows), "token": token}
+
+
+@app.route("/api/plans/preview", methods=["POST"])
+def api_plans_preview():
+    """A plan's preview, {items: [...]}: per merchant the rows it would
+    label, the rows of another merchant a wording would reach (and, where
+    past rows would change, the preview's numbers), any refusal by merchant,
+    and one token for the apply (none while anything is refused). The plan
+    runs as the apply would, then is rolled back: it writes nothing."""
+    try:
+        items = _plan_items(request.get_json(silent=True))
+    except PlanRefused as e:
+        return jsonify({"error": str(e)}), 400
     with get_db() as conn:
         try:
-            book = _checked_book(data.get("book"))
-            type_id = _checked_type_id(conn, data.get("type_id"))
-        except UnknownLabel as e:
-            return jsonify({"error": str(e)}), 400
-        # A flow edit that would make a row naming a person a movement names
-        # the person as a movement's other side: refused since the contract
-        # (personal-ledger 23), before anything is written.
-        if flow_type == flow.MOVEMENT and conn.execute(
-            "SELECT 1 FROM transactions t JOIN accounts o ON o.id = t.other_side_id "
-            "WHERE t.id = ? AND o.type = 'person'", (tx_id,)
-        ).fetchone():
-            return jsonify({"error": review.PERSON_MOVEMENT_REFUSED}), 400
-
-        try:
-            # Step 1: Resolve service — find existing or create new
-            if service_id:
-                svc = conn.execute(
-                    "SELECT id, book, type_id, review_each_time FROM services WHERE id = ?", (service_id,)
-                ).fetchone()
-                if not svc:
-                    return jsonify({"error": f"Service ID {service_id} not found"}), 404
-            else:
-                # Look up by name (case-insensitive)
-                svc = conn.execute(
-                    "SELECT id, book, type_id, review_each_time FROM services WHERE UPPER(name) = ?",
-                    (service_name.upper(),),
-                ).fetchone()
-
-            if svc:
-                service_id = svc["id"]
-                # Whatever the request leaves out is the merchant's own.
-                if type_id is None:
-                    type_id = svc["type_id"]
-                if book is None:
-                    book = svc["book"]
-                book = _book_or_proposed(conn, book, type_id)
-                merchant_book = book if apply_scope == "service_default" else svc["book"]
-            else:
-                # Create new service — the type is required
-                if not type_id:
-                    return jsonify({"error": "type_id required for new service"}), 400
-                book = _book_or_proposed(conn, book, type_id)
-                merchant_book = book
-
-            # Service-default resolution can update the merchant's default,
-            # and then its past rows go through the preview, as the merchant
-            # sheet's do (fin-surfaces 21); so does a wording that would take
-            # rows another merchant holds (fin-surfaces 53). Without past_rows
-            # nothing is written and the preview comes back, one question for
-            # both. Before any write, so a refusal leaves the book as it was.
-            merchant_plan = taken_plan = None
-            if svc and apply_scope == "service_default" and (
-                (book, type_id) != (svc["book"], svc["type_id"])
-            ):
-                moved = {f: v for f, v in (("book", book), ("type_id", type_id)) if v != svc[f]}
-                merchant_plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id},
-                                                                 teaching=True)
-            if taught_words:
-                reach = relabel_preview.together([
-                    relabel_preview.wording_reach(conn, w, match_type, service_id if svc else None) for w in taught_words])
-                if reach.others:
-                    shown_name = conn.execute(
-                        "SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()[0] if svc else service_name
-                    taken_plan = relabel_preview.taking(
-                        conn, reach, shown_name, {"book": book, "type_id": type_id},
-                        label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book)))
-            plan = relabel_preview.joined(merchant_plan, taken_plan)
-            if plan is not None:
-                # Where the teach asks anyway, the merchant's own rows still
-                # waiting for a type that it labels itself in the same change,
-                # whatever the answer (its backfill), are counted too, as the
-                # merchant sheet counts them (case 13): so the count is the
-                # past rows the change writes. Rows with no merchant are the
-                # teach's own, waiting as the row taught is, never counted
-                # (case 29); where nothing else asks, so are these.
-                if plan.count and svc and taught_words:
-                    taught = label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book))
-                    fills = {}
-                    for wording in taught_words:
-                        for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
-                            sets = {"service_id": service_id, **sets}
-                            if held["id"] not in fills and held["service_id"] == service_id and _would_change(held, sets):
-                                fills[held["id"]] = sets
-                    plan = relabel_preview.with_fills(conn, plan, fills)
-                refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
-                if refused is not None:
-                    return refused
-            if merchant_plan is not None:
-                conn.execute(
-                    "UPDATE services SET book = ?, type_id = ? WHERE id = ?",
-                    (book, type_id, service_id),
-                )
-                _write_plan(conn, merchant_plan, past_rows)
-            if not svc:
-                conn.execute(
-                    "INSERT INTO services (name, book, type_id, review_each_time) VALUES (?, ?, ?, ?)",
-                    (service_name, book, type_id, _new_checks_each_row(conn, type_id)),
-                )
-                service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            if taken_plan is not None:
-                _write_taken(conn, taken_plan, past_rows, service_id)
-
-            # The setting, as taught: Check each row, or Every row the same.
-            # A merchant fin already held, newly set to check each row, has
-            # its past rows answered by the screen's offer (past): leave marks
-            # them checked, as the setting route's "Not now" does; queue, or no
-            # answer, leaves them waiting. Before the backfill, so the rows
-            # this save labels wait whatever the answer.
-            if past == "leave" and svc and not svc["review_each_time"]:
-                _accept_past(conn, f"t.service_id = ? AND t.id != ? AND {LABELLED_ROWS}", (service_id, tx_id))
-            if check_each_row is not None:
-                conn.execute("UPDATE services SET review_each_time = ? WHERE id = ?",
-                             (1 if check_each_row else 0, service_id))
-
-            # Step 2: Create a merchant rule for each wording, the pattern's
-            # first (none for a PayNow/transfer taught without one).
-            # A rule override carries the type, and the book only where it
-            # is not the merchant's.
-            rule_ids = []
-            backfilled_ids = []
-            overrides = _taught_overrides(apply_scope, book, type_id, merchant_book)
-            override_type_id, override_book = overrides["type_override_id"], overrides["book_override"]
-            taught = label_source.rule_sources(overrides)
-            for wording in taught_words:
-                rule_exists = conn.execute(
-                    "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
-                    (wording.upper(),),
-                ).fetchone()
-                if not rule_exists:
-                    conn.execute(
-                        "INSERT INTO merchant_rules (pattern, service_id, book_override, "
-                        "type_override_id, match_type, confidence) "
-                        "VALUES (?, ?, ?, ?, ?, 'confirmed')",
-                        (wording, service_id, override_book, override_type_id, match_type),
-                    )
-                    rule_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-                else:
-                    rule_ids.append(rule_exists["id"])
-                    conn.execute(
-                        "UPDATE merchant_rules SET service_id = ?, book_override = ?, "
-                        "type_override_id = ? WHERE id = ?",
-                        (service_id, override_book, override_type_id, rule_exists["id"]),
-                    )
-
-                # Backfill the other rows matching this wording that have no
-                # merchant, or have this merchant but still no type: the
-                # rows a preview, where one was asked, counted as the teach's
-                # own (_teach_fills).
-                for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
-                    if _write_label(conn, held, {"service_id": service_id, **sets}):
-                        backfilled_ids.append(held["id"])
-            rule_id = rule_ids[0] if rule_ids else None
-            backfilled = len(backfilled_ids)
-
-            # Step 3: Update the target transaction with explicit provenance.
-            # flow_type override is independent of the label (ADR v2):
-            #   - if caller supplies flow_type, set it + mark flow_type_manual=1
-            #   - otherwise leave a hand-set flow alone and re-derive the rest
-            tx_row = conn.execute(
-                f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
-            ).fetchone()
-            label = (book, type_id, service_id,
-                     *_resolved_sources(tx_row, apply_scope, book, type_id, merchant_book))
-            written = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, book_source = ?, type_source = ?"
-            if flow_type is not None:
-                conn.execute(
-                    f"{written}, flow_type = ?, flow_type_manual = 1 WHERE id = ?",
-                    (*label, flow_type, tx_id),
-                )
-            elif tx_row and not tx_row["flow_type_manual"]:
-                flow_type, other_side = _classify_flow_for_tx(
-                    conn, tx_row["description"], tx_row["amount_minor"],
-                    tx_id=tx_id, service_id=service_id, labelled=True,
-                )
-                conn.execute(
-                    f"{written}, flow_type = ?, other_side_id = ? WHERE id = ?",
-                    (*label, flow_type, other_side, tx_id),
-                )
-            else:
-                conn.execute(f"{written} WHERE id = ?", (*label, tx_id))
-
-            # Afterwards, for a merchant the model was asked about: the type
-            # the operator chose and whether the suggestion was on screen.
-            suggest.record_choice(
-                conn, tx_id, type_id, data.get("suggestion_visible") is True,
-            )
-
-            conn.commit()
+            shown = _run_plan(conn, items)
+        finally:
+            conn.rollback()
             invalidate_rules_cache()
-            return jsonify({
-                "success": True,
-                "service_id": service_id,
-                "rule_id": rule_id,
-                "rule_ids": rule_ids,
-                "book": book,
-                "type_id": type_id,
-                "backfilled": backfilled,
-                "backfilled_ids": backfilled_ids,
-            })
-        except BookNeeded as e:
+    return jsonify(shown)
+
+
+@app.route("/api/plans/apply", methods=["POST"])
+def api_plans_apply():
+    """Apply a previewed plan, {items: [...], token}: the same items as the
+    preview, its token. The plan runs again and is written as one change
+    entry, "Applied a plan: N merchants, M rows", which one Undo takes back.
+    Refused, writing nothing, when any item is refused (400, the refusals by
+    merchant) or the token is not the one these items make on the book now
+    (409: a row changed since the preview, or the plan was applied already)."""
+    data = request.get_json(silent=True)
+    try:
+        items = _plan_items(data)
+    except PlanRefused as e:
+        return jsonify({"error": str(e)}), 400
+    token = data.get("token")
+    if not isinstance(token, str) or not token:
+        return jsonify({"error": "apply takes the preview's token: preview the plan first"}), 400
+    with get_db() as conn:
+        try:
+            shown = _run_plan(conn, items)
+            if shown["refusals"]:
+                conn.rollback()
+                return jsonify({"error": "nothing was saved: an item was refused",
+                                "refusals": shown["refusals"]}), 400
+            if shown["token"] != token:
+                conn.rollback()
+                return jsonify({"error": PLAN_STALE, "stale": True}), 409
+            via, _ = _caller()
+            said = ", ".join(f"{n} {word}{'' if n == 1 else 's'}"
+                             for n, word in ((shown["merchants"], "merchant"), (shown["rows"], "row")))
+            _name_change(conn, f"{'Chat applied' if via == history.VIA_CHAT else 'Applied'} a plan: {said}")
+            conn.commit()
+        except BaseException:
             conn.rollback()
-            return jsonify({"error": str(e)}), 400
-        except Exception as e:
-            conn.rollback()
-            app.logger.warning("Failed to resolve transaction: %s", e)
-            return jsonify({"error": "Failed to resolve transaction"}), 400
+            raise
+        finally:
+            invalidate_rules_cache()
+    return jsonify({"success": True, "merchants": shown["merchants"], "rows": shown["rows"],
+                    "items": shown["items"]})
 
 
 @app.route("/api/book-prefill", methods=["POST"])
