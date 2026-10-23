@@ -13,7 +13,7 @@ import account_kind
 # Bank statement PayNow payee → type mapping
 # These are identified by the "To:" field in bank statement descriptions
 PAYNOW_RULES = [
-    # (pattern_in_description, type name, notes)
+    # (pattern_in_description, type key, notes)
     ("CENTRAL PROVIDENT FUND BOARD", "Tax", "CPF payment"),
     ("CPF VOLUNTARY CONTRIBUTIONS", "Tax", "CPF voluntary contribution"),
     ("SINGAPORE LIFE", "Insurance", "Life insurance premium"),
@@ -38,13 +38,13 @@ PAYNOW_RULES = [
 def paynow_type(description: str) -> str | None:
     """Match a bank statement PayNow/transfer description to a type.
 
-    Returns the type's name, or None if no payee wording matches. The caller
-    resolves the name to its id.
+    Returns the type's key (book_type.py), or None if no payee wording
+    matches. The caller resolves the key to its id.
     """
     desc_upper = description.upper()
-    for pattern, type_name, _ in PAYNOW_RULES:
+    for pattern, key, _ in PAYNOW_RULES:
         if pattern.upper() in desc_upper:
-            return type_name
+            return key
     return None
 
 

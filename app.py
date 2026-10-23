@@ -183,7 +183,7 @@ def _proposed_book(conn, type_id: int | None) -> str | None:
     """The book a type proposes for a merchant no rule knows; None = ask."""
     if type_id is None:
         return None
-    return book_type.proposed_book(book_type.spending_type_names(conn).get(type_id))
+    return book_type.proposed_book(conn, type_id)
 
 
 class BookNeeded(ValueError):
@@ -273,11 +273,11 @@ def _paynow_fallback_label(description: str | None, conn) -> tuple[str | None, i
     if not description or "PAYNOW" not in description.upper():
         return None, None
     from ingest import paynow_type
-    type_name = paynow_type(description)
-    type_id = book_type.spending_type_ids(conn).get(type_name) if type_name else None
+    key = paynow_type(description)  # a type's key
+    type_id = book_type.keyed_ids(conn).get(key) if key else None
     if type_id is None:
         return None, None
-    return book_type.proposed_book(type_name), type_id
+    return book_type.proposed_for_key(key), type_id
 
 
 class BadAmount(ValueError):
@@ -1018,10 +1018,10 @@ def index():
 
 _TYPES_SELECT = (
     "SELECT t.id, t.kind, t.name, t.parent_id, p.name as parent_name, "
-    "t.default_one_off, t.covers, t.not_for "
+    "t.default_one_off, t.covers, t.not_for, k.key "
     "FROM types t LEFT JOIN types p ON t.parent_id = p.id "
+    "LEFT JOIN type_keys k ON k.type_id = t.id "
 )
-_DECLARED_TYPES = frozenset(name for name, *_ in book_type.SPENDING_TYPES)
 
 
 def _type_shown(r) -> dict:
@@ -1039,12 +1039,12 @@ def _type_shown(r) -> dict:
         "covers": r["covers"],
         "not_for": r["not_for"],
         # The book this type proposes for a merchant no rule knows; null = ask.
-        "proposed_book": book_type.proposed_book(shown) if spending else None,
-        # Name set in code: fin reads it by name. Its wording is still fixed here
+        "proposed_book": book_type.proposed_for_key(r["key"]) if spending else None,
+        # Name set in code: fin means this type. Its wording is still fixed here
         # (fin RUL-004); an income kind's is not.
-        "locked": (shown in book_type.LOCKED) if spending else True,
-        # A spending type the declaration does not hold was added in fin.
-        "added_in_fin": spending and r["name"] not in _DECLARED_TYPES,
+        "locked": (r["key"] in book_type.LOCKED) if spending else True,
+        # A spending type with no key is not declared: it was added in fin.
+        "added_in_fin": spending and r["key"] is None,
     }
 
 
@@ -5050,12 +5050,6 @@ def _label_account(conn, choice, account_id, row_account_id) -> int:
     return account["id"]
 
 
-def _typed_as(conn, kind: str, name: str) -> int:
-    return conn.execute(
-        "SELECT id FROM types WHERE kind = ? AND name = ? AND parent_id IS NULL", (kind, name)
-    ).fetchone()["id"]
-
-
 @app.route("/api/review/<int:tx_id>/label", methods=["POST"])
 def api_review_label(tx_id: int):
     """Say what a waiting transfer was. Writes the choice's flow (set by hand)
@@ -5102,9 +5096,9 @@ def api_review_label(tx_id: int):
                 # Positive is money out: a gift given. Otherwise one received.
                 if tx["amount_minor"] < 0:
                     flow_name = "income"
-                    type_id = _typed_as(conn, book_type.INCOME, review.GIFT_RECEIVED_KIND)
+                    type_id = book_type.keyed_id(conn, book_type.GIFT_RECEIVED, book_type.INCOME)
                 else:
-                    type_id = _typed_as(conn, book_type.SPENDING, review.GIFT_GIVEN_TYPE)
+                    type_id = book_type.keyed_id(conn, book_type.GIFT_GIVEN)
                     book = book_type.DEFAULT_BOOK
             elif choice.asks == review.ASKS_INCOME_KIND:
                 kind_id = data.get("income_kind_id")
@@ -5162,15 +5156,15 @@ def _label_as_choice(row) -> tuple | None:
     """A row labelled by hand, read back as the review choice that would
     label it the same way: (choice, the label's body). None when no choice
     writes what the row holds."""
-    flow_name, kind, type_name = row["flow_type"], row["other_kind"], row["type_name"]
+    flow_name, kind, type_key = row["flow_type"], row["other_kind"], row["type_key"]
     if flow_name == "expense":
-        if type_name == review.GIFT_GIVEN_TYPE:
+        if type_key == book_type.GIFT_GIVEN:
             return "gift", {}
         if row["type_id"] is None:
             return None
         return "spending", {"type_id": row["type_id"], **({"book": row["book"]} if row["book"] else {})}
     if flow_name == "income":
-        if type_name == review.GIFT_RECEIVED_KIND:
+        if type_key == book_type.GIFT_RECEIVED:
             return "gift", {}
         return ("income", {"income_kind_id": row["type_id"]}) if row["type_id"] is not None else None
     if row["other_side_id"] is None:
@@ -5200,9 +5194,10 @@ def api_review_suggestion(tx_id: int):
             return jsonify({"error": "no such row"}), 404
         rows = conn.execute(
             "SELECT t.flow_type, t.other_side_id, t.type_id, t.book, a.type AS other_kind, "
-            "a.name AS other_name, ty.name AS type_name, p.name AS parent_name "
+            "a.name AS other_name, ty.name AS type_name, p.name AS parent_name, k.key AS type_key "
             "FROM transactions t LEFT JOIN accounts a ON a.id = t.other_side_id "
             "LEFT JOIN types ty ON ty.id = t.type_id LEFT JOIN types p ON p.id = ty.parent_id "
+            "LEFT JOIN type_keys k ON k.type_id = t.type_id "
             f"WHERE t.id != ? AND {_left_to_label('t.flow_type_manual = 1')} AND t.flow_type != ? "
             "AND UPPER(TRIM(t.description)) = UPPER(TRIM(?)) AND (t.amount_minor < 0) = (? < 0) "
             "ORDER BY t.date DESC, t.id DESC LIMIT ?",

@@ -10,10 +10,15 @@ Once a book exists, its `types` table is the home of each type's wording
 (covers, not for) in the app, each one entry in the change history. A later
 change to a declared type's wording here does not reach a book already
 seeded, as `seed_types` never overwrites; such a change goes in as a
-conversion step, as a rename does. Renaming, merging and removing a type,
-and every book, stay code changes. The types code reads by name are LOCKED:
-their names are the code's, but their wording is fixed in the app like any
-spending type's (fin RUL-004).
+conversion step. Renaming, merging and removing a type, and every book,
+stay code changes. The types code means are LOCKED: their names stay as
+declared, but their wording is fixed in the app like any spending type's
+(fin RUL-004).
+
+Code never finds a type by the name it shows. Each declared type and income
+kind keeps a key, its declared name frozen, in the `type_keys` table, and the
+code reads the types it means through the key helpers below
+(type-relationships 01). A type added in the app has no key.
 """
 
 from __future__ import annotations
@@ -194,31 +199,47 @@ INCOME_KINDS = (
 SPENDING = "spending"
 INCOME = "income"
 
+# The types code means, each by its key (its declared name, frozen; see
+# `type_keys` below). Nothing outside this module names a type in quotes: a
+# test fails when code does.
+#
 # Book for a merchant no rule knows is proposed by its type. These types
 # propose Moom; ASKS_FOR_BOOK types propose nothing and the operator must say;
 # every other type proposes Household. A picker's first value may instead come
 # from the operator's history or the paying account (book_prefill.py).
 PROPOSES_MOOM = ("Advertising", "Stock purchases", "Payment fees")
 ASKS_FOR_BOOK = ("Software & AI tools",)
+# What fin files the loan interest it works out under (loan_interest.py).
+LOAN_INTEREST = "Bank & government fees"
+# What a gift is filed under: a spending type when given (the review list's
+# gift, a let-go gift), an income kind when received.
+GIFT_GIVEN = "Gifts & Donations"
+GIFT_RECEIVED = "Gift received"
+# Other means "not placed yet", and is never asked of Jev (suggest.NOT_ASKED).
+NOT_PLACED = "Other"
 
 
-# The types code reads by name, so their names are the code's: the app never
-# renames them, though their wording is fixed like any type's (fin RUL-004).
-# The book-proposing lists above,
-# loan interest's type (loan_interest.TYPE_NAME), a gift given
-# (review.GIFT_GIVEN_TYPE, letgo_api.GIFTS), and Other, which means "not
-# placed yet" and is never asked of Jev (suggest.NOT_ASKED). A test fails
-# when code reads a type by a name not in this list.
-LOCKED = PROPOSES_MOOM + ASKS_FOR_BOOK + ("Bank & government fees", "Gifts & Donations", "Other")
+# The spending types code means, so their names stay as declared: the app
+# never renames them, though their wording is fixed like any type's (fin
+# RUL-004).
+LOCKED = PROPOSES_MOOM + ASKS_FOR_BOOK + (LOAN_INTEREST, GIFT_GIVEN, NOT_PLACED)
 
 
-def proposed_book(type_name: str | None) -> str | None:
-    """The book proposed for a type (its display name); None means ask."""
-    if type_name in ASKS_FOR_BOOK:
+def proposed_for_key(key: str | None) -> str | None:
+    """The book a type proposes, from its key (None for a type added in the
+    app, which proposes Household); None means ask."""
+    if key in ASKS_FOR_BOOK:
         return None
-    if type_name in PROPOSES_MOOM:
+    if key in PROPOSES_MOOM:
         return "Moom"
     return DEFAULT_BOOK
+
+
+def proposed_book(conn: sqlite3.Connection, type_id: int) -> str | None:
+    """The book a spending type proposes for a merchant no rule knows; None
+    means ask."""
+    return proposed_for_key(keys_by_id(conn).get(type_id))
+
 
 # The same statement as in schema.sql, which stays the source of truth; a test
 # holds the two to the same shape. The conversion runs it one statement at a
@@ -239,47 +260,104 @@ CREATE TABLE IF NOT EXISTS types (
 """
 
 
+# The same statement as in schema.sql, which stays the source of truth (a
+# test holds the two to the same shape). seed_types makes the table itself, so
+# the conversion step that first seeds a book's types keys them as it does.
+TYPE_KEYS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS type_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    type_id INTEGER NOT NULL UNIQUE REFERENCES types(id),
+    UNIQUE (kind, key)
+)
+"""
+
+
 def display_name(name: str, parent: str | None) -> str:
     """'Parent > Child' for a sub-type, the bare name otherwise."""
     return f"{parent} > {name}" if parent else name
 
 
-def seed_types(conn: sqlite3.Connection) -> None:
-    """Add every declared type and income kind the table does not hold yet.
+def _declared() -> list[tuple]:
+    """Every declared type and income kind as (kind, name, parent, default,
+    covers, not for), parents before their sub-types."""
+    return [(SPENDING, name, parent, default, covers, not_for)
+            for name, parent, default, covers, not_for in SPENDING_TYPES] + [
+        (INCOME, name, None, RUNNING, description, None) for name, description in INCOME_KINDS]
 
-    Safe to run again: a name already present is left as it is, wording and
-    all, so a type added in the app and a wording fixed there survive every
-    start; nothing is overwritten or deleted. One statement at a time and no
-    commit, so it can run inside a caller's transaction.
+
+def _keyed(conn: sqlite3.Connection) -> dict[tuple[str, str], int]:
+    """Each keyed type's id by (kind, key); empty on a book with no key table."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'type_keys'").fetchone() is None:
+        return {}
+    return {(kind, key): type_id for kind, key, type_id in conn.execute("SELECT kind, key, type_id FROM type_keys")}
+
+
+def seed_types(conn: sqlite3.Connection) -> None:
+    """Add every declared type and income kind the book does not hold yet,
+    and give each its key.
+
+    A declared type is found by its key. One with no key yet (every type on a
+    book from before keys, or a type newly declared) is found by its declared
+    name among the types no key holds, and keyed; only when none has that
+    name is it added. So a type renamed in the app is never added again, and
+    a type added in the app and a wording fixed there survive every start;
+    nothing is overwritten or deleted. One statement at a time and no commit,
+    so it can run inside a caller's transaction.
     """
-    held = {
-        (row[0], row[1]): row[2]
-        for row in conn.execute("SELECT kind, name, id FROM types")
+    conn.execute(TYPE_KEYS_TABLE_SQL)
+    keyed = _keyed(conn)
+    taken = set(keyed.values())
+    unkeyed = {
+        (kind, name): type_id
+        for type_id, kind, name in conn.execute("SELECT id, kind, name FROM types")
+        if type_id not in taken
     }
-    for name, parent, default, covers, not_for in SPENDING_TYPES:
-        if (SPENDING, name) in held:
+    for kind, name, parent, default, covers, not_for in _declared():
+        if (kind, name) in keyed:
             continue
-        cur = conn.execute(
-            "INSERT INTO types (kind, name, parent_id, default_one_off, covers, not_for)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (SPENDING, name, held[(SPENDING, parent)] if parent else None,
-             1 if default == ONE_OFF else 0, covers, not_for),
-        )
-        held[(SPENDING, name)] = cur.lastrowid
-    for name, description in INCOME_KINDS:
-        if (INCOME, name) in held:
-            continue
-        conn.execute(
-            "INSERT INTO types (kind, name, covers) VALUES (?, ?, ?)",
-            (INCOME, name, description),
-        )
+        type_id = unkeyed.get((kind, name))
+        if type_id is None:
+            type_id = conn.execute(
+                "INSERT INTO types (kind, name, parent_id, default_one_off, covers, not_for)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (kind, name, keyed[(kind, parent)] if parent else None,
+                 1 if default == ONE_OFF else 0, covers, not_for),
+            ).lastrowid
+        conn.execute("INSERT INTO type_keys (kind, key, type_id) VALUES (?, ?, ?)", (kind, name, type_id))
+        keyed[(kind, name)] = type_id
 
 
 def types_are_seeded(conn: sqlite3.Connection) -> bool:
-    """Whether the table holds every declared type and income kind."""
+    """Whether the book holds every declared type and income kind, by its key
+    or, on a book from before keys, by its declared name."""
+    keyed = _keyed(conn)
     held = {(row[0], row[1]) for row in conn.execute("SELECT kind, name FROM types")}
-    declared = {(SPENDING, t[0]) for t in SPENDING_TYPES} | {(INCOME, k[0]) for k in INCOME_KINDS}
-    return declared <= held
+    return all((kind, name) in keyed or (kind, name) in held for kind, name, *_ in _declared())
+
+
+# --- the key helpers: how code finds the types it means ---------------------
+
+
+def keyed_ids(conn: sqlite3.Connection, kind: str = SPENDING) -> dict[str, int]:
+    """Each declared type's id (or income kind's, with kind INCOME) by its key."""
+    return {key: type_id for (k, key), type_id in _keyed(conn).items() if k == kind}
+
+
+def keyed_id(conn: sqlite3.Connection, key: str, kind: str = SPENDING) -> int:
+    """The id of the declared type (or income kind) with this key. Every
+    declared one has its key from the first start, so a missing key is an
+    error, never a type to do without."""
+    found = conn.execute("SELECT type_id FROM type_keys WHERE kind = ? AND key = ?", (kind, key)).fetchone()
+    if found is None:
+        raise LookupError(f"no {kind} type has the key {key!r}")
+    return found[0]
+
+
+def keys_by_id(conn: sqlite3.Connection, kind: str = SPENDING) -> dict[int, str]:
+    """Each keyed type's key by its id; a type added in the app is not here."""
+    return {type_id: key for key, type_id in keyed_ids(conn, kind).items()}
 
 
 def spending_type_ids(conn: sqlite3.Connection) -> dict[str, int]:
@@ -311,6 +389,7 @@ CODE_CHANGE = "renaming, merging or removing a type is a code change"
 # in the app is taken out again, by Undo, only while none of them names it. A
 # test holds this list to schema.sql's foreign keys.
 USED_BY = (
+    ("type_keys", "type_id"),
     ("transactions", "type_id"),
     ("subscriptions", "type_id"),
     ("services", "type_id"),

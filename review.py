@@ -57,10 +57,6 @@ PERSON_MOVEMENT_REFUSED = (
     "(money out) or Expect to pay back (money in)."
 )
 
-# What a gift is filed under: a spending type when given, an income kind when received.
-GIFT_GIVEN_TYPE = "Gifts & Donations"
-GIFT_RECEIVED_KIND = "Gift received"
-
 
 class LabelRefused(ValueError):
     """The label does not say what its choice asks for. Nothing was changed."""

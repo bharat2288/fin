@@ -36,8 +36,6 @@ import label_source
 LOAN = "loan"
 # The name of the statement record derived rows sit under.
 DERIVED_STATEMENT = "derived: loan interest"
-# What derived interest is filed under.
-TYPE_NAME = "Bank & government fees"
 BOOK = book_type.DEFAULT_BOOK
 FLOW = "expense"
 
@@ -145,7 +143,7 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
             "SELECT id FROM accounts WHERE id = ? AND type = ? AND owner = ?",
             (loan_id, LOAN, account_kind.HOUSEHOLD),
         )]
-    type_id = book_type.spending_type_ids(conn)[TYPE_NAME]
+    type_id = book_type.keyed_id(conn, book_type.LOAN_INTEREST)
 
     changed = 0
     for loan in loans:

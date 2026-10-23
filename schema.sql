@@ -154,6 +154,20 @@ CREATE TABLE IF NOT EXISTS types (
     UNIQUE (kind, name)
 );
 
+-- The stable key of each type and income kind book_type.py declares: its
+-- declared name, frozen, so code finds the type it means however the type is
+-- named on screen (type-relationships 01). Filled at start by seed_types,
+-- which matches declared names on a book that has no key yet; a type added
+-- in the app has none. Tracked by the change history. A new table, made by
+-- CREATE IF NOT EXISTS on start; no existing row is converted.
+CREATE TABLE IF NOT EXISTS type_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,             -- the type's kind: 'spending' or 'income'
+    key TEXT NOT NULL,              -- the declared name, frozen
+    type_id INTEGER NOT NULL UNIQUE REFERENCES types(id),
+    UNIQUE (kind, key)
+);
+
 -- Answers from the outside judgment model to "which type is this merchant?",
 -- one per cleaned merchant string, model and version (suggest.py). A
 -- suggestion only: nothing here labels a row. A new table, made empty by
@@ -757,6 +771,31 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'types', OLD.id, 'delete',
         json_object('id', OLD.id, 'kind', OLD.kind, 'name', OLD.name, 'parent_id', OLD.parent_id, 'default_one_off', OLD.default_one_off, 'covers', OLD.covers, 'not_for', OLD.not_for, 'created_at', OLD.created_at), NULL);
+END;
+-- Type keys (type-relationships 01): a new table, so a book gains its
+-- triggers on its next start (history.ADDED_ON_START).
+CREATE TRIGGER IF NOT EXISTS history_type_keys_insert AFTER INSERT ON type_keys
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_keys', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'kind', NEW.kind, 'key', NEW.key, 'type_id', NEW.type_id));
+END;
+CREATE TRIGGER IF NOT EXISTS history_type_keys_update AFTER UPDATE ON type_keys
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'kind', OLD.kind, 'key', OLD.key, 'type_id', OLD.type_id) IS NOT json_object('id', NEW.id, 'kind', NEW.kind, 'key', NEW.key, 'type_id', NEW.type_id)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_keys', NEW.id, 'update',
+        json_object('id', OLD.id, 'kind', OLD.kind, 'key', OLD.key, 'type_id', OLD.type_id),
+        json_object('id', NEW.id, 'kind', NEW.kind, 'key', NEW.key, 'type_id', NEW.type_id));
+END;
+CREATE TRIGGER IF NOT EXISTS history_type_keys_delete AFTER DELETE ON type_keys
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_keys', OLD.id, 'delete',
+        json_object('id', OLD.id, 'kind', OLD.kind, 'key', OLD.key, 'type_id', OLD.type_id), NULL);
 END;
 -- history:end
 

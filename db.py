@@ -25,8 +25,8 @@ DB_PATH = configured_db_path()
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 # Initial merchant rules based on known data: (pattern, label, match_type).
-# The label is the merchant's type, with book Household, unless SEED_LABELS
-# says otherwise.
+# The label is the merchant's type, by its key (book_type.py), with book
+# Household, unless SEED_LABELS says otherwise.
 DEFAULT_MERCHANT_RULES = [
     # Groceries
     ("TANGLIN MARKET", "Groceries", "contains"),
@@ -366,7 +366,8 @@ def init_db() -> None:
     # The type list, from its one declaration.
     book_type.seed_types(conn)
     conn.commit()
-    type_ids = book_type.spending_type_ids(conn)
+    # By key: a seed rule still finds its type once the type is renamed.
+    type_ids = book_type.keyed_ids(conn)
 
     # Seed merchant rules — skip if pattern already exists in any form
     # Rules require service_id (service-centric model)

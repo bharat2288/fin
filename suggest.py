@@ -51,8 +51,8 @@ PREFILL_AT = 0.90   # at or above: the type is pre-filled
 OFFER_AT = 0.50     # at or above: the top three are offered; below: blank
 
 NONE_OF_THESE = "none_of_these"
-# `Other` means "not placed yet", which says nothing about a merchant.
-NOT_ASKED = ("Other",)
+# `Other` means "not placed yet", which says nothing about a merchant. By key.
+NOT_ASKED = (book_type.NOT_PLACED,)
 
 # The file the cleaned strings are written to for the operator to read before
 # anything is sent. It sits beside the database.
@@ -176,12 +176,13 @@ def question(conn: sqlite3.Connection) -> dict:
     exists (fin RUL-002), so a type added in fin is one Jev can pick; it
     names no merchant."""
     criteria = {}
-    for name, parent, covers, not_for in conn.execute(
-        "SELECT t.name, p.name, t.covers, t.not_for FROM types t"
+    keys = book_type.keys_by_id(conn)
+    for type_id, name, parent, covers, not_for in conn.execute(
+        "SELECT t.id, t.name, p.name, t.covers, t.not_for FROM types t"
         " LEFT JOIN types p ON p.id = t.parent_id WHERE t.kind = ? ORDER BY t.id",
         (book_type.SPENDING,),
     ):
-        if parent is None and name in NOT_ASKED:
+        if keys.get(type_id) in NOT_ASKED:
             continue
         described = {"what": covers}
         if not_for:

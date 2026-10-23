@@ -42,13 +42,16 @@ TRACKED = (
     "dismissal",
     # Types in the app (fin RUL-002): an added type and a fixed wording.
     "types",
+    # Each declared type's stable key (type-relationships 01).
+    "type_keys",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was
 # there, with every column its triggers record, before it was tracked, so
 # schema.sql's CREATE TRIGGER IF NOT EXISTS gives a book them on its next
-# start and no conversion step is owed. has_shape does not ask for them.
-ADDED_ON_START = ("types",)
+# start and no conversion step is owed; so are a new table's, made by the
+# same start. has_shape does not ask for them.
+ADDED_ON_START = ("types", "type_keys")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens
