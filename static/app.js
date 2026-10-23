@@ -1209,7 +1209,7 @@ ACT['home-guess-yes'] = async el => {
     const row = await findRow(Number(el.dataset.tx));
     if (!row) { toast('That row is no longer waiting', { bad: true }); return; }
     const pattern = suggestPattern(row.description);
-    const body = { tx_id: row.id, service_name: el.dataset.merchant || row.service_name || titleCase(pattern || row.description),
+    const body = { tx_id: row.id, service_name: el.dataset.merchant || row.service_name || suggestName(row.description) || titleCase(pattern || row.description),
         type_id: Number(el.dataset.type), apply_scope: pattern ? 'service_default' : 'transaction', pattern, match_type: 'contains', suggestion_visible: true };
     const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
     if (r.cancelled) return;
@@ -2110,10 +2110,13 @@ function sureRows(g) {
 /** Ready to save: a book, and under Check each row a book on every row drawn. */
 function sureReady(g) { return !!sureBook(g) && !recBlocks(g.key) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
 
-/** The merchant a line's save makes: resolve's name from its first row's
- *  text, or the merchant fin already holds by that name (the save reuses it). */
-function sureName(row, services) {
-    const name = resolveBody(row, null).service_name;
+/** The merchant a line's save makes: the name suggested from its first
+ *  row's text, or the merchant fin already holds by that name, ignoring case
+ *  (the save reuses it). asks: a wording that names no merchant gives no
+ *  name, for a sheet whose save asks for one (This was…); else resolve's. */
+function sureName(row, services, { asks = false } = {}) {
+    const name = asks ? suggestName(row.description) : resolveBody(row, null).service_name;
+    if (!name) return '';
     return services.find(s => s.name.toLowerCase() === name.toLowerCase())?.name || name;
 }
 /** The lanes' rows with no type whose guess is sure, one group per merchant
@@ -2581,6 +2584,43 @@ function suggestPattern(description) {
 }
 function titleCase(s) { return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); }
 
+/** The name a teach suggests for a merchant: fin's own tidy-up of the
+ *  statement wording (queue-naming A; suggest.py's clean, which is what Jev
+ *  is sent, stays as it is). Its rules are the data below. Empty when the
+ *  wording names no merchant (a PayNow, a transfer): the save asks for one. */
+const NAME_RULES = {
+    // a payee or transfer shape (suggest.py's _PAYEE_SHAPE): no merchant to name
+    payee: /PAY ?NOW|PAYLAH|\bFAST\b|\bIBG\b|GIRO|TRANSFER|\bTRF\b|INWARD|REMITT|\bATM\b|\bCASH\b|\bFUNDS\b|I-BANK|:IB\b|\bMEP\b|\bFT\d/,
+    // bank advice, card payment and fee or tax lines (suggest.py's _BANK_LINE): rules, not merchants
+    bank: /^(ADVICE|BILL PAYMENT|PAYMENT\b|PAYMT\b|CARD PAYMENT|SERVICE CHARGE|MISC DEBIT|BUSINESS ADVANCE|INTEREST|CASH REBATE|SALARY|DIVIDEND|GST\b|FINANCE CHARGE|CCY CONVERSION FEE|FEE$)|\b(SERVICE FEE|ADMINISTRATIVE FEE|FOREIGN CURRENCY TRANSACTION FEE|ANNUAL (MEMBERSHIP )?FEE|LATE (PAYMENT )?(CHARGE|FEE)|ADMIN(ISTRATION)? FEE|OVERLIMIT FEE|GOODS (AND|&) SERVICES TAX|((CREDIT )?CARDS?|CC) (PAYMENT|PAYMT))\b/,
+    // processors that print their name before the merchant's (suggest.py's, with SP and EZYPAY)
+    processor: /^(?:(?:2C2P|2C2|PAYPAL|PP|STRIPE|SQUARE|SQ|OMISE|GLOBAL-E|GLOBALE|ADYEN|SUMUP|ATOME|SMP|PYU|EZYPAYSGD|EZYPAY)\s*[*/]\s*|(?:2C2P|PAYPAL|STRIPE|OMISE|GLOBAL-E|GLOBALE|SP)\s+(?=\S))/,
+    web: /^(?:WWW\.)?([A-Z0-9-]+)\.(?:COM|NET|ORG|IO|CO|AI|APP|SHOP|STORE)(?:\.[A-Z]{2})?\/?$/,
+    branch: /\s+-\s+.*$/,
+    // trailing countries, cities and currencies (suggest.py's _PLACES, and the currencies)
+    trailing: /(\s+(SINGAPORE|SGP|SGD|SG|SIN|USA|USD|US|GBR|GBP|GB|UK|LONDON|AUS|AUD|AU|SYDNEY|IND|INR|IN|HKG|HKD|HK|JPN|JPY|JP|TOKYO|MYS|MYR|MY|THA|THB|TH|BANGKOK|IDN|IDR|ID|NLD|NL|IRL|IE|DUBLIN|CAN|CAD|CA|DEU|DE|FRA|FR|EUR|EU|CHF|NZD|CNY))+$/,
+};
+function suggestName(description) {
+    let text = (description || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    if (NAME_RULES.payee.test(text)) return '';
+    text = text.replace(NAME_RULES.processor, '');
+    let words = text.split(' ');
+    if (!/[A-Z]/.test(words[0])) return '';
+    // "X*REST": X names the merchant ("GRAB*A-R123", "ETSY.COM*MULTIPLE SHOP")
+    const star = words[0].indexOf('*');
+    if (star > 0) words = [words[0].slice(0, star)];
+    words = words.map((w, i) => {
+        const web = NAME_RULES.web.exec(w);
+        return !web ? w : i === 0 ? web[1] : '';
+    }).filter(Boolean);
+    // every word from the first after the name's own with a digit is a reference
+    const ref = words.findIndex((w, i) => i > 0 && /\d/.test(w));
+    if (ref > 0) words = words.slice(0, ref);
+    text = words.join(' ').replace(NAME_RULES.branch, '').replace(NAME_RULES.trailing, '').replace(/^[\s*\-\/.]+|[\s*\-\/.]+$/g, '');
+    if (!/[A-Z]/.test(text) || NAME_RULES.bank.test(text)) return '';
+    return text.toLowerCase().replace(/(^|[\s\-\/&(])([a-z])/g, (m, at, c) => at + c.toUpperCase());
+}
+
 // "This was…": one step for every row that waits for a label (Q4.1). The row,
 // then fin's guess with one "Yes" (Q4.2), then the choices; once one is picked
 // the others fold away and its questions sit straight under it (Q4.4). For a
@@ -2613,7 +2653,7 @@ async function openWhatWas(row, group, { mixed = false, notGuess = '' } = {}) {
     const minor = toMinor(row.amount_sgd, row.currency);
     const untyped = row.flow_type !== 'review';
     const pattern = suggestPattern(row.description);
-    const merchant = row.service_name || titleCase(pattern || row.description || '');
+    const merchant = row.service_name || sureName(row, services, { asks: true });
     const waiting = q.lanes.out.concat(q.lanes.in).filter(i => i.kind === 'untyped' && i.row.id !== row.id);
     const others = pattern ? waiting.filter(i => (i.row.description || '').toUpperCase().includes(pattern)).length : group.length - 1;
     let guess;
@@ -2712,7 +2752,7 @@ ACT['ww-pick'] = el => {
         }
         const name = $('#rs-merchant')?.value.trim() || step.merchant;
         w.textContent = s === 'transaction' ? 'Label only this row'
-            : s === 'rule' ? `Label rows whose text contains ${recKeyWording('ww') || '…'}` : `Label every row from ${name} the same way`;
+            : s === 'rule' ? `Label rows whose text contains ${recKeyWording('ww') || '…'}` : `Label every row from ${name || 'this merchant'} the same way`;
         // The rule's wording is shown wherever this save teaches one; its
         // count names other merchants' rows by the merchant taught.
         const ctx = recCtx.get('ww');
@@ -2743,7 +2783,7 @@ ACT['ww-scope'] = el => {
  *  each: the merchant setting as taught (true: Check each row); left out,
  *  the merchant keeps its own. */
 function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern, book = '', visible = false, each } = {}) {
-    const name = merchant || row.service_name || titleCase(suggestPattern(row.description) || row.description || '');
+    const name = merchant || row.service_name || suggestName(row.description) || titleCase(suggestPattern(row.description) || row.description || '');
     const body = { tx_id: row.id, service_name: name, type_id: typeId, apply_scope: scope,
         pattern: pattern ?? suggestPattern(row.description), match_type: 'contains', suggestion_visible: visible };
     if (book) body.book = book;
