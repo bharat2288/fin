@@ -906,3 +906,13 @@ CREATE TABLE IF NOT EXISTS conversion_steps (
     step TEXT PRIMARY KEY,          -- a step's name, as conversion.CHAIN names it
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))  -- UTC
 );
+
+-- A seed fin makes once, at start, and never again, so what the operator
+-- removes of it stays removed: the PayNow wordings made rules
+-- (type-relationships 05; db.py names each seed). Not a tracked table: an
+-- Undo never removes it. A new table, made empty by CREATE IF NOT EXISTS on
+-- start; no existing row is converted.
+CREATE TABLE IF NOT EXISTS seeded_once (
+    seed TEXT PRIMARY KEY,          -- a seed's name, as db.py declares it
+    seeded_at TEXT NOT NULL DEFAULT (datetime('now'))  -- UTC
+);

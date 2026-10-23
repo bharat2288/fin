@@ -217,28 +217,9 @@ def _build_match_condition(match_type: str) -> str:
     return "UPPER(description) = ?"
 
 
-_GENERIC_TRANSFER_PATTERNS = {
-    "PAYNOW",
-    "PAYNOW TRANSFER",
-    "ICT PAYNOW",
-    "ICT PAYNOW TRANSFER",
-    "TOP-UP TO PAYLAH",
-    "TOP UP TO PAYLAH",
-    "MAXED OUT FROM PAYLAH",
-    "TRANSFER",
-    "BANK TRANSFER",
-    "I-BANK",
-}
-
-
-def _normalize_pattern_text(text: str | None) -> str:
-    """Normalize a rule pattern or description fragment for guard checks."""
-    return re.sub(r"\s+", " ", (text or "").upper()).strip()
-
-
 def _looks_transfer_like_description(description: str | None) -> bool:
     """Return True when a raw description is rail-like, not merchant-like."""
-    normalized = _normalize_pattern_text(description)
+    normalized = db.normalize_pattern_text(description)
     if not normalized:
         return False
     if any(token in normalized for token in ("PAYNOW", "PAYLAH", "I-BANK", ":IB")):
@@ -248,42 +229,14 @@ def _looks_transfer_like_description(description: str | None) -> bool:
     return False
 
 
-def _is_generic_rule_pattern(pattern: str | None) -> bool:
-    """Return True for reusable rules that are too generic to be safe."""
-    normalized = _normalize_pattern_text(pattern)
-    if not normalized:
-        return False
-    if normalized in _GENERIC_TRANSFER_PATTERNS:
-        return True
-    if re.fullmatch(r"FT\d+[A-Z0-9:-]*", normalized):
-        return True
-    if normalized.startswith("DBSC-") and "I-BANK" in normalized:
-        return True
-    return False
-
-
 def _rule_pattern_error(pattern: str | None) -> str | None:
     """Return a user-facing validation error for unsafe rule patterns."""
-    if _is_generic_rule_pattern(pattern):
+    if db.is_generic_rule_pattern(pattern):
         return (
             "Pattern is too generic for PayNow/transfer traffic. "
             "Leave it blank for a one-off resolution or use a specific counterparty name."
         )
     return None
-
-
-def _paynow_fallback_label(description: str | None, conn) -> tuple[str | None, int | None]:
-    """The (book, type_id) the PayNow payee wording gives a row no rule
-    matches; (None, None) when the wording says nothing. The book is the one
-    the type proposes."""
-    if not description or "PAYNOW" not in description.upper():
-        return None, None
-    from ingest import paynow_type
-    key = paynow_type(description)  # a type's key
-    type_id = book_type.keyed_ids(conn).get(key) if key else None
-    if type_id is None:
-        return None, None
-    return book_type.proposed_book(conn, type_id), type_id
 
 
 class BadAmount(ValueError):
@@ -342,21 +295,14 @@ def _account_currency(conn, account_name: str, stated=None) -> str:
 
 
 def _label_for(conn, description: str, amount_minor: int) -> dict:
-    """What the rules, then the PayNow wording, make of a row: the result of
-    match_merchant, with the fallback's type when no rule gave one. A merchant
-    the rules did find is kept, and so is its book. With each field's source
-    (book_source, type_source): from the merchant or the rule that gave it,
-    or from the wording; none for a field left empty."""
+    """What the rules make of a row: the result of match_merchant. With each
+    field's source (book_source, type_source): from the merchant or the rule
+    that gave it; none for a field left empty. The PayNow payee wordings are
+    ordinary rules now (type-relationships 05); a row the wording labelled
+    before keeps its wording source."""
     found = match_merchant(description, conn, amount_minor=amount_minor)
     rule = first_rule(description, conn, amount_minor) if found["service_id"] is not None else None
     book_source, type_source = label_source.rule_sources(rule) if rule else (None, None)
-    if found["type_id"] is None:
-        book, type_id = _paynow_fallback_label(description, conn)
-        if type_id is not None:
-            if found["book"] is None:
-                book_source = label_source.WORDING
-            found.update(book=found["book"] or book, type_id=type_id)
-            type_source = label_source.WORDING
     found["book_source"] = label_source.given(found["book"], book_source or label_source.MERCHANT)
     found["type_source"] = label_source.given(found["type_id"], type_source or label_source.MERCHANT)
     return found
@@ -4484,7 +4430,7 @@ def api_import_confirm():
                 # Create merchant rule from description → service
                 if desc:
                     pattern = desc.upper().strip()
-                    if _looks_transfer_like_description(desc) or _is_generic_rule_pattern(pattern):
+                    if _looks_transfer_like_description(desc) or db.is_generic_rule_pattern(pattern):
                         rules_skipped_generic += 1
                     else:
                         rule_exists = conn.execute(
@@ -4849,7 +4795,7 @@ def api_rules_create():
             "max_amount_minor": max_minor,
         }
         try:
-            plan = relabel_preview.rule_change(conn, None, proposed, _paynow_fallback_label)
+            plan = relabel_preview.rule_change(conn, None, proposed)
         except relabel_preview.Gone as e:
             return jsonify({"error": str(e)}), 400
         refused = _previewed_answer(conn, plan, past, data.get("token"))
@@ -4927,7 +4873,7 @@ def api_rules_update(rule_id):
         if gone is not None:
             return gone
         try:
-            plan = relabel_preview.rule_change(conn, rule_id, proposed, _paynow_fallback_label)
+            plan = relabel_preview.rule_change(conn, rule_id, proposed)
         except relabel_preview.Gone as e:
             return jsonify({"error": str(e)}), 400
         refused = _previewed_answer(conn, plan, past, data.get("token"))
@@ -4962,7 +4908,7 @@ def api_rules_delete(rule_id):
         gone = _rule_gone(conn, rule_id)
         if gone is not None:
             return gone
-        plan = relabel_preview.rule_change(conn, rule_id, None, _paynow_fallback_label)
+        plan = relabel_preview.rule_change(conn, rule_id, None)
         refused = _previewed_answer(conn, plan, past, data.get("token"))
         if refused is not None:
             return refused
@@ -4987,7 +4933,7 @@ def api_rules_drift():
     examples, token, ...}. Fields from the merchant, a rule or the wording
     only; a checked or chosen field is never counted. It writes nothing."""
     with get_db() as conn:
-        return jsonify(relabel_preview.summary(conn, relabel_preview.drift(conn, _paynow_fallback_label)))
+        return jsonify(relabel_preview.summary(conn, relabel_preview.drift(conn)))
 
 
 @app.route("/api/rules/drift", methods=["POST"])
@@ -5005,7 +4951,7 @@ def api_rules_drift_apply():
         return jsonify({"error": f"past must be {relabel_preview.APPLY}: leaving the rows as they are "
                                  "writes nothing, so there is nothing to send"}), 400
     with get_db() as conn:
-        plan = relabel_preview.drift(conn, _paynow_fallback_label)
+        plan = relabel_preview.drift(conn)
         if data.get("token") is not None and data["token"] != plan.token:
             return jsonify({"error": relabel_preview.stale(plan), "stale": True}), 409
         if plan.count and past is None:

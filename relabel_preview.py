@@ -524,20 +524,14 @@ def _rule_key(rule):
     return (rule["id"], rule["service_id"], *db.rule_label(rule), label_source.rule_sources(rule))
 
 
-def _given(rule, description: str | None, conn, fallback) -> dict:
-    """What a winning rule (or none), then the wording, give a row: as
-    app._label_for gives it, for a rule list the change would leave."""
+def _given(rule) -> dict:
+    """What a winning rule (or none) gives a row: as app._label_for gives it,
+    for a rule list the change would leave."""
     service_id = book = type_id = book_source = type_source = None
     if rule is not None:
         service_id = rule["service_id"]
         book, type_id = db.rule_label(rule)
         book_source, type_source = label_source.rule_sources(rule)
-    if type_id is None:
-        wording_book, wording_type = fallback(description, conn)
-        if wording_type is not None:
-            if book is None:
-                book_source = label_source.WORDING
-            book, type_id, type_source = book or wording_book, wording_type, label_source.WORDING
     return {"service_id": service_id, "book": book, "type_id": type_id,
             "book_source": label_source.given(book, book_source or label_source.MERCHANT),
             "type_source": label_source.given(type_id, type_source or label_source.MERCHANT)}
@@ -570,16 +564,15 @@ def _held_rows(conn, ids: list[int]) -> list[sqlite3.Row]:
     return found
 
 
-def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | None, fallback) -> Plan:
+def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | None) -> Plan:
     """The plan for a rule added (rule_id None), edited (`proposed`: the
     RULE_FIELDS that change) or deleted (`proposed` None).
 
     Its rows are those whose winning rule, after the change, differs from
     before, or whose label from that rule changes, and whose label would
     then change: each field a later change may reach takes what the new
-    winner gives (or the wording, `fallback`: app._paynow_fallback_label),
-    a checked field staying checked and not emptied, as a re-run of the rules
-    writes it. So a rule's priority and amount limits are honoured, and a
+    winner gives, a checked field staying checked and not emptied, as a
+    re-run of the rules writes it. So a rule's priority and amount limits are honoured, and a
     row another rule wins is not touched. A row with no rule left loses its
     merchant and waits in the Queue. Only new rows keeps each value, the
     fields that would change checked (both, where the merchant would). A row
@@ -644,7 +637,7 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
             labelled += 1
         if _rule_key(before) == _rule_key(after):
             continue
-        found = _given(after, held["description"], conn, fallback)
+        found = _given(after)
         sets, reached, kept, chosen = {"service_id": found["service_id"]}, [], False, False
         for field_name, column in label_source.FIELDS.items():
             source = sources[field_name]
@@ -747,12 +740,11 @@ class _Winner:
         return self.seen[key]
 
 
-def drift(conn: sqlite3.Connection, fallback) -> Plan:
+def drift(conn: sqlite3.Connection) -> Plan:
     """The rows that differ from what their rule says now: Re-run every
     rule's place (fin-surfaces 21 and 51; spec 24, the drift count). A row
     counts when a field of it from the merchant, a rule or the wording holds
-    a value other than what the winning rule (or the wording, `fallback`)
-    gives now, or, every field being from fin, its merchant is not the
+    a value other than what the winning rule gives now, or, every field being from fin, its merchant is not the
     rule's. A checked or chosen field is never counted and never written;
     an empty field reads its own source, as the rule preview reads it.
     Apply writes what the rules give, each field taking the source that
@@ -781,7 +773,7 @@ def drift(conn: sqlite3.Connection, fallback) -> Plan:
         key = rule["id"] if rule is not None and (rule["type_override_id"] or rule["type_id"]) else None
         found = by_rule.get(key) if key is not None else None
         if found is None:
-            found = _given(rule, description, conn, fallback)
+            found = _given(rule)
             if key is not None:
                 by_rule[key] = found
         sets, differs, kept = {}, False, False

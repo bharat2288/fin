@@ -21,7 +21,7 @@ import pytest
 
 import db
 import suggest
-from test_type_keys import book_before, every_row
+from test_type_keys import book_before, every_row, kept_every_row
 from test_type_suggestion import NOT_A_KEY, FakeModel, prepare_and_send, row, statement_on
 
 
@@ -359,7 +359,7 @@ def test_a_book_from_before_this_effort_starts_unchanged_and_renames(tmp_path, m
     db.init_db()
 
     after = every_row(path)
-    assert {t: after[t] for t in rows_before} == rows_before
+    kept_every_row(rows_before, after)
     golf = types(client)["Fitness > Golf"]["id"]
     assert rename(client, "Fitness", "Sport").status_code == 200
     assert types(client)["Sport > Golf"]["id"] == golf

@@ -23,7 +23,7 @@ import db
 import history
 from test_book_and_type_switch import confirm as confirm_with, fake_statement, upload  # noqa: F401 (fixture)
 from test_movements_and_review import BANK, bring_in, ledger, row  # noqa: F401 (fixture)
-from test_type_keys import book_before, every_row
+from test_type_keys import book_before, every_row, kept_every_row
 
 CHILDCARE = {"name": "Childcare", "covers": "nannies, after-school care, holiday camps"}
 
@@ -321,7 +321,7 @@ def test_a_book_from_before_this_effort_starts_seeds_the_settings_and_changes_no
     db.init_db()
 
     after = every_row(path)
-    assert {t: after[t] for t in rows_before} == rows_before
+    kept_every_row(rows_before, after)
     conn = sqlite3.connect(str(path))
     try:
         seeded = dict(conn.execute(

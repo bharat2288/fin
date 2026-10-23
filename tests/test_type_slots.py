@@ -27,7 +27,7 @@ import history
 from test_expect_letgo import harbour, let_go, on_day, story  # noqa: F401 (fixtures)
 from test_loan_interest import enter, make_account, row as seed_row, statement
 from test_movements_and_review import BANK, TRANSFERS, bring_in, labelled, ledger, row, waiting  # noqa: F401
-from test_type_keys import book_before, every_row
+from test_type_keys import book_before, every_row, kept_every_row
 
 INTEREST = {"name": "Interest", "covers": "interest charged on the household's loans"}
 PRESENTS = {"name": "Presents", "covers": "presents bought for others"}
@@ -382,7 +382,7 @@ def test_a_book_from_before_this_effort_starts_seeds_the_slots_and_changes_no_ro
     db.init_db()
 
     after = every_row(path)
-    assert {t: after[t] for t in rows_before} == rows_before
+    kept_every_row(rows_before, after)
     conn = sqlite3.connect(str(path))
     try:
         seeded = dict(conn.execute(

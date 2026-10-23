@@ -515,7 +515,7 @@ def test_types_is_a_tracked_table():
 # wording, the old categories' mapping, the demo book): they need the name to
 # be there, which a name added in the app cannot take away, and nothing they
 # do turns on a type's wording.
-LABEL_DATA = {"book_type.py", "db.py", "ingest.py", "convert_book_type.py", "seed_mock_data.py",
+LABEL_DATA = {"book_type.py", "db.py", "convert_book_type.py", "seed_mock_data.py",
               "convert_account_kinds.py"}
 
 

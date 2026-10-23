@@ -1,51 +1,14 @@
 """Ingest helpers for the fin database.
 
-Provides account/statement creation and the PayNow type fallback,
-imported by app.py for the import-confirm workflow.
+Provides account/statement creation, imported by app.py for the
+import-confirm workflow. (The PayNow payee wordings are merchant rules now:
+db.PAYNOW_WORDINGS, type-relationships 05.)
 """
 
 import re
 import sqlite3
 
 import account_kind
-
-
-# Bank statement PayNow payee → type mapping
-# These are identified by the "To:" field in bank statement descriptions
-PAYNOW_RULES = [
-    # (pattern_in_description, type key, notes)
-    ("CENTRAL PROVIDENT FUND BOARD", "Tax", "CPF payment"),
-    ("CPF VOLUNTARY CONTRIBUTIONS", "Tax", "CPF voluntary contribution"),
-    ("SINGAPORE LIFE", "Insurance", "Life insurance premium"),
-    ("INLAND REVENUE", "Tax", "Tax payment (IRAS)"),
-    ("SINGAPORE ISLAND", "Fitness", "SICC country club"),
-    ("SICC", "Fitness", "SICC country club"),
-    ("SITOH SIEW KIM", "Kids", "Nanny"),
-    ("OSTEOPATHIC", "Medical", "Osteopath"),
-    ("TERRA MEDICAL", "Medical", "Medical"),
-    ("LIMITLESS WELLNESS", "Fitness", "Wellness"),
-    ("VIN GOLF", "Fitness", "Golf"),
-    ("RK", "Other", "Miscellaneous"),
-    ("AMAC", "Home", "Appliance repair"),
-    ("BJT", "Other", "Unknown"),
-    ("FATELICIOUS", "Dining", "Snacks"),
-    ("DREAMCORE", "Other", "PC parts"),
-    ("JEREMY L", "Other", "Unknown"),
-    ("LEC", "Other", "Unknown"),
-]
-
-
-def paynow_type(description: str) -> str | None:
-    """Match a bank statement PayNow/transfer description to a type.
-
-    Returns the type's key (book_type.py), or None if no payee wording
-    matches. The caller resolves the key to its id.
-    """
-    desc_upper = description.upper()
-    for pattern, key, _ in PAYNOW_RULES:
-        if pattern.upper() in desc_upper:
-            return key
-    return None
 
 
 def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:

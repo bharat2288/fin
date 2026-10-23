@@ -29,8 +29,9 @@ from test_movements_and_review import (  # noqa: F401 (fixtures)
 REPO = Path(__file__).resolve().parent.parent
 BEFORE = Path(__file__).parent / "fixtures" / "book_before_type_keys.sql"
 # The same start makes ticket 02's settings table (tests/test_type_settings.py) and
-# ticket 03's slots table (tests/test_type_slots.py).
-NEW_TABLES = {"type_keys", "type_settings", "type_slots"}
+# ticket 03's slots table (tests/test_type_slots.py) and ticket 05's marker
+# that the PayNow wordings were made rules (tests/test_paynow_rules.py).
+NEW_TABLES = {"type_keys", "type_settings", "type_slots", "seeded_once"}
 
 
 def book_before(tmp_path, monkeypatch) -> Path:
@@ -53,6 +54,15 @@ def every_row(path: Path) -> dict[str, list[tuple]]:
         return {t: sorted(conn.execute(f"SELECT * FROM {t}").fetchall(), key=repr) for t in tables}
     finally:
         conn.close()
+
+
+def kept_every_row(before: dict, after: dict) -> None:
+    """Every row the book held is there unchanged; the start added rows only
+    to merchants and rules (ticket 05's PayNow wording rules)."""
+    for table, rows in before.items():
+        assert set(rows) <= set(after[table]), table
+        if table not in ("services", "merchant_rules"):
+            assert after[table] == rows, table
 
 
 def keys_held(path: Path) -> dict[tuple[str, str], int]:
@@ -92,7 +102,7 @@ def test_case_1_a_book_from_before_starts_every_declared_type_gains_its_key_and_
     db.init_db()  # a second start changes nothing either
 
     after = every_row(path)
-    assert {t: after[t] for t in held} == held
+    kept_every_row(held, after)
     assert set(after) - set(held) == NEW_TABLES
     declared = [("spending", n) for n, *_ in book_type.SPENDING_TYPES] + \
                [("income", n) for n, _ in book_type.INCOME_KINDS]
@@ -255,10 +265,10 @@ def test_a_paynow_wording_still_types_a_row_after_its_type_is_renamed(client, le
 # --- the sweep: code reads a declared type by its key, through book_type ---------
 
 # Lists that name types only as labels to give, each read through the key
-# helpers: the seed rules (db.py), the PayNow wordings (ingest.py), the old
+# helpers: the seed rules and the PayNow wordings (db.py), the old
 # categories' mapping (a conversion step on books from before types), the
 # demo book, and the account kinds (where "Home" is not a type).
-LABEL_DATA = {"db.py", "ingest.py", "convert_book_type.py", "seed_mock_data.py", "convert_account_kinds.py"}
+LABEL_DATA = {"db.py", "convert_book_type.py", "seed_mock_data.py", "convert_account_kinds.py"}
 
 
 def test_no_code_reads_a_declared_type_by_a_quoted_name_outside_book_type():
