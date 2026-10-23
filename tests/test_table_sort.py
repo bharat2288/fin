@@ -216,7 +216,7 @@ TABLES = {
     "rates": ("await viewLists('rates')", {"/api/rates": RATES},
               ["day", "pair", "rate", "source"], "day", r'<td class="num sl-name">([^<]+)</td>', ["31 Aug 2026", "30 Sep 2026", "15 Oct 2026"]),
     "types": ("await viewLists('types')", {},
-              ["name", "covers", "notfor", "book"], "covers", r'<td class="sl-name"><b>([^<]+)</b>', ["Travel", "Advertising", "Dining"]),
+              ["name", "covers", "notfor", "book", "oneoff", "each"], "covers", r'<td class="sl-name"><b>([^<]+)</b>', ["Travel", "Advertising", "Dining"]),
     "bills": ("await viewBills()", {"/api/subscriptions": SUBS},
               ["name", "amount", "often", "month", "from", "last", "next"], "month", r'<td class="sl-name"><b>([^<]+)</b>', ["iCloud", "Netflix", "Adobe"]),
     "spend-rows": (_spending("flat") + "await viewSpending()", {},

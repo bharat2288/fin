@@ -42,13 +42,20 @@ TRACKED = (
     "dismissal",
     # Types in the app (fin RUL-002): an added type and a fixed wording.
     "types",
+    # Each declared type's stable key (type-relationships 01).
+    "type_keys",
+    # A type's usual book and Check each row by default (type-relationships 02).
+    "type_settings",
+    # fin's own filings: the type each slot files under (type-relationships 03).
+    "type_slots",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was
 # there, with every column its triggers record, before it was tracked, so
 # schema.sql's CREATE TRIGGER IF NOT EXISTS gives a book them on its next
-# start and no conversion step is owed. has_shape does not ask for them.
-ADDED_ON_START = ("types",)
+# start and no conversion step is owed; so are a new table's, made by the
+# same start. has_shape does not ask for them.
+ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens
@@ -356,6 +363,20 @@ def _write_back(conn: sqlite3.Connection, entry_id: int) -> None:
         "SELECT tbl, row_id, op, before FROM change_rows WHERE entry_id = ? ORDER BY id DESC",
         (entry_id,),
     ).fetchall()
+    # Jev's stored answers name types by display name and are not tracked:
+    # a type's name written back takes them with it, as the rename did
+    # (type-relationships 04). Imported here: suggest imports db, which
+    # imports this module.
+    import book_type
+    import suggest
+
+    names = book_type.spending_type_names(conn) if any(c[0] == "types" for c in changes) else None
+    _write_rows(conn, changes)
+    if names is not None:
+        suggest.follow_renames(conn, names)
+
+
+def _write_rows(conn: sqlite3.Connection, changes: list) -> None:
     for tbl, row_id, op, before in changes:
         if tbl not in TRACKED:
             raise UndoRefused("this change touched a table undo does not write")

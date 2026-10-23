@@ -183,7 +183,13 @@ def _proposed_book(conn, type_id: int | None) -> str | None:
     """The book a type proposes for a merchant no rule knows; None = ask."""
     if type_id is None:
         return None
-    return book_type.proposed_book(book_type.spending_type_names(conn).get(type_id))
+    return book_type.proposed_book(conn, type_id)
+
+
+def _new_checks_each_row(conn, type_id: int | None) -> int:
+    """A new merchant's Check each row flag, from its type's setting
+    (type-relationships 02): 1 when the type says check each row."""
+    return 1 if book_type.checks_each_row(conn, type_id) else 0
 
 
 class BookNeeded(ValueError):
@@ -211,28 +217,9 @@ def _build_match_condition(match_type: str) -> str:
     return "UPPER(description) = ?"
 
 
-_GENERIC_TRANSFER_PATTERNS = {
-    "PAYNOW",
-    "PAYNOW TRANSFER",
-    "ICT PAYNOW",
-    "ICT PAYNOW TRANSFER",
-    "TOP-UP TO PAYLAH",
-    "TOP UP TO PAYLAH",
-    "MAXED OUT FROM PAYLAH",
-    "TRANSFER",
-    "BANK TRANSFER",
-    "I-BANK",
-}
-
-
-def _normalize_pattern_text(text: str | None) -> str:
-    """Normalize a rule pattern or description fragment for guard checks."""
-    return re.sub(r"\s+", " ", (text or "").upper()).strip()
-
-
 def _looks_transfer_like_description(description: str | None) -> bool:
     """Return True when a raw description is rail-like, not merchant-like."""
-    normalized = _normalize_pattern_text(description)
+    normalized = db.normalize_pattern_text(description)
     if not normalized:
         return False
     if any(token in normalized for token in ("PAYNOW", "PAYLAH", "I-BANK", ":IB")):
@@ -242,42 +229,14 @@ def _looks_transfer_like_description(description: str | None) -> bool:
     return False
 
 
-def _is_generic_rule_pattern(pattern: str | None) -> bool:
-    """Return True for reusable rules that are too generic to be safe."""
-    normalized = _normalize_pattern_text(pattern)
-    if not normalized:
-        return False
-    if normalized in _GENERIC_TRANSFER_PATTERNS:
-        return True
-    if re.fullmatch(r"FT\d+[A-Z0-9:-]*", normalized):
-        return True
-    if normalized.startswith("DBSC-") and "I-BANK" in normalized:
-        return True
-    return False
-
-
 def _rule_pattern_error(pattern: str | None) -> str | None:
     """Return a user-facing validation error for unsafe rule patterns."""
-    if _is_generic_rule_pattern(pattern):
+    if db.is_generic_rule_pattern(pattern):
         return (
             "Pattern is too generic for PayNow/transfer traffic. "
             "Leave it blank for a one-off resolution or use a specific counterparty name."
         )
     return None
-
-
-def _paynow_fallback_label(description: str | None, conn) -> tuple[str | None, int | None]:
-    """The (book, type_id) the PayNow payee wording gives a row no rule
-    matches; (None, None) when the wording says nothing. The book is the one
-    the type proposes."""
-    if not description or "PAYNOW" not in description.upper():
-        return None, None
-    from ingest import paynow_type
-    type_name = paynow_type(description)
-    type_id = book_type.spending_type_ids(conn).get(type_name) if type_name else None
-    if type_id is None:
-        return None, None
-    return book_type.proposed_book(type_name), type_id
 
 
 class BadAmount(ValueError):
@@ -336,21 +295,14 @@ def _account_currency(conn, account_name: str, stated=None) -> str:
 
 
 def _label_for(conn, description: str, amount_minor: int) -> dict:
-    """What the rules, then the PayNow wording, make of a row: the result of
-    match_merchant, with the fallback's type when no rule gave one. A merchant
-    the rules did find is kept, and so is its book. With each field's source
-    (book_source, type_source): from the merchant or the rule that gave it,
-    or from the wording; none for a field left empty."""
+    """What the rules make of a row: the result of match_merchant. With each
+    field's source (book_source, type_source): from the merchant or the rule
+    that gave it; none for a field left empty. The PayNow payee wordings are
+    ordinary rules now (type-relationships 05); a row the wording labelled
+    before keeps its wording source."""
     found = match_merchant(description, conn, amount_minor=amount_minor)
     rule = first_rule(description, conn, amount_minor) if found["service_id"] is not None else None
     book_source, type_source = label_source.rule_sources(rule) if rule else (None, None)
-    if found["type_id"] is None:
-        book, type_id = _paynow_fallback_label(description, conn)
-        if type_id is not None:
-            if found["book"] is None:
-                book_source = label_source.WORDING
-            found.update(book=found["book"] or book, type_id=type_id)
-            type_source = label_source.WORDING
     found["book_source"] = label_source.given(found["book"], book_source or label_source.MERCHANT)
     found["type_source"] = label_source.given(found["type_id"], type_source or label_source.MERCHANT)
     return found
@@ -604,7 +556,8 @@ _CHANGE_SUMMARIES = {
     "api_history_undo": "Undid a change",
     # Each names its type in its own summary; these are the fallback.
     "api_types_create": "Added a type",
-    "api_types_fix_wording": "Fixed a type's wording",
+    "api_types_change": "Changed a type",
+    "api_type_slots_move": "Moved one of fin's own filings",
 }
 _CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
 
@@ -1018,16 +971,18 @@ def index():
 
 _TYPES_SELECT = (
     "SELECT t.id, t.kind, t.name, t.parent_id, p.name as parent_name, "
-    "t.default_one_off, t.covers, t.not_for "
+    "t.default_one_off, t.covers, t.not_for, k.key, s.usual_book, s.check_each_row "
     "FROM types t LEFT JOIN types p ON t.parent_id = p.id "
+    "LEFT JOIN type_keys k ON k.type_id = t.id "
+    "LEFT JOIN type_settings s ON s.type_id = t.id "
 )
-_DECLARED_TYPES = frozenset(name for name, *_ in book_type.SPENDING_TYPES)
 
 
 def _type_shown(r) -> dict:
     """One type as the screens and the chat's types tool read it."""
     spending = r["kind"] == book_type.SPENDING
     shown = format_type_display(r["parent_name"], r["name"])
+    usual_book, check_each_row = book_type.settings_of(r["usual_book"], r["check_each_row"], r["key"])
     return {
         "id": r["id"],
         "kind": r["kind"],
@@ -1038,13 +993,18 @@ def _type_shown(r) -> dict:
         "default_one_off": r["default_one_off"],
         "covers": r["covers"],
         "not_for": r["not_for"],
-        # The book this type proposes for a merchant no rule knows; null = ask.
-        "proposed_book": book_type.proposed_book(shown) if spending else None,
-        # Name set in code: fin reads it by name. Its wording is still fixed here
-        # (fin RUL-004); an income kind's is not.
-        "locked": (shown in book_type.LOCKED) if spending else True,
-        # A spending type the declaration does not hold was added in fin.
-        "added_in_fin": spending and r["name"] not in _DECLARED_TYPES,
+        # Its usual book: a book, or "ask" (type-relationships 02); and the
+        # book it proposes for a merchant no rule knows, null = ask.
+        "usual_book": usual_book if spending else None,
+        "proposed_book": book_type.proposed(usual_book) if spending else None,
+        # Whether a new merchant of this type starts as Check each row.
+        "check_each_row": check_each_row if spending else False,
+        # Its name cannot be changed here: Other's meaning is fixed, and an
+        # income kind is set in code. Any other spending type is renamed in
+        # the app (type-relationships 04).
+        "locked": (r["key"] == book_type.NOT_PLACED) if spending else True,
+        # A spending type with no key is not declared: it was added in fin.
+        "added_in_fin": spending and r["key"] is None,
     }
 
 
@@ -1088,26 +1048,122 @@ def api_types_create():
     return jsonify({"type": _type_shown(r)}), 201
 
 
+def _type_change_words(changed: dict) -> list[str]:
+    """What a type change did, in the words Changes shows: the settings, then
+    the wording."""
+    words = []
+    if "usual_book" in changed:
+        book = changed["usual_book"]
+        words.append("usual book: ask" if book == book_type.ASK else f"usual book {book}")
+    if "one_off" in changed:
+        words.append("one-off by default" if changed["one_off"] else "running by default")
+    if "check_each_row" in changed:
+        words.append("Check each row by default" if changed["check_each_row"] else "Every row the same by default")
+    if words and "wording" in changed:
+        words.append("wording fixed")
+    return words
+
+
 @app.route("/api/types/<int:type_id>", methods=["PUT"])
-def api_types_fix_wording(type_id: int):
-    """Fix a spending type's wording: covers, not_for, or both. Anything else
-    is a code change and refused, as is an income kind; nothing is written.
-    A type whose name is set in code has its wording fixed here too (fin RUL-004)."""
+def api_types_change(type_id: int):
+    """Change a spending type: its name, its wording (covers, not_for) and its
+    settings (usual_book: a book or "ask"; one_off and check_each_row, true
+    or false), any of them, as one change. Anything else is a code change
+    and refused, as is an income kind and Other's name and settings; nothing
+    is written. A name is checked as an added type's is; a rename keeps the
+    type's id, so its merchants, rules and rows follow it, and Jev's stored
+    answers are re-pointed to the new name (type-relationships 04). A
+    settings change reaches new merchants only (fin RUL-006 Q3)."""
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
-        return jsonify({"error": "send the wording as JSON"}), 400
+        return jsonify({"error": "send the change as JSON"}), 400
     with get_db() as conn:
+        was = book_type.spending_type_names(conn).get(type_id)
         try:
-            book_type.fix_wording(conn, type_id, data)
+            changed = book_type.change_type(conn, type_id, data)
         except book_type.NoSuchType:
             return jsonify({"error": "no such type"}), 404
         except book_type.TypeRefused as e:
             conn.rollback()
             return jsonify({"error": str(e)}), 400
         r = conn.execute(_TYPES_SELECT + "WHERE t.id = ?", (type_id,)).fetchone()
-        _name_change(conn, f"Fixed the wording of {format_type_display(r['parent_name'], r['name'])}")
+        shown = format_type_display(r["parent_name"], r["name"])
+        words = _type_change_words(changed)
+        if "name" in changed and words:
+            summary = f"Changed {shown}: renamed from {was}, {', '.join(words)}"
+        elif "name" in changed:
+            summary = f"Renamed {was} to {shown}" + (", wording fixed" if "wording" in changed else "")
+        else:
+            summary = f"Changed {shown}: {', '.join(words)}" if words else f"Fixed the wording of {shown}"
+        _name_change(conn, summary)
         conn.commit()
     return jsonify({"type": _type_shown(r)})
+
+
+@app.route("/api/types/slots")
+def api_type_slots():
+    """fin's own filings (type-relationships 03): {slots: [{slot, kind,
+    files, type_id, display_type, says, past_known}]}, in declared order."""
+    with get_db() as conn:
+        return jsonify({"slots": book_type.slots(conn)})
+
+
+SLOT_FIELDS = ("type_id", "past", "token")
+
+
+def _slot_shown(conn, slot: str) -> dict:
+    return next(s for s in book_type.slots(conn) if s["slot"] == slot)
+
+
+@app.route("/api/types/slots/<slot>", methods=["PUT"])
+def api_type_slots_move(slot: str):
+    """Move one of fin's own filings to another type: body {type_id, past,
+    token}. A type of the wrong kind, or Other, is refused, writing
+    nothing. Where fin can tell the past rows it filed through the slot
+    (loan interest), a move that reaches some answers with the preview
+    (409) until `past` says apply (they move too) or only_new (they stay);
+    where it cannot (a gift), the preview says so and only only_new is
+    taken. One change entry either way. Returns {slot, recategorized}."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "send the move as JSON"}), 400
+    unknown = [k for k in data if k not in SLOT_FIELDS]
+    if unknown:
+        return jsonify({"error": f"unknown field: {unknown[0]}"}), 400
+    with get_db() as conn:
+        try:
+            shown = book_type.checked_slot_type(conn, slot, data.get("type_id"))
+            past = relabel_preview.checked_answer(data.get("past"))
+        except book_type.NoSuchSlot:
+            return jsonify({"error": "no such slot"}), 404
+        except book_type.NoSuchType:
+            return jsonify({"error": "no such type"}), 400
+        except (book_type.TypeRefused, relabel_preview.Refused) as e:
+            return jsonify({"error": str(e)}), 400
+        type_id = data["type_id"]
+        if book_type.slot_type(conn, slot) == type_id:
+            return jsonify({"slot": _slot_shown(conn, slot), "recategorized": 0})
+        plan = relabel_preview.slot_change(conn, slot, type_id)
+        words = book_type.slot_words(slot)
+        if data.get("token") is not None and data["token"] != plan.token:
+            return jsonify({"error": relabel_preview.stale(plan), "stale": True}), 409
+        told = plan.extra["past_known"]
+        if past is None and (plan.count or not told):
+            return jsonify({"error": relabel_preview.slot_asked(plan, shown),
+                            "preview": relabel_preview.summary(conn, plan)}), 409
+        if past == relabel_preview.APPLY and not told:
+            return jsonify({"error": f"fin cannot tell which past rows it filed as {words}: "
+                                     f"only new rows can go under {shown}"}), 400
+        book_type.move_slot(conn, slot, type_id)
+        recategorized, _ = _write_plan(conn, plan, past)
+        said = f"fin files {words} under {shown}"
+        if recategorized:
+            said += f", with its {recategorized} past row{'' if recategorized == 1 else 's'}"
+        elif past == relabel_preview.ONLY_NEW:
+            said += ", new rows only"
+        _name_change(conn, said)
+        conn.commit()
+        return jsonify({"slot": _slot_shown(conn, slot), "recategorized": recategorized})
 
 
 @app.route("/api/books")
@@ -1800,6 +1856,8 @@ def api_services_create():
             book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
         except (UnknownLabel, BookNeeded) as e:
             return jsonify({"error": str(e)}), 400
+        # Left unsaid, Check each row is the type's (type-relationships 02).
+        each_row = data["review_each_time"] if "review_each_time" in data else _new_checks_each_row(conn, type_id)
         return _crud_insert(
             conn,
             "INSERT INTO services (name, book, type_id, notes, exclude_from_expense_views, "
@@ -1810,7 +1868,7 @@ def api_services_create():
                 type_id,
                 data.get("notes"),
                 data.get("exclude_from_expense_views", 0),
-                1 if data.get("review_each_time") else 0,
+                1 if each_row else 0,
             ),
             "service",
             post_commit=invalidate_rules_cache,
@@ -3246,8 +3304,8 @@ def api_resolve_transaction():
                 _write_plan(conn, merchant_plan, past_rows)
             if not svc:
                 conn.execute(
-                    "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
-                    (service_name, book, type_id),
+                    "INSERT INTO services (name, book, type_id, review_each_time) VALUES (?, ?, ?, ?)",
+                    (service_name, book, type_id, _new_checks_each_row(conn, type_id)),
                 )
                 service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             if taken_plan is not None:
@@ -3582,8 +3640,8 @@ def api_transaction_suggestion(tx_id: int):
 def _suggested(answer, type_ids: dict) -> tuple[str, list]:
     """A stored answer as the screens are given it: the route and the types
     it offers. No answer is blank. A type the answer names that the book no
-    longer has (renamed or removed since) is left out; an answer left with
-    none is blank."""
+    longer has is left out (a rename re-points the answers, so this is one
+    taken out by Undo); an answer left with none is blank."""
     if answer is None:
         return "blank", []
     where, offered = suggest.route(answer["pick"], json.loads(answer["probabilities"]))
@@ -4364,15 +4422,15 @@ def api_import_confirm():
                     svc_type_id = ns.get("type_id") or None
                     svc_book = _book_or_proposed(conn, ns.get("book") or None, svc_type_id)
                     conn.execute(
-                        "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
-                        (svc_name, svc_book, svc_type_id),
+                        "INSERT INTO services (name, book, type_id, review_each_time) VALUES (?, ?, ?, ?)",
+                        (svc_name, svc_book, svc_type_id, _new_checks_each_row(conn, svc_type_id)),
                     )
                     svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     services_created += 1
                 # Create merchant rule from description → service
                 if desc:
                     pattern = desc.upper().strip()
-                    if _looks_transfer_like_description(desc) or _is_generic_rule_pattern(pattern):
+                    if _looks_transfer_like_description(desc) or db.is_generic_rule_pattern(pattern):
                         rules_skipped_generic += 1
                     else:
                         rule_exists = conn.execute(
@@ -4737,7 +4795,7 @@ def api_rules_create():
             "max_amount_minor": max_minor,
         }
         try:
-            plan = relabel_preview.rule_change(conn, None, proposed, _paynow_fallback_label)
+            plan = relabel_preview.rule_change(conn, None, proposed)
         except relabel_preview.Gone as e:
             return jsonify({"error": str(e)}), 400
         refused = _previewed_answer(conn, plan, past, data.get("token"))
@@ -4815,7 +4873,7 @@ def api_rules_update(rule_id):
         if gone is not None:
             return gone
         try:
-            plan = relabel_preview.rule_change(conn, rule_id, proposed, _paynow_fallback_label)
+            plan = relabel_preview.rule_change(conn, rule_id, proposed)
         except relabel_preview.Gone as e:
             return jsonify({"error": str(e)}), 400
         refused = _previewed_answer(conn, plan, past, data.get("token"))
@@ -4850,7 +4908,7 @@ def api_rules_delete(rule_id):
         gone = _rule_gone(conn, rule_id)
         if gone is not None:
             return gone
-        plan = relabel_preview.rule_change(conn, rule_id, None, _paynow_fallback_label)
+        plan = relabel_preview.rule_change(conn, rule_id, None)
         refused = _previewed_answer(conn, plan, past, data.get("token"))
         if refused is not None:
             return refused
@@ -4872,10 +4930,11 @@ def api_rules_delete(rule_id):
 def api_rules_drift():
     """The rows that differ from what their rule says now
     (relabel_preview.drift): the preview the drawer and chat read, {count,
-    examples, token, ...}. Fields from the merchant, a rule or the wording
-    only; a checked or chosen field is never counted. It writes nothing."""
+    examples, token, ...}. Fields from the merchant or a rule only; a
+    checked or chosen field, or one the PayNow wording gave before its
+    wordings were rules, is never counted. It writes nothing."""
     with get_db() as conn:
-        return jsonify(relabel_preview.summary(conn, relabel_preview.drift(conn, _paynow_fallback_label)))
+        return jsonify(relabel_preview.summary(conn, relabel_preview.drift(conn)))
 
 
 @app.route("/api/rules/drift", methods=["POST"])
@@ -4893,7 +4952,7 @@ def api_rules_drift_apply():
         return jsonify({"error": f"past must be {relabel_preview.APPLY}: leaving the rows as they are "
                                  "writes nothing, so there is nothing to send"}), 400
     with get_db() as conn:
-        plan = relabel_preview.drift(conn, _paynow_fallback_label)
+        plan = relabel_preview.drift(conn)
         if data.get("token") is not None and data["token"] != plan.token:
             return jsonify({"error": relabel_preview.stale(plan), "stale": True}), 409
         if plan.count and past is None:
@@ -5050,12 +5109,6 @@ def _label_account(conn, choice, account_id, row_account_id) -> int:
     return account["id"]
 
 
-def _typed_as(conn, kind: str, name: str) -> int:
-    return conn.execute(
-        "SELECT id FROM types WHERE kind = ? AND name = ? AND parent_id IS NULL", (kind, name)
-    ).fetchone()["id"]
-
-
 @app.route("/api/review/<int:tx_id>/label", methods=["POST"])
 def api_review_label(tx_id: int):
     """Say what a waiting transfer was. Writes the choice's flow (set by hand)
@@ -5102,9 +5155,9 @@ def api_review_label(tx_id: int):
                 # Positive is money out: a gift given. Otherwise one received.
                 if tx["amount_minor"] < 0:
                     flow_name = "income"
-                    type_id = _typed_as(conn, book_type.INCOME, review.GIFT_RECEIVED_KIND)
+                    type_id = book_type.slot_type(conn, book_type.GIFT_RECEIVED_SLOT)
                 else:
-                    type_id = _typed_as(conn, book_type.SPENDING, review.GIFT_GIVEN_TYPE)
+                    type_id = book_type.slot_type(conn, book_type.GIFT_GIVEN_SLOT)
                     book = book_type.DEFAULT_BOOK
             elif choice.asks == review.ASKS_INCOME_KIND:
                 kind_id = data.get("income_kind_id")
@@ -5158,19 +5211,20 @@ REVIEW_GUESS_AT_LEAST = 2
 REVIEW_GUESS_SHARE = 0.6
 
 
-def _label_as_choice(row) -> tuple | None:
+def _label_as_choice(row, gifts: tuple[int, int]) -> tuple | None:
     """A row labelled by hand, read back as the review choice that would
     label it the same way: (choice, the label's body). None when no choice
-    writes what the row holds."""
-    flow_name, kind, type_name = row["flow_type"], row["other_kind"], row["type_name"]
+    writes what the row holds. `gifts`: the types a gift given and a gift
+    received are filed under now (their slots)."""
+    flow_name, kind = row["flow_type"], row["other_kind"]
     if flow_name == "expense":
-        if type_name == review.GIFT_GIVEN_TYPE:
+        if row["type_id"] == gifts[0]:
             return "gift", {}
         if row["type_id"] is None:
             return None
         return "spending", {"type_id": row["type_id"], **({"book": row["book"]} if row["book"] else {})}
     if flow_name == "income":
-        if type_name == review.GIFT_RECEIVED_KIND:
+        if row["type_id"] == gifts[1]:
             return "gift", {}
         return ("income", {"income_kind_id": row["type_id"]}) if row["type_id"] is not None else None
     if row["other_side_id"] is None:
@@ -5208,9 +5262,11 @@ def api_review_suggestion(tx_id: int):
             "ORDER BY t.date DESC, t.id DESC LIMIT ?",
             (tx_id, flow.REVIEW, tx["description"], tx["amount_minor"], REVIEW_GUESS_LOOK_BACK),
         ).fetchall()
+        gifts = (book_type.slot_type(conn, book_type.GIFT_GIVEN_SLOT),
+                 book_type.slot_type(conn, book_type.GIFT_RECEIVED_SLOT))
     tally: dict = {}
     for r in rows:
-        read = _label_as_choice(r)
+        read = _label_as_choice(r, gifts)
         if read is None:
             continue
         key = (read[0], json.dumps(read[1], sort_keys=True))

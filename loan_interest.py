@@ -36,8 +36,6 @@ import label_source
 LOAN = "loan"
 # The name of the statement record derived rows sit under.
 DERIVED_STATEMENT = "derived: loan interest"
-# What derived interest is filed under.
-TYPE_NAME = "Bank & government fees"
 BOOK = book_type.DEFAULT_BOOK
 FLOW = "expense"
 
@@ -145,7 +143,8 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
             "SELECT id FROM accounts WHERE id = ? AND type = ? AND owner = ?",
             (loan_id, LOAN, account_kind.HOUSEHOLD),
         )]
-    type_id = book_type.spending_type_ids(conn)[TYPE_NAME]
+    # The type the slot files loan interest under now (type-relationships 03).
+    type_id = book_type.slot_type(conn, book_type.LOAN_INTEREST_SLOT)
 
     changed = 0
     for loan in loans:
@@ -155,8 +154,8 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
                 "SELECT s.statement_date, t.date, t.amount_minor, t.description "
                 + _DERIVED_FROM
                 + "AND l.id = ? AND t.book_source = ? AND t.type_source = ? AND t.flow_type = ? "
-                "AND t.book = ? AND t.type_id = ?",
-                (*_DERIVED_PARAMS, loan, label_source.DERIVED, label_source.DERIVED, FLOW, BOOK, type_id),
+                "AND t.book = ? AND t.type_id IS NOT NULL",
+                (*_DERIVED_PARAMS, loan, label_source.DERIVED, label_source.DERIVED, FLOW, BOOK),
             )
         )
         total_held = conn.execute(
@@ -165,6 +164,16 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
         if held == wanted and total_held == len(wanted):
             continue
 
+        # A month already filed keeps the type it was filed under: the slot
+        # moved for new rows only leaves it (type-relationships 03).
+        filed = {
+            (period_end, day): filed_type
+            for period_end, day, filed_type in conn.execute(
+                "SELECT s.statement_date, t.date, t.type_id " + _DERIVED_FROM
+                + "AND l.id = ? AND t.type_source = ? AND t.type_id IS NOT NULL",
+                (*_DERIVED_PARAMS, loan, label_source.DERIVED),
+            )
+        }
         # Replace. Only rows under a derived statement record of this loan are
         # removed: nothing a statement or the operator put there.
         conn.execute(
@@ -190,11 +199,20 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
                 "INSERT INTO transactions (statement_id, date, description, amount_minor, "
                 "flow_type, book, type_id, book_source, type_source)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (statement_ids[period_end], day, description, amount, FLOW, BOOK, type_id,
-                 label_source.DERIVED, label_source.DERIVED),
+                (statement_ids[period_end], day, description, amount, FLOW, BOOK,
+                 filed.get((period_end, day), type_id), label_source.DERIVED, label_source.DERIVED),
             )
         changed += 1
     return changed
+
+
+def filed_ids(conn: sqlite3.Connection) -> list[int]:
+    """The rows fin filed as loan interest: every worked-out row on a loan,
+    oldest first (type-relationships 03, moving the slot)."""
+    return [r[0] for r in conn.execute(
+        "SELECT t.id " + _DERIVED_FROM + "AND t.type_source = ? ORDER BY t.date, t.id",
+        (*_DERIVED_PARAMS, label_source.DERIVED),
+    )]
 
 
 def interest_between(conn: sqlite3.Connection, loan_id: int, after: str, upto: str) -> int:

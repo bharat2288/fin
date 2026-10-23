@@ -578,16 +578,16 @@ def test_applying_the_drift_applies_a_rules_override(client, conn, statement):
     assert label(client, tx) == ("Moom", "Stock purchases", "rule_override")
 
 
-def test_the_paynow_fallback_gives_a_type_and_the_book_its_type_proposes(
+def test_a_paynow_wording_is_a_rule_giving_its_type_and_the_book_its_type_proposes(
     client, conn, statement
 ):
-    # No merchant rule knows this payee; the fixed PayNow wording list does.
+    # The PayNow payee wordings are ordinary rules (type-relationships 05).
     tx = row(conn, statement, "PayNow Transfer 0042 To: INLAND REVENUE AUTHORITY", 310.0)
 
     assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
-    assert label(client, tx) == ("Household", "Tax", "fallback")
-    assert shown(client, tx)["service_id"] is None
+    assert label(client, tx) == ("Household", "Tax", "service_default")
+    assert shown(client, tx)["service_name"] == "Inland Revenue"
 
 
 # --- P4: service update and merge ----------------------------------------------
@@ -878,7 +878,7 @@ def test_import_confirm_refuses_an_unknown_book_or_type_and_writes_nothing(
     assert client.get("/api/accounts").get_json() == []
 
 
-def test_import_preview_falls_back_to_the_paynow_wording_for_a_type(
+def test_import_preview_types_a_paynow_wording_by_its_rule(
     client, conn, fake_statement
 ):
     fake_statement([("2026-04-05", "PayNow Transfer 0042 To: INLAND REVENUE AUTHORITY", 310.0)])
@@ -886,10 +886,11 @@ def test_import_preview_falls_back_to_the_paynow_wording_for_a_type(
     preview = upload(client)
     entry = preview["groups"][0]["transactions"][0]
 
-    assert (entry["book"], entry["type_name"], entry["service_id"]) == ("Household", "Tax", None)
+    assert (entry["book"], entry["type_name"]) == ("Household", "Tax")
+    assert entry["service_id"] is not None
     assert confirm(client, preview).status_code == 200
     saved = by_description(client)["PayNow Transfer 0042 To: INLAND REVENUE AUTHORITY"]
-    assert (saved["book_source"], saved["type_source"]) == ("wording", "wording")
+    assert (saved["book_source"], saved["type_source"]) == ("merchant", "merchant")
 
 
 # --- the merchant's review-each-time mark -----------------------------------------

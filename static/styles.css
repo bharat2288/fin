@@ -1584,6 +1584,10 @@ tr.sl-inactive td { color: var(--text-tertiary); }
 .sl-merge .field { flex: 1 1 auto; }
 .mono-ish { letter-spacing: 0.01em; }
 .rename-input { min-width: 180px; width: 100%; }
+/* Lists › Types: fin's own filings, a picker per slot beside its words (type-relationships 06) */
+.slots { display: grid; gap: 8px; max-width: 720px; }
+.slot-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 280px); gap: 12px; align-items: center; }
+.slot-what { min-width: 0; overflow-wrap: anywhere; }
 
 /* a list's phone line lives in its own cell, hidden on the desk */
 table.sl-stack td.sl-sub { display: none; }
@@ -1621,6 +1625,7 @@ table.sl-stack td.sl-sub { display: none; }
     table.sl-stack tr:has(> td.sl-end) td.sl-sub { grid-column: 1; }
     table.sl-stack td.sl-end { display: block; grid-column: 2; grid-row: 2; justify-self: end; }
     table.sl-stack td.sl-wide { grid-column: 1 / -1; }
+    .slot-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
     table.sl-stack td.empty { grid-column: 1 / -1; text-align: center; }
     table.sl-stack tr.section { grid-template-columns: auto minmax(0, 1fr); padding: 10px 12px 8px; background: var(--bg-raised); }
     table.sl-stack tr.sl-sub-head { background: color-mix(in srgb, var(--bg-raised) 30%, var(--bg-surface)); }

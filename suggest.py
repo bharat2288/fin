@@ -51,8 +51,8 @@ PREFILL_AT = 0.90   # at or above: the type is pre-filled
 OFFER_AT = 0.50     # at or above: the top three are offered; below: blank
 
 NONE_OF_THESE = "none_of_these"
-# `Other` means "not placed yet", which says nothing about a merchant.
-NOT_ASKED = ("Other",)
+# `Other` means "not placed yet", which says nothing about a merchant. By key.
+NOT_ASKED = (book_type.NOT_PLACED,)
 
 # The file the cleaned strings are written to for the operator to read before
 # anything is sent. It sits beside the database.
@@ -176,12 +176,13 @@ def question(conn: sqlite3.Connection) -> dict:
     exists (fin RUL-002), so a type added in fin is one Jev can pick; it
     names no merchant."""
     criteria = {}
-    for name, parent, covers, not_for in conn.execute(
-        "SELECT t.name, p.name, t.covers, t.not_for FROM types t"
+    keys = book_type.keys_by_id(conn)
+    for type_id, name, parent, covers, not_for in conn.execute(
+        "SELECT t.id, t.name, p.name, t.covers, t.not_for FROM types t"
         " LEFT JOIN types p ON p.id = t.parent_id WHERE t.kind = ? ORDER BY t.id",
         (book_type.SPENDING,),
     ):
-        if parent is None and name in NOT_ASKED:
+        if keys.get(type_id) in NOT_ASKED:
             continue
         described = {"what": covers}
         if not_for:
@@ -305,6 +306,31 @@ def stored_answers(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
             f"SELECT * FROM suggestion_answers WHERE {_CURRENT}", _CURRENT_VALUES
         )
     }
+
+
+def follow_renames(conn: sqlite3.Connection, was: dict[int, str]) -> None:
+    """Re-point every stored answer, its pick and its probabilities, from each
+    spending type's display name in `was` (by id, read before a write) to
+    the type's display name now: an answer names types by display name, so it
+    follows a rename (type-relationships 04), a parent's rename its
+    sub-types', and the Undo of one. A name the answer holds that a renamed
+    type now has belonged to a type the book no longer has, and is dropped.
+    No commit: the caller owns it."""
+    now = book_type.spending_type_names(conn)
+    renamed = {old: now[type_id] for type_id, old in was.items() if now.get(type_id, old) != old}
+    if not renamed:
+        return
+    gone = set(renamed.values()) - set(renamed)
+    for answer_id, pick, probabilities in conn.execute(
+        "SELECT id, pick, probabilities FROM suggestion_answers"
+    ).fetchall():
+        held = json.loads(probabilities)
+        moved = {renamed.get(name, name): p for name, p in held.items() if name not in gone}
+        if renamed.get(pick, pick) != pick or moved != held:
+            conn.execute(
+                "UPDATE suggestion_answers SET pick = ?, probabilities = ? WHERE id = ?",
+                (renamed.get(pick, pick), json.dumps(moved), answer_id),
+            )
 
 
 def unanswered(conn: sqlite3.Connection) -> list[str]:

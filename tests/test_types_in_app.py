@@ -1,7 +1,8 @@
 """Types in the app (fin RUL-002; walk-fixes 2026-10-22, ticket 06): the
 operator adds a spending type and fixes a type's wording in fin, each one
-entry in the change history that can be undone. Renaming, merging and
-removing a type stay code changes; the types code reads by name stay locked.
+entry in the change history that can be undone. Merging and removing a type
+stay code changes; renaming one is tests/test_type_rename.py
+(type-relationships 04), where only Other's name stays as declared.
 
 Driven through the HTTP interface against a temporary book. Every merchant,
 figure and name here is invented, and the key is a made-up word.
@@ -234,30 +235,18 @@ LOCKED = ["Advertising", "Stock purchases", "Payment fees", "Software & AI tools
 ADVERTISING_FIXED = "paid adverts and promotion on search, social media, marketplaces and podcasts"
 
 
-# queue-naming case 21 (fin RUL-004): a type code reads by name keeps its name
-# locked, but its wording is fixed like any spending type's.
+# queue-naming case 21 (fin RUL-004): a type code means has its wording fixed
+# like any spending type's. Its name is renamed in the app too since
+# type-relationships 04 (code finds it by key), but for Other's.
 @pytest.mark.parametrize("display", LOCKED)
-def test_21_a_locked_types_wording_is_fixed_as_one_entry_and_its_name_stays_locked(client, display):
-    assert types(client)[display]["locked"] is True
-
+def test_21_a_locked_types_wording_is_fixed_as_one_entry(client, display):
     resp = fix(client, display, covers="anything it covers", not_for="what it is not")
 
     assert resp.status_code == 200, resp.get_json()
     [entry] = entries(client)
     assert (entry["summary"], entry["rows"]) == (f"Fixed the wording of {display}", 1)
     got = types(client)[display]
-    assert (got["covers"], got["not_for"], got["locked"]) == ("anything it covers", "what it is not", True)
-
-
-@pytest.mark.parametrize("display", LOCKED)
-def test_21_a_locked_type_still_cannot_be_renamed(client, temp_db, display):
-    before = book_rows(temp_db)
-
-    resp = fix(client, display, covers="anything", name="Something else")
-
-    assert resp.status_code == 400
-    assert resp.get_json()["error"] == "renaming, merging or removing a type is a code change"
-    assert book_rows(temp_db) == before
+    assert (got["covers"], got["not_for"], got["locked"]) == ("anything it covers", "what it is not", display == "Other")
 
 
 def test_21_jev_is_asked_with_advertisings_fixed_wording(client, conn):
@@ -267,7 +256,9 @@ def test_21_jev_is_asked_with_advertisings_fixed_wording(client, conn):
 
 
 @pytest.mark.parametrize("extra", [
-    {"name": "Eating out"}, {"parent_id": 1}, {"one_off": True}, {"kind": "income"}, {"default_one_off": 1},
+    # One-off by default is a setting since type-relationships 02 (tests/test_type_settings.py),
+    # and the name is renamed since type-relationships 04 (tests/test_type_rename.py).
+    {"parent_id": 1}, {"kind": "income"}, {"default_one_off": 1},
 ])
 def test_25_any_field_but_the_wording_is_refused(client, temp_db, extra):
     before = book_rows(temp_db)
@@ -275,7 +266,7 @@ def test_25_any_field_but_the_wording_is_refused(client, temp_db, extra):
     resp = fix(client, "Dining", covers=FIXED_COVERS, **extra)
 
     assert resp.status_code == 400
-    assert resp.get_json()["error"] == "renaming, merging or removing a type is a code change"
+    assert resp.get_json()["error"] == "moving, merging or removing a type is a code change"
     assert book_rows(temp_db) == before
 
 
@@ -292,7 +283,7 @@ def test_25_an_income_kind_is_refused(client, temp_db):
 @pytest.mark.parametrize("body, reason", [
     ({"covers": ""}, "a type needs words for what it covers"),
     ({"covers": "c" * 301}, "what a type covers can be at most 300 characters"),
-    ({}, "say what the type covers or what it is not for"),
+    ({}, "say what to change about the type"),
     ({"covers": 7}, "covers must be words"),
     ({"not_for": "groceries\u202e"}, "the wording cannot hold control characters"),
 ])
@@ -524,7 +515,7 @@ def test_types_is_a_tracked_table():
 # wording, the old categories' mapping, the demo book): they need the name to
 # be there, which a name added in the app cannot take away, and nothing they
 # do turns on a type's wording.
-LABEL_DATA = {"book_type.py", "db.py", "ingest.py", "convert_book_type.py", "seed_mock_data.py",
+LABEL_DATA = {"book_type.py", "db.py", "convert_book_type.py", "seed_mock_data.py",
               "convert_account_kinds.py"}
 
 

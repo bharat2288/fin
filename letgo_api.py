@@ -9,8 +9,8 @@ month already read does not change:
 
 - a back item (money out, expected back) becomes "mine after all", spending in
   its row's type and book (a type is asked for when the row, or an opening
-  figure, has none), or "a gift", Gifts & Donations · Household, to whom if
-  named;
+  figure, has none), or "a gift", Household, under the type fin files gifts
+  given under (book_type's gift_given slot), to whom if named;
 - a pay item (money in, to pay back) becomes only "a gift to me", income in
   the Household with the income type the operator picks (case 26d).
 
@@ -37,7 +37,6 @@ SUMMARIES: dict[str, str] = {
     "api_undo_let_go": "Undid a let-go",
 }
 
-GIFTS = "Gifts & Donations"
 PICK = "pick mine or a gift"
 
 
@@ -71,9 +70,9 @@ def _what_it_became(conn, x, became: str, type_id, to_id) -> tuple[str, int]:
             raise expect_back.Refused("a gift to me is income: pick an income type")
         return account_kind.HOUSEHOLD, picked["id"]
     if became == expect_back.GIFT:
-        gifts = book_type.spending_type_ids(conn)[GIFTS]
+        gifts = book_type.slot_type(conn, book_type.GIFT_GIVEN_SLOT)
         if type_id is not None and type_id != gifts:
-            raise expect_back.Refused(f"a gift counts as {GIFTS}")
+            raise expect_back.Refused(f"a gift counts as {book_type.spending_type_names(conn)[gifts]}")
         return account_kind.HOUSEHOLD, gifts
     # Mine after all: the row's book and type; a type is asked for when there is none.
     row = (conn.execute("SELECT book, type_id FROM transactions WHERE id = ?", (x["row_id"],)).fetchone()

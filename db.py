@@ -1,6 +1,7 @@
 """Database initialization and helpers for fin."""
 
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,8 +26,8 @@ DB_PATH = configured_db_path()
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 # Initial merchant rules based on known data: (pattern, label, match_type).
-# The label is the merchant's type, with book Household, unless SEED_LABELS
-# says otherwise.
+# The label is the merchant's type, by its key (book_type.py), with book
+# Household, unless SEED_LABELS says otherwise.
 DEFAULT_MERCHANT_RULES = [
     # Groceries
     ("TANGLIN MARKET", "Groceries", "contains"),
@@ -223,6 +224,60 @@ DEFAULT_MERCHANT_RULES = [
 ]
 
 
+# The PayNow payee wordings the import once read a type from when no rule
+# knew the row (type-relationships 05), each made a merchant named from the
+# wording, with a `contains` rule, its type (by key) and the type's usual
+# book: once, at start (PAYNOW_SEED), so a rule the operator deletes stays
+# deleted. Six more were already seed rules above (SINGAPORE LIFE,
+# OSTEOPATHIC, TERRA MEDICAL, SICC, VIN GOLF, FATELICIOUS); the five that
+# gave Other gave no type and were dropped, and so was AMAC (Home): four
+# letters a `contains` rule would find inside other words (LAMACHI), where the
+# old wording read it only on a PAYNOW row. The operator adds a longer one in
+# Lists › Rules if it is wanted.
+PAYNOW_WORDINGS = [
+    ("CENTRAL PROVIDENT FUND BOARD", "Tax"),
+    ("CPF VOLUNTARY CONTRIBUTIONS", "Tax"),
+    ("INLAND REVENUE", "Tax"),
+    ("SINGAPORE ISLAND", "Fitness"),
+    ("SITOH SIEW KIM", "Kids"),
+    ("LIMITLESS WELLNESS", "Fitness"),
+]
+# The marker (seeded_once) that the wordings were made rules on this book.
+PAYNOW_SEED = "paynow-wordings"
+
+# Rule patterns too generic to be safe on PayNow and transfer traffic.
+_GENERIC_TRANSFER_PATTERNS = {
+    "PAYNOW",
+    "PAYNOW TRANSFER",
+    "ICT PAYNOW",
+    "ICT PAYNOW TRANSFER",
+    "TOP-UP TO PAYLAH",
+    "TOP UP TO PAYLAH",
+    "MAXED OUT FROM PAYLAH",
+    "TRANSFER",
+    "BANK TRANSFER",
+    "I-BANK",
+}
+
+
+def normalize_pattern_text(text: str | None) -> str:
+    """Normalize a rule pattern or description fragment for guard checks."""
+    return re.sub(r"\s+", " ", (text or "").upper()).strip()
+
+
+def is_generic_rule_pattern(pattern: str | None) -> bool:
+    """Return True for reusable rules that are too generic to be safe."""
+    normalized = normalize_pattern_text(pattern)
+    if not normalized:
+        return False
+    if normalized in _GENERIC_TRANSFER_PATTERNS:
+        return True
+    if re.fullmatch(r"FT\d+[A-Z0-9:-]*", normalized):
+        return True
+    if normalized.startswith("DBSC-") and "I-BANK" in normalized:
+        return True
+    return False
+
 # Seed labels that are not a Household type of the same name: (book, type).
 # These are what the book and type conversion makes of the old categories of
 # the same names: no type, left for the operator to place.
@@ -363,39 +418,30 @@ def init_db() -> None:
     history.close_left_open(conn)
     conn.commit()
 
-    # The type list, from its one declaration.
+    # The type list, from its one declaration, and each declared type's
+    # settings where it has none yet (type-relationships 02), and the type
+    # each of fin's own filings goes under (type-relationships 03).
     book_type.seed_types(conn)
+    book_type.seed_settings(conn)
+    book_type.seed_slots(conn)
     conn.commit()
-    type_ids = book_type.spending_type_ids(conn)
+    # By key: a seed rule still finds its type once the type is renamed.
+    type_ids = book_type.keyed_ids(conn)
 
     # Seed merchant rules — skip if pattern already exists in any form
     # Rules require service_id (service-centric model)
     added = 0
     for pattern, label, match_type in DEFAULT_MERCHANT_RULES:
         book, type_name = SEED_LABELS.get(label, (book_type.DEFAULT_BOOK, label))
-        existing = conn.execute(
-            "SELECT id FROM merchant_rules WHERE pattern = ?", (pattern,)
-        ).fetchone()
-        if not existing:
-            # Find or create a service for this pattern
-            svc_name = pattern.title()  # e.g., "GRAB" → "Grab"
-            svc = conn.execute(
-                "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
-            ).fetchone()
-            if not svc:
-                conn.execute(
-                    "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
-                    (svc_name, book, type_ids[type_name] if type_name else None),
-                )
-                svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            else:
-                svc_id = svc[0]
-            conn.execute(
-                "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
-                "VALUES (?, ?, ?, 'auto')",
-                (pattern, svc_id, match_type),
-            )
-            added += 1
+        added += _seed_rule(conn, pattern, match_type, book, type_ids[type_name] if type_name else None)
+    # The PayNow wordings, once: a start after the marker adds none back.
+    if not conn.execute("SELECT 1 FROM seeded_once WHERE seed = ?", (PAYNOW_SEED,)).fetchone():
+        for pattern, key in PAYNOW_WORDINGS:
+            if key == book_type.NOT_PLACED or is_generic_rule_pattern(pattern):
+                continue  # no type to give, or a pattern too generic to be a rule
+            type_id = type_ids[key]
+            added += _seed_rule(conn, pattern, "contains", book_type.proposed_book(conn, type_id), type_id)
+        conn.execute("INSERT INTO seeded_once (seed) VALUES (?)", (PAYNOW_SEED,))
     conn.commit()
     if added > 0:
         print(f"Added {added} new merchant rules")
@@ -407,6 +453,32 @@ def init_db() -> None:
     print(f"Database ready: {total_types} types, {total_rules} merchant rules")
 
     conn.close()
+
+
+def _seed_rule(conn: sqlite3.Connection, pattern: str, match_type: str,
+               book: str | None, type_id: int | None) -> int:
+    """A seed rule, unless one with its pattern is already there: on the
+    merchant named from the pattern ("GRAB" → "Grab"), made with this book and
+    type when there is none. 1 when the rule was added, else 0; no commit."""
+    if conn.execute("SELECT id FROM merchant_rules WHERE pattern = ?", (pattern,)).fetchone():
+        return 0
+    svc_name = pattern.title()
+    svc = conn.execute(
+        "SELECT id FROM services WHERE UPPER(name) = ?", (svc_name.upper(),)
+    ).fetchone()
+    if svc:
+        svc_id = svc[0]
+    else:
+        svc_id = conn.execute(
+            "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
+            (svc_name, book, type_id),
+        ).lastrowid
+    conn.execute(
+        "INSERT INTO merchant_rules (pattern, service_id, match_type, confidence) "
+        "VALUES (?, ?, ?, 'auto')",
+        (pattern, svc_id, match_type),
+    )
+    return 1
 
 
 # --- Rule engine cache ---
