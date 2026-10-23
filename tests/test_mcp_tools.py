@@ -29,6 +29,8 @@ READS = [
 # fin-surfaces 51: rerun_rules removed (Re-run every rule retired); rule_drift,
 # a read, gives the rows that differ from what their rule says now.
 READS.insert(READS.index("rules") + 1, "rule_drift")
+# chat-queue-read 02: the Queue's labelling work, card by card.
+READS.insert(READS.index("review_summary") + 1, "queue")
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
