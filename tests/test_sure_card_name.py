@@ -146,6 +146,9 @@ def test_case_10_a_name_matching_a_merchant_ignoring_case_attaches_and_uses_its_
     # The save attaches to Rhode with its own type and book: no new merchant,
     # Rhode's own default unchanged, and no question asked first.
     assert not any(t["bad"] for t in out["toasts"]), out["toasts"]
+    # The toast names the merchant as fin holds it too (review F4).
+    said = " ".join(t["words"] for t in out["toasts"])
+    assert "Saved Rhode as " in said and "Saved rhode" not in said
     assert stored(conn, waiting) == ("Rhode", "Moom", type_id(conn, "Shopping"))
     assert [tuple(r) for r in services_held(conn)] == before
     assert conn.execute("SELECT service_id FROM transactions WHERE id = ?", (waiting,)).fetchone()[0] == rhode

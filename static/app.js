@@ -2082,8 +2082,9 @@ function recMoreHTML(key) {
 }
 /** The wordings a teach's save sends beside its own. */
 function recMoreWordings(key) { return (recMore.get(key) || []).map(recKeyWording); }
-/** An added wording cannot be saved: refused, or refused by the reach read. */
-function recMoreBlocks(key) { return (recMore.get(key) || []).some(xk => recMoreRefused(key, xk) || recReach(xk)?.error); }
+/** An added wording cannot be saved: refused, or by its reach read refused or
+ *  matching no row, as the first wording (recBlocks); not while it is read. */
+function recMoreBlocks(key) { return (recMore.get(key) || []).some(xk => recMoreRefused(key, xk) || recBlocks(xk)); }
 /** Each added wording's words drawn again in place (a wording before it may have changed). */
 function recMoreDraw(key) {
     (recMore.get(key) || []).forEach(xk => {
@@ -2274,11 +2275,14 @@ function sureGroups(q, guesses, r, services) {
  *  book does not wait on a pick. Else fin's book prefill for every row. */
 function surePrefill(g) {
     if (!sureEach(g)) return g.prefill;
-    // A row's book: fin's prefill with its own hint, else one it holds (it has
-    // a source; an empty book reads as Household and is not one).
-    const own = x => eachPrefill(x) || (x.sources?.book ? { book: x.book, hint: `${x.book} on the latest row` } : null);
-    // The rows run oldest first: the last that carries a book is the latest.
-    return g.items.map(i => own(i.row)).filter(Boolean).pop() || g.prefill;
+    // The rows run oldest first: the last that carries a book is the latest
+    // (it has a source; an empty book reads as Household and is not one).
+    // Its own book, as case 19 says, not its picker's prefill; with no row
+    // carrying one, the latest picker's prefill with its own hint.
+    const rows = g.items.map(i => i.row);
+    const held = rows.filter(x => x.sources?.book).pop();
+    if (held) return { book: held.book, hint: `${held.book} on the latest row` };
+    return rows.map(eachPrefill).filter(Boolean).pop() || g.prefill;
 }
 /** The book a group would be saved with: the held merchant's, else the one
  *  picked, else its prefill, else its type's. */
@@ -2528,7 +2532,7 @@ ACT['sure-save'] = async el => {
     if (!res.skipped) {   // skipped: its rows already have a type
         if (res.ok) sureForget(g);
         // Under Check each row the rows not drawn are named as waiting.
-        savedToast(g.name, sureType(g).name, book, res, each ? sureRows(g) : g.items.map(i => i.row), { each });
+        savedToast(sureShownName(g), sureType(g).name, book, res, each ? sureRows(g) : g.items.map(i => i.row), { each });
     }
     rerender(); refreshFrame();
 };
@@ -2569,16 +2573,16 @@ ACT['sure-all'] = async () => {
     let pasts = '';            // what the offer's answers did to past rows
     let saved = 0, cancelled = 0, error = null, at = ready.length;
     for (const [n, g] of ready.entries()) {
-        const checks = sureEach(g);
+        const checks = sureEach(g), name = sureShownName(g);   // as fin holds it, not as typed
         const res = await saveSureGroup(g, labelled);
-        if (res.skipped) { skipped.push([g.name, by.get(g.items[0].row.id)]); continue; }
+        if (res.skipped) { skipped.push([name, by.get(g.items[0].row.id)]); continue; }
         if (res.cancelled) { cancelled += 1; continue; }   // its question closed: that line is left as it was
-        pasts += pastWords(g.name, res.past);
+        pasts += pastWords(name, res.past);
         changes.push(...res.changes);
-        res.labelledIds.forEach(id => { if (!by.has(id)) by.set(id, g.name); });
+        res.labelledIds.forEach(id => { if (!by.has(id)) by.set(id, name); });
         // A merchant whose rule was made counts as saved even if one of its
         // rows then failed: its changes are in the Undo.
-        if (res.resolved) { sureForget(g); saved += 1; if (checks) each.push(g.name); }
+        if (res.resolved) { sureForget(g); saved += 1; if (checks) each.push(name); }
         if (!res.ok) { error = res.error; at = n + 1; break; }
     }
     queueBusy = false;
@@ -2765,21 +2769,25 @@ const NAME_RULES = {
     // bank advice, card payment and fee or tax lines (suggest.py's _BANK_LINE): rules, not merchants
     bank: /^(ADVICE|BILL PAYMENT|PAYMENT\b|PAYMT\b|CARD PAYMENT|SERVICE CHARGE|MISC DEBIT|BUSINESS ADVANCE|INTEREST|CASH REBATE|SALARY|DIVIDEND|GST\b|FINANCE CHARGE|CCY CONVERSION FEE|FEE$)|\b(SERVICE FEE|ADMINISTRATIVE FEE|FOREIGN CURRENCY TRANSACTION FEE|ANNUAL (MEMBERSHIP )?FEE|LATE (PAYMENT )?(CHARGE|FEE)|ADMIN(ISTRATION)? FEE|OVERLIMIT FEE|GOODS (AND|&) SERVICES TAX|((CREDIT )?CARDS?|CC) (PAYMENT|PAYMT))\b/,
     // processors that print their name before the merchant's (suggest.py's, with SP and EZYPAY)
-    processor: /^(?:(?:2C2P|2C2|PAYPAL|PP|STRIPE|SQUARE|SQ|OMISE|GLOBAL-E|GLOBALE|ADYEN|SUMUP|ATOME|SMP|PYU|EZYPAYSGD|EZYPAY)\s*[*/]\s*|(?:2C2P|PAYPAL|STRIPE|OMISE|GLOBAL-E|GLOBALE|SP)\s+(?=\S))/,
-    web: /^(?:WWW\.)?([A-Z0-9-]+)\.(?:COM|NET|ORG|IO|CO|AI|APP|SHOP|STORE)(?:\.[A-Z]{2})?\/?$/,
+    // (SP Group, the power company, is a merchant: its SP is not the prefix)
+    processor: /^(?:(?:2C2P|2C2|PAYPAL|PP|STRIPE|SQUARE|SQ|OMISE|GLOBAL-E|GLOBALE|ADYEN|SUMUP|ATOME|SMP|PYU|EZYPAYSGD|EZYPAY)\s*[*/]\s*|(?:2C2P|PAYPAL|STRIPE|OMISE|GLOBAL-E|GLOBALE|SP)\s+(?!(?:GROUP|SERVICES)\b)(?=\S))/,
+    // a web address, its subdomains dropped ("HELP.UBER.COM" is Uber's)
+    web: /^(?:WWW\.)?(?:[A-Z0-9-]+\.)*?([A-Z0-9-]+)\.(?:COM|NET|ORG|IO|CO|AI|APP|SHOP|STORE)(?:\.[A-Z]{2})?\/?$/,
     branch: /\s+-\s+.*$/,
     // trailing countries, cities and currencies (suggest.py's _PLACES, and the currencies)
     trailing: /(\s+(SINGAPORE|SGP|SGD|SG|SIN|USA|USD|US|GBR|GBP|GB|UK|LONDON|AUS|AUD|AU|SYDNEY|IND|INR|IN|HKG|HKD|HK|JPN|JPY|JP|TOKYO|MYS|MYR|MY|THA|THB|TH|BANGKOK|IDN|IDR|ID|NLD|NL|IRL|IE|DUBLIN|CAN|CAD|CA|DEU|DE|FRA|FR|EUR|EU|CHF|NZD|CNY))+$/,
 };
 function suggestName(description) {
-    let text = (description || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    let text = (description || '').toUpperCase().replace(/\s+/g, ' ').trim().replace(/ ?\* ?/g, '*');
     if (NAME_RULES.payee.test(text)) return '';
     text = text.replace(NAME_RULES.processor, '');
     let words = text.split(' ');
     if (!/[A-Z]/.test(words[0])) return '';
-    // "X*REST": X names the merchant ("GRAB*A-R123", "ETSY.COM*MULTIPLE SHOP")
+    // "X*REST": a web address X names the merchant ("ETSY.COM*MULTIPLE SHOP");
+    // any other X keeps the rest, so "GOOGLE*ADS" is not cut to "Google"
     const star = words[0].indexOf('*');
-    if (star > 0) words = [words[0].slice(0, star)];
+    if (star > 0 && NAME_RULES.web.test(words[0].slice(0, star))) words = [words[0].slice(0, star)];
+    else words = words.join(' ').replace(/\*/g, ' ').trim().split(' ');
     words = words.map((w, i) => {
         const web = NAME_RULES.web.exec(w);
         return !web ? w : i === 0 ? web[1] : '';

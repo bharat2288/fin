@@ -128,6 +128,7 @@ def test_case_17_undo_keeps_a_merchant_fin_already_held(client, conn, book):
     (["RHODESKIN", "Rhodeskin"], "twice"),             # the same wording twice
     ("RHODESKIN", "list"),                             # not a list
     ([42], "wording"),                                 # not words
+    ([f"RHODEWORD{i}" for i in range(21)], "at most"),  # more than a save takes (review F5)
 ])
 def test_case_18_one_refused_wording_writes_nothing_and_makes_no_entry(client, conn, book, wordings, said):
     before, held, history_before = every_row(conn), counts(conn), entries(client)
@@ -326,3 +327,19 @@ def test_case_17_saving_the_line_saves_both_wordings_and_remove_takes_one_away(s
     assert rules_of(conn, "Rhode Skin") == [("RHODESKIN.COM SG", "contains"), ("SP RHODE SKIN RHODESKIN.COM CA", "contains")]
     assert conn.execute("SELECT s.name FROM transactions t JOIN services s ON s.id = t.service_id"
                         " WHERE t.id = ?", (card["loose"],)).fetchone()[0] == "Rhode Skin"
+
+
+@needs_node
+def test_an_added_wording_that_matches_no_row_blocks_the_save(server, conn, card):
+    """As the first wording does: a typo would save a rule that never matches (review F1)."""
+    before = every_row(conn)
+
+    out = run(server, OPEN % "await more('XSS<B>X'); const typo = line(); await save();"
+                             " return { typo, toasts: __toasts };")
+
+    [(_, said)] = added_lines(out["typo"]["detail"])
+    assert "matches no row" in said
+    assert out["typo"]["ready"] is False
+    assert re.search(r'<button[^>]*data-act="sure-save"[^>]*disabled', out["typo"]["top"])
+    assert every_row(conn) == before
+    assert rules_of(conn, "Rhode Skin") == []

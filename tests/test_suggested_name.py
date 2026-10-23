@@ -60,6 +60,25 @@ def test_the_name_keeps_ampersands_and_apostrophes_and_stops_at_a_reference(serv
     assert got == ["Marks & Spencer", "Mcdonald's", "Netflix", "Grab", "Netflix"]
 
 
+# The star cuts a name short only after a processor (case 2) or a web address
+# (case 5). Any other "WORD*REST" keeps both sides, so the name does not shrink
+# to a word a held merchant may also carry ("GOOGLE*ADS" is not "Google"); SP
+# Group is a merchant, not SP's processor prefix (review F2).
+STAR = [
+    ("FP*FOOD PANDA", "Fp Food Panda"),
+    ("GOOGLE*ADS", "Google Ads"),
+    ("GOOGLE*GOOGLE ONE", "Google Google One"),
+    ("UBER *TRIP HELP.UBER.COM", "Uber Trip"),
+    ("SP GROUP SERVICES", "Sp Group Services"),
+    ("GRAB*A-R12345678", "Grab"),
+]
+
+
+def test_the_star_cuts_only_after_a_processor_or_a_web_address(server):
+    got = run(server, f"return {json.dumps([w for w, _ in STAR])}.map(suggestName);")
+    assert dict(zip([w for w, _ in STAR], got)) == dict(STAR)
+
+
 @pytest.fixture
 def waiting(conn, statement):  # noqa: F811
     """A Rhode Skin row with no merchant or type, waiting in the Queue."""

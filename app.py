@@ -1873,6 +1873,9 @@ class BadWording(ValueError):
     """A teach's other wordings are refused: the whole teach writes nothing."""
 
 
+MAX_OTHER_WORDINGS = 20   # a card adds a few; the cap keeps a request from making hundreds of rules
+
+
 def _other_wordings(value, pattern: str, apply_scope: str) -> list[str]:
     """The other wordings a teach's rule also recognises (queue-naming C):
     each one more `contains` rule for the merchant, saved with the pattern in
@@ -1885,6 +1888,8 @@ def _other_wordings(value, pattern: str, apply_scope: str) -> list[str]:
         raise BadWording("wordings must be a list of the other wordings the rule recognises")
     if value and (apply_scope not in {"rule", "service_default"} or not pattern):
         raise BadWording("Other wordings go with a rule: not with this row only")
+    if len(value) > MAX_OTHER_WORDINGS:
+        raise BadWording(f"At most {MAX_OTHER_WORDINGS} other wordings in one save")
     out, seen = [], {pattern.upper()}
     for wording in value:
         if not isinstance(wording, str) or not wording.strip():

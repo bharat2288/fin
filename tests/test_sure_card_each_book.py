@@ -134,3 +134,20 @@ def test_case_19_check_each_row_prefills_the_usual_book_from_the_latest_row(serv
     assert out["picked"]["ready"] is True
     assert not any(t["bad"] for t in out["toasts"]), out["toasts"]
     assert merchant_held(conn, rows[0]) == ("Sampleai Pro Subscription", "Kalesh", 1)
+
+
+def test_case_19_the_latest_rows_own_book_wins_over_its_pickers_prefill(server, conn, rows):
+    """The card is a company's (Kalesh), so every row's picker would start on
+    Kalesh; the usual book is still the latest row's own, Moom (review F3)."""
+    account = conn.execute("SELECT s.account_id FROM transactions t JOIN statements s ON s.id = t.statement_id"
+                           " WHERE t.id = ?", (rows[0],)).fetchone()[0]
+    conn.execute("UPDATE accounts SET owner = 'Kalesh' WHERE id = ?", (account,))
+    conn.commit()
+
+    out = run(server, LINE % "set('each'); const each = line();"
+                             " return { each, prefill: queueModel.prefills.get(%d) };" % rows[2])
+
+    assert out["prefill"]["book"] == "Kalesh"     # the row's own picker starts on the company's book
+    chosen, after = book_picker(out["each"]["top"])
+    assert chosen == "Moom"
+    assert hint_shown(after) == "Moom on the latest row"
