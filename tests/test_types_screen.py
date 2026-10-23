@@ -115,6 +115,14 @@ def entries(api):
     return api.get("/api/history").get_json()["entries"]
 
 
+def as_shown(t, **change):
+    """Every field of a type's Edit sheet as the sheet shows it, with `change` typed over it."""
+    shown = {"ty-name": t["name"], "ty-covers": t["covers"] or "", "ty-notfor": t["not_for"] or "",
+             "ty-book": t["usual_book"], "ty-oneoff": bool(t["default_one_off"]), "ty-each": bool(t["check_each_row"])}
+    shown.update(change)
+    return json.dumps(shown)
+
+
 # Fill a sheet's fields as the operator types them, then press its Save.
 FILL = """
 const fill = values => Object.entries(values).forEach(([id, v]) => { const e = __byId(id); if (typeof v === 'boolean') e.checked = v; else e.value = v; });
@@ -129,8 +137,8 @@ const press = async html => { const m = /data-act="(type-[\\w-]+-save)"(?: data-
 def test_case_15_the_types_card_says_what_is_true_and_offers_add(server):
     html = run(server, "return await viewLists('types');")
     said = words(html)
-    assert ("One list serves every book. Add a type, or fix a type's wording, here. "
-            "Renaming, merging or removing a type is a code change.") in said.replace("’", "'")
+    assert ("One list serves every book. Add a type, or change a type's name, wording or settings, here. "
+            "Merging or removing a type is a code change.") in said.replace("’", "'")
     assert "ask Claude in chat" not in said
     assert re.search(r'<button class="btn"[^>]*data-act="type-add"[^>]*>.*?Add a type</button>', html, re.S)
 
@@ -138,13 +146,13 @@ def test_case_15_the_types_card_says_what_is_true_and_offers_add(server):
 # --- case 25 (walk-fixes), now queue-naming cases 21-22 (fin RUL-004) -------------
 
 
-def test_a_locked_type_offers_fix_the_wording_and_says_its_name_is_set_in_code(server, api):
+def test_every_spending_type_offers_edit_and_others_name_is_set_in_code(server, api):
     html = run(server, "return await viewLists('types');")
     # The spending table only: an income kind may share a name ("Other").
     rows = type_rows(html.split("Income kinds", 1)[0])
     shown = listed(api)
     for locked in ("Advertising", "Other", "Gifts & Donations"):
-        assert re.search(rf'<button[^>]*data-act="type-fix" data-id="{shown[locked]["id"]}"[^>]*>Fix the wording</button>', rows[locked]), locked
+        assert re.search(rf'<button[^>]*data-act="type-edit" data-id="{shown[locked]["id"]}"[^>]*>Edit</button>', rows[locked]), locked
         assert "Set in code" not in words(rows[locked]), locked
     # Only Other's name stays as declared (type-relationships 04): code finds
     # every other type it means by its key, so those are renamed in the app.
@@ -152,12 +160,12 @@ def test_a_locked_type_offers_fix_the_wording_and_says_its_name_is_set_in_code(s
     for renamed in ("Advertising", "Gifts & Donations"):
         assert "name set in code" not in words(rows[renamed]), renamed
     dining = shown["Dining"]
-    assert re.search(rf'<button[^>]*data-act="type-fix" data-id="{dining["id"]}"[^>]*>Fix the wording</button>', rows["Dining"])
+    assert re.search(rf'<button[^>]*data-act="type-edit" data-id="{dining["id"]}"[^>]*>Edit</button>', rows["Dining"])
     assert "set in code" not in words(rows["Dining"]).lower()
     # The income kinds stay set in code: no fix offered.
     kinds = html.split("Income kinds", 1)
     if len(kinds) == 2 and "<tbody>" in kinds[1]:
-        assert 'data-act="type-fix"' not in kinds[1]
+        assert 'data-act="type-edit"' not in kinds[1]
         assert "Set in code" in words(kinds[1])
 
 
@@ -165,15 +173,15 @@ def test_case_21_advertisings_wording_fixed_from_the_screen_is_one_change(server
     ad = listed(api)["Advertising"]
     fixed = "paid adverts and promotion on search, social media, marketplaces and podcasts"
     out = run(server, FILL + f"""
-        await ACT['type-fix']({{ dataset: {{ id: '{ad["id"]}' }} }});
+        await ACT['type-edit']({{ dataset: {{ id: '{ad["id"]}' }} }});
         const opened = sheet();
-        fill({{ 'ty-covers': {json.dumps(fixed)}, 'ty-notfor': {json.dumps(ad["not_for"])} }});
+        fill({as_shown(ad, **{"ty-covers": fixed})});
         await press(opened);
         return {{ opened, after: sheet(), toasts: __toasts, view: __byId('view').innerHTML }};
     """)
-    # The sheet fixes the wording only: no name field (Lists › Types gains one
-    # in type-relationships 06). Advertising's name is no longer the code's.
-    assert 'id="ty-name"' not in out["opened"]
+    # The Edit sheet holds the name too (type-relationships 06): Advertising's
+    # name is no longer the code's. Only the wording changed, so only it is sent.
+    assert 'id="ty-name"' in out["opened"]
     assert "Its name is set in code" not in words(out["opened"])
     [entry] = entries(api)
     assert entry["summary"] == "Fixed the wording of Advertising"
@@ -262,17 +270,16 @@ def test_case_22_a_refusal_shows_the_servers_reason_and_keeps_the_sheet_open(ser
 def test_case_24_fix_the_wording_from_the_screen_lands_and_shows(server, api):
     dining = listed(api)["Dining"]
     out = run(server, FILL + f"""
-        await ACT['type-fix']({{ dataset: {{ id: '{dining["id"]}' }} }});
+        await ACT['type-edit']({{ dataset: {{ id: '{dining["id"]}' }} }});
         const opened = sheet();
-        // The operator adds to what it covers and leaves what it is not for as the sheet shows it.
-        fill({{ 'ty-covers': {json.dumps(FIXED_COVERS)}, 'ty-notfor': {json.dumps(dining["not_for"])} }});
+        // The operator adds to what it covers and leaves the rest as the sheet shows it.
+        fill({as_shown(dining, **{"ty-covers": FIXED_COVERS})});
         await press(opened);
         return {{ opened, after: sheet(), toasts: __toasts, view: __byId('view').innerHTML }};
     """)
     # The sheet holds the wording as it is, and says what it cannot change.
     assert DINING_COVERS in htmllib.unescape(out["opened"])
-    assert "Renaming, merging or removing a type is a code change." in words(out["opened"])
-    assert 'id="ty-name"' not in out["opened"]
+    assert "Merging or removing a type is a code change." in words(out["opened"])
     [entry] = entries(api)
     assert entry["summary"] == "Fixed the wording of Dining"
     [toast] = out["toasts"]
@@ -286,7 +293,7 @@ def test_case_24_fix_the_wording_from_the_screen_lands_and_shows(server, api):
 def test_case_24_the_fix_sheet_fills_its_fields_with_the_wording(server, api):
     dining = listed(api)["Dining"]
     out = run(server, f"""
-        await ACT['type-fix']({{ dataset: {{ id: '{dining["id"]}' }} }});
+        await ACT['type-edit']({{ dataset: {{ id: '{dining["id"]}' }} }});
         return __byId('sheets').innerHTML;
     """)
     covers = re.search(r'<textarea[^>]*id="ty-covers"[^>]*>(.*?)</textarea>', out, re.S)
@@ -350,11 +357,11 @@ def test_a_refused_undo_names_the_type_that_blocks_it_as_every_screen_does(serve
 # --- the phone -------------------------------------------------------------------
 
 
-def test_the_phone_puts_fix_in_the_rows_end_cell_and_every_control_is_44px(server):
+def test_the_phone_puts_edit_in_the_rows_end_cell_and_every_control_is_44px(server):
     html = run(server, "return await viewLists('types');")
     # The spending table only: an income kind shares Other's name.
     rows = type_rows(html.split("Income kinds", 1)[0])
-    cell = re.search(r'<td class="([^"]*)"><button[^>]*class="([^"]*)"[^>]*data-act="type-fix"', rows["Dining"])
+    cell = re.search(r'<td class="([^"]*)"><button[^>]*class="([^"]*)"[^>]*data-act="type-edit"', rows["Dining"])
     assert cell and "sl-end" in cell.group(1).split() and {"btn", "sm"} <= set(cell.group(2).split())
     assert "sl-end" in re.search(r'<td class="([^"]*)">[^<]*<span[^>]*>name set in code', rows["Other"]).group(1).split()
     # A small control and a plain button are each the 44px tap target on a phone.

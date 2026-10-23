@@ -4303,22 +4303,35 @@ async function viewLists(tab) {
     const needle = listState.search.toLowerCase();
 
     if (tab === 'types') {
-        const income = await get('/api/types?kind=income').catch(() => []);
-        // Every spending type's wording can be fixed here; a type fin reads by name keeps its name (fin RUL-004). Income kinds are set in code.
+        const [income, filings] = await Promise.all([get('/api/types?kind=income').catch(() => []), get('/api/types/slots').catch(() => ({ slots: [] }))]);
+        // Every spending type is edited here: name, wording, settings (type-relationships 06). Other's meaning is
+        // fixed: only its wording (fin RUL-004). Income kinds are set in code.
         const fix = t => t.kind === 'income' ? '<span class="small muted">Set in code</span>'
-            : `${t.locked ? '<span class="small muted">name set in code</span> ' : ''}<button type="button" class="btn sm" data-act="type-fix" data-id="${t.id}" aria-label="Fix the wording of ${esc(t.display_name || t.name)}">Fix the wording</button>`;
-        const row = t => `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b>${t.added_in_fin ? ` ${tag('yours', 'added in fin')}` : ''}</td><td class="small">${esc(plainWords(t.covers))}</td>
-            <td class="small muted">${esc(plainWords(t.not_for || ''))}</td><td class="small">${t.kind === 'income' ? '' : `${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}</td>
-            <td class="sl-sub">${esc(plainWords(t.covers))}${t.kind === 'income' ? '' : ` · ${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}${t.not_for ? `<div>Not for: ${esc(plainWords(t.not_for))}</div>` : ''}</td>
+            : `${t.locked ? '<span class="small muted">name set in code</span> ' : ''}<button type="button" class="btn sm" data-act="type-edit" data-id="${t.id}" aria-label="Edit ${esc(t.display_name || t.name)}">Edit</button>`;
+        const yes = v => (v ? 'yes' : '');
+        const settings = t => t.locked ? 'not placed yet: fixed'
+            : [t.usual_book, t.default_one_off ? 'one-off by default' : '', t.check_each_row ? 'Check each row by default' : ''].filter(Boolean).join(', ');
+        const row = t => t.kind === 'income'
+            ? `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b></td><td class="small">${esc(plainWords(t.covers))}</td>
+            <td class="small muted">${esc(plainWords(t.not_for || ''))}</td>
+            <td class="sl-sub">${esc(plainWords(t.covers))}${t.not_for ? `<div>Not for: ${esc(plainWords(t.not_for))}</div>` : ''}</td>
+            <td class="r sl-end">${fix(t)}</td></tr>`
+            : `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b>${t.added_in_fin ? ` ${tag('yours', 'added in fin')}` : ''}</td><td class="small">${esc(plainWords(t.covers))}</td>
+            <td class="small muted">${esc(plainWords(t.not_for || ''))}</td>${t.locked ? '<td class="small muted" colspan="3">not placed yet: fixed</td>'
+                : `<td class="small">${esc(t.usual_book)}</td><td class="small">${yes(t.default_one_off)}</td><td class="small">${yes(t.check_each_row)}</td>`}
+            <td class="sl-sub">${esc(plainWords(t.covers))} · ${esc(settings(t))}${t.not_for ? `<div>Not for: ${esc(plainWords(t.not_for))}</div>` : ''}</td>
             <td class="r sl-end">${fix(t)}</td></tr>`;
         const cols = name => ({ name: { label: name, kind: 'text', of: t => t.display_name || t.name }, covers: { label: 'Covers', kind: 'text', of: t => plainWords(t.covers) },
             notfor: { label: 'Not for', kind: 'text', of: t => plainWords(t.not_for) } });
-        const TYPE_SORT = { ...cols('Type'), book: { label: 'Usual book', kind: 'text', of: t => t.proposed_book } }, KIND_SORT = cols('Kind');
+        const TYPE_SORT = { ...cols('Type'), book: { label: 'Usual book', kind: 'text', of: t => t.usual_book },
+            oneoff: { label: 'One-off', kind: 'text', of: t => yes(t.default_one_off) }, each: { label: 'Check each row', kind: 'text', of: t => yes(t.check_each_row) } };
+        const KIND_SORT = cols('Kind');
         const heads = (table, c) => Object.keys(c).map(k => `<th>${sortHead(table, k, c)}</th>`).join('');
-        return `${head}<section class="card"><div class="section-header"><div><h2>Types</h2><p>One list serves every book. Add a type, or fix a type’s wording, here. Renaming, merging or removing a type is a code change.</p></div>
+        return `${head}<section class="card"><div class="section-header"><div><h2>Types</h2><p>One list serves every book. Add a type, or change a type’s name, wording or settings, here. Merging or removing a type is a code change.</p></div>
             <button class="btn" data-act="type-add">${icon('plus')}Add a type</button></div>
             ${sortPicker('types', TYPE_SORT)}<div class="table-wrap"><table class="t sl-stack"><thead><tr>${heads('types', TYPE_SORT)}<th></th></tr></thead><tbody>${sortRows('types', r.types.filter(t => t.kind === 'spending'), TYPE_SORT).map(row).join('')}</tbody></table></div>
-            ${income.length ? `<h3 class="sl-subhead">Income kinds</h3>${sortPicker('income-kinds', KIND_SORT)}<div class="table-wrap"><table class="t sl-stack"><thead><tr>${heads('income-kinds', KIND_SORT)}<th></th><th></th></tr></thead><tbody>${sortRows('income-kinds', income, KIND_SORT).map(row).join('')}</tbody></table></div>`
+            ${filingsHTML(filings.slots, r.types, income)}
+            ${income.length ? `<h3 class="sl-subhead">Income kinds</h3>${sortPicker('income-kinds', KIND_SORT)}<div class="table-wrap"><table class="t sl-stack"><thead><tr>${heads('income-kinds', KIND_SORT)}<th></th></tr></thead><tbody>${sortRows('income-kinds', income, KIND_SORT).map(row).join('')}</tbody></table></div>`
                 : '<p class="card-foot">Income kinds: none set up yet.</p>'}</section>`;
     }
     if (tab === 'rates') {
@@ -4430,8 +4443,9 @@ function merchantListRow(s, { renaming, renames }) {
         ${renaming ? '' : `<td class="sl-sub">${esc(s.book || 'no book')} · ${typeCell} · ${plural(s.rule_count, 'rule')} ${marks}</td>
         <td class="r sl-end"><button type="button" class="btn sm subtle icon" data-act="merchant" data-id="${s.id}" aria-label="Edit ${esc(s.name)}" title="Edit ${esc(s.name)}">${icon('pencil-simple')}</button></td>`}</tr>`;
 }
-// Lists › Types (fin RUL-002): add a spending type, or fix one's wording (what it
-// covers, what it is not for). Jev is sent the same words. The server refuses
+// Lists › Types (fin RUL-002): add a spending type, or edit one: its name, its
+// wording (what it covers, what it is not for) and its settings (type-relationships
+// 06). Jev is sent the same words. The server refuses
 // what is not allowed and says why; the sheet stays open on a refusal.
 const TYPE_WORDS_MOST = 300;
 function typeWordingFields(t) {
@@ -4448,15 +4462,8 @@ ACT['type-add'] = async () => {
         <label class="field"><span>Under</span><select id="ty-parent"><option value="">Nothing: a type of its own</option>${tops.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select></label>
         <label class="check"><input type="checkbox" id="ty-oneoff"> One-off by default: a row of this type is one-off unless you say otherwise</label>
         ${typeWordingFields(null)}</div>
-        <p class="hint">Renaming, merging or removing a type is a code change.</p>`,
+        <p class="hint">Merging or removing a type is a code change.</p>`,
     { eyebrow: 'Types', foot: '<button class="btn primary" data-act="type-add-save">Add the type</button>' });
-};
-ACT['type-fix'] = async el => {
-    const t = (await refs()).typeById.get(Number(el.dataset.id));
-    if (!t) { toast('That type is no longer in fin', { bad: true }); return; }
-    openSheet(esc(t.display_name || t.name), `<div class="fields">${typeWordingFields(t)}</div>
-        <p class="hint">${t.locked ? 'Its name is set in code: fin reads it by name. ' : ''}Renaming, merging or removing a type is a code change.</p>`,
-    { eyebrow: 'Fix the wording', foot: `<button class="btn primary" data-act="type-fix-save" data-id="${t.id}">Save the wording</button>` });
 };
 /** Send a type write; on success toast the type's name with Undo and redraw, on a refusal say the server's words. */
 async function typeWrite(el, method, url, body, done) {
@@ -4474,8 +4481,111 @@ ACT['type-add-save'] = el => {
     return typeWrite(el, 'POST', '/api/types', { name: $('#ty-name').value, parent_id: parent ? Number(parent) : null,
         one_off: $('#ty-oneoff').checked, covers: $('#ty-covers').value, not_for: $('#ty-notfor').value }, shown => `Added the type ${shown}`);
 };
-ACT['type-fix-save'] = el => typeWrite(el, 'PUT', `/api/types/${el.dataset.id}`,
-    { covers: $('#ty-covers').value, not_for: $('#ty-notfor').value }, shown => `Fixed the wording of ${shown}`);
+// A type's Edit sheet (type-relationships 06): its name, its wording, its usual
+// book, one-off and Check each row by default, saved as one change.
+ACT['type-edit'] = async el => {
+    const r = await refs();
+    const t = r.typeById.get(Number(el.dataset.id));
+    if (!t) { toast('That type is no longer in fin', { bad: true }); return; }
+    // Other means not placed yet: its name and settings are fixed, its wording is not (fin RUL-004).
+    if (t.locked) {
+        openSheet(esc(t.display_name || t.name), `<div class="fields">${typeWordingFields(t)}</div>
+            <p class="hint">${esc(t.name)} means not placed yet: its name and settings are fixed.</p>`,
+        { eyebrow: 'Edit the type', foot: `<button class="btn primary" data-act="type-edit-save" data-id="${t.id}">Save</button>` });
+        return;
+    }
+    const books = [...r.books.map(b => b.name), 'ask'];
+    const parent = t.parent_id ? r.typeById.get(t.parent_id) : null;
+    openSheet(esc(t.display_name || t.name), `<div class="fields">
+        <label class="field"><span>Name</span><input type="text" id="ty-name" maxlength="40" value="${esc(t.name)}">
+            <span class="hint">${parent ? `Under ${esc(parent.name)}. ` : ''}Merchants, rules and rows keep pointing at it; Jev’s answers follow the new name.</span></label>
+        ${typeWordingFields(t)}
+        <label class="field"><span>Usual book</span><select id="ty-book">${books.map(b => `<option value="${esc(b)}"${b === t.usual_book ? ' selected' : ''}>${b === 'ask' ? 'ask: you say whose it is' : esc(b)}</option>`).join('')}</select>
+            <span class="hint">The book a new merchant of this type is proposed. Merchants you have already placed keep theirs.</span></label>
+        <label class="check"><input type="checkbox" id="ty-oneoff"${t.default_one_off ? ' checked' : ''}> One-off by default: a row of this type is one-off unless you say otherwise</label>
+        <label class="check"><input type="checkbox" id="ty-each"${t.check_each_row ? ' checked' : ''}> Check each row by default: a new merchant of this type starts as Check each row</label></div>
+        <p class="hint">Merging or removing a type is a code change.</p>`,
+    { eyebrow: 'Edit the type', foot: `<button class="btn primary" data-act="type-edit-save" data-id="${t.id}">Save</button>` });
+};
+/** What an Edit sheet's save did, in the toast's words: as Changes names it. */
+function typeEditWords(sent, was, shown) {
+    const settings = [
+        'usual_book' in sent ? (sent.usual_book === 'ask' ? 'usual book: ask' : `usual book ${sent.usual_book}`) : '',
+        'one_off' in sent ? (sent.one_off ? 'one-off by default' : 'running by default') : '',
+        'check_each_row' in sent ? (sent.check_each_row ? 'Check each row by default' : 'Every row the same by default') : '',
+    ].filter(Boolean).join(', ');
+    const wording = 'covers' in sent || 'not_for' in sent;
+    if ('name' in sent) return `Renamed ${was} to ${shown}${settings ? `, ${settings}` : ''}${wording ? ', wording fixed' : ''}`;
+    if (settings) return `Changed ${shown}: ${settings}${wording ? ', wording fixed' : ''}`;
+    return `Fixed the wording of ${shown}`;
+}
+// Only what the operator changed is sent: one change entry, named for it.
+ACT['type-edit-save'] = async el => {
+    const t = (await refs()).typeById.get(Number(el.dataset.id));
+    if (!t) { toast('That type is no longer in fin', { bad: true }); return; }
+    const sent = {};
+    const typed = (id, field, was) => { const v = $(id).value; if (v !== was) sent[field] = v; };
+    typed('#ty-covers', 'covers', t.covers || '');
+    typed('#ty-notfor', 'not_for', t.not_for || '');
+    if (!t.locked) {
+        typed('#ty-name', 'name', t.name);
+        typed('#ty-book', 'usual_book', t.usual_book);
+        if ($('#ty-oneoff').checked !== Boolean(t.default_one_off)) sent.one_off = $('#ty-oneoff').checked;
+        if ($('#ty-each').checked !== Boolean(t.check_each_row)) sent.check_each_row = $('#ty-each').checked;
+    }
+    if (!Object.keys(sent).length) { toast(`Nothing to save: ${t.display_name || t.name} is as it was`); closeSheet(); return; }
+    return typeWrite(el, 'PUT', `/api/types/${t.id}`, sent, shown => typeEditWords(sent, t.display_name || t.name, shown));
+};
+
+// fin's own filings (type-relationships 03, 06): the type each thing fin files
+// itself goes under, a picker per slot. A move goes through the preview: where
+// fin can tell the past rows it filed (loan interest), apply to them or new
+// rows only; where it cannot (a gift), new rows only, and it says so.
+const SLOT_WORDS = { loan_interest: 'Loan interest worked out from your figures', gift_given: 'A gift given', gift_received: 'A gift received' };
+function filingsHTML(slots, types, income) {
+    if (!slots.length) return '';
+    // Other means not placed yet: fin files nothing under it, of either kind. Its name is fixed.
+    const notPlaced = types.find(t => t.kind === 'spending' && t.locked)?.name;
+    const offered = s => (s.kind === 'income' ? income : types.filter(t => t.kind === 'spending')).filter(t => t.name !== notPlaced || t.parent_id);
+    const picker = s => `<select class="sel" data-change="slot-move" data-slot="${esc(s.slot)}" aria-label="The type fin files ${esc(s.files)} under">${offered(s).map(t =>
+        `<option value="${t.id}"${t.id === s.type_id ? ' selected' : ''}>${esc(t.display_name || t.name)}</option>`).join('')}</select>`;
+    return `<h3 class="sl-subhead">fin’s own filings</h3>
+        <p class="card-foot sl-lead">What fin files itself goes under these types. Moving one asks about the past rows first.</p>
+        <div class="slots">${slots.map(s => `<div class="slot-row"><span class="slot-what">${esc(SLOT_WORDS[s.slot] || s.files)}${s.kind === 'income' ? ' <span class="small muted">(income kind)</span>' : ''}</span>
+            ${picker(s)}</div>`).join('')}</div>`;
+}
+/** The drawer's parts for a slot move's preview. The type names come from the picker: an income kind too. */
+function slotParts(p, from, to) {
+    const asked = p.past_known
+        ? `<p class="q">${plural(p.count, 'past row')} fin filed as ${esc(p.subject.name)}</p>
+            <p class="sub">Move them to ${esc(to)} too, or only new rows go there.</p>
+            <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }],
+                rows: p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(from)} → <b>${esc(to)}</b></td></tr>`) })}</div>`
+        : `<p class="sub">fin cannot tell which past rows it filed as ${esc(p.subject.name)}, so only new rows go under ${esc(to)}. Past rows keep their type.</p>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span>${p.past_known
+        ? `<button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`
+        : '<button type="button" class="btn primary" data-act="preview-answer" data-past="only_new">Only new rows</button>'}`;
+    return { eyebrow: 'fin’s own filings', title: `File ${esc(p.subject.name)} under ${esc(to)}?`,
+        body: `<ul class="diff"><li>Type: <s>${esc(from)}</s> → <b>${esc(to)}</b></li></ul>${asked}`, foot };
+}
+ACT['slot-move'] = async el => {
+    const slot = el.dataset.slot;
+    const typeId = Number(el.value);
+    const [{ slots }, income, r] = await Promise.all([get('/api/types/slots', { fresh: true }), get('/api/types?kind=income'), refs()]);
+    const s = slots.find(x => x.slot === slot);
+    if (!s || s.type_id === typeId) return;
+    const to = [...r.types, ...income].find(t => t.id === typeId);
+    const shown = to ? (to.display_name || to.name) : 'that type';
+    const res = await sendPreviewed('PUT', `/api/types/slots/${slot}`, { type_id: typeId }, { parts: p => slotParts(p, s.display_type, shown) });
+    if (!res.cancelled && !res.ok) toast(res.data.error || 'That did not work; nothing was changed', { bad: true });
+    if (res.ok) {
+        const n = res.data.recategorized;
+        toast(`fin files ${s.files} under ${shown}${n ? `, with its ${plural(n, 'past row')}` : res.answered?.past === 'only_new' ? ', new rows only' : ''}. One change in Changes, with Undo.`, { undo: res.change });
+        refreshFrame();
+    }
+    // Drawn again either way: a closed preview or a refusal puts the picker back as it was.
+    rerender();
+};
 
 ACT['list-filter'] = el => { listState.filter = el.dataset.f; rerender(); };
 listState.renaming = false;
@@ -4643,8 +4753,7 @@ function driftParts(p) {
     return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
 }
 /** Ask the preview: 'apply', 'only_new', or null when it is closed. */
-function askPreview(p) {
-    const parts = previewParts(p);
+function askPreview(p, parts = previewParts(p)) {
     return new Promise(done => {
         openSheet(parts.title, parts.body, { eyebrow: parts.eyebrow, center: true, foot: parts.foot, focusSheet: true });
         pastAnswer = done;
@@ -4655,12 +4764,13 @@ ACT['preview-answer'] = el => ACT['past-answer'](el);
 ACT['preview-all'] = el => { closeSheet(); location.hash = `#/books/merchant/${el.dataset.id}`; };
 /** A write that may reach past rows: sent once; when the server answers with
  *  a preview, the drawer asks, and the answer goes back (under `key`) with
- *  the preview's token. Returns send's result, or {ok: false, cancelled}
+ *  the preview's token. `parts` draws the drawer in place of previewParts
+ *  (a slot move's). Returns send's result, or {ok: false, cancelled}
  *  when the drawer was closed: nothing was written. */
-async function sendPreviewed(method, url, body, { key = 'past' } = {}) {
+async function sendPreviewed(method, url, body, { key = 'past', parts = null } = {}) {
     const r = await send(method, url, body);
     if (r.status !== 409 || !r.data.preview) return r;
-    const answer = await askPreview(r.data.preview);
+    const answer = await askPreview(r.data.preview, parts ? parts(r.data.preview) : undefined);
     if (!answer) return { ok: false, cancelled: true, status: 409, data: { error: 'Nothing was saved.' }, change: null };
     const answered = await send(method, url, { ...body, [key]: answer, token: r.data.preview.token });
     return { ...answered, answered: { past: answer, count: r.data.preview.count } };
@@ -5253,7 +5363,10 @@ function dayHeading(iso) {
 const SKIP_FIELDS = new Set(['id', 'created_at', 'book_source', 'type_source', 'flow_type_manual', 'imported_at', 'fetched_at', 'updated_at', 'statement_id', 'printed']);
 const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'kind', is_one_off: 'one-off', notes: 'note',
     amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'check each row',
-    exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement', covers: 'covers', not_for: 'not for' };
+    exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement', covers: 'covers', not_for: 'not for',
+    usual_book: 'usual book', check_each_row: 'Check each row by default', default_one_off: 'one-off by default' };
+// What fin files through each slot, as the server says it (book_type.SLOTS).
+const SLOT_FILES = { loan_interest: 'loan interest', gift_given: 'gifts given', gift_received: 'gifts received' };
 // An empty old or new value said plainly, never as bad news (C4.2).
 const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty' };
 const FLOW_WORDS = { expense: 'money out', income: 'money in', refund: 'a refund', review: 'waiting for a label', transfer: 'a move between own accounts' };
@@ -5271,7 +5384,7 @@ function valueText(table, field, value, ctx, cur = 'SGD') {
         const gone = ctx.gone?.get(value);
         return esc(ctx.services.find(s => s.id === value)?.name || (gone ? `${gone}, since removed` : 'a merchant no longer listed'));
     }
-    if (['is_one_off', 'review_each_time', 'exclude_from_expense_views'].includes(field)) return value ? 'yes' : 'no';
+    if (['is_one_off', 'review_each_time', 'exclude_from_expense_views', 'check_each_row', 'default_one_off'].includes(field)) return value ? 'yes' : 'no';
     if (field === 'flow_type') return esc(FLOW_WORDS[value] || String(value).replace(/_/g, ' '));
     // Each changed row comes with its own currency (its account's): rupees
     // keep Indian grouping here as everywhere.
@@ -5587,6 +5700,9 @@ function rowLabel(table, row, ctx, shown = null) {
     if (!row) return esc(table);
     // A type is named as every screen names it (Kids > Childcare): the server reads its parent.
     if (table === 'types') return `type ${esc(shown || row.name)}`;
+    // A type's settings and fin's own filings (type-relationships 06), named as Lists › Types names them.
+    if (table === 'type_settings') return `type ${valueText(table, 'type_id', row.type_id, ctx) || 'no longer listed'}`;
+    if (table === 'type_slots') return `what fin files as ${esc(SLOT_FILES[row.slot] || String(row.slot).replace(/_/g, ' '))}`;
     if (table === 'transactions') return `${esc(row.description)} <span class="muted">· ${esc(day(row.date, { year: false }))}</span>`;
     if (table === 'anchors') return `figure of ${esc(day(row.date))}`;
     if (table === 'services') return `merchant ${esc(row.name)}`;
@@ -5613,6 +5729,11 @@ function afterCell(c, k, ctx) {
 async function changeRowsHTML(entry) {
     const changes = entry.changes;
     const ctx = { r: await refs(), services: await servicesList(), gone: goneMerchants(changes) };
+    // A slot may file under an income kind: those are named too.
+    if (changes.some(c => c.table === 'type_slots')) {
+        const income = await get('/api/types?kind=income').catch(() => []);
+        ctx.r = { ...ctx.r, typeById: new Map([...ctx.r.typeById, ...income.map(t => [t.id, t])]) };
+    }
     const out = [];
     const txRows = new Set(changes.filter(c => c.table === 'transactions').map(c => c.row_id));
     // A changed row sorts by its name, account or amount; its field lines stay together under it.
