@@ -492,6 +492,9 @@ const sureShown = new Set();
 function sureBook(g) { return 'Household'; }
 function sureEach(g) { return false; }
 function sureReady(g) { return true; }
+function sureType(g) { return g.type; }
+function sureBookHeld(g) { return false; }
+function sureShownName(g) { return g.name; }
 function sumByCurrency(items) { return 'S$ 1,450.30'; }
 function bookOptions() { return '<option>Household</option>'; }
 function prefillHintHTML() { return ''; }

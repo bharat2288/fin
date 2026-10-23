@@ -691,7 +691,13 @@ li.empty { list-style: none; margin-top: 8px; }
 .rec-mini b { font-weight: var(--font-semibold); color: var(--text-secondary); }
 .qi__more > .rec { margin-bottom: var(--space-2); }
 #ww-rec[hidden] { display: none; }
+/* the name on a sure line (queue-naming B): the field, then whom the save reaches or that it needs a name */
+.sname { display: grid; gap: var(--space-1); min-width: 0; }
+.sname input { width: 100%; max-width: 360px; min-width: 0; }
+.sname__say { font-size: var(--t-meta); color: var(--text-secondary); overflow-wrap: anywhere; }
+.sname__say .warn-word { font-weight: var(--font-semibold); }
 @media (max-width: 720px) {
+    .sname input { max-width: none; }
     .rec-mini { margin-left: 0; }
     .rec .link { display: inline-flex; align-items: center; min-height: var(--tap); }
 }

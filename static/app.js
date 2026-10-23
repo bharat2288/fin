@@ -2082,6 +2082,7 @@ const sureShown = new Set();   // the keys of the lines opened to their detail
 const sureAll = new Set();     // the keys of the lines showing every row
 const sureSets = new Map();    // a group's key -> true for Check each row, false for Every row the same, as picked
 const sureRowBooks = new Map(); // a row's id -> the book picked on its line under Check each row
+const sureNames = new Map();   // a group's key -> the name as typed in its Name field
 let sureList = [];             // the groups as last drawn, in card order
 
 // Teaching with Check each row (fin-surfaces 13): wherever a merchant is
@@ -2107,8 +2108,36 @@ function sureRows(g) {
     const rows = g.items.map(i => i.row);
     return sureAll.has(g.key) ? rows : rows.slice(0, SURE_ROWS);
 }
-/** Ready to save: a book, and under Check each row a book on every row drawn. */
-function sureReady(g) { return !!sureBook(g) && !recBlocks(g.key) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
+/** Ready to save: a name, a book, and under Check each row a book on every row drawn. */
+function sureReady(g) { return !!g.name && !!sureBook(g) && !recBlocks(g.key) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
+
+// The name on the card (queue-naming B): the opened line's Name field holds
+// the name its save makes, fin's suggestion until it is changed, with a
+// chooser of the merchants fin holds. A name that is one of them, ignoring
+// case, attaches the save to it: its own type and book are what the save
+// uses, and the line shows them (a merchant with none keeps the line's).
+/** The merchant fin holds by the line's name, ignoring case; null when none. */
+function sureHeld(g) {
+    const name = (g.name || '').toLowerCase();
+    return name ? (queueModel?.services || []).find(s => s.name.toLowerCase() === name) || null : null;
+}
+/** The name a line shows: the held merchant's own spelling, else as typed. */
+function sureShownName(g) { return sureHeld(g)?.name || g.name; }
+/** The type a line saves: the held merchant's, else Jev's. held: it is the merchant's. */
+function sureType(g) {
+    const held = sureHeld(g);
+    const type = held?.type_id && queueModel.r.typeById.get(held.type_id);
+    return type ? { type_id: type.id, name: type.display_name || type.name, held: true } : g.type;
+}
+/** The book is the held merchant's own: its picker shows it and cannot change it. */
+function sureBookHeld(g) { return !!sureHeld(g)?.book; }
+/** The words under the Name field: the merchant it saves to, or that it needs a name. */
+function sureNameSay(g) {
+    if (!g.name) return '<span class="warn-word">Give it a name</span>';
+    const held = sureHeld(g);
+    if (!held) return 'Type to find a merchant already in fin.';
+    return `Saves to ${esc(held.name)}, already in fin: ${esc(sureType(g).name)} · ${sureBook(g) ? esc(sureBook(g)) : 'the book you pick'}`;
+}
 
 /** The merchant a line's save makes: the name suggested from its first
  *  row's text, or the merchant fin already holds by that name, ignoring case
@@ -2142,15 +2171,21 @@ function sureGroups(q, guesses, r, services) {
         // A line's rows run oldest first, and the first names the merchant its save makes.
         byMerchant.forEach(group => {
             group.items.sort((a, b) => (a.row.date || '').localeCompare(b.row.date || '') || a.row.id - b.row.id);
-            group.name = sureName(group.items[0].row, services);
+            group.suggested = sureName(group.items[0].row, services, { asks: true });
+            group.name = sureNames.has(group.key) ? sureNames.get(group.key).trim() : group.suggested;
             group.checksEach = merchantChecksEach(group.name, services);
         });
         groups.push(...[...byMerchant.values()].sort((a, b) => b.amount - a.amount));
     });
     return groups;
 }
-/** The book a group would be saved with: the one picked, else its prefill, else its type's. */
-function sureBook(g) { return sureBooks.has(g.key) ? sureBooks.get(g.key) : (g.prefill?.book || g.proposed || ''); }
+/** The book a group would be saved with: the held merchant's, else the one
+ *  picked, else its prefill, else its type's. */
+function sureBook(g) {
+    const held = sureHeld(g);
+    if (held?.book) return held.book;
+    return sureBooks.has(g.key) ? sureBooks.get(g.key) : (g.prefill?.book || g.proposed || '');
+}
 /** The title row's words and its button, from what is ready now. */
 function sureHead() {
     const ready = sureList.filter(sureReady).length;
@@ -2168,9 +2203,10 @@ function jevName(g) { return g.merchant.toLowerCase() === g.name.toLowerCase() ?
 /** The one sentence for a line's setting, then Jev's name when it differs. */
 function sureSay(g) {
     const book = sureBook(g) ? esc(sureBook(g)) : 'the book you pick';
+    const name = g.name ? esc(sureShownName(g)) : 'this merchant', type = esc(sureType(g).name);
     const say = sureEach(g)
-        ? `You give the rows below their own book. Each new row from ${esc(g.name)} arrives as ${esc(g.type.name)} in its usual book, ${book}, marked not checked, and waits in the Queue’s Check each row step.`
-        : `Every new row from ${esc(g.name)} will be ${esc(g.type.name)} · ${book}, without asking.`;
+        ? `You give the rows below their own book. Each new row from ${name} arrives as ${type} in its usual book, ${book}, marked not checked, and waits in the Queue’s Check each row step.`
+        : `Every new row from ${name} will be ${type} · ${book}, without asking.`;
     const jev = jevName(g);
     return `${say}${jev ? ` Jev’s name for it: ${esc(jev)}.` : ''}`;
 }
@@ -2186,7 +2222,11 @@ function sureDetailHTML(g, at) {
     const first = g.items[0].row;
     const rec = recShown(g.key, { tx: first.id, txs: g.items.map(i => i.row.id), name: g.name, suggested: suggestPattern(first.description),
         here: g.items.length, changed: drawSureState });
-    return `<div class="det">${rec}
+    const nameId = `sn-${at}`;
+    const field = `<div class="sname"><label class="cap" for="${nameId}">Name</label>
+        <input type="text" id="${nameId}" data-sure-name="${esc(g.key)}" list="sure-merchants" value="${esc(g.name)}" autocomplete="off" spellcheck="false" aria-describedby="${nameId}-say"${queueBusy ? ' disabled' : ''}>
+        <p class="sname__say" id="${nameId}-say" data-sure-said="${esc(g.key)}" aria-live="polite">${sureNameSay(g)}</p></div>`;
+    return `<div class="det">${field}${rec}
         <div class="det__top"><div class="det__set"><span class="cap" id="nr-${at}">New rows</span>${eachSegHTMLQ('sure-set', g.key, g.name, each, { labelledBy: `nr-${at}` })}</div>
             <button type="button" class="btn sm ghost" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></div>
         <p class="det__say">${sureSay(g)}</p>
@@ -2196,14 +2236,14 @@ function sureDetailHTML(g, at) {
 /** A line: the name opens its detail; the setting shows only as a tag, and
  *  only when it is Check each row; the select alone says it needs a book. */
 function sureRowHTML(g, books, at) {
-    const book = sureBook(g), each = sureEach(g);
+    const book = sureBook(g), each = sureEach(g), type = sureType(g), held = sureBookHeld(g);
     const n = g.items.length, open = sureShown.has(g.key), id = `sd-${at}`;
     return `<tr class="sl${open ? ' is-open' : ''}" data-key="${esc(g.key)}" data-at="${at}">
-        <td class="sl-m">${rowDetailToggle({ id, label: g.name, open, act: 'sure-open', data: { key: g.key } })}${open ? '' : recMiniHTML(recWording(g.key, g.items[0].row), g.key)}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
+        <td class="sl-m">${rowDetailToggle({ id, label: sureShownName(g) || 'Give it a name', open, act: 'sure-open', data: { key: g.key } })}${open ? '' : recMiniHTML(recWording(g.key, g.items[0].row), g.key)}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
         <td class="r num sl-n">${n}<span class="ph-w"> ${n === 1 ? 'row' : 'rows'}</span></td>
         <td class="r num sl-a">${esc(sumByCurrency(g.items))}</td>
-        <td class="sl-ty">${esc(g.type.name)} <em>${Math.round(g.type.probability * 100)}%</em></td>
-        <td class="sl-bk"><select class="sel${book ? '' : ' need'}" data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(g.prefill, book, 'sl-hint')}</td>
+        <td class="sl-ty">${esc(type.name)} ${type.held ? '<em>in fin</em>' : `<em>${Math.round(type.probability * 100)}%</em>`}</td>
+        <td class="sl-bk"><select class="sel${book ? '' : ' need'}" data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy || held ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(g.prefill, book, 'sl-hint')}</td>
         <td class="sl-go"><button type="button" class="btn sm subtle icon" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${sureReady(g) && !queueBusy ? '' : ' disabled'}>${icon('check')}</button></td></tr>
         <tr class="sl-det" id="${id}"${open ? '' : ' hidden'}><td colspan="6">${open ? sureDetailHTML(g, at) : ''}</td></tr>`;
 }
@@ -2226,7 +2266,9 @@ function sureCardHTML(books) {
     });
     const table = bandedTable({ caption: 'Merchants Jev is sure of', cls: 'sure-t', colgroup: [0, 64, 124, 200, 150, 64], rows,
         columns: [{ label: 'Merchant' }, { label: 'Rows', cls: 'r' }, { label: 'Amount', cls: 'r' }, { label: 'Jev’s type' }, { label: 'Book' }, { label: 'Save', sr: true }] });
-    return `<section class="card sure-card" id="sure-card" aria-labelledby="sure-title">
+    // One chooser for every line's Name field: the merchants fin holds.
+    const chooser = `<datalist id="sure-merchants">${(queueModel?.services || []).map(s => `<option value="${esc(s.name)}">`).join('')}</datalist>`;
+    return `<section class="card sure-card" id="sure-card" aria-labelledby="sure-title">${chooser}
         <div class="sure-head">
             <div><h2 id="sure-title"><button type="button" class="disc sure-fold" data-act="sure-fold" aria-expanded="${open}" aria-controls="sure-body">${icon('caret-right', 'caret')}<span>Jev is sure of ${esc(plural(sureList.length, 'merchant'))}</span></button></h2>
                 <p class="sub"><span id="sure-meta">${esc(h.meta)}</span> ${SURE_NOTE}</p></div>
@@ -2244,8 +2286,8 @@ function drawSureState() {
         if (!tr) return;
         const ready = sureReady(g);
         $('[data-change="sure-book"]', tr).classList.toggle('need', !sureBook(g));
-        $$('select', tr).forEach(x => { x.disabled = queueBusy; });
-        $$('select, .seg button', tr.nextElementSibling).forEach(x => { x.disabled = queueBusy; });
+        $$('select', tr).forEach(x => { x.disabled = queueBusy || sureBookHeld(g); });
+        $$('select, .seg button, [data-sure-name]', tr.nextElementSibling).forEach(x => { x.disabled = queueBusy; });
         const hint = $('.sl-hint', tr);
         if (hint) hint.hidden = sureBook(g) !== g.prefill.book;
         $('[data-act="sure-save"]', tr).disabled = queueBusy || !ready;
@@ -2295,6 +2337,32 @@ ACT['sure-set'] = el => {
     sureShown.add(g.key);
     drawSureLine(g, `[data-act="sure-set"][data-v="${el.dataset.v}"]`);
 };
+// The Name field, typed in or chosen from: the line's name, the merchant it
+// attaches to, and what that sets (its type, its book, how its rows arrive),
+// drawn again in place; the field keeps its focus.
+ACT['sure-name'] = el => {
+    const g = sureList.find(x => x.key === el.dataset.sureName);
+    if (!g) return;
+    sureNames.set(g.key, el.value);
+    g.name = el.value.trim();
+    g.checksEach = merchantChecksEach(g.name);
+    const tr = $$('#sure-card tr.sl').find(x => x.dataset.key === g.key);
+    if (tr) {
+        const body = document.createElement('tbody');
+        body.innerHTML = sureRowHTML(g, queueModel.r.books, Number(tr.dataset.at));
+        const box = tr.nextElementSibling;
+        tr.replaceWith(body.rows[0]);
+        const said = $('[data-sure-said]', box);
+        if (said) said.innerHTML = sureNameSay(g);
+        const say = $('.det__say', box);
+        if (say) say.innerHTML = sureSay(g);
+    }
+    drawSureState();
+};
+document.addEventListener('input', e => {
+    const el = e.target.closest && e.target.closest('[data-sure-name]');
+    if (el) ACT['sure-name'](el);
+});
 ACT['sure-row-book'] = el => {
     const g = sureList.find(x => x.key === el.dataset.key);
     if (!g) return;
@@ -2343,7 +2411,7 @@ async function saveSureGroup(g, labelled) {
     if (!rows.length) return { skipped: true };
     const each = sureEach(g);
     const drawn = new Set(sureRows(g).map(x => x.id));
-    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { merchant: g.name, visible: true, book: sureBook(g), each,
+    const res = await saveResolve(resolveBody(rows[0], sureType(g).type_id, { merchant: g.name, visible: true, book: sureBook(g), each,
         pattern: recWording(g.key, g.items[0].row) }), rows,
         { quiet: true, check: each ? x => sureRowBook(g, x) : null, onScreen: each ? rows.filter(x => drawn.has(x.id)) : null });
     res.labelledIds.forEach(id => labelled.add(id));
@@ -2359,7 +2427,7 @@ ACT['sure-save'] = async el => {
     if (!res.skipped) {   // skipped: its rows already have a type
         if (res.ok) sureForget(g);
         // Under Check each row the rows not drawn are named as waiting.
-        savedToast(g.name, g.type.name, book, res, each ? sureRows(g) : g.items.map(i => i.row), { each });
+        savedToast(g.name, sureType(g).name, book, res, each ? sureRows(g) : g.items.map(i => i.row), { each });
     }
     rerender(); refreshFrame();
 };
@@ -2367,6 +2435,7 @@ ACT['sure-save'] = async el => {
 function sureForget(g) {
     sureBooks.delete(g.key);
     sureSets.delete(g.key);
+    sureNames.delete(g.key);
     g.items.forEach(i => sureRowBooks.delete(i.row.id));
 }
 /** One merchant's save said: the sure card's ✓, Pick a type's Save and "This
