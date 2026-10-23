@@ -25,12 +25,13 @@ rupee row converts) and the months it touches, the newest three examples,
 and the rows another merchant holds (a rule's change and a taught wording
 name them; none for a merchant's own change or a merge).
 
-Five ways to a plan: merchant_change (a merchant's book or type, fin-surfaces
+Six ways to a plan: merchant_change (a merchant's book or type, fin-surfaces
 49), merge_change and rule_change (a merge; a rule added, edited or deleted,
 fin-surfaces 50), taking (the rows another merchant holds that a wording
-taught from the Queue would take, fin-surfaces 53), and drift (the rows that
+taught from the Queue would take, fin-surfaces 53), drift (the rows that
 differ from what their rule says now, Re-run every rule's place,
-fin-surfaces 51). A rule change's rows are
+fin-surfaces 51), and slot_change (the rows fin filed through one of its
+own slots, type-relationships 03). A rule change's rows are
 those whose winning rule, after the change, differs from before, or whose
 label from that rule changes: the winner is asked of the rules as the change
 would leave them (db.pick_rule), never of the cache, so nothing is written to
@@ -54,6 +55,7 @@ import book_type
 import db
 import expect_back
 import label_source
+import loan_interest
 
 # The answers to "this changes N past rows".
 APPLY, ONLY_NEW = "apply", "only_new"
@@ -809,6 +811,38 @@ def drift_asked(plan: Plan) -> str:
     return (f"Nothing was relabelled yet: {plan.count} row{'' if plan.count == 1 else 's'} "
             f"differ from what their rule says now. Send past: {APPLY} to relabel them; "
             "leaving them as they are writes nothing.")
+
+
+def slot_change(conn: sqlite3.Connection, slot: str, type_id: int) -> Plan:
+    """The plan for moving one of fin's own filings to another type
+    (type-relationships 03): the rows fin filed through the slot that are
+    not under that type yet, where they can be told apart
+    (book_type.PAST_TOLD: loan interest's worked-out rows). Apply moves
+    each to the type, its source as it was; Only new rows writes nothing to
+    them. Where they cannot be told apart there are no rows, and the preview
+    offers new rows only."""
+    was = book_type.slot_type(conn, slot)
+    words = book_type.slot_words(slot)
+    told = slot in book_type.PAST_TOLD
+    plan = Plan(subject={"kind": "slot", "id": slot, "name": words}, change={"type_id": (was, type_id)},
+                called=words[0].upper() + words[1:])
+    plan.extra = {"past_known": told, "offers": list(ANSWERS) if told else [ONLY_NEW]}
+    if told:
+        for held in _held_rows(conn, loan_interest.filed_ids(conn)):
+            if held["type_id"] != type_id:
+                plan.rows.append(Planned(held, {"type_id": type_id}, {}))
+    plan.token = _stamp("slot", slot, was, type_id, [tuple(p.held) for p in plan.rows])
+    return plan
+
+
+def slot_asked(plan: Plan, type_shown: str) -> str:
+    """The refusal a slot move answers with before it is answered, in words."""
+    if not plan.extra["past_known"]:
+        return (f"Nothing was saved yet: fin cannot tell which past rows it filed as {plan.subject['name']}, "
+                f"so only new rows can go under {type_shown} (past: {ONLY_NEW}).")
+    return (f"Nothing was saved yet: there {'is' if plan.count == 1 else 'are'} {_rows(plan.count)} fin filed "
+            f"as {plan.subject['name']}. Say whether they move to {type_shown} too (past: {APPLY}) "
+            f"or only new rows go there (past: {ONLY_NEW}).")
 
 
 # --- the preview as the drawer and chat read it --------------------------------------------

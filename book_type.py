@@ -7,9 +7,11 @@ here, once, with a plain description for each member, and a new book's
 
 Once a book exists, its `types` table is the home of each type's wording
 (fin RUL-002): the operator may add a spending type and fix a type's wording
-(covers, not for) in the app, and change its settings (usual book, one-off
-by default, Check each row by default; type-relationships 02), each one
-entry in the change history. A later change to a declared type's wording
+(covers, not for) in the app, change its settings (usual book, one-off
+by default, Check each row by default; type-relationships 02), and move
+which type each of fin's own filings goes under (loan interest, a gift given,
+a gift received; type-relationships 03), each one entry in the change
+history. A later change to a declared type's wording
 here does not reach a book already seeded, as `seed_types` never
 overwrites; such a change goes in as a conversion step. Renaming, merging and removing a type, and every book,
 stay code changes. The types code means are LOCKED: their names stay as
@@ -213,10 +215,11 @@ INCOME = "income"
 # (book_prefill.py).
 PROPOSES_MOOM = ("Advertising", "Stock purchases", "Payment fees")
 ASKS_FOR_BOOK = ("Software & AI tools",)
-# What fin files the loan interest it works out under (loan_interest.py).
+# What a start seeds fin's own filings with (SLOTS below; type-relationships
+# 03): the loan interest it works out (loan_interest.py), and a gift, a
+# spending type when given (the review list's gift, a let-go gift), an income
+# kind when received. Once seeded the book's slot says, moved in the app.
 LOAN_INTEREST = "Bank & government fees"
-# What a gift is filed under: a spending type when given (the review list's
-# gift, a let-go gift), an income kind when received.
 GIFT_GIVEN = "Gifts & Donations"
 GIFT_RECEIVED = "Gift received"
 # Other means "not placed yet", and is never asked of Jev (suggest.NOT_ASKED).
@@ -310,6 +313,107 @@ def seed_settings(conn: sqlite3.Connection) -> None:
             " WHERE NOT EXISTS (SELECT 1 FROM type_settings WHERE type_id = ?)",
             (type_id, _seeded_usual_book(key), type_id),
         )
+
+
+# --- fin's own filings (type-relationships 03) --------------------------------
+#
+# What fin files itself goes under the type its slot points at, kept in the
+# book (`type_slots`) and moved in the app. The slots are declared here:
+# (slot, the kind of type it takes, the type a start seeds it with by key,
+# what fin files through it, in words). A move reaches new rows; past rows
+# move too only where fin can tell which it filed through the slot.
+LOAN_INTEREST_SLOT, GIFT_GIVEN_SLOT, GIFT_RECEIVED_SLOT = "loan_interest", "gift_given", "gift_received"
+SLOTS = (
+    (LOAN_INTEREST_SLOT, SPENDING, LOAN_INTEREST, "loan interest"),
+    (GIFT_GIVEN_SLOT, SPENDING, GIFT_GIVEN, "gifts given"),
+    (GIFT_RECEIVED_SLOT, INCOME, GIFT_RECEIVED, "gifts received"),
+)
+# The slots whose past rows fin can tell apart: loan interest's rows are
+# worked out (label_source.DERIVED). A gift's label does not record that fin
+# filed it, so a gift slot moves for new rows only.
+PAST_TOLD = (LOAN_INTEREST_SLOT,)
+
+_SLOT = {slot: (kind, key, words) for slot, kind, key, words in SLOTS}
+
+
+class NoSuchSlot(LookupError):
+    """No slot has that name."""
+
+
+def seed_slots(conn: sqlite3.Connection) -> None:
+    """Give every declared slot that has none its type, from what the code
+    said before. Insert if missing, never overwriting: a slot the operator
+    moved stays moved. Run after seed_types, with no change entry open; no
+    commit."""
+    for slot, kind, key, _ in SLOTS:
+        conn.execute(
+            "INSERT INTO type_slots (slot, type_id) SELECT ?, type_id FROM type_keys WHERE kind = ? AND key = ?"
+            " AND NOT EXISTS (SELECT 1 FROM type_slots WHERE slot = ?)",
+            (slot, kind, key, slot),
+        )
+
+
+def slot_type(conn: sqlite3.Connection, slot: str) -> int:
+    """The id of the type fin files this slot's things under."""
+    kind, key, _ = _SLOT[slot]
+    found = conn.execute("SELECT type_id FROM type_slots WHERE slot = ?", (slot,)).fetchone()
+    return found[0] if found else keyed_id(conn, key, kind)
+
+
+def slots(conn: sqlite3.Connection) -> list[dict]:
+    """Every slot, in declared order: its name, the kind it takes, what fin
+    files through it, the type it files under now, and whether its past rows
+    can be told apart."""
+    out = []
+    for slot, kind, _, words in SLOTS:
+        type_id = slot_type(conn, slot)
+        name, parent = conn.execute(
+            "SELECT t.name, p.name FROM types t LEFT JOIN types p ON p.id = t.parent_id WHERE t.id = ?",
+            (type_id,),
+        ).fetchone()
+        shown = display_name(name, parent)
+        out.append({"slot": slot, "kind": kind, "files": words, "type_id": type_id, "display_type": shown,
+                    "says": f"fin files {words} under {shown}", "past_known": slot in PAST_TOLD})
+    return out
+
+
+def slot_words(slot: str) -> str:
+    """What fin files through a slot, in words ("loan interest")."""
+    if slot not in _SLOT:
+        raise NoSuchSlot(slot)
+    return _SLOT[slot][2]
+
+
+def checked_slot_type(conn: sqlite3.Connection, slot: str, type_id) -> str:
+    """The display name of the type a slot may move to, or TypeRefused in
+    words: a type of the slot's kind, never Other (it means not placed
+    yet). NoSuchSlot and NoSuchType as their names say. Reads only."""
+    words = slot_words(slot)
+    kind = _SLOT[slot][0]
+    if isinstance(type_id, bool) or not isinstance(type_id, int):
+        raise TypeRefused("type_id must be a type's id")
+    found = conn.execute(
+        "SELECT t.kind, t.name, p.name, k.key FROM types t LEFT JOIN types p ON p.id = t.parent_id"
+        " LEFT JOIN type_keys k ON k.type_id = t.id WHERE t.id = ?",
+        (type_id,),
+    ).fetchone()
+    if found is None:
+        raise NoSuchType(type_id)
+    held_kind, name, parent, key = found
+    if held_kind != kind:
+        raise TypeRefused(f"fin files {words} under {'a spending type' if kind == SPENDING else 'an income kind'}")
+    if key == NOT_PLACED:
+        raise TypeRefused(f"{NOT_PLACED} means not placed yet: fin files nothing under it")
+    return display_name(name, parent)
+
+
+def move_slot(conn: sqlite3.Connection, slot: str, type_id: int) -> None:
+    """Point a slot at a type checked_slot_type let through. No commit."""
+    conn.execute(
+        "INSERT INTO type_slots (slot, type_id) VALUES (?, ?)"
+        " ON CONFLICT (slot) DO UPDATE SET type_id = excluded.type_id",
+        (slot, type_id),
+    )
 
 
 # The same statement as in schema.sql, which stays the source of truth; a test
@@ -468,6 +572,7 @@ USED_BY = (
     ("suggestion_answers", "chosen_type_id"),
     ("let_go", "type_id"),
     ("type_settings", "type_id"),
+    ("type_slots", "type_id"),
 )
 
 
@@ -663,6 +768,9 @@ def refusal_to_undo(conn: sqlite3.Connection, entry_id: int) -> str | None:
         # A type's settings row is made by a later change, never by its add.
         if conn.execute("SELECT 1 FROM type_settings WHERE type_id = ?", (type_id,)).fetchone():
             return f"{shown}'s settings were changed since; undo that first"
+        filed = conn.execute("SELECT slot FROM type_slots WHERE type_id = ? LIMIT 1", (type_id,)).fetchone()
+        if filed is not None:
+            return f"fin files {slot_words(filed[0])} under {shown}; move that first"
         for table, column in USED_BY:
             # Both names come from USED_BY above, never from a request.
             if conn.execute(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", (type_id,)).fetchone():

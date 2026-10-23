@@ -31,7 +31,7 @@ CHOICES = (
     Choice("spending", "spending", "expense", ASKS_TYPE, (),
            "money spent; it takes a type, and counts in its book's spending"),
     Choice("gift", "a gift", "expense", None, (),
-           "a gift: spending under Gifts & Donations when given, income when received"),
+           "a gift: spending when given, income when received, each under the type fin files gifts under"),
     Choice("own_account", "a move to my own account", "transfer", ASKS_ACCOUNT,
            account_kind.STATEMENT_KINDS,
            "money moved to or from another of the household's bank accounts or cards"),

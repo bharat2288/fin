@@ -611,6 +611,7 @@ _CHANGE_SUMMARIES = {
     # Each names its type in its own summary; these are the fallback.
     "api_types_create": "Added a type",
     "api_types_change": "Changed a type",
+    "api_type_slots_move": "Moved one of fin's own filings",
 }
 _CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
 
@@ -1141,6 +1142,72 @@ def api_types_change(type_id: int):
         _name_change(conn, f"Changed {shown}: {', '.join(words)}" if words else f"Fixed the wording of {shown}")
         conn.commit()
     return jsonify({"type": _type_shown(r)})
+
+
+@app.route("/api/types/slots")
+def api_type_slots():
+    """fin's own filings (type-relationships 03): {slots: [{slot, kind,
+    files, type_id, display_type, says, past_known}]}, in declared order."""
+    with get_db() as conn:
+        return jsonify({"slots": book_type.slots(conn)})
+
+
+SLOT_FIELDS = ("type_id", "past", "token")
+
+
+def _slot_shown(conn, slot: str) -> dict:
+    return next(s for s in book_type.slots(conn) if s["slot"] == slot)
+
+
+@app.route("/api/types/slots/<slot>", methods=["PUT"])
+def api_type_slots_move(slot: str):
+    """Move one of fin's own filings to another type: body {type_id, past,
+    token}. A type of the wrong kind, or Other, is refused, writing
+    nothing. Where fin can tell the past rows it filed through the slot
+    (loan interest), a move that reaches some answers with the preview
+    (409) until `past` says apply (they move too) or only_new (they stay);
+    where it cannot (a gift), the preview says so and only only_new is
+    taken. One change entry either way. Returns {slot, recategorized}."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "send the move as JSON"}), 400
+    unknown = [k for k in data if k not in SLOT_FIELDS]
+    if unknown:
+        return jsonify({"error": f"unknown field: {unknown[0]}"}), 400
+    with get_db() as conn:
+        try:
+            shown = book_type.checked_slot_type(conn, slot, data.get("type_id"))
+            past = relabel_preview.checked_answer(data.get("past"))
+        except book_type.NoSuchSlot:
+            return jsonify({"error": "no such slot"}), 404
+        except book_type.NoSuchType:
+            return jsonify({"error": "no such type"}), 400
+        except (book_type.TypeRefused, relabel_preview.Refused) as e:
+            return jsonify({"error": str(e)}), 400
+        type_id = data["type_id"]
+        if book_type.slot_type(conn, slot) == type_id:
+            return jsonify({"slot": _slot_shown(conn, slot), "recategorized": 0})
+        plan = relabel_preview.slot_change(conn, slot, type_id)
+        words = book_type.slot_words(slot)
+        if data.get("token") is not None and data["token"] != plan.token:
+            return jsonify({"error": relabel_preview.stale(plan), "stale": True}), 409
+        told = plan.extra["past_known"]
+        if past is None and (plan.count or not told):
+            return jsonify({"error": relabel_preview.slot_asked(plan, shown),
+                            "preview": relabel_preview.summary(conn, plan)}), 409
+        if past == relabel_preview.APPLY and not told:
+            return jsonify({"error": f"fin cannot tell which past rows it filed as {words}: "
+                                     f"only new rows can go under {shown}"}), 400
+        book_type.move_slot(conn, slot, type_id)
+        recategorized, _ = _write_plan(conn, plan, past)
+        said = f"fin files {words} under {shown}"
+        if recategorized:
+            said += f", with its {recategorized} past row{'' if recategorized == 1 else 's'}"
+        elif past == relabel_preview.ONLY_NEW:
+            said += ", new rows only"
+        _name_change(conn, said)
+        conn.commit()
+        return jsonify({"slot": _slot_shown(conn, slot), "recategorized": recategorized})
 
 
 @app.route("/api/books")
@@ -5131,9 +5198,9 @@ def api_review_label(tx_id: int):
                 # Positive is money out: a gift given. Otherwise one received.
                 if tx["amount_minor"] < 0:
                     flow_name = "income"
-                    type_id = book_type.keyed_id(conn, book_type.GIFT_RECEIVED, book_type.INCOME)
+                    type_id = book_type.slot_type(conn, book_type.GIFT_RECEIVED_SLOT)
                 else:
-                    type_id = book_type.keyed_id(conn, book_type.GIFT_GIVEN)
+                    type_id = book_type.slot_type(conn, book_type.GIFT_GIVEN_SLOT)
                     book = book_type.DEFAULT_BOOK
             elif choice.asks == review.ASKS_INCOME_KIND:
                 kind_id = data.get("income_kind_id")
@@ -5187,19 +5254,20 @@ REVIEW_GUESS_AT_LEAST = 2
 REVIEW_GUESS_SHARE = 0.6
 
 
-def _label_as_choice(row) -> tuple | None:
+def _label_as_choice(row, gifts: tuple[int, int]) -> tuple | None:
     """A row labelled by hand, read back as the review choice that would
     label it the same way: (choice, the label's body). None when no choice
-    writes what the row holds."""
-    flow_name, kind, type_key = row["flow_type"], row["other_kind"], row["type_key"]
+    writes what the row holds. `gifts`: the types a gift given and a gift
+    received are filed under now (their slots)."""
+    flow_name, kind = row["flow_type"], row["other_kind"]
     if flow_name == "expense":
-        if type_key == book_type.GIFT_GIVEN:
+        if row["type_id"] == gifts[0]:
             return "gift", {}
         if row["type_id"] is None:
             return None
         return "spending", {"type_id": row["type_id"], **({"book": row["book"]} if row["book"] else {})}
     if flow_name == "income":
-        if type_key == book_type.GIFT_RECEIVED:
+        if row["type_id"] == gifts[1]:
             return "gift", {}
         return ("income", {"income_kind_id": row["type_id"]}) if row["type_id"] is not None else None
     if row["other_side_id"] is None:
@@ -5229,18 +5297,19 @@ def api_review_suggestion(tx_id: int):
             return jsonify({"error": "no such row"}), 404
         rows = conn.execute(
             "SELECT t.flow_type, t.other_side_id, t.type_id, t.book, a.type AS other_kind, "
-            "a.name AS other_name, ty.name AS type_name, p.name AS parent_name, k.key AS type_key "
+            "a.name AS other_name, ty.name AS type_name, p.name AS parent_name "
             "FROM transactions t LEFT JOIN accounts a ON a.id = t.other_side_id "
             "LEFT JOIN types ty ON ty.id = t.type_id LEFT JOIN types p ON p.id = ty.parent_id "
-            "LEFT JOIN type_keys k ON k.type_id = t.type_id "
             f"WHERE t.id != ? AND {_left_to_label('t.flow_type_manual = 1')} AND t.flow_type != ? "
             "AND UPPER(TRIM(t.description)) = UPPER(TRIM(?)) AND (t.amount_minor < 0) = (? < 0) "
             "ORDER BY t.date DESC, t.id DESC LIMIT ?",
             (tx_id, flow.REVIEW, tx["description"], tx["amount_minor"], REVIEW_GUESS_LOOK_BACK),
         ).fetchall()
+        gifts = (book_type.slot_type(conn, book_type.GIFT_GIVEN_SLOT),
+                 book_type.slot_type(conn, book_type.GIFT_RECEIVED_SLOT))
     tally: dict = {}
     for r in rows:
-        read = _label_as_choice(r)
+        read = _label_as_choice(r, gifts)
         if read is None:
             continue
         key = (read[0], json.dumps(read[1], sort_keys=True))

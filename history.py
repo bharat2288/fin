@@ -46,6 +46,8 @@ TRACKED = (
     "type_keys",
     # A type's usual book and Check each row by default (type-relationships 02).
     "type_settings",
+    # fin's own filings: the type each slot files under (type-relationships 03).
+    "type_slots",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was
@@ -53,7 +55,7 @@ TRACKED = (
 # schema.sql's CREATE TRIGGER IF NOT EXISTS gives a book them on its next
 # start and no conversion step is owed; so are a new table's, made by the
 # same start. has_shape does not ask for them.
-ADDED_ON_START = ("types", "type_keys", "type_settings")
+ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens

@@ -184,6 +184,20 @@ CREATE TABLE IF NOT EXISTS type_settings (
     check_each_row INTEGER NOT NULL DEFAULT 0  -- 1: a new merchant of this type starts as Check each row
 );
 
+-- fin's own filings (type-relationships 03): the type each thing fin files
+-- itself goes under, one row per slot book_type.SLOTS declares: loan_interest
+-- (the interest loan_interest.py works out) and gift_given (the review list's
+-- gift, a let-go gift), each a spending type; gift_received (the review
+-- list's gift on money in), an income kind. Seeded at start from what the
+-- code said before, never overwriting (book_type.seed_slots); moved in the
+-- app. Tracked by the change history. A new table, made by CREATE IF NOT
+-- EXISTS on start; no existing row is converted.
+CREATE TABLE IF NOT EXISTS type_slots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot TEXT NOT NULL UNIQUE,                     -- book_type.SLOTS
+    type_id INTEGER NOT NULL REFERENCES types(id)
+);
+
 -- Answers from the outside judgment model to "which type is this merchant?",
 -- one per cleaned merchant string, model and version (suggest.py). A
 -- suggestion only: nothing here labels a row. A new table, made empty by
@@ -837,6 +851,31 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_settings', OLD.id, 'delete',
         json_object('id', OLD.id, 'type_id', OLD.type_id, 'usual_book', OLD.usual_book, 'check_each_row', OLD.check_each_row), NULL);
+END;
+-- fin's own filings (type-relationships 03): a new table, so a book gains its
+-- triggers on its next start (history.ADDED_ON_START).
+CREATE TRIGGER IF NOT EXISTS history_type_slots_insert AFTER INSERT ON type_slots
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_slots', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'slot', NEW.slot, 'type_id', NEW.type_id));
+END;
+CREATE TRIGGER IF NOT EXISTS history_type_slots_update AFTER UPDATE ON type_slots
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'slot', OLD.slot, 'type_id', OLD.type_id) IS NOT json_object('id', NEW.id, 'slot', NEW.slot, 'type_id', NEW.type_id)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_slots', NEW.id, 'update',
+        json_object('id', OLD.id, 'slot', OLD.slot, 'type_id', OLD.type_id),
+        json_object('id', NEW.id, 'slot', NEW.slot, 'type_id', NEW.type_id));
+END;
+CREATE TRIGGER IF NOT EXISTS history_type_slots_delete AFTER DELETE ON type_slots
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_slots', OLD.id, 'delete',
+        json_object('id', OLD.id, 'slot', OLD.slot, 'type_id', OLD.type_id), NULL);
 END;
 -- history:end
 
