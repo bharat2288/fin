@@ -248,8 +248,9 @@ async function get(url, { fresh = false } = {}) {
 }
 
 /** A write. Returns {ok, status, data, change}: change is the history entry
- *  it made, for the toast's Undo. Every write clears what was read. */
-async function send(method, url, body) {
+ *  it made, for the toast's Undo. Every write clears what was read, but one
+ *  that changes no book data (keep: "looked") keeps it and re-reads its own. */
+async function send(method, url, body, { keep = false } = {}) {
     const opts = { method, headers: { Accept: 'application/json' } };
     if (body instanceof FormData) opts.body = body;
     else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
@@ -257,7 +258,7 @@ async function send(method, url, body) {
     try { res = await fetch(url, opts); }
     catch (_) { return { ok: false, status: 0, data: { error: 'fin could not be reached; nothing was changed' } }; }
     const data = await res.json().catch(() => ({}));
-    cache.clear();
+    if (!keep) cache.clear();
     const change = res.headers.get('X-Fin-Change');
     return { ok: res.ok && !data.error, status: res.status, data, change: change ? Number(change) : null };
 }
@@ -1219,9 +1220,10 @@ ACT['home-guess-yes'] = async el => {
 };
 
 ACT['looks-right'] = async el => {
-    const r = await send('POST', '/api/changes/looked', { upto: Number(el.dataset.upto) });
+    const r = await send('POST', '/api/changes/looked', { upto: Number(el.dataset.upto) }, { keep: true });
     if (!r.ok) { toast(r.data.error || 'That did not work', { bad: true }); return; }
     toast('Marked as looked at. Nothing was undone.');
+    await refreshFrame();   // the Claude count, read fresh, before Home draws it again
     rerender();
 };
 ACT['go-month-check'] = el => {
@@ -5223,7 +5225,7 @@ async function viewChanges() {
         S.lastSeenMark = h.last_looked;
         S.lastSeenAt = h.last_looked_at;
         if (h.newest && h.newest !== h.last_looked) {
-            send('POST', '/api/changes/looked', { upto: h.newest }).then(() => refreshFrame());
+            send('POST', '/api/changes/looked', { upto: h.newest }, { keep: true }).then(() => refreshFrame());
         }
     }
     S.manyRows = h.many_rows;
