@@ -29,7 +29,10 @@ from gate_tokens import (
 GOLDEN: list[str] = [
     # reads
     "balance_sheet", "spending_cards", "spending_by_type", "spending_by_month", "transactions",
-    "review_summary", "accounts", "figures", "merchants", "rules",
+    "review_summary",
+    # chat-queue-read 02: the Queue's labelling work, card by card (a read)
+    "queue",
+    "accounts", "figures", "merchants", "rules",
     # fin-surfaces 51: the rows that differ from their rule (Re-run every rule's place)
     "rule_drift",
     "types", "books", "flows", "coverage", "rates", "history", "change", "expected_back",

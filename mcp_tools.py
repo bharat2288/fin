@@ -37,6 +37,9 @@ Rulings this module carries:
   routes the app's drawers call, and expected_back reads the open list and an item's page;
   Claude does what the app does, one change each, stamped as the chat's, under the switch.
   A let-go must name mine or a gift: there is no default.
+- The Queue (chat-queue-read 02): queue reads the Queue's labelling work
+  card by card, as the operator sees it; it never asks Jev and writes
+  nothing. Saving a card is the operator's: no tool here labels a group.
 - No tool imports a statement, changes or deletes an imported row, edits an
   account other than adding a company or a person, sends merchants to the
   type-suggestion service, runs a conversion or touches subscriptions.
@@ -203,6 +206,22 @@ _READS = [
         _schema(),
         False,
         _get("/api/review"),
+    ),
+    Tool(
+        "queue",
+        "The Queue's labelling work as its cards hold it. The rows with no type in their "
+        "merchant groups, the biggest first: each group's rows (date, amount, account), Jev's "
+        "guess (types with how sure, and route: prefill, top3 or blank; blank with Jev off), "
+        "the name and wording fin suggests for the merchant and its rule (empty for a PayNow "
+        "or a transfer: the operator gives them), the book the card prefills and why, and the "
+        "merchant fin already holds by that name, if any. Then the rows waiting under Check "
+        "each row (merchant, type, usual book, the row's own book) and the transfers waiting "
+        "for a label (count, totals, rows). Each list says when it is cut (showing N of M). "
+        "This only reads and applies nothing: saving a card (a group's name, wording, type and "
+        "book at once) is the operator's, in fin's Queue.",
+        _schema(),
+        False,
+        _get("/api/queue/cards"),
     ),
     Tool(
         "accounts",
