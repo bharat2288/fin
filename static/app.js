@@ -5259,7 +5259,10 @@ function valueText(table, field, value, ctx, cur = 'SGD') {
     if (isEmpty(value)) return '';
     if (field === 'type_id' || field === 'type_override_id') return esc(ctx.r.typeById.get(value)?.display_name || 'a type no longer listed');
     if (field === 'other_side_id' || field === 'account_id') return esc(ctx.r.accountById.get(value)?.name || 'an account no longer listed');
-    if (field === 'service_id') return esc(ctx.services.find(s => s.id === value)?.name || 'a merchant no longer listed');
+    if (field === 'service_id') {
+        const gone = ctx.gone?.get(value);
+        return esc(ctx.services.find(s => s.id === value)?.name || (gone ? `${gone}, since removed` : 'a merchant no longer listed'));
+    }
     if (['is_one_off', 'review_each_time', 'exclude_from_expense_views'].includes(field)) return value ? 'yes' : 'no';
     if (field === 'flow_type') return esc(FLOW_WORDS[value] || String(value).replace(/_/g, ' '));
     // Each changed row comes with its own currency (its account's): rupees
@@ -5271,6 +5274,18 @@ function valueText(table, field, value, ctx, cur = 'SGD') {
     return esc(String(value));
 }
 function emptyText(field) { return EMPTY_WORDS[field] || 'empty'; }
+/** The merchants a change's own rows name (an undone save that made one:
+ *  its after, the undo's before), by id: a merchant gone from fin is still
+ *  named on the change's row lines. */
+function goneMerchants(changes) {
+    const out = new Map();
+    for (const c of changes) {
+        if (c.table !== 'services') continue;
+        const row = c.after || c.before || {};
+        if (row.name) out.set(c.row_id, row.name);
+    }
+    return out;
+}
 function rowName(c) {
     const row = c.after || c.before || {};
     return row.description || c.display_name || row.name || row.pattern || row.pair || '';
@@ -5588,8 +5603,8 @@ function afterCell(c, k, ctx) {
 /** A change opened (walk C4.1): one line per field, with the row's account
  *  and amount, before and after in their own columns. */
 async function changeRowsHTML(entry) {
-    const ctx = { r: await refs(), services: await servicesList() };
     const changes = entry.changes;
+    const ctx = { r: await refs(), services: await servicesList(), gone: goneMerchants(changes) };
     const out = [];
     const txRows = new Set(changes.filter(c => c.table === 'transactions').map(c => c.row_id));
     // A changed row sorts by its name, account or amount; its field lines stay together under it.
