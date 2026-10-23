@@ -3194,12 +3194,14 @@ class TeachRefused(Exception):
         self.body, self.status = body, status
 
 
-def _teach(conn, data: dict) -> tuple[dict, "relabel_preview.Plan | None"]:
+def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "relabel_preview.Plan | None"]:
     """The resolve route's teach (its body, `data`) on `conn`, not committed:
     the caller commits, so a plan can run many teaches in one change
     (chat-plan-apply 01). Returns what the route answers and the preview's
     plan the teach was asked about (None where nothing asked). Raises
-    TeachRefused, whatever it wrote then the caller's to roll back."""
+    TeachRefused, whatever it wrote then the caller's to roll back.
+    `record_choice` False leaves the suggestion's record of the operator's
+    choice alone: a plan's teach is not one, and Undo would not take it back."""
     tx_id = data.get("tx_id")
     service_name = (data.get("service_name") or "").strip()
     service_id = data.get("service_id")
@@ -3425,9 +3427,10 @@ def _teach(conn, data: dict) -> tuple[dict, "relabel_preview.Plan | None"]:
 
         # Afterwards, for a merchant the model was asked about: the type
         # the operator chose and whether the suggestion was on screen.
-        suggest.record_choice(
-            conn, tx_id, type_id, data.get("suggestion_visible") is True,
-        )
+        if record_choice:
+            suggest.record_choice(
+                conn, tx_id, type_id, data.get("suggestion_visible") is True,
+            )
 
         return {
             "success": True,
@@ -3465,6 +3468,9 @@ PLAN_STALE = "the book changed since the preview: preview again"
 # Columns a write stamps with the clock: left out of the token, so a preview
 # and its apply a second later stamp the same.
 _CLOCK_COLUMNS = frozenset({"created_at"})
+# The ids an item names, held to what SQLite stores (a signed 64-bit integer).
+_PLAN_ITEM_IDS = ("service_id", "type_id")
+_SQLITE_INT = range(-2 ** 63, 2 ** 63)
 
 
 class PlanRefused(ValueError):
@@ -3473,12 +3479,13 @@ class PlanRefused(ValueError):
 
 def _plan_items(data) -> list[dict]:
     """The items as sent, checked for shape before anything runs: 1 to
-    MAX_PLAN_ITEMS, each with its own rows, no row in two items."""
+    MAX_PLAN_ITEMS, each with its own rows (at most QUEUE_ROW_CAP, as many as
+    the Queue shows), no row in two items, every id one SQLite can hold."""
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_PLAN_ITEMS:
         raise PlanRefused(f"items must be a list of 1 to {MAX_PLAN_ITEMS} merchants' teaches")
     seen = set()
-    for item in items:
+    for n, item in enumerate(items):
         if not isinstance(item, dict):
             raise PlanRefused("each item is one merchant's teach")
         unknown = set(item) - _PLAN_ITEM_KEYS
@@ -3493,6 +3500,14 @@ def _plan_items(data) -> list[dict]:
         if not isinstance(rows, list) or not rows or not all(
                 isinstance(i, int) and not isinstance(i, bool) for i in rows):
             raise PlanRefused("each item needs tx_ids, the rows it labels")
+        if len(rows) > QUEUE_ROW_CAP:
+            raise PlanRefused(f"item {n}: at most {QUEUE_ROW_CAP} rows, as many as the Queue shows")
+        out = next((tx for tx in rows if tx not in _SQLITE_INT), None)
+        if out is not None:
+            raise PlanRefused(f"item {n}: row id {out} is out of range")
+        out = next((k for k in _PLAN_ITEM_IDS if isinstance(item.get(k), int) and item[k] not in _SQLITE_INT), None)
+        if out is not None:
+            raise PlanRefused(f"item {n}: {out} is out of range")
         for tx in rows:
             if tx in seen:
                 raise PlanRefused(f"row {tx} is in the plan twice")
@@ -3536,11 +3551,12 @@ def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None"]:
             if isinstance(wording, str) and wording.strip() and not relabel_preview.wording_reach(
                     conn, wording, item.get("match_type") or "contains").count:
                 raise TeachRefused({"error": f"The wording {wording.strip()} matches no row"})
-    taught, plan = _teach(conn, body)
+    taught, plan = _teach(conn, body, record_choice=False)
     service_id, label = taught["service_id"], {"book": taught["book"], "type_id": taught["type_id"]}
     for tx in tx_ids[1:]:
         if conn.execute("SELECT type_id FROM transactions WHERE id = ?", (tx,)).fetchone()[0] is None:
-            _teach(conn, {"tx_id": tx, "service_id": service_id, "apply_scope": "transaction", **label})
+            _teach(conn, {"tx_id": tx, "service_id": service_id, "apply_scope": "transaction", **label},
+                   record_choice=False)
     if item.get("check_each_row") is True:
         lines = [{"tx_id": tx, **label} for tx in tx_ids if conn.execute(
             "SELECT service_id FROM transactions WHERE id = ?", (tx,)).fetchone()[0] == service_id]
@@ -3576,7 +3592,12 @@ def _run_plan(conn, items: list[dict]) -> dict:
         raise RuntimeError("a plan runs inside a request's change entry")
     if not conn.in_transaction:
         conn.execute("BEGIN")   # so releasing an item's savepoint never commits
-    shown, refusals, stamped, rows = [], [], [], set()
+    shown, refusals, stamped = [], [], []
+    # Every row the plan changes, the rows it labels (another merchant's row a
+    # wording reaches, left unanswered, only takes a checked mark), and the
+    # merchants it labels them with: a new one by its id, so two items for one
+    # merchant are one.
+    rows, labelled_rows, merchants = set(), set(), set()
     for n, item in enumerate(items):
         name = _plan_item_name(conn, item)
         mark = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_rows").fetchone()[0]
@@ -3596,14 +3617,23 @@ def _run_plan(conn, items: list[dict]) -> dict:
         ).fetchall()
         stamped.append((n, plan.token if plan is not None else None,
                         [(c["tbl"], c["row_id"], c["op"], _stable(c["before"]), _stable(c["after"])) for c in changes]))
-        labelled = {}
+        labelled, was = {}, {}
         for c in changes:
             if c["tbl"] != "transactions":
                 continue
             rows.add(c["row_id"])
+            # The row as it stood before this item: a row that held a type
+            # shows its label, so the yes sees the plan overwrite it.
+            if c["row_id"] not in was:
+                before = json.loads(c["before"]) if c["before"] else {}
+                was[c["row_id"]] = None if before.get("type_id") is None else {
+                    k: before.get(k) for k in ("service_id", "book", "type_id", "book_source", "type_source")}
             after = json.loads(c["after"]) if c["after"] else {}
             if after.get("service_id") == service_id:
-                labelled[c["row_id"]] = {k: after.get(k) for k in ("id", "date", "description", "amount_minor")}
+                labelled[c["row_id"]] = {**{k: after.get(k) for k in ("id", "date", "description", "amount_minor")},
+                                         "was": was[c["row_id"]]}
+        labelled_rows.update(labelled)
+        merchants.add(service_id)
         new = any(c["tbl"] == "services" and c["op"] == "insert" and c["row_id"] == service_id for c in changes)
         preview = None
         if plan is not None and plan.count:
@@ -3623,16 +3653,19 @@ def _run_plan(conn, items: list[dict]) -> dict:
         })
     token = None if refusals else relabel_preview._stamp(
         "plan", json.dumps(items, sort_keys=True), stamped)
-    return {"items": shown, "refusals": refusals, "merchants": len(items), "rows": len(rows), "token": token}
+    return {"items": shown, "refusals": refusals, "merchants": len(merchants), "rows": len(labelled_rows),
+            "rows_checked": len(rows - labelled_rows), "token": token}
 
 
 @app.route("/api/plans/preview", methods=["POST"])
 def api_plans_preview():
     """A plan's preview, {items: [...]}: per merchant the rows it would
-    label, the rows of another merchant a wording would reach (and, where
-    past rows would change, the preview's numbers), any refusal by merchant,
-    and one token for the apply (none while anything is refused). The plan
-    runs as the apply would, then is rolled back: it writes nothing."""
+    label (each with `was`, the label the row held, or null), the rows of
+    another merchant a wording would reach (and, where past rows would
+    change, the preview's numbers), any refusal by merchant, the merchants
+    and rows labelled, the other rows only checked (rows_checked), and one
+    token for the apply (none while anything is refused). The plan runs as
+    the apply would, then is rolled back: it writes nothing."""
     try:
         items = _plan_items(request.get_json(silent=True))
     except PlanRefused as e:
@@ -3683,7 +3716,7 @@ def api_plans_apply():
         finally:
             invalidate_rules_cache()
     return jsonify({"success": True, "merchants": shown["merchants"], "rows": shown["rows"],
-                    "items": shown["items"]})
+                    "rows_checked": shown["rows_checked"], "items": shown["items"]})
 
 
 @app.route("/api/book-prefill", methods=["POST"])

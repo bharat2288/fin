@@ -605,9 +605,11 @@ _PLANS = [
         "plan_preview",
         "Preview a batch of teaches for the Queue's cards (from the queue tool): writes nothing. "
         "Ask the operator about the cards in batches across turns, then preview the settled "
-        "batch: the answer gives, per merchant, the rows that would be labelled, the rows of "
+        "batch: the answer gives, per merchant, the rows that would be labelled (a row's was is the "
+        "label it holds now, which the batch overwrites: tell the operator), the rows of "
         "another merchant a wording would reach (overlaps: ask whether they move too, past_rows), "
-        "any refusal by merchant, the batch's merchants and rows, and a token (none while "
+        "any refusal by merchant, the batch's merchants and rows labelled, the rows only checked "
+        "(rows_checked), and a token (none while "
         "anything is refused). Show the operator those numbers; call plan_apply only on their yes.",
         _schema({"items": _PLAN_ITEMS}, ("items",)),
         False,

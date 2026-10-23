@@ -334,3 +334,92 @@ def test_case_9_the_entry_lists_every_row_before_and_after_and_reads_as_chats(cl
     assert set(rows) == set(queue["indigo"] + queue["rhode"] + queue["vaura"])
     assert all(before["type_id"] is None and after["type_id"] is not None for before, after in rows.values())
     assert {c["table"] for c in shown["changes"]} == {"transactions", "services", "merchant_rules"}
+
+
+# --- review repairs (chat-plan-apply-2026-10-24) ----------------------------------------------
+
+
+def test_the_rows_count_the_rows_labelled_and_the_other_merchants_checked_rows_apart(client, conn, queue, gifts):
+    """Unanswered, the Sample Gifts row only takes a checked mark: it is not
+    one of the rows labelled."""
+    items = items_of(conn, queue)
+
+    shown = preview(client, items)
+
+    assert [i["count"] for i in shown["items"]] == [2, 1, 2]
+    assert (shown["merchants"], shown["rows"], shown["rows_checked"]) == (3, 5, 1)
+    resp = apply(client, items, shown["token"])
+    assert resp.status_code == 200, resp.get_json()
+    assert (resp.get_json()["rows"], resp.get_json()["rows_checked"]) == (5, 1)
+    assert entries(client)[0]["summary"] == "Applied a plan: 3 merchants, 5 rows"
+
+
+def test_a_row_that_holds_a_label_shows_what_it_was_in_the_preview(client, conn, queue):
+    """A plan may relabel a row that has a label (as set_label may); the
+    preview says what that row held, so the operator's yes can see it."""
+    kept = add_row(conn, queue["statement"], "OVERWRITER CAFE", 1200, service_id=None, book="Kalesh",
+                   type_name="Dining", day="2026-09-08")
+    conn.execute("UPDATE transactions SET book_source = 'chosen', type_source = 'chosen' WHERE id = ?", (kept,))
+    conn.commit()
+    items = [{"tx_ids": [kept, *queue["indigo"]], "service_name": "Overwriter",
+              "type_id": type_id(conn, "Travel"), "book": "Household"}]
+
+    shown = preview(client, items)
+
+    rows = {r["id"]: r for r in shown["items"][0]["rows"]}
+    assert rows[kept]["was"] == {"service_id": None, "book": "Kalesh", "type_id": type_id(conn, "Dining"),
+                                 "book_source": "chosen", "type_source": "chosen"}
+    assert [rows[i]["was"] for i in queue["indigo"]] == [None, None]
+
+
+@pytest.mark.parametrize("spoil, words", [
+    (lambda item, queue: item.update(tx_ids=[queue["rhode"][0], *range(10_000, 10_100)]), "100"),
+    (lambda item, queue: item.update(tx_ids=[10 ** 30]), "row id"),
+    (lambda item, queue: item.update(service_id=10 ** 30), "service_id"),
+    (lambda item, queue: item.update(type_id=10 ** 30), "type_id"),
+])
+def test_an_item_with_too_many_rows_or_an_id_out_of_range_is_refused_by_item(client, conn, queue, spoil, words):
+    items = items_of(conn, queue)
+    spoil(items[1], queue)
+    before = book_state(conn)
+
+    for route in ("/api/plans/preview", "/api/plans/apply"):
+        resp = client.post(route, json={"items": items, "token": "0" * 32})
+        assert resp.status_code == 400, resp.get_json()
+        assert "item 1" in resp.get_json()["error"] and words in resp.get_json()["error"]
+    assert book_state(conn) == before
+
+
+def test_two_items_for_one_merchant_count_as_one_merchant(client, conn, queue):
+    items = [{"tx_ids": [queue["indigo"][0]], "service_name": "Indigoair",
+              "type_id": type_id(conn, "Travel"), "book": "Household"},
+             {"tx_ids": [queue["indigo"][1]], "service_name": "indigoair"}]
+
+    shown = preview(client, items)
+
+    assert shown["refusals"] == [], shown["refusals"]
+    assert [i["new_merchant"] for i in shown["items"]] == [True, False]
+    assert (shown["merchants"], shown["rows"]) == (1, 2)
+    resp = apply(client, items, shown["token"])
+    assert resp.status_code == 200, resp.get_json()
+    assert entries(client)[0]["summary"] == "Applied a plan: 1 merchant, 2 rows"
+
+
+def test_a_plan_teach_records_no_choice_against_a_stored_suggestion(client, conn, queue):
+    """The suggestion's record of the operator's choice is not tracked, so
+    Undo would not take it back: a plan leaves it for the operator's own."""
+    import suggest
+    from test_queue_guesses import answer
+    conn.execute("UPDATE accounts SET type = ? WHERE id = (SELECT account_id FROM statements WHERE id = ?)",
+                 (suggest.SENT_FROM_KIND, queue["statement"]))
+    conn.commit()
+    said = suggest.row_merchant(conn, queue["vaura"][0])
+    assert said
+    answer(conn, said, "Fitness", 0.9)
+    items = items_of(conn, queue)
+
+    resp = apply(client, items, preview(client, items)["token"])
+
+    assert resp.status_code == 200, resp.get_json()
+    assert conn.execute("SELECT chosen_type_id, suggestion_visible FROM suggestion_answers WHERE merchant = ?",
+                        (said,)).fetchone()[:] == (None, None)
