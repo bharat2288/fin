@@ -40,6 +40,12 @@ Rulings this module carries:
 - The Queue (chat-queue-read 02): queue reads the Queue's labelling work
   card by card, as the operator sees it; it never asks Jev and writes
   nothing. Saving a card is the operator's: no tool here labels a group.
+- Plans (chat-plan-apply 02): chat labels the Queue in bulk only through
+  plan_preview, which writes nothing, and plan_apply, which writes the
+  previewed batch as one change entry on that preview's token, refused when
+  the book moved since (a replay included). Both stop with the switch off. The
+  token stands in for expected_count: a batch over MANY_ROWS rows applies on
+  it and is recorded as asked first.
 - No tool imports a statement, changes or deletes an imported row, edits an
   account other than adding a company or a person, sends merchants to the
   type-suggestion service, runs a conversion or touches subscriptions.
@@ -561,6 +567,68 @@ _WRITES = [
     ),
 ]
 
+# --- plans (chat-plan-apply 02): a batch of teaches, previewed, then applied --
+# The Queue's labelling work as one change: the operator says yes to the
+# preview's numbers, and the apply writes the batch only on that preview's
+# token. Both stop with the switch off; the preview too, as it leads only to
+# a write.
+
+_PLAN_ITEM = {
+    "type": "object",
+    "properties": {
+        "tx_ids": {"type": "array", "items": _I, "description": "The card's rows this merchant labels."},
+        "service_name": {**_S, "description": "A new merchant's name (or one fin finds by that name)."},
+        "service_id": {**_I, "description": "A merchant fin holds already, to attach the rows to."},
+        "pattern": {**_S, "description": "The wording its rule recognises."},
+        "wordings": {"type": "array", "items": _S, "description": "Other wordings, each a rule too."},
+        "match_type": {"type": "string", "enum": ["contains", "startswith", "exact"]},
+        "type_id": _I,
+        "book": _S,
+        "check_each_row": {**_B, "description": "Check each row: every row from this merchant is checked."},
+        "past": {"type": "string", "enum": ["leave", "queue"],
+                 "description": "With check_each_row: the merchant's past rows stay as they are, or go to the Queue."},
+        "past_rows": {"type": "string", "enum": ["apply", "only_new"],
+                      "description": "The operator's answer for rows another merchant holds that a wording "
+                                     "reaches (the preview's overlaps): apply moves them too; unanswered, "
+                                     "only new rows take it."},
+    },
+    "required": ["tx_ids"],
+    "additionalProperties": False,
+}
+_PLAN_ITEMS = {
+    "type": "array", "items": _PLAN_ITEM, "minItems": 1, "maxItems": 20,
+    "description": "One teach per merchant, up to 20: what saving its Queue card would do.",
+}
+
+_PLANS = [
+    Tool(
+        "plan_preview",
+        "Preview a batch of teaches for the Queue's cards (from the queue tool): writes nothing. "
+        "Ask the operator about the cards in batches across turns, then preview the settled "
+        "batch: the answer gives, per merchant, the rows that would be labelled, the rows of "
+        "another merchant a wording would reach (overlaps: ask whether they move too, past_rows), "
+        "any refusal by merchant, the batch's merchants and rows, and a token (none while "
+        "anything is refused). Show the operator those numbers; call plan_apply only on their yes.",
+        _schema({"items": _PLAN_ITEMS}, ("items",)),
+        False,
+        lambda a: ("POST", "/api/plans/preview", _pick(a, "items")),
+    ),
+    Tool(
+        "plan_apply",
+        "Apply a previewed batch, only after the operator said yes to plan_preview's numbers: "
+        "the same items, and the preview's token. It is written as one change, which one undo "
+        "takes back. Refused, writing nothing, when any item is refused or the book changed "
+        "since the preview (a row labelled since, or the batch applied already): preview again "
+        "and ask again. The token is the operator's yes to the preview's count, so no "
+        "expected_count is taken.",
+        _schema({"items": _PLAN_ITEMS,
+                 "token": {"type": "string", "description": "plan_preview's token for exactly these items."}},
+                ("items", "token")),
+        True,
+        lambda a: ("POST", "/api/plans/apply", _pick(a, "items", "token")),
+    ),
+]
+
 # --- the off switch (01's Off switches): off only, never on ------------------
 
 _SWITCHES = [
@@ -575,9 +643,10 @@ _SWITCHES = [
     ),
 ]
 
-TOOLS = _READS + _WRITES + _SWITCHES
-# The tools the switch stops: every write but the switch itself.
-_STOPPED_WHEN_OFF = frozenset(t.name for t in _WRITES)
+TOOLS = _READS + _WRITES + _PLANS + _SWITCHES
+# The tools the switch stops: every write but the switch itself, and the
+# plan's preview, which leads only to a write.
+_STOPPED_WHEN_OFF = frozenset(t.name for t in _WRITES + _PLANS)
 BY_NAME = {t.name: t for t in TOOLS}
 
 
@@ -641,6 +710,9 @@ def _answer(resp) -> dict:
                 answer["preview"] = _hidden_out(body["preview"])
             if body.get("stale") is True:
                 answer["stale"] = True
+        # A plan refused by item: each refusal by merchant, for Claude to ask about.
+        if isinstance(body, dict) and isinstance(body.get("refusals"), list):
+            answer["refusals"] = _hidden_out(body["refusals"])
         return answer
     return {"ok": True, "result": _hidden_out(body)}
 
@@ -714,7 +786,10 @@ def call(name: str, args: dict | None, actor: str) -> dict:
         # token still held, so the change is the one the preview showed
         # (fin-surfaces 51). An answer with no token behind it is asked the
         # count as any other write.
-        answered = name in _PREVIEWED and args.get("past") is not None and args.get("token") is not None
+        # A plan applies only on its preview's token (chat-plan-apply 02),
+        # so it always stands on the preview's count.
+        answered = name == "plan_apply" or (
+            name in _PREVIEWED and args.get("past") is not None and args.get("token") is not None)
         if rows > MANY_ROWS and expected != rows and not answered:
             conn = db.get_connection()
             try:

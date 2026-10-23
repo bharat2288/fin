@@ -44,6 +44,8 @@ GOLDEN: list[str] = [
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
     "undo",
+    # chat-plan-apply 02: a batch of teaches, previewed (writes nothing) then applied as one change
+    "plan_preview", "plan_apply",
     # 01's Off switches: chat can turn Claude's writes off, never on.
     "turn_off_writes",
 ]

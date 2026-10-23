@@ -31,6 +31,9 @@ READS = [
 READS.insert(READS.index("rules") + 1, "rule_drift")
 # chat-queue-read 02: the Queue's labelling work, card by card.
 READS.insert(READS.index("review_summary") + 1, "queue")
+# chat-plan-apply 02: a batch of teaches previewed (it writes nothing, and
+# stops with the switch off, as it leads only to a write), then applied.
+READS.append("plan_preview")
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
@@ -38,6 +41,8 @@ WRITES = [
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
     "undo",
+    # chat-plan-apply 02: the previewed batch, applied as one change
+    "plan_apply",
     # 01's Off switches: chat can turn Claude's writes off, never on.
     "turn_off_writes",
 ]
