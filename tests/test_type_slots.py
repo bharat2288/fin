@@ -407,3 +407,20 @@ def test_type_slots_is_tracked_and_its_triggers_come_with_a_start():
 
 def test_every_slot_is_declared_once_with_its_kind_and_seed():
     assert [s for s, *_ in book_type.SLOTS] == ["loan_interest", "gift_given", "gift_received"]
+
+
+# --- the chat's types read (spec: chat; review F4) -------------------------------
+
+
+def test_the_chat_types_read_shows_the_filings_and_writes_nothing(client):
+    import mcp_tools
+    interest = added(client, INTEREST)
+    assert move(client, "loan_interest", interest).status_code == 200
+
+    read = mcp_tools.call("types", {"filings": True}, actor="chat:sample-subject")
+
+    assert read["ok"], read
+    assert {s["slot"]: s["display_type"] for s in read["result"]["slots"]} == {
+        "loan_interest": "Interest", "gift_given": "Gifts & Donations", "gift_received": "Gift received"}
+    tool = next(t for t in mcp_tools.TOOLS if t.name == "types")
+    assert not tool.write and tool.request({"filings": True})[0] == "GET"

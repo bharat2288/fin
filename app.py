@@ -4930,8 +4930,9 @@ def api_rules_delete(rule_id):
 def api_rules_drift():
     """The rows that differ from what their rule says now
     (relabel_preview.drift): the preview the drawer and chat read, {count,
-    examples, token, ...}. Fields from the merchant, a rule or the wording
-    only; a checked or chosen field is never counted. It writes nothing."""
+    examples, token, ...}. Fields from the merchant or a rule only; a
+    checked or chosen field, or one the PayNow wording gave before its
+    wordings were rules, is never counted. It writes nothing."""
     with get_db() as conn:
         return jsonify(relabel_preview.summary(conn, relabel_preview.drift(conn)))
 

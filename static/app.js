@@ -4620,9 +4620,9 @@ function merchantFields(r, s) {
         : 'With a type chosen, fin gives it the type’s usual book when you add it.';
     return `<label class="field"><span>Name</span><input type="text" id="mc-name" value="${esc(s?.name || '')}"></label>
         <div class="fields two"><label class="field"><span>Book</span><select id="mc-book">${bookOptions(r.books, s?.book, 'No book chosen')}</select><span class="hint">${esc(bookLine)}</span></label>
-            <label class="field"><span>Type</span><select id="mc-type">${typeOptions(r.types, s?.type_id, { blank: 'No type' })}</select></label></div>
+            <label class="field"><span>Type</span><select id="mc-type"${s ? '' : ' data-change="mc-type-pick"'}>${typeOptions(r.types, s?.type_id, { blank: 'No type' })}</select></label></div>
         <label class="field"><span>Note</span><textarea id="mc-notes" rows="2" placeholder="Anything worth remembering about it">${esc(s?.notes || '')}</textarea></label>
-        ${s ? eachSettingHTML(s) : '<label class="check"><input type="checkbox" id="mc-each"> Check each row: each new row waits in the Queue for you to check it</label>'}
+        ${s ? eachSettingHTML(s) : '<label class="check"><input type="checkbox" id="mc-each" data-change="mc-each-touch"> Check each row: each new row waits in the Queue for you to check it</label>'}
         <label class="check"><input type="checkbox" id="mc-hidden"${s?.exclude_from_expense_views ? ' checked' : ''}> Hide from spending lists (never from a sum)</label>`;
 }
 // The Check each row setting (fin-surfaces 12): one route turns it on or
@@ -4986,8 +4986,19 @@ ACT['bv-no'] = async el => {
     if (location.hash === `#/books/merchant/${id}`) rerender();
 };
 
+// Adding, Check each row starts as the picked type's default (type-relationships
+// 02, case 7) until the operator ticks or unticks it; after that a new pick
+// leaves it as they set it.
+let addTypes = new Map();
+ACT['mc-type-pick'] = el => {
+    const box = $('#mc-each');
+    if (box.dataset.touched) return;
+    box.checked = !!addTypes.get(Number(el.value))?.check_each_row;
+};
+ACT['mc-each-touch'] = el => { el.dataset.touched = '1'; };
 ACT['merchant-add'] = async () => {
     const r = await refs();
+    addTypes = r.typeById;
     openSheet('Add a merchant', `<div class="fields">${merchantFields(r, null)}</div>
         <p class="small muted">A merchant takes rows through its rules: add a rule for it next, from Rules.</p>`,
     { eyebrow: 'Merchants', foot: '<button class="btn primary" data-act="merchant-create">Add the merchant</button>' });
@@ -5075,7 +5086,7 @@ ACT['rule-delete'] = async el => {
 };
 // Re-running every rule is retired (fin-surfaces 21 and 51). Lists › Rules says
 // how many rows differ from what their rule says now (fields from the
-// merchant, a rule or the wording; never one checked or chosen), drawn only
+// merchant or a rule; never one checked, chosen or from the wording), drawn only
 // above 0, and opens the one-confirm drawer: Leave them, or Apply.
 /** The drift line in the rules card's head: a quiet ghost button, or nothing at 0. */
 function driftLine(d) {

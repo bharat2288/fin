@@ -9,8 +9,8 @@ it, the change is one entry `via` chat, undoable with every source restored.
 
 Re-run every rule is gone (its route, its button, chat's rerun_rules). In its
 place Lists › Rules counts the rows whose label differs from what the rules
-give now (fields from the merchant, a rule or the wording only; checked and
-chosen fields never count), and opens the same preview with Apply and Leave
+give now (fields from the merchant or a rule only; checked, chosen and
+wording fields never count), and opens the same preview with Apply and Leave
 them.
 
 Each case is one request through fin's public route (the Flask test client,

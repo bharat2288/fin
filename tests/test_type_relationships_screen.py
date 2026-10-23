@@ -152,6 +152,42 @@ def test_cases_6_and_7_one_off_and_check_each_row_from_the_same_sheet_are_one_ch
     assert (after["default_one_off"], after["check_each_row"]) == (1, True)
 
 
+# Add a merchant from Lists › Merchants: name it, pick its type (as the
+# picker's change runs), touch Check each row or not, press Add.
+ADD_MERCHANT = FILL + """
+const addMerchant = async (name, typeId, each) => {
+    await ACT['merchant-add']();
+    fill({ 'mc-name': name, 'mc-type': String(typeId) });
+    ACT['mc-type-pick'](__byId('mc-type'));
+    const shown = __byId('mc-each').checked;
+    if (each !== null) { fill({ 'mc-each': each }); ACT['mc-each-touch'](__byId('mc-each')); ACT['mc-type-pick'](__byId('mc-type')); }
+    await ACT['merchant-create'](); await __settle();
+    return { shown, toasts: __toasts };
+};
+"""
+
+
+def test_case_7_a_merchant_added_in_lists_of_a_check_each_row_type_starts_as_check_each_row(server, api):
+    medical = listed(api)["Medical"]
+    assert api.put(f"/api/types/{medical['id']}", json={"check_each_row": True}).status_code == 200
+
+    out = run(server, ADD_MERCHANT + f"return await addMerchant('Sample Clinic', {medical['id']}, null);")
+
+    assert out["shown"] is True
+    made = {s["name"]: s for s in api.get("/api/services").get_json()}["Sample Clinic"]
+    assert (made["type_id"], made["review_each_time"]) == (medical["id"], 1)
+
+
+def test_case_7_the_box_the_operator_unticks_stays_unticked_when_the_type_is_picked_again(server, api):
+    medical = listed(api)["Medical"]
+    assert api.put(f"/api/types/{medical['id']}", json={"check_each_row": True}).status_code == 200
+
+    run(server, ADD_MERCHANT + f"return await addMerchant('Sample Clinic', {medical['id']}, false);")
+
+    made = {s["name"]: s for s in api.get("/api/services").get_json()}["Sample Clinic"]
+    assert made["review_each_time"] == 0
+
+
 def test_case_13_rename_from_the_sheet_is_one_change_and_every_row_shows_it(server, api):
     dining = listed(api)["Dining"]
     out = edit(server, dining, **{"ty-name": "Food"})

@@ -24,7 +24,8 @@ from test_type_keys import book_before, every_row, kept_every_row
 
 # What the start makes of the wordings, written out by hand from the list the
 # import held: (pattern, merchant, type). Book Household for every one: each
-# type's usual book. Left out: RK, BJT, DREAMCORE, JEREMY L, LEC (type Other).
+# type's usual book. Left out: the five typed Other, and AMAC, a four-letter
+# wording that a `contains` rule would find inside any other word.
 MADE = {
     ("CENTRAL PROVIDENT FUND BOARD", "Central Provident Fund Board", "Tax"),
     ("CPF VOLUNTARY CONTRIBUTIONS", "Cpf Voluntary Contributions", "Tax"),
@@ -37,10 +38,11 @@ MADE = {
     ("TERRA MEDICAL", "Terra Medical", "Medical"),
     ("LIMITLESS WELLNESS", "Limitless Wellness", "Fitness"),
     ("VIN GOLF", "Vin Golf", "Fitness"),
-    ("AMAC", "Amac", "Home"),
     ("FATELICIOUS", "Fatelicious", "Dining"),
 }
-LEFT_OUT = {"RK", "BJT", "DREAMCORE", "JEREMY L", "LEC"}
+# The wordings typed Other, as patterns only; the one that was a person's name
+# is not repeated here.
+LEFT_OUT = {"RK", "BJT", "DREAMCORE", "LEC", "AMAC"}
 # Six of them were already seed rules (db.DEFAULT_MERCHANT_RULES), so a book
 # from before holds them; the start adds the other seven.
 ALREADY = {"SINGAPORE LIFE", "OSTEOPATHIC", "TERRA MEDICAL", "SICC", "VIN GOLF", "FATELICIOUS"}
@@ -95,7 +97,7 @@ def test_case_18_a_wording_rule_deleted_stays_deleted_after_a_start(client):
     db.init_db()
 
     assert "LIMITLESS WELLNESS" not in rules(client)
-    assert "AMAC" in rules(client)
+    assert "INLAND REVENUE" in rules(client)
 
 
 # --- case 19: a wording that is Other or generic is not made a rule -------------
@@ -149,6 +151,50 @@ def test_case_20_a_row_the_wording_labelled_keeps_its_label_and_source(tmp_path,
     tx = row(client, "PAYNOW TO LIMITLESS WELLNESS REF 77")
     assert (tx["service_id"], tx["book"], tx["display_type"], tx["book_source"], tx["type_source"]) == (
         None, "Household", "Fitness", "wording", "wording")
+
+
+def test_case_20_rows_the_wording_labelled_are_not_counted_as_drift_after_the_start(
+        tmp_path, monkeypatch, client):
+    """The rules' drift count leaves a field the wording gave alone, as it
+    leaves a checked or chosen one: whether a rule now gives that wording or
+    the wording was dropped (typed Other), the row keeps its label, and Apply
+    has nothing to write (review F1)."""
+    path = book_before(tmp_path, monkeypatch)
+    conn = sqlite3.connect(str(path))
+    try:
+        ids = {name: i for name, i in conn.execute("SELECT name, id FROM types WHERE kind = 'spending'")}
+        # As the import's wording fallback wrote them: no merchant, both from the wording.
+        for day, description, type_name in (
+                ("2026-09-02", "PAYNOW TO CENTRAL PROVIDENT FUND BOARD REF 11", "Tax"),
+                ("2026-09-03", "PAYNOW TO AMAC SERVICES REF 12", "Home"),
+                ("2026-09-04", "PAYNOW TO DREAMCORE REF 13", "Other"),
+                ("2026-09-05", "PAYNOW TO SAMPLE LEC REF 14", "Other")):
+            conn.execute(
+                "INSERT INTO transactions (statement_id, date, description, flow_type, book, type_id,"
+                " amount_minor, book_source, type_source) VALUES (1, ?, ?, 'expense', 'Household', ?, 5000,"
+                " 'wording', 'wording')", (day, description, ids[type_name]))
+        conn.commit()
+    finally:
+        conn.close()
+
+    db.init_db()
+
+    assert client.get("/api/rules/drift").get_json()["count"] == 0
+    resp = client.post("/api/rules/drift", json={"past": "apply"})
+    assert resp.status_code == 200, resp.get_json()
+    tx = row(client, "PAYNOW TO CENTRAL PROVIDENT FUND BOARD REF 11")
+    assert (tx["service_id"], tx["display_type"], tx["type_source"]) == (None, "Tax", "wording")
+
+
+# --- case 19 and review F2: a short wording is not made a rule ------------------
+
+
+def test_a_card_row_with_amac_inside_a_word_is_not_labelled_home(client, ledger):
+    bring_in(client, BANK, [(5, "CARD PURCHASE LAMACHI RESTAURANT SG", 42.00)])
+
+    tx = row(client, "CARD PURCHASE LAMACHI RESTAURANT SG")
+    assert tx["service_name"] != "Amac"
+    assert tx["display_type"] != "Home"
 
 
 # --- case 21: a new PayNow row is labelled by its rule --------------------------

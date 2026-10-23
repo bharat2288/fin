@@ -743,10 +743,13 @@ class _Winner:
 def drift(conn: sqlite3.Connection) -> Plan:
     """The rows that differ from what their rule says now: Re-run every
     rule's place (fin-surfaces 21 and 51; spec 24, the drift count). A row
-    counts when a field of it from the merchant, a rule or the wording holds
-    a value other than what the winning rule gives now, or, every field being from fin, its merchant is not the
-    rule's. A checked or chosen field is never counted and never written;
-    an empty field reads its own source, as the rule preview reads it.
+    counts when a field of it from the merchant or a rule holds a value
+    other than what the winning rule gives now, or, every field being from
+    fin, its merchant is not the rule's. A checked or chosen field is never
+    counted and never written, nor is one from the wording: no rule gives
+    that source now (the PayNow wordings are rules since type-relationships
+    05), and the rows it labelled keep their label and source (its case 20).
+    An empty field reads its own source, as the rule preview reads it.
     Apply writes what the rules give, each field taking the source that
     gives it, its flow worked out again, in one change; there is no Only new
     rows (Leave them writes nothing). Transfers and card payments are not
@@ -765,7 +768,8 @@ def drift(conn: sqlite3.Connection) -> Plan:
         " t.type_source FROM transactions t"
         " WHERE COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')"
         f" AND {label_source.from_fin_sql('t')}").fetchall()
-    from_fin, source_of = label_source.FROM_FIN, label_source.source_of
+    # A field from the wording is kept as a checked one is (case 20 above).
+    rerun, source_of = (label_source.MERCHANT, label_source.RULE), label_source.source_of
     by_rule: dict = {}                     # what a rule that gives a type gives every row it wins
     writes_of: dict[int, dict] = {}
     for tx_id, description, amount_minor, service_id, book, book_source, type_id, type_source in read:
@@ -779,7 +783,7 @@ def drift(conn: sqlite3.Connection) -> Plan:
         sets, differs, kept = {}, False, False
         for field_name, column, value, source in (("book", "book_source", book, book_source),
                                                   ("type_id", "type_source", type_id, type_source)):
-            if source_of(source) not in from_fin:
+            if source_of(source) not in rerun:
                 kept = True
                 continue
             differs = differs or found[field_name] != value

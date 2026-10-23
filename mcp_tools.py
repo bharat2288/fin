@@ -237,7 +237,7 @@ _READS = [
         "rule_drift",
         "The rows whose label differs from what the merchant rules give now (re-running the "
         "rules is retired; this count is what replaces it): how many, the newest three as "
-        "examples (now and after). Only labels from a merchant, a rule or the wording count; "
+        "examples (now and after). Only labels from a merchant or a rule count; "
         "a row the operator checked or chose never does. Applying it is the operator's, on "
         "Lists › Rules in fin, where the count opens the same preview.",
         _schema(),
@@ -246,10 +246,13 @@ _READS = [
     ),
     Tool(
         "types",
-        "The type list (one list for every book, with sub-types and what each covers).",
-        _schema(),
+        "The type list (one list for every book, with sub-types and what each covers, and each "
+        "type's settings: its usual book, one-off by default, Check each row by default). With "
+        "filings: fin's own filings instead (loan interest, a gift given, a gift received) and the "
+        "type each goes under. Changing any of these is the operator's, in fin's Lists › Types.",
+        _schema({"filings": _B}),
         False,
-        _get("/api/types"),
+        lambda a: ("GET", "/api/types/slots" if a.get("filings") else "/api/types", {}),
     ),
     Tool("books", "The books (Household, Moom, Kalesh).", _schema(), False, _get("/api/books")),
     Tool("flows", "The flows a row can have, with what each means.", _schema(), False, _get("/api/flows")),

@@ -230,7 +230,10 @@ DEFAULT_MERCHANT_RULES = [
 # book: once, at start (PAYNOW_SEED), so a rule the operator deletes stays
 # deleted. Six more were already seed rules above (SINGAPORE LIFE,
 # OSTEOPATHIC, TERRA MEDICAL, SICC, VIN GOLF, FATELICIOUS); the five that
-# gave Other gave no type and were dropped.
+# gave Other gave no type and were dropped, and so was AMAC (Home): four
+# letters a `contains` rule would find inside other words (LAMACHI), where the
+# old wording read it only on a PAYNOW row. The operator adds a longer one in
+# Lists › Rules if it is wanted.
 PAYNOW_WORDINGS = [
     ("CENTRAL PROVIDENT FUND BOARD", "Tax"),
     ("CPF VOLUNTARY CONTRIBUTIONS", "Tax"),
@@ -238,7 +241,6 @@ PAYNOW_WORDINGS = [
     ("SINGAPORE ISLAND", "Fitness"),
     ("SITOH SIEW KIM", "Kids"),
     ("LIMITLESS WELLNESS", "Fitness"),
-    ("AMAC", "Home"),
 ]
 # The marker (seeded_once) that the wordings were made rules on this book.
 PAYNOW_SEED = "paynow-wordings"
