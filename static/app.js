@@ -4296,9 +4296,9 @@ async function viewLists(tab) {
 
     if (tab === 'types') {
         const income = await get('/api/types?kind=income').catch(() => []);
-        // A type fin reads by name (and every income kind) is set in code; any other can have its wording fixed here.
-        const fix = t => t.locked ? '<span class="small muted">Set in code</span>'
-            : `<button type="button" class="btn sm" data-act="type-fix" data-id="${t.id}" aria-label="Fix the wording of ${esc(t.display_name || t.name)}">Fix the wording</button>`;
+        // Every spending type's wording can be fixed here; a type fin reads by name keeps its name (fin RUL-004). Income kinds are set in code.
+        const fix = t => t.kind === 'income' ? '<span class="small muted">Set in code</span>'
+            : `${t.locked ? '<span class="small muted">name set in code</span> ' : ''}<button type="button" class="btn sm" data-act="type-fix" data-id="${t.id}" aria-label="Fix the wording of ${esc(t.display_name || t.name)}">Fix the wording</button>`;
         const row = t => `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b>${t.added_in_fin ? ` ${tag('yours', 'added in fin')}` : ''}</td><td class="small">${esc(plainWords(t.covers))}</td>
             <td class="small muted">${esc(plainWords(t.not_for || ''))}</td><td class="small">${t.kind === 'income' ? '' : `${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}</td>
             <td class="sl-sub">${esc(plainWords(t.covers))}${t.kind === 'income' ? '' : ` · ${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}${t.not_for ? `<div>Not for: ${esc(plainWords(t.not_for))}</div>` : ''}</td>
@@ -4447,7 +4447,7 @@ ACT['type-fix'] = async el => {
     const t = (await refs()).typeById.get(Number(el.dataset.id));
     if (!t) { toast('That type is no longer in fin', { bad: true }); return; }
     openSheet(esc(t.display_name || t.name), `<div class="fields">${typeWordingFields(t)}</div>
-        <p class="hint">Renaming, merging or removing a type is a code change.</p>`,
+        <p class="hint">${t.locked ? 'Its name is set in code: fin reads it by name. ' : ''}Renaming, merging or removing a type is a code change.</p>`,
     { eyebrow: 'Fix the wording', foot: `<button class="btn primary" data-act="type-fix-save" data-id="${t.id}">Save the wording</button>` });
 };
 /** Send a type write; on success toast the type's name with Undo and redraw, on a refusal say the server's words. */

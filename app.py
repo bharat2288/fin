@@ -1040,7 +1040,8 @@ def _type_shown(r) -> dict:
         "not_for": r["not_for"],
         # The book this type proposes for a merchant no rule knows; null = ask.
         "proposed_book": book_type.proposed_book(shown) if spending else None,
-        # Set in code: fin reads it by name, so its wording is not fixed here.
+        # Name set in code: fin reads it by name. Its wording is still fixed here
+        # (fin RUL-004); an income kind's is not.
         "locked": (shown in book_type.LOCKED) if spending else True,
         # A spending type the declaration does not hold was added in fin.
         "added_in_fin": spending and r["name"] not in _DECLARED_TYPES,
@@ -1090,8 +1091,8 @@ def api_types_create():
 @app.route("/api/types/<int:type_id>", methods=["PUT"])
 def api_types_fix_wording(type_id: int):
     """Fix a spending type's wording: covers, not_for, or both. Anything else
-    is a code change and refused, as is a type set in code; nothing is
-    written."""
+    is a code change and refused, as is an income kind; nothing is written.
+    A type whose name is set in code has its wording fixed here too (fin RUL-004)."""
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "send the wording as JSON"}), 400
