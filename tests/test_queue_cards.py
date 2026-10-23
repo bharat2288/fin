@@ -14,6 +14,7 @@ import pytest
 import app as fin_app
 import money
 import suggest
+from expect_fixtures import mark
 from test_book_and_type_switch import merchant, type_id
 from test_preview_merchant_change import add_row
 from test_queue_guesses import NOT_A_KEY, answer, statement_on
@@ -80,12 +81,15 @@ def test_case_1_each_group_carries_its_rows_guess_name_wording_and_book(client, 
     payload = cards(client)
 
     indigo = group_of(payload, book["indigo_old"])
-    # Its rows, oldest first, with their dates, amounts and account.
-    assert [(r["id"], r["date"], r["amount_minor"], r["amount"], r["currency"], r["account"])
+    # Its rows, oldest first, with their dates and amounts; the account and
+    # currency every row shares are said once, on the group.
+    assert [(r["id"], r["date"], r["amount_minor"], r["counted_minor"], r["expect_pill"])
             for r in indigo["rows"]] == [
-        (book["indigo_old"], "2026-09-02", 41250, 412.50, "SGD", "Sample card 0001"),
-        (book["indigo_new"], "2026-09-20", 38800, 388.00, "SGD", "Sample card 0001"),
+        (book["indigo_old"], "2026-09-02", 41250, 41250, None),
+        (book["indigo_new"], "2026-09-20", 38800, 38800, None),
     ]
+    assert (indigo["side"], indigo["currency"], indigo["account"]) == ("out", "SGD", "Sample card 0001")
+    assert all({"currency", "account", "prefill", "amount"}.isdisjoint(r) for r in indigo["rows"])
     assert indigo["row_count"] == 2
     assert indigo["merchant"] == "INDIGOAIR MUMBAI"
     assert indigo["route"] == "prefill"
@@ -112,9 +116,58 @@ def test_case_1_a_name_matching_a_held_merchant_ignoring_case_names_it(client, c
     assert rhode["suggested_name"] == "Rhode Skin"
     assert rhode["held"] == {
         "id": held, "name": "RHODE skin", "type_id": type_id(conn, "Health & Beauty"),
-        "type": "Health & Beauty", "book": "Moom",
+        "type": "Health & Beauty", "book": "Moom", "review_each_time": False,
     }
     assert group_of(cards(client), book["indigo_old"])["held"] is None
+
+
+def test_case_1_held_says_when_the_merchant_checks_each_row(client, conn, book, key):
+    held = merchant(conn, "Rhode Skin", "Moom", "Health & Beauty")
+    conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (held,))
+    conn.commit()
+
+    assert group_of(cards(client), book["rhode"])["held"]["review_each_time"] is True
+
+
+def test_case_1_held_is_the_merchant_the_card_finds_first_by_name(client, conn, book, key):
+    # Two held merchants whose names differ only by case: the card takes the
+    # first of the merchants list, which runs by name.
+    merchant(conn, "rhode skin", "Kalesh", "Health & Beauty")
+    first = merchant(conn, "RHODE SKIN", "Moom", "Health & Beauty")
+
+    assert group_of(cards(client), book["rhode"])["held"]["id"] == first
+
+
+def test_case_1_a_group_splits_by_side_as_the_queue_cards_do(client, conn, card, key):
+    out = untyped(conn, card, "INDIGOAIR 312-4567890 MUMBAI", 5000, "2026-09-02")
+    back = untyped(conn, card, "INDIGOAIR 312-1111111 MUMBAI", -3000, "2026-09-03")
+    answer(conn, "INDIGOAIR MUMBAI", "Travel", 1.0)
+
+    payload = cards(client)
+
+    spent, refunded = group_of(payload, out), group_of(payload, back)
+    assert spent is not refunded
+    assert ([r["id"] for r in spent["rows"]], spent["side"]) == ([out], "out")
+    assert ([r["id"] for r in refunded["rows"]], refunded["side"]) == ([back], "in")
+    assert spent["merchant"] == refunded["merchant"] == "INDIGOAIR MUMBAI"
+
+
+def test_case_1_a_row_lists_its_own_part_and_the_groups_run_as_the_queue_sorts(client, conn, card, key):
+    flight = untyped(conn, card, "SAMPLE AIRWAYS 0042 SG", 41250, "2026-09-02")
+    hotel = untyped(conn, card, "SAMPLE HOTEL 0042 SG", 20000, "2026-09-03")
+    untyped(conn, card, "SAMPLE TAXI 0042 SG", 900, "2026-09-04")
+    mark(conn, flight, 30000)
+
+    payload = cards(client)
+    listed = client.get("/api/transactions?types=__untyped__&sort=amount&sort_dir=desc").get_json()["transactions"]
+
+    order = [r["id"] for g in payload["untyped"]["groups"] for r in g["rows"]]
+    assert order == [t["id"] for t in listed]
+    assert order.index(hotel) < order.index(flight)
+    [row] = group_of(payload, flight)["rows"]
+    assert (row["amount_minor"], row["counted_minor"]) == (41250, 11250)
+    queue_row = next(t for t in listed if t["id"] == flight)
+    assert row["expect_pill"] == queue_row["expect_pill"] == "S$ 300 expected back"
 
 
 def test_case_1_a_company_card_prefills_its_company_and_says_why(client, conn, key):
@@ -128,7 +181,28 @@ def test_case_1_a_company_card_prefills_its_company_and_says_why(client, conn, k
     rhode = group_of(cards(client), tx)
 
     assert rhode["prefill"] == {"book": "Moom", "reason": "account", "hint": "Moom card"}
-    assert rhode["rows"][0]["prefill"] == {"book": "Moom", "reason": "account"}
+    # The row's own prefill is the group's: said once, on the group.
+    assert "prefill" not in rhode["rows"][0]
+
+
+def test_case_1_a_row_whose_prefill_differs_from_its_groups_carries_its_own(client, conn, card, key):
+    company = statement_on(conn, "card", "0042")
+    conn.execute("UPDATE accounts SET owner = 'Moom' WHERE id = (SELECT account_id FROM statements WHERE id = ?)",
+                 (company,))
+    conn.commit()
+    on_company = untyped(conn, company, "RHODE SKIN 8812 SINGAPORE", 5323, "2026-09-11")
+    on_household = untyped(conn, card, "RHODE SKIN 8813 SINGAPORE", 4100, "2026-09-12")
+    answer(conn, "RHODE SKIN", "Health & Beauty", 0.99)
+
+    rhode = group_of(cards(client), on_company)
+
+    assert rhode["prefill"]["reason"] == "type"
+    assert rhode["account"] is None and rhode["currency"] == "SGD"
+    rows = {r["id"]: r for r in rhode["rows"]}
+    assert rows[on_company]["prefill"] == {"book": "Moom", "reason": "account"}
+    assert rows[on_company]["account"] == "Sample card 0042"
+    assert "prefill" not in rows[on_household]
+    assert rows[on_household]["account"] == "Sample card 0001"
 
 
 # --- case 2: a PayNow names nothing --------------------------------------------
@@ -163,6 +237,18 @@ def test_case_3_rows_under_check_each_row_carry_merchant_type_usual_and_own_book
     assert (line["merchant"], line["service_id"], line["type"], line["type_id"]) == (
         "Sample Travelsite", svc, "Travel", type_id(conn, "Travel"))
     assert (line["usual_book"], line["book"]) == ("Moom", "Kalesh")
+
+
+def test_case_3_a_sub_type_reads_with_its_parent_as_the_queue_shows_it(client, conn, card, key):
+    svc = merchant(conn, "Sample Golfclub", "Moom", "Fitness > Golf")
+    conn.execute("UPDATE services SET review_each_time = 1 WHERE id = ?", (svc,))
+    conn.commit()
+    add_row(conn, card, "SAMPLE GOLFCLUB GREEN FEE", 21000, service_id=svc, book="Moom",
+            type_name="Fitness > Golf", day="2026-09-14")
+
+    [line] = cards(client)["check_each"]["rows"]
+
+    assert line["display_type"] == "Fitness > Golf"
 
 
 # --- case 4: the transfers waiting ------------------------------------------------
@@ -202,6 +288,12 @@ def test_case_5_with_jev_off_groups_come_back_blank_and_nothing_is_asked(
 
     assert sorted(r["id"] for g in groups for r in g["rows"]) == sorted(book.values())
     assert all((g["route"], g["types"]) == ("blank", []) for g in groups)
+    # With no guess, each card is one wording, as the Queue draws them.
+    payload = cards(client)
+    old, new = group_of(payload, book["indigo_old"]), group_of(payload, book["indigo_new"])
+    assert ([r["id"] for r in old["rows"]], [r["id"] for r in new["rows"]]) == (
+        [book["indigo_old"]], [book["indigo_new"]])
+    assert (old["merchant"], new["merchant"]) == ("INDIGOAIR 312-4567890 MUMBAI", "INDIGOAIR 312-9988776 MUMBAI")
     # The name and wording are fin's own and stand without Jev.
     indigo = group_of(cards(client), book["indigo_old"])
     assert (indigo["suggested_name"], indigo["suggested_wording"]) == ("Indigoair", "INDIGOAIR")
@@ -224,16 +316,21 @@ def test_the_read_writes_nothing(client, conn, book, key):
 # --- case 8: a large Queue ---------------------------------------------------------------
 
 
-def test_case_8_two_thousand_rows_with_no_type_come_back_cut_and_say_so(client, conn, card, key, monkeypatch):
-    for m in range(1000):
+def many_untyped(conn, statement_id: int, merchants: int = 1000) -> None:
+    """Two rows with no type for each of `merchants` stalls, the last the biggest."""
+    for m in range(merchants):
         name = f"SAMPLE STALL {chr(65 + m % 26)}{chr(65 + m // 26 % 26)}{chr(65 + m // 676)}"
         for n in range(2):
             conn.execute(
                 "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type)"
                 " VALUES (?, '2026-09-10', ?, ?, 'expense')",
-                (card, f"{name} 00{n}2 SG", money.to_minor(10 + m)),
+                (statement_id, f"{name} 00{n}2 SG", money.to_minor(10 + m)),
             )
     conn.commit()
+
+
+def test_case_8_two_thousand_rows_with_no_type_come_back_cut_and_say_so(client, conn, card, key, monkeypatch):
+    many_untyped(conn, card)
 
     statements = []
     real = fin_app.get_connection

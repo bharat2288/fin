@@ -3653,6 +3653,13 @@ def _suggested(answer, type_ids: dict) -> tuple[str, list]:
     return (where, types) if types else ("blank", [])
 
 
+# A row's parts as the transaction list reads them, over `row_parts rp`: its
+# own part (what the Queue shows and sorts by) and what its pill words.
+_PARTS_COLUMNS = """rp.own_minor, rp.expected_minor, rp.placed_minor,
+               (SELECT COALESCE(SUM(so.amount_minor), 0) FROM set_off so
+                WHERE so.payment_row_id = t.id AND so.expectation_id IS NULL) AS waiting_minor"""
+
+
 def _untyped_groups(conn, on: bool) -> list[dict]:
     """Every row with no type, grouped by merchant with the stored guess for
     each group: {merchant, route, types, rows}, the biggest row's group first.
@@ -3664,11 +3671,12 @@ def _untyped_groups(conn, on: bool) -> list[dict]:
     rows = conn.execute(f"""
         SELECT t.id, t.date, t.description, t.amount_minor, t.flow_type, t.service_id,
                {book_expr('t')} AS book, a.type AS account_kind, a.name AS account_name,
-               COALESCE(a.currency, 'SGD') AS currency
+               COALESCE(a.currency, 'SGD') AS currency, {_PARTS_COLUMNS}
         FROM transactions t
         LEFT JOIN services svc ON t.service_id = svc.id
         JOIN statements s ON t.statement_id = s.id
         JOIN accounts a ON s.account_id = a.id
+        JOIN row_parts rp ON rp.row_id = t.id
         WHERE {_untyped_rows()} AND {_expense_visibility_filter('svc')}
         ORDER BY t.amount_minor DESC, t.id
     """).fetchall()
@@ -3703,37 +3711,67 @@ def api_queue_guesses():
 
 # The Queue read whole for chat (chat-queue-read 01): no list in it holds more
 # than this many rows; past it the list says "showing N of M", as the Queue does.
-QUEUE_ROW_CAP = 500
+# Chat reads all three lists in one answer, so the biggest come and the rest
+# wait until those are labelled.
+QUEUE_ROW_CAP = 100
 
 
 def _queue_row(r) -> dict:
-    """A row as a Queue card lists it: its date, words, amount, account and book."""
+    """A row as a Queue card lists it: its date, words, amount and the own part
+    the Queue shows (with the pill saying why they differ), account and book."""
     return {
         "id": r["id"], "date": r["date"], "description": r["description"],
-        "amount_minor": r["amount_minor"], "amount": money.from_minor(r["amount_minor"], r["currency"]),
+        "amount_minor": r["amount_minor"], "counted_minor": r["own_minor"],
+        "expect_pill": _parts_pill(r["amount_minor"], r["expected_minor"], r["placed_minor"],
+                                   r["waiting_minor"], r["currency"]),
         "currency": r["currency"], "account": mask_card_number(r["account_name"] or ""), "book": r["book"],
     }
 
 
+def _queue_card_groups(conn, on: bool) -> list[dict]:
+    """The rows with no type as the Queue draws their cards, each group
+    {merchant, route, types, side, rows}: rows Jev has a guess for (sure or
+    three) one card per merchant string, any other row one card per its
+    description, upper-cased and trimmed (merchantCards), each split by side,
+    money out or in (sureGroups, laneCards). The biggest row's card first, by
+    the own part the Queue sorts on. /api/queue/guesses keeps its own groups."""
+    placed = [(g, r) for g in _untyped_groups(conn, on) for r in g["rows"]]
+    placed.sort(key=lambda p: (p[1]["own_minor"], p[1]["date"] or "", p[1]["id"]), reverse=True)
+    cards = {}
+    for g, r in placed:
+        guessed = g["route"] != "blank"
+        name = g["merchant"] if guessed else (r["description"] or "").strip().upper()
+        side = "in" if r["amount_minor"] < 0 else "out"
+        card = cards.get((side, guessed, name))
+        if card is None:
+            card = cards[(side, guessed, name)] = {
+                "merchant": name, "route": g["route"], "types": g["types"], "side": side, "rows": []}
+        card["rows"].append(r)
+    return list(cards.values())
+
+
 def _queue_list(conn, where: str, params: list, *, hide: bool) -> tuple[list, int]:
-    """The rows `where` picks, the biggest first, up to QUEUE_ROW_CAP, and how
-    many it picks in all. `hide` leaves out the merchants hidden from expense
-    views, as the Queue's list of them does."""
+    """The rows `where` picks, the biggest own part first as the Queue sorts
+    them, up to QUEUE_ROW_CAP, and how many it picks in all. `hide` leaves out
+    the merchants hidden from expense views, as the Queue's list of them does."""
     if hide:
         where = f"{where} AND {_expense_visibility_filter('svc')}"
     joins = """FROM transactions t
         LEFT JOIN services svc ON t.service_id = svc.id
         LEFT JOIN types ty ON t.type_id = ty.id
+        LEFT JOIN types tp ON ty.parent_id = tp.id
         JOIN statements s ON t.statement_id = s.id
         JOIN accounts a ON s.account_id = a.id"""
     total = conn.execute(f"SELECT COUNT(*) {joins} WHERE {where}", params).fetchone()[0]
     rows = conn.execute(f"""
         SELECT t.id, t.date, t.description, t.amount_minor, {book_expr('t')} AS book,
                a.name AS account_name, COALESCE(a.currency, 'SGD') AS currency,
-               t.service_id, svc.name AS service_name, svc.book AS service_book, t.type_id, ty.name AS type
+               t.service_id, svc.name AS service_name, svc.book AS service_book, t.type_id,
+               ty.name AS type, tp.name AS parent_type, {_PARTS_COLUMNS}
         {joins}
+        JOIN row_parts rp ON rp.row_id = t.id
         WHERE {where}
-        ORDER BY t.amount_minor DESC, t.id
+        ORDER BY rp.own_minor DESC, t.date DESC, t.id DESC
         LIMIT ?
     """, [*params, QUEUE_ROW_CAP]).fetchall()
     return rows, total
@@ -3766,6 +3804,26 @@ def _group_prefill(rows: list, prefills: dict, top_type_id: int | None, proposes
     return {"book": proposes.get(top_type_id), "reason": book_prefill.TYPE, "hint": ""}
 
 
+def _card_rows(rows: list, prefills: dict, prefill: dict) -> tuple[dict, list]:
+    """A card's rows as chat reads them, saying nothing twice: the currency
+    and account every row shares are said once, on the card (None there when
+    they differ, and each row says its own), and a row names its own prefilled
+    book only when it is from history or a company's account and differs from
+    the card's."""
+    listed = [_queue_row(r) for r in rows]
+    shared = {k: listed[0][k] if all(x[k] == listed[0][k] for x in listed) else None
+              for k in ("currency", "account")}
+    for x in listed:
+        for k, v in shared.items():
+            if v is not None:
+                del x[k]
+        own = prefills.get(x["id"])
+        if own and own["book"] and own["reason"] != book_prefill.TYPE and (
+                own["book"], own["reason"]) != (prefill["book"], prefill["reason"]):
+            x["prefill"] = {"book": own["book"], "reason": own["reason"]}
+    return shared, listed
+
+
 @app.route("/api/queue/cards")
 def api_queue_cards():
     """The Queue's labelling work as its cards hold it, for chat to read: the
@@ -3777,17 +3835,20 @@ def api_queue_cards():
     never asks Jev and writes nothing."""
     on = suggest.key() is not None
     with get_db() as conn:
-        groups = _untyped_groups(conn, on)
+        groups = _queue_card_groups(conn, on)
         each, each_total = _queue_list(conn, _not_checked_rows(), [], hide=True)
         waiting_where, waiting_params = _waiting_rows()
         transfers, transfers_total = _queue_list(conn, waiting_where, waiting_params, hide=False)
         waiting = _waiting_sides(conn)
+        # The merchant a name finds, ignoring case: the first by name, as the
+        # card takes it from the merchants list.
         held = {}
         for svc in conn.execute(
-            "SELECT svc.id, svc.name, svc.type_id, ty.name AS type, svc.book"
-            " FROM services svc LEFT JOIN types ty ON ty.id = svc.type_id ORDER BY svc.id"
+            "SELECT svc.id, svc.name, svc.type_id, ty.name AS type, svc.book,"
+            " COALESCE(svc.review_each_time, 0) AS review_each_time"
+            " FROM services svc LEFT JOIN types ty ON ty.id = svc.type_id ORDER BY svc.name, svc.id"
         ):
-            held.setdefault(svc["name"].lower(), dict(svc))
+            held.setdefault(svc["name"].lower(), {**dict(svc), "review_each_time": bool(svc["review_each_time"])})
         proposes = book_type.proposed_books(conn)
         # The groups up to the cap, the rows of each oldest first: the first
         # names the merchant the card's save makes.
@@ -3804,15 +3865,17 @@ def api_queue_cards():
     for g, rows, listed in shown:
         name = name_wording.suggest_name(rows[0]["description"])
         top = g["types"][0]["type_id"] if g["route"] == "prefill" and g["types"] else None
+        prefill = _group_prefill(listed, prefills, top, proposes)
+        shared, card_rows = _card_rows(listed, prefills, prefill)
         cards.append({
-            "merchant": g["merchant"], "route": g["route"], "types": g["types"],
+            "merchant": g["merchant"], "route": g["route"], "types": g["types"], "side": g["side"],
             "suggested_name": name,
             "suggested_wording": name_wording.suggest_pattern(rows[0]["description"]),
-            "prefill": _group_prefill(listed, prefills, top, proposes),
+            "prefill": prefill,
             "held": held.get(name.lower()) if name else None,
+            **shared,
             "row_count": len(rows),
-            "rows": [{**_queue_row(r), "prefill": {k: prefills[r["id"]][k] for k in ("book", "reason")}}
-                     for r in listed],
+            "rows": card_rows,
         })
     untyped_total = sum(len(g["rows"]) for g in groups)
     lists = {
@@ -3820,7 +3883,8 @@ def api_queue_cards():
                     "shown": _shown_of(QUEUE_ROW_CAP - room, untyped_total)},
         "check_each": {"rows": [{
             **_queue_row(r), "merchant": r["service_name"], "service_id": r["service_id"],
-            "type": r["type"], "type_id": r["type_id"], "usual_book": r["service_book"] or r["book"],
+            "type": r["type"], "display_type": format_type_display(r["parent_type"], r["type"]),
+            "type_id": r["type_id"], "usual_book": r["service_book"] or r["book"],
         } for r in each], "total": each_total, "shown": _shown_of(len(each), each_total)},
         "transfers": {
             "waiting": waiting["count"], "waiting_total": money.from_minor(waiting["net_minor"]),

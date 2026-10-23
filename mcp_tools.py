@@ -210,13 +210,19 @@ _READS = [
     Tool(
         "queue",
         "The Queue's labelling work as its cards hold it. The rows with no type in their "
-        "merchant groups, the biggest first: each group's rows (date, amount, account), Jev's "
-        "guess (types with how sure, and route: prefill, top3 or blank; blank with Jev off), "
-        "the name and wording fin suggests for the merchant and its rule (empty for a PayNow "
-        "or a transfer: the operator gives them), the book the card prefills and why, and the "
-        "merchant fin already holds by that name, if any. Then the rows waiting under Check "
-        "each row (merchant, type, usual book, the row's own book) and the transfers waiting "
-        "for a label (count, totals, rows). Each list says when it is cut (showing N of M). "
+        "groups, one per Queue card (a merchant string Jev has a guess for, else one wording; "
+        "split by side, out or in), the biggest first: each group's rows (date, amount_minor, "
+        "counted_minor: the row's own part the Queue shows, with expect_pill saying why they "
+        "differ), Jev's guess (types with how sure, and route: prefill, top3 or blank; blank "
+        "with Jev off), the name and wording fin suggests for the merchant and its rule (empty "
+        "for a PayNow or a transfer: the operator gives them), the book the card prefills and "
+        "why, and the merchant fin already holds by that name, if any (held.name is the "
+        "spelling the card shows; with held.review_each_time each row keeps its own book). "
+        "Currency and account every row of a group shares are on the group; a row names its "
+        "own prefilled book only when it differs. Then the rows waiting under Check each row "
+        "(merchant, type, usual book, the row's own book) and the transfers waiting for a "
+        "label (count, totals, rows). Amounts are in minor units of the row's currency. Each "
+        "list holds the biggest 100 and says when it is cut (showing N of M). "
         "This only reads and applies nothing: saving a card (a group's name, wording, type and "
         "book at once) is the operator's, in fin's Queue.",
         _schema(),
