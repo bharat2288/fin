@@ -358,6 +358,29 @@ def wording_reach(conn: sqlite3.Connection, pattern: str, match_type: str = "con
     return reach
 
 
+def together(reaches: list[Reach]) -> Reach:
+    """One reach for a teach of several wordings (queue-naming 17): the rows
+    any of them labels, each once, and of them those another merchant holds;
+    the wordings named together. One wording's reach is itself."""
+    if len(reaches) == 1:
+        return reaches[0]
+    first = reaches[0]
+    reach = Reach(pattern=" · ".join(r.pattern for r in reaches), match_type=first.match_type,
+                  service_id=first.service_id, taught={"wordings": [r.taught for r in reaches]})
+    seen = set()
+    for one in reaches:
+        for held in one.rows:
+            if held["id"] in seen:
+                continue
+            seen.add(held["id"])
+            reach.rows.append(held)
+            if held["service_id"] is not None and held["service_id"] != reach.service_id:
+                reach.others.setdefault(held["service_id"], []).append(held)
+        reach.names.update(one.names)
+    reach.rows.sort(key=lambda r: (r["date"] or "", r["id"]), reverse=True)
+    return reach
+
+
 def kept(held) -> bool:
     """A row the rule leaves with its merchant: a field of it chosen or
     worked out."""

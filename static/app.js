@@ -1979,7 +1979,8 @@ function recBlocks(key) {
 }
 /** Read the count for a wording, after REC_WAIT ms of quiet (0: at once). */
 function recLoad(key, wording, wait = REC_WAIT) {
-    const ctx = recCtx.get(key);
+    let ctx = recCtx.get(key);
+    if (ctx?.of) ctx = recCtx.get(ctx.of);   // an added wording: its line's
     clearTimeout(recTimers.get(key));
     recFound.set(key, { wording, reach: null });
     if (!ctx) return;
@@ -2011,6 +2012,7 @@ function recShown(key, ctx) {
 function recDraw(key, { whole = false } = {}) {
     const ctx = recCtx.get(key);
     if (!ctx) return;
+    if (ctx.of) { recMoreDraw(ctx.of); recCtx.get(ctx.of)?.changed?.(); return; }
     const box = $$('[data-rec-line]').find(x => x.dataset.recLine === key);
     if (box && recOpen.has(key) && !whole) {
         const n = $('.rec__n', box);
@@ -2042,6 +2044,93 @@ function recWhenShown(key) {
     });
     recWatch.observe(document.body, { childList: true, subtree: true });
 }
+
+// Several wordings (queue-naming C, cases 14-18): the sure card's opened line
+// adds wordings under its own with "+ another wording", each with its own
+// field, live count and warning (the same reach read) and a remove link; the
+// save sends them with its own, one rule each, in one change. An empty
+// wording, or one the line already has, is refused before saving.
+const recMore = new Map();     // a teach's key -> the keys of the wordings added under it
+let recMoreN = 0;
+/** Why an added wording cannot be saved, before its count: it is empty, or
+ *  the line already has it (ignoring case). '' when it can. */
+function recMoreRefused(key, xk) {
+    const wording = recKeyWording(xk).toUpperCase();
+    if (!wording) return 'Say the wording the rule recognises';
+    const keys = recMore.get(key) || [];
+    const before = [recKeyWording(key), ...keys.slice(0, keys.indexOf(xk)).map(recKeyWording)];
+    return before.some(w => (w || '').toUpperCase() === wording) ? 'Already a wording here' : '';
+}
+/** An added wording's words: why it is refused, else its live count. */
+function recMoreCountHTML(key, xk) {
+    const refused = recMoreRefused(key, xk);
+    if (refused) return `<span class="warn-word">${esc(refused)}</span>`;
+    const f = recFound.get(xk), wording = recKeyWording(xk);
+    if (!f || f.wording !== wording) recLoad(xk, wording, 0);
+    return recCountHTML(recReach(xk));
+}
+/** The wordings added under a teach's line, then the link that adds one. */
+function recMoreHTML(key) {
+    const lines = (recMore.get(key) || []).map(xk => {
+        const id = `rec-${xk.replace(/[^A-Za-z0-9]/g, '_')}`;
+        return `<div class="rec rec--edit rec--more" data-rec-line="${esc(xk)}"><label class="sr-only" for="${id}">Another wording</label>
+            <div class="rec__row"><input type="text" id="${id}" class="mono" data-rec-more="${esc(xk)}" value="${esc(recKeyWording(xk))}" autocomplete="off" spellcheck="false">
+            <button type="button" class="link" data-act="rec-more-remove" data-key="${esc(xk)}" aria-label="Remove the wording">remove</button></div>
+            <p class="rec__n" data-rec-n="${esc(xk)}" aria-live="polite">${recMoreCountHTML(key, xk)}</p></div>`;
+    }).join('');
+    return `<div class="rec-more" data-rec-more-of="${esc(key)}">${lines}<button type="button" class="link" data-act="rec-more" data-key="${esc(key)}">+ another wording</button></div>`;
+}
+/** The wordings a teach's save sends beside its own. */
+function recMoreWordings(key) { return (recMore.get(key) || []).map(recKeyWording); }
+/** An added wording cannot be saved: refused, or refused by the reach read. */
+function recMoreBlocks(key) { return (recMore.get(key) || []).some(xk => recMoreRefused(key, xk) || recReach(xk)?.error); }
+/** Each added wording's words drawn again in place (a wording before it may have changed). */
+function recMoreDraw(key) {
+    (recMore.get(key) || []).forEach(xk => {
+        const n = $$('[data-rec-n]').find(x => x.dataset.recN === xk);
+        if (n) n.innerHTML = recMoreCountHTML(key, xk);
+    });
+}
+/** The list drawn again whole, then the line's save state. */
+function recMoreRedraw(key) {
+    const box = $$('[data-rec-more-of]').find(x => x.dataset.recMoreOf === key);
+    if (box) box.outerHTML = recMoreHTML(key);
+    recCtx.get(key)?.changed?.();
+}
+/** A saved line's added wordings, gone. */
+function recMoreForget(key) {
+    (recMore.get(key) || []).forEach(xk => { clearTimeout(recTimers.get(xk)); [recWords, recFound, recCtx, recTimers].forEach(m => m.delete(xk)); });
+    recMore.delete(key);
+}
+ACT['rec-more'] = el => {
+    const key = el.dataset.key, xk = `${key}+${++recMoreN}`;
+    recMore.set(key, [...(recMore.get(key) || []), xk]);
+    recWords.set(xk, '');
+    recCtx.set(xk, { of: key });
+    recMoreRedraw(key);
+    $$('[data-rec-more]').find(x => x.dataset.recMore === xk)?.focus();
+};
+ACT['rec-more-word'] = el => {
+    const xk = el.dataset.recMore, ctx = recCtx.get(xk);
+    if (!ctx) return;
+    const wording = el.value.trim();
+    recWords.set(xk, wording);
+    if (wording && !recMoreRefused(ctx.of, xk)) recLoad(xk, wording);
+    recDraw(xk);
+};
+ACT['rec-more-remove'] = el => {
+    const xk = el.dataset.key, key = recCtx.get(xk)?.of;
+    if (!key) return;
+    clearTimeout(recTimers.get(xk));
+    [recWords, recFound, recCtx, recTimers].forEach(m => m.delete(xk));
+    recMore.set(key, recMore.get(key).filter(k => k !== xk));
+    recMoreRedraw(key);
+    $$('[data-act="rec-more"]').find(x => x.dataset.key === key)?.focus();
+};
+document.addEventListener('input', e => {
+    const el = e.target.closest && e.target.closest('[data-rec-more]');
+    if (el) ACT['rec-more-word'](el);
+});
 ACT['rec-edit'] = el => {
     recOpen.add(el.dataset.key);
     recDraw(el.dataset.key, { whole: true });
@@ -2108,8 +2197,8 @@ function sureRows(g) {
     const rows = g.items.map(i => i.row);
     return sureAll.has(g.key) ? rows : rows.slice(0, SURE_ROWS);
 }
-/** Ready to save: a name, a book, and under Check each row a book on every row drawn. */
-function sureReady(g) { return !!g.name && !!sureBook(g) && !recBlocks(g.key) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
+/** Ready to save: a name, a book, every wording savable, and under Check each row a book on every row drawn. */
+function sureReady(g) { return !!g.name && !!sureBook(g) && !recBlocks(g.key) && !recMoreBlocks(g.key) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
 
 // The name on the card (queue-naming B): the opened line's Name field holds
 // the name its save makes, fin's suggestion until it is changed, with a
@@ -2226,7 +2315,7 @@ function sureDetailHTML(g, at) {
     const field = `<div class="sname"><label class="cap" for="${nameId}">Name</label>
         <input type="text" id="${nameId}" data-sure-name="${esc(g.key)}" list="sure-merchants" value="${esc(g.name)}" autocomplete="off" spellcheck="false" aria-describedby="${nameId}-say"${queueBusy ? ' disabled' : ''}>
         <p class="sname__say" id="${nameId}-say" data-sure-said="${esc(g.key)}" aria-live="polite">${sureNameSay(g)}</p></div>`;
-    return `<div class="det">${field}${rec}
+    return `<div class="det">${field}${rec}${rec ? recMoreHTML(g.key) : ''}
         <div class="det__top"><div class="det__set"><span class="cap" id="nr-${at}">New rows</span>${eachSegHTMLQ('sure-set', g.key, g.name, each, { labelledBy: `nr-${at}` })}</div>
             <button type="button" class="btn sm ghost" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></div>
         <p class="det__say">${sureSay(g)}</p>
@@ -2412,7 +2501,7 @@ async function saveSureGroup(g, labelled) {
     const each = sureEach(g);
     const drawn = new Set(sureRows(g).map(x => x.id));
     const res = await saveResolve(resolveBody(rows[0], sureType(g).type_id, { merchant: g.name, visible: true, book: sureBook(g), each,
-        pattern: recWording(g.key, g.items[0].row) }), rows,
+        pattern: recWording(g.key, g.items[0].row), wordings: recMoreWordings(g.key) }), rows,
         { quiet: true, check: each ? x => sureRowBook(g, x) : null, onScreen: each ? rows.filter(x => drawn.has(x.id)) : null });
     res.labelledIds.forEach(id => labelled.add(id));
     return res;
@@ -2436,6 +2525,7 @@ function sureForget(g) {
     sureBooks.delete(g.key);
     sureSets.delete(g.key);
     sureNames.delete(g.key);
+    recMoreForget(g.key);
     g.items.forEach(i => sureRowBooks.delete(i.row.id));
 }
 /** One merchant's save said: the sure card's ✓, Pick a type's Save and "This
@@ -2850,13 +2940,14 @@ ACT['ww-scope'] = el => {
 };
 /** What resolve takes for a row with no type and the type chosen for it.
  *  each: the merchant setting as taught (true: Check each row); left out,
- *  the merchant keeps its own. */
-function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern, book = '', visible = false, each } = {}) {
+ *  the merchant keeps its own. wordings: the others its rule recognises. */
+function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern, book = '', visible = false, each, wordings = [] } = {}) {
     const name = merchant || row.service_name || suggestName(row.description) || titleCase(suggestPattern(row.description) || row.description || '');
     const body = { tx_id: row.id, service_name: name, type_id: typeId, apply_scope: scope,
         pattern: pattern ?? suggestPattern(row.description), match_type: 'contains', suggestion_visible: visible };
     if (book) body.book = book;
     if (typeof each === 'boolean' && scope === 'service_default') body.check_each_row = each;
+    if (wordings.length && scope !== 'transaction') body.wordings = wordings;
     return body;
 }
 /** Save a type for a row with no type. A merchant text too plain to make a
@@ -2904,7 +2995,7 @@ async function saveResolve(body, group = [], { quiet = false, check = null, onSc
         : group.filter(x => x.id !== body.tx_id && !reached.has(x.id) && !x.type_id);
     let done = 0, error = null;
     for (const x of rest) {
-        const { check_each_row: _, ...one } = body;   // the setting went with the first
+        const { check_each_row: _, wordings: __, ...one } = body;   // the setting and the wordings went with the first
         const more = await send('POST', '/api/transactions/resolve', { ...one, tx_id: x.id, apply_scope: 'transaction', service_id: r.data.service_id ?? body.service_id });
         if (!more.ok) {
             error = more.data.error || 'One of the rows could not be labelled';

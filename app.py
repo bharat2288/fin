@@ -1868,6 +1868,37 @@ def _write_plan(conn, plan, answer: str | None) -> tuple[int, int]:
     return relabelled, checked
 
 
+class BadWording(ValueError):
+    """A teach's other wordings are refused: the whole teach writes nothing."""
+
+
+def _other_wordings(value, pattern: str, apply_scope: str) -> list[str]:
+    """The other wordings a teach's rule also recognises (queue-naming C):
+    each one more `contains` rule for the merchant, saved with the pattern in
+    the one change. Refused, every one, before anything is written: a wording
+    that is empty, there twice (the pattern's among them, ignoring case), or
+    refused as a pattern is; and any at all without a rule to go with."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise BadWording("wordings must be a list of the other wordings the rule recognises")
+    if value and (apply_scope not in {"rule", "service_default"} or not pattern):
+        raise BadWording("Other wordings go with a rule: not with this row only")
+    out, seen = [], {pattern.upper()}
+    for wording in value:
+        if not isinstance(wording, str) or not wording.strip():
+            raise BadWording("Say each wording the rule recognises")
+        wording = wording.strip()
+        if wording.upper() in seen:
+            raise BadWording(f"The wording {wording} is there twice")
+        why = _rule_pattern_error(wording)
+        if why:
+            raise BadWording(why)
+        seen.add(wording.upper())
+        out.append(wording)
+    return out
+
+
 def _taught_overrides(apply_scope: str, book, type_id, merchant_book) -> dict:
     """The overrides a rule taught by resolve carries: with a rule override,
     the type, and the book only where it is not the merchant's; none for the
@@ -3043,6 +3074,9 @@ def api_resolve_transaction():
             used; for a new service the type is required and the book is the
             one the type proposes (Software & AI tools proposes none: say it).
         pattern: merchant rule pattern (auto-suggested from description)
+        wordings: other wordings the rule also recognises, each one more
+            'contains' rule for the merchant in the same change; one refused
+            refuses the whole request (_other_wordings)
         match_type: 'contains' (default) or 'startswith'
         apply_scope: where the label applies —
             'transaction'     this row only (a row may override both)
@@ -3096,6 +3130,12 @@ def api_resolve_transaction():
     pattern_error = _rule_pattern_error(pattern)
     if pattern and apply_scope in {"rule", "service_default"} and pattern_error:
         return jsonify({"error": pattern_error}), 400
+    try:
+        wordings = _other_wordings(data.get("wordings"), pattern, apply_scope)
+    except BadWording as e:
+        return jsonify({"error": str(e)}), 400
+    # Every wording the teach's rules recognise: the pattern, then the others.
+    taught_words = [pattern, *wordings] if pattern and apply_scope in {"rule", "service_default"} else []
     flow_type = data.get("flow_type")
     if flow_type is not None:
         try:
@@ -3162,8 +3202,9 @@ def api_resolve_transaction():
                 moved = {f: v for f, v in (("book", book), ("type_id", type_id)) if v != svc[f]}
                 merchant_plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id},
                                                                  teaching=True)
-            if pattern and apply_scope in {"rule", "service_default"}:
-                reach = relabel_preview.wording_reach(conn, pattern, match_type, service_id if svc else None)
+            if taught_words:
+                reach = relabel_preview.together([
+                    relabel_preview.wording_reach(conn, w, match_type, service_id if svc else None) for w in taught_words])
                 if reach.others:
                     shown_name = conn.execute(
                         "SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()[0] if svc else service_name
@@ -3179,13 +3220,14 @@ def api_resolve_transaction():
                 # past rows the change writes. Rows with no merchant are the
                 # teach's own, waiting as the row taught is, never counted
                 # (case 29); where nothing else asks, so are these.
-                if plan.count and svc and pattern and apply_scope in {"rule", "service_default"}:
+                if plan.count and svc and taught_words:
                     taught = label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book))
                     fills = {}
-                    for held, sets in _teach_fills(conn, service_id, tx_id, pattern, match_type, book, type_id, taught):
-                        sets = {"service_id": service_id, **sets}
-                        if held["service_id"] == service_id and _would_change(held, sets):
-                            fills[held["id"]] = sets
+                    for wording in taught_words:
+                        for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
+                            sets = {"service_id": service_id, **sets}
+                            if held["id"] not in fills and held["service_id"] == service_id and _would_change(held, sets):
+                                fills[held["id"]] = sets
                     plan = relabel_preview.with_fills(conn, plan, fills)
                 refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
                 if refused is not None:
@@ -3217,44 +3259,45 @@ def api_resolve_transaction():
                 conn.execute("UPDATE services SET review_each_time = ? WHERE id = ?",
                              (1 if check_each_row else 0, service_id))
 
-            # Step 2: Create merchant rule if pattern provided (optional for PayNow/transfers)
-            rule_id = None
-            backfilled = 0
+            # Step 2: Create a merchant rule for each wording, the pattern's
+            # first (none for a PayNow/transfer taught without one).
+            # A rule override carries the type, and the book only where it
+            # is not the merchant's.
+            rule_ids = []
             backfilled_ids = []
-            if pattern and apply_scope in {"rule", "service_default"}:
+            overrides = _taught_overrides(apply_scope, book, type_id, merchant_book)
+            override_type_id, override_book = overrides["type_override_id"], overrides["book_override"]
+            taught = label_source.rule_sources(overrides)
+            for wording in taught_words:
                 rule_exists = conn.execute(
                     "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
-                    (pattern.upper(),),
+                    (wording.upper(),),
                 ).fetchone()
-                # A rule override carries the type, and the book only where it
-                # is not the merchant's.
-                overrides = _taught_overrides(apply_scope, book, type_id, merchant_book)
-                override_type_id, override_book = overrides["type_override_id"], overrides["book_override"]
-                taught = label_source.rule_sources(overrides)
                 if not rule_exists:
                     conn.execute(
                         "INSERT INTO merchant_rules (pattern, service_id, book_override, "
                         "type_override_id, match_type, confidence) "
                         "VALUES (?, ?, ?, ?, ?, 'confirmed')",
-                        (pattern, service_id, override_book, override_type_id, match_type),
+                        (wording, service_id, override_book, override_type_id, match_type),
                     )
-                    rule_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    rule_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
                 else:
-                    rule_id = rule_exists["id"]
+                    rule_ids.append(rule_exists["id"])
                     conn.execute(
                         "UPDATE merchant_rules SET service_id = ?, book_override = ?, "
                         "type_override_id = ? WHERE id = ?",
-                        (service_id, override_book, override_type_id, rule_id),
+                        (service_id, override_book, override_type_id, rule_exists["id"]),
                     )
 
-                # Backfill the other rows matching this pattern that have no
+                # Backfill the other rows matching this wording that have no
                 # merchant, or have this merchant but still no type: the
                 # rows a preview, where one was asked, counted as the teach's
                 # own (_teach_fills).
-                for held, sets in _teach_fills(conn, service_id, tx_id, pattern, match_type, book, type_id, taught):
+                for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
                     if _write_label(conn, held, {"service_id": service_id, **sets}):
                         backfilled_ids.append(held["id"])
-                backfilled = len(backfilled_ids)
+            rule_id = rule_ids[0] if rule_ids else None
+            backfilled = len(backfilled_ids)
 
             # Step 3: Update the target transaction with explicit provenance.
             # flow_type override is independent of the label (ADR v2):
@@ -3295,6 +3338,7 @@ def api_resolve_transaction():
                 "success": True,
                 "service_id": service_id,
                 "rule_id": rule_id,
+                "rule_ids": rule_ids,
                 "book": book,
                 "type_id": type_id,
                 "backfilled": backfilled,
