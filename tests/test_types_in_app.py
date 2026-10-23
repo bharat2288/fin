@@ -126,6 +126,10 @@ def test_21_a_one_off_top_level_type_with_no_not_for_is_added(client):
     ({"name": "Childcare", "not_for": "n" * 301}, "what a type is not for can be at most 300 characters"),
     ({"name": "Childcare", "one_off": "yes"}, "one_off must be true or false"),
     ({"name": "Childcare", "kind": "income"}, "only a spending type can be added here"),
+    ({"name": "<img src=x onerror=alert(1)//"}, "a type's name cannot hold \"<\""),
+    ({"name": "Child\ncare"}, "a type's name cannot hold a line break or control character"),
+    ({"name": "Child\x00care"}, "a type's name cannot hold a line break or control character"),
+    ({"name": "Childcare", "covers": "nannies\x1b[2J"}, "the wording cannot hold control characters"),
 ])
 def test_22_an_add_that_breaks_a_rule_is_refused_in_words_and_writes_nothing(client, temp_db, body, reason):
     before = book_rows(temp_db)
@@ -253,6 +257,16 @@ def test_25_a_wording_that_breaks_a_rule_is_refused(client, temp_db, body, reaso
     assert resp.status_code == 400
     assert resp.get_json()["error"] == reason
     assert book_rows(temp_db) == before
+
+
+def test_a_line_break_in_the_wording_is_kept_as_one_space(client):
+    resp = add(client, name="Childcare", covers="nannies,\nafter-school care", not_for="school\r\n\tfees")
+    assert resp.status_code == 201, resp.get_json()
+    fix(client, "Dining", not_for="groceries\nand\nsupermarkets")
+
+    got = types(client)
+    assert (got["Childcare"]["covers"], got["Childcare"]["not_for"]) == ("nannies, after-school care", "school fees")
+    assert got["Dining"]["not_for"] == "groceries and supermarkets"
 
 
 def test_25_an_unknown_type_is_not_found(client):

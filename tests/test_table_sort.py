@@ -407,8 +407,8 @@ def test_case_12_an_account_page_rows_sort_on_the_server():
     """, answers={"/api/balance-sheet": SHEET, "/api/accounts/1/ties": TIES, "/api/anchors": [], "/api/statements/refused": {"refused": []},
                   "/api/transactions": {"transactions": [_row(1, "2026-09-01", "INDIGO", 30000, "Travel")], "total": 1, "pages": 1, "page": 1}})
     by_out, by_in, html = got
-    assert "sort=amount&sort_dir=asc" in by_out
-    assert "sort=amount&sort_dir=asc" in by_in            # money in, largest first: the most negative amount first
+    assert "sort=amount_out&sort_dir=asc" in by_out       # money out, smallest first; money-in rows last
+    assert "sort=amount_in&sort_dir=desc" in by_in        # money in, largest first; money-out rows last
     assert heads(html, "acct-rows") == ["date", "description", "type", "in", "out"]
 
 

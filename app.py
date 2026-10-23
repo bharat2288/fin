@@ -2653,21 +2653,33 @@ def api_transactions():
     per_page = int(request.args.get("per_page", 50))
     offset = (page - 1) * per_page
 
-    # Sort column — whitelist valid columns to prevent SQL injection
+    # Sort column — whitelist valid columns to prevent SQL injection. Each is
+    # (what comes last both ways, the column): an empty cell is last whichever
+    # way the column runs (spec case 11), and text sorts ignoring case.
     sort_col = request.args.get("sort", "date")
     sort_dir = request.args.get("sort_dir", "desc").upper()
+    own = expect_back.own_sql("t")  # by what each row counts: its own part once switched
     valid_sorts = {
-        "date": "t.date",
-        "description": "t.description",
-        "type": "ty.name",
-        "service": "svc.name",
-        "account": "a.name",
-        # By what each row counts: its own part once switched.
-        "amount": expect_back.own_sql("t"),
+        "date": (None, "t.date"),
+        "description": (None, "t.description COLLATE NOCASE"),
+        "type": ("ty.name IS NULL", "ty.name COLLATE NOCASE"),
+        "service": ("svc.name IS NULL", "svc.name COLLATE NOCASE"),
+        "account": (None, "a.name COLLATE NOCASE"),
+        "amount": (None, own),
+        # An account page's two money columns: a row on the other side is the
+        # empty cell, so last; money in is a negative amount, read as its size.
+        "amount_in": ("t.amount_minor >= 0", f"-{own}"),
+        "amount_out": ("t.amount_minor < 0", own),
     }
-    order_col = valid_sorts.get(sort_col, "t.date")
+    if sort_col not in valid_sorts:
+        sort_col = "date"
+    last_col, order_col = valid_sorts[sort_col]
     if sort_dir not in ("ASC", "DESC"):
         sort_dir = "DESC"
+    # The id breaks any tie, so a page boundary neither repeats nor skips a row:
+    # by date, rows of one day keep the order they came in, read either way.
+    ties = (f"t.id {sort_dir}",) if sort_col == "date" else ("t.date DESC", "t.id DESC")
+    order_by = ", ".join(c for c in (last_col, f"{order_col} {sort_dir}", *ties) if c)
 
     type_joins = _TYPE_JOINS.format(owner="t")
     with get_db() as conn:
@@ -2710,7 +2722,7 @@ def api_transactions():
             LEFT JOIN accounts oa ON t.other_side_id = oa.id
             JOIN row_parts rp ON rp.row_id = t.id
             WHERE 1=1 {filters}
-            ORDER BY {order_col} {sort_dir}, t.date DESC
+            ORDER BY {order_by}
             LIMIT ? OFFSET ?
             """,
             params + [per_page, offset],

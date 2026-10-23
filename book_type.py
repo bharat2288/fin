@@ -18,6 +18,7 @@ the app does not fix their wording either.
 from __future__ import annotations
 
 import sqlite3
+import unicodedata
 
 # (name, description). A new book is a new value here.
 BOOKS = (
@@ -334,8 +335,26 @@ def _words(value, what: str) -> str | None:
     return value.strip() or None
 
 
+def _controls(text: str) -> bool:
+    """Whether words hold a control character (a line break, a tab, an escape)."""
+    return any(unicodedata.category(c) == "Cc" for c in text)
+
+
+def _wording(value, what: str) -> str | None:
+    """A type's wording as stored: any run of spaces and line breaks is one
+    space, since it is read on one line and sent to Jev inside his question;
+    any other control character is refused."""
+    words = _words(value, what)
+    if words is None:
+        return None
+    words = " ".join(words.split())
+    if _controls(words):
+        raise TypeRefused("the wording cannot hold control characters")
+    return words
+
+
 def _covers(value) -> str:
-    covers = _words(value, "covers")
+    covers = _wording(value, "covers")
     if covers is None:
         raise TypeRefused("a type needs words for what it covers")
     if len(covers) > WORDING_MOST:
@@ -344,7 +363,7 @@ def _covers(value) -> str:
 
 
 def _not_for(value) -> str | None:
-    not_for = _words(value, "not_for")
+    not_for = _wording(value, "not_for")
     if not_for is not None and len(not_for) > WORDING_MOST:
         raise TypeRefused(f"what a type is not for can be at most {WORDING_MOST} characters")
     return not_for
@@ -381,6 +400,11 @@ def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
         raise TypeRefused("a type needs a name")
     if ">" in name:
         raise TypeRefused('a type\'s name cannot hold ">"')
+    # Read on every screen and in Jev's question: no markup, one line.
+    if "<" in name:
+        raise TypeRefused('a type\'s name cannot hold "<"')
+    if _controls(name):
+        raise TypeRefused("a type's name cannot hold a line break or control character")
     if len(name) > NAME_MOST:
         raise TypeRefused(f"a type's name can be at most {NAME_MOST} characters")
     if " ".join(name.replace("_", " ").split()).casefold() == suggest.NONE_OF_THESE.replace("_", " "):

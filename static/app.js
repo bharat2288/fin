@@ -1304,8 +1304,7 @@ const plainText = html => String(html || '').replace(/<[^>]*>/g, ' ').replace(/\
 function sortServer(table, cols, own = { sort: 'date', sort_dir: 'desc' }) {
     const s = sortOf(table), col = cols[s.key];
     if (!col) return own;
-    const desc = (s.dir === 'desc') !== !!col.flip;   // flip: a column read the other way from the server's (money in)
-    return { sort: col.server || s.key, sort_dir: desc ? 'desc' : 'asc' };
+    return { sort: col.server || s.key, sort_dir: s.dir === 'desc' ? 'desc' : 'asc' };
 }
 /** A heading that sorts its table; the arrow beside it is the stylesheet's. */
 function sortHead(table, key, cols) {
@@ -3343,11 +3342,11 @@ const TIE_SORT = {
     says: { label: 'Statement says', kind: 'money', of: t => t.closing_minor },
     check: { label: 'Check', kind: 'text', of: t => t.status },
 };
-/** An account's rows sort on the server (a page at a time). Money in is a negative amount,
- *  so its largest first is the server's amount ascending (flip). */
+/** An account's rows sort on the server (a page at a time). Money in and money out are each
+ *  their own server column, so the rows on the other side (an empty cell) come last both ways. */
 const ACCT_ROW_SORT = {
     date: { label: 'Date', kind: 'date' }, description: { label: 'Description', kind: 'text' }, type: { label: 'Labelled', kind: 'text' },
-    in: { label: 'Money in', kind: 'money', server: 'amount', flip: true }, out: { label: 'Money out', kind: 'money', server: 'amount' },
+    in: { label: 'Money in', kind: 'money', server: 'amount_in' }, out: { label: 'Money out', kind: 'money', server: 'amount_out' },
 };
 const accountPage = { page: 1, month: null };
 SORT_REDRAW['acct-rows'] = () => { accountPage.page = 1; rerender(); };
@@ -4148,7 +4147,7 @@ async function viewLists(tab) {
         const RULE_SORT = { pattern: { label: 'Pattern', kind: 'text', of: x => x.pattern }, match: { label: 'Match', kind: 'text', of: x => MATCH_WORDS[x.match_type] || x.match_type },
             merchant: { label: 'Merchant', kind: 'text', of: x => x.service_name }, sets: { label: 'Sets', kind: 'text', of: x => plainText(sets(x)) },
             rows: { label: 'Rows it labelled', kind: 'number', of: x => x.rows_labelled } };
-        const rows = sortRows('rules', shown, RULE_SORT).slice(0, 200).map(x => `<tr class="clickable" data-act="rule"data-id="${x.id}"><td class="sl-name"><b class="mono-ish">${esc(x.pattern)}</b></td><td class="small">${esc(MATCH_WORDS[x.match_type] || x.match_type)}</td>
+        const rows = sortRows('rules', shown, RULE_SORT).slice(0, 200).map(x => `<tr class="clickable" data-act="rule" data-id="${x.id}"><td class="sl-name"><b class="mono-ish">${esc(x.pattern)}</b></td><td class="small">${esc(MATCH_WORDS[x.match_type] || x.match_type)}</td>
             <td>${esc(x.service_name || '')}</td><td class="small">${sets(x)}</td>
             <td class="r num sl-fig">${x.rows_labelled ?? ''}<span class="sl-phone-word"> ${x.rows_labelled === 1 ? 'row' : 'rows'}</span></td>
             <td class="sl-sub">${esc(MATCH_WORDS[x.match_type] || x.match_type)} · gives ${esc(x.service_name || '')}${sets(x) ? ' · ' + sets(x) : ''}</td></tr>`).join('');
