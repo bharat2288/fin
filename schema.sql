@@ -135,7 +135,10 @@ CREATE TABLE IF NOT EXISTS services (
 );
 
 -- The type list: one list for every book, with one level of sub-type, and
--- the short list of income kinds. Filled from the declaration in book_type.py.
+-- the short list of income kinds. A new book's is filled from the declaration
+-- in book_type.py; once a book exists the table is the home of each type's
+-- wording, and the app may add a spending type or fix one's wording (fin
+-- RUL-002). Tracked by the change history.
 -- An existing database gains it, and the book and type columns, through
 -- convert_book_type.py.
 CREATE TABLE IF NOT EXISTS types (
@@ -729,6 +732,31 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'dismissal', OLD.id, 'delete',
         json_object('id', OLD.id, 'row_id', OLD.row_id, 'kind', OLD.kind, 'purchase_row_id', OLD.purchase_row_id, 'made_at', OLD.made_at), NULL);
+END;
+-- Types in the app (fin RUL-002). The table predates its triggers, so a
+-- book gains them on its next start (history.ADDED_ON_START).
+CREATE TRIGGER IF NOT EXISTS history_types_insert AFTER INSERT ON types
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'types', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'kind', NEW.kind, 'name', NEW.name, 'parent_id', NEW.parent_id, 'default_one_off', NEW.default_one_off, 'covers', NEW.covers, 'not_for', NEW.not_for, 'created_at', NEW.created_at));
+END;
+CREATE TRIGGER IF NOT EXISTS history_types_update AFTER UPDATE ON types
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'kind', OLD.kind, 'name', OLD.name, 'parent_id', OLD.parent_id, 'default_one_off', OLD.default_one_off, 'covers', OLD.covers, 'not_for', OLD.not_for, 'created_at', OLD.created_at) IS NOT json_object('id', NEW.id, 'kind', NEW.kind, 'name', NEW.name, 'parent_id', NEW.parent_id, 'default_one_off', NEW.default_one_off, 'covers', NEW.covers, 'not_for', NEW.not_for, 'created_at', NEW.created_at)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'types', NEW.id, 'update',
+        json_object('id', OLD.id, 'kind', OLD.kind, 'name', OLD.name, 'parent_id', OLD.parent_id, 'default_one_off', OLD.default_one_off, 'covers', OLD.covers, 'not_for', OLD.not_for, 'created_at', OLD.created_at),
+        json_object('id', NEW.id, 'kind', NEW.kind, 'name', NEW.name, 'parent_id', NEW.parent_id, 'default_one_off', NEW.default_one_off, 'covers', NEW.covers, 'not_for', NEW.not_for, 'created_at', NEW.created_at));
+END;
+CREATE TRIGGER IF NOT EXISTS history_types_delete AFTER DELETE ON types
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'types', OLD.id, 'delete',
+        json_object('id', OLD.id, 'kind', OLD.kind, 'name', OLD.name, 'parent_id', OLD.parent_id, 'default_one_off', OLD.default_one_off, 'covers', OLD.covers, 'not_for', OLD.not_for, 'created_at', OLD.created_at), NULL);
 END;
 -- history:end
 

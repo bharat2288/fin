@@ -600,6 +600,9 @@ _CHANGE_SUMMARIES = {
     "api_subscriptions_delete": "Deleted a subscription",
     "api_subscriptions_enrich": "Filled in subscriptions",
     "api_history_undo": "Undid a change",
+    # Each names its type in its own summary; these are the fallback.
+    "api_types_create": "Added a type",
+    "api_types_fix_wording": "Fixed a type's wording",
 }
 _CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
 
@@ -706,7 +709,8 @@ def _change_currencies(conn, changes: list[dict]) -> None:
     """Give each changed row the currency its amounts are in (and a bank
     row its account_id, from its statement): a row's and a
     figure's are their account's, an account's its own, a bill's its own.
-    A statement removed by the same entry still names its account there."""
+    A statement removed by the same entry still names its account there.
+    A type is also given its display name."""
     def account_currency(account_id):
         if account_id is None:
             return None
@@ -732,6 +736,13 @@ def _change_currencies(conn, changes: list[dict]) -> None:
             currency = account_currency(row.get("account_id"))
         elif c["table"] in ("accounts", "subscriptions"):
             currency = row.get("currency")
+        elif c["table"] == "types":
+            # A type is named as the screens name it ("Kids > Childcare"),
+            # its parent read from the book: a type is never re-parented.
+            parent = conn.execute(
+                "SELECT name FROM types WHERE id = ?", (row.get("parent_id"),)
+            ).fetchone() if row.get("parent_id") is not None else None
+            c["display_name"] = format_type_display(parent[0] if parent else None, row.get("name"))
         c["currency"] = currency or "SGD"
 
 
@@ -935,36 +946,97 @@ def index():
 # Reference data
 # ---------------------------------------------------------------------------
 
-@app.route("/api/types")
-def api_types():
-    """The type list as a flat list with parent info: spending types, or with
-    ?kind=income the income kinds. Read-only: the list is declared in
-    book_type.py and the table is filled from that declaration alone."""
-    kind = book_type.INCOME if request.args.get("kind") == book_type.INCOME else book_type.SPENDING
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT t.id, t.kind, t.name, t.parent_id, p.name as parent_name, "
-            "t.default_one_off, t.covers, t.not_for "
-            "FROM types t LEFT JOIN types p ON t.parent_id = p.id "
-            "WHERE t.kind = ? ORDER BY t.id",
-            (kind,),
-        ).fetchall()
-    return jsonify([{
+_TYPES_SELECT = (
+    "SELECT t.id, t.kind, t.name, t.parent_id, p.name as parent_name, "
+    "t.default_one_off, t.covers, t.not_for "
+    "FROM types t LEFT JOIN types p ON t.parent_id = p.id "
+)
+_DECLARED_TYPES = frozenset(name for name, *_ in book_type.SPENDING_TYPES)
+
+
+def _type_shown(r) -> dict:
+    """One type as the screens and the chat's types tool read it."""
+    spending = r["kind"] == book_type.SPENDING
+    shown = format_type_display(r["parent_name"], r["name"])
+    return {
         "id": r["id"],
         "kind": r["kind"],
         "name": r["name"],
         "parent_id": r["parent_id"],
         "parent_name": r["parent_name"],
-        "display_name": format_type_display(r["parent_name"], r["name"]),
+        "display_name": shown,
         "default_one_off": r["default_one_off"],
         "covers": r["covers"],
         "not_for": r["not_for"],
         # The book this type proposes for a merchant no rule knows; null = ask.
-        "proposed_book": (
-            book_type.proposed_book(format_type_display(r["parent_name"], r["name"]))
-            if kind == book_type.SPENDING else None
-        ),
-    } for r in rows])
+        "proposed_book": book_type.proposed_book(shown) if spending else None,
+        # Set in code: fin reads it by name, so its wording is not fixed here.
+        "locked": (shown in book_type.LOCKED) if spending else True,
+        # A spending type the declaration does not hold was added in fin.
+        "added_in_fin": spending and r["name"] not in _DECLARED_TYPES,
+    }
+
+
+@app.route("/api/types")
+def api_types():
+    """The type list as a flat list with parent info: spending types, or with
+    ?kind=income the income kinds. A new book's list is filled from the
+    declaration in book_type.py; once a book exists the table is the home of
+    each type's wording, and the operator may add a spending type or fix one's
+    wording here (fin RUL-002)."""
+    kind = book_type.INCOME if request.args.get("kind") == book_type.INCOME else book_type.SPENDING
+    with get_db() as conn:
+        rows = conn.execute(_TYPES_SELECT + "WHERE t.kind = ? ORDER BY t.id", (kind,)).fetchall()
+    return jsonify([_type_shown(r) for r in rows])
+
+
+def _name_change(conn, words: str) -> None:
+    """Name this request's change in Changes, unless its caller already named it."""
+    entry_id = g.get("change_entry")
+    if entry_id is not None:
+        conn.execute("UPDATE change_entries SET summary = ? WHERE id = ? AND summary = ''", (words, entry_id))
+
+
+@app.route("/api/types", methods=["POST"])
+def api_types_create():
+    """Add a spending type: name, parent_id (a top-level spending type, or
+    none), one_off (the running / one-off default), covers, not_for. Refused,
+    writing nothing, with the reason in words."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "send the type as JSON"}), 400
+    with get_db() as conn:
+        try:
+            type_id = book_type.add_spending_type(conn, data)
+        except book_type.TypeRefused as e:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 400
+        r = conn.execute(_TYPES_SELECT + "WHERE t.id = ?", (type_id,)).fetchone()
+        _name_change(conn, f"Added the type {format_type_display(r['parent_name'], r['name'])}")
+        conn.commit()
+    return jsonify({"type": _type_shown(r)}), 201
+
+
+@app.route("/api/types/<int:type_id>", methods=["PUT"])
+def api_types_fix_wording(type_id: int):
+    """Fix a spending type's wording: covers, not_for, or both. Anything else
+    is a code change and refused, as is a type set in code; nothing is
+    written."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "send the wording as JSON"}), 400
+    with get_db() as conn:
+        try:
+            book_type.fix_wording(conn, type_id, data)
+        except book_type.NoSuchType:
+            return jsonify({"error": "no such type"}), 404
+        except book_type.TypeRefused as e:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 400
+        r = conn.execute(_TYPES_SELECT + "WHERE t.id = ?", (type_id,)).fetchone()
+        _name_change(conn, f"Fixed the wording of {format_type_display(r['parent_name'], r['name'])}")
+        conn.commit()
+    return jsonify({"type": _type_shown(r)})
 
 
 @app.route("/api/books")
@@ -2581,21 +2653,33 @@ def api_transactions():
     per_page = int(request.args.get("per_page", 50))
     offset = (page - 1) * per_page
 
-    # Sort column — whitelist valid columns to prevent SQL injection
+    # Sort column — whitelist valid columns to prevent SQL injection. Each is
+    # (what comes last both ways, the column): an empty cell is last whichever
+    # way the column runs (spec case 11), and text sorts ignoring case.
     sort_col = request.args.get("sort", "date")
     sort_dir = request.args.get("sort_dir", "desc").upper()
+    own = expect_back.own_sql("t")  # by what each row counts: its own part once switched
     valid_sorts = {
-        "date": "t.date",
-        "description": "t.description",
-        "type": "ty.name",
-        "service": "svc.name",
-        "account": "a.name",
-        # By what each row counts: its own part once switched.
-        "amount": expect_back.own_sql("t"),
+        "date": (None, "t.date"),
+        "description": (None, "t.description COLLATE NOCASE"),
+        "type": ("ty.name IS NULL", "ty.name COLLATE NOCASE"),
+        "service": ("svc.name IS NULL", "svc.name COLLATE NOCASE"),
+        "account": (None, "a.name COLLATE NOCASE"),
+        "amount": (None, own),
+        # An account page's two money columns: a row on the other side is the
+        # empty cell, so last; money in is a negative amount, read as its size.
+        "amount_in": ("t.amount_minor >= 0", f"-{own}"),
+        "amount_out": ("t.amount_minor < 0", own),
     }
-    order_col = valid_sorts.get(sort_col, "t.date")
+    if sort_col not in valid_sorts:
+        sort_col = "date"
+    last_col, order_col = valid_sorts[sort_col]
     if sort_dir not in ("ASC", "DESC"):
         sort_dir = "DESC"
+    # The id breaks any tie, so a page boundary neither repeats nor skips a row:
+    # by date, rows of one day keep the order they came in, read either way.
+    ties = (f"t.id {sort_dir}",) if sort_col == "date" else ("t.date DESC", "t.id DESC")
+    order_by = ", ".join(c for c in (last_col, f"{order_col} {sort_dir}", *ties) if c)
 
     type_joins = _TYPE_JOINS.format(owner="t")
     with get_db() as conn:
@@ -2638,7 +2722,7 @@ def api_transactions():
             LEFT JOIN accounts oa ON t.other_side_id = oa.id
             JOIN row_parts rp ON rp.row_id = t.id
             WHERE 1=1 {filters}
-            ORDER BY {order_col} {sort_dir}, t.date DESC
+            ORDER BY {order_by}
             LIMIT ? OFFSET ?
             """,
             params + [per_page, offset],
@@ -3303,7 +3387,7 @@ def api_suggestions_send():
         to_send = [m for m in suggest.unanswered(conn) if m in left_in_file]
         for merchant in to_send:
             try:
-                record = suggest.ask(merchant, api_key)
+                record = suggest.ask(merchant, api_key, conn)
             except Exception as exc:
                 stopped = suggest.describe_failure(exc)
                 app.logger.warning("Type suggestion stopped: %s", stopped)

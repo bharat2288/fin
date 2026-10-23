@@ -356,7 +356,7 @@ def test_case_27_the_sure_line_and_its_detail_read_the_wording():
                 "{ count: 6, only_this: false, others: [] }, false) }")
 
     assert text(got["mini"]) == "recognises INDIGOAIR"
-    assert text(got["line"]) == "Recognises INDIGOAIR · 6 rows · change"
+    assert text(got["line"]) == "Recognises rows containing INDIGOAIR · 6 rows in the book · change"
     assert 'data-act="rec-edit"' in got["line"]
 
 
@@ -364,7 +364,7 @@ def test_case_27_the_sure_line_and_its_detail_read_the_wording():
 def test_case_28_only_this_row_warns_in_the_warning_colour():
     got = words("recCountHTML({ count: 1, only_this: true, others: [] })")
 
-    assert text(got) == "matches 1 row · only this one: a number in the wording?"
+    assert text(got) == "matches 1 row in the book · only this one: a number in the wording?"
     assert 'class="warn-word"' in got
 
 
@@ -372,7 +372,7 @@ def test_case_28_only_this_row_warns_in_the_warning_colour():
 def test_case_29_another_merchants_rows_are_named():
     got = words("recCountHTML({ count: 11, only_this: false, others: [{ name: 'Air India', count: 4 }] })")
 
-    assert text(got) == "matches 11 rows · also 4 rows now Air India’s"
+    assert text(got) == "matches 11 rows in the book · also 4 rows now Air India’s"
     assert 'class="warn-word"' in got
 
 
@@ -443,8 +443,8 @@ const tick = ms => new Promise(r => setTimeout(r, ms));
 """])
     got = _node(code)
 
-    assert text(got["built"]) == "Recognises SKYWING · change"
-    assert text(got["shown"]) == "Recognises SKYWING · 11 rows · also 4 rows now Air India’s · change"
+    assert text(got["built"]) == "Recognises rows containing SKYWING · change"
+    assert text(got["shown"]) == "Recognises rows containing SKYWING · 11 rows in the book · also 4 rows now Air India’s · change"
 
 
 def test_the_wording_shown_is_the_one_saved():
@@ -480,3 +480,110 @@ def test_case_29_the_drawer_names_the_rows_it_would_take():
 def test_the_count_is_read_from_the_reach_route_debounced():
     load = _function("recLoad")
     assert "/api/rules/reach?" in load and "setTimeout" in load
+
+
+# --- walk-fixes 2026-10-22, F (cases 18-20): the sure card says recognises once, and whose count it is
+
+
+SURE_ROW_STUBS = r"""
+const icon = n => `<i ${n}></i>`;
+let queueBusy = false;
+const sureShown = new Set();
+function sureBook(g) { return 'Household'; }
+function sureEach(g) { return false; }
+function sureReady(g) { return true; }
+function sumByCurrency(items) { return 'S$ 1,450.30'; }
+function bookOptions() { return '<option>Household</option>'; }
+function prefillHintHTML() { return ''; }
+function sureDetailHTML(g, at) { return '<div class="det">the detail</div>'; }
+function recWording(key, row) { return 'INDIGOAIR'; }
+const G = { key: 'g1', name: 'Indigoair Sgd', items: [{ row: { id: 1 } }, { row: { id: 2 } }],
+            type: { name: 'Travel', probability: 0.97 } };
+"""
+
+
+def sure_row(calls: str) -> dict:
+    code = "\n".join([PRELUDE, SURE_ROW_STUBS,
+                      *(_function(n) for n in ("rowDetailToggle", "recMiniHTML", "sureRowHTML")),
+                      f"console.log(JSON.stringify({calls}));"])
+    return _node(code)
+
+
+def _name_cell(row_html: str) -> str:
+    cell = re.search(r'<td class="sl-m">(.*?)</td>', row_html, re.S).group(1)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cell)).strip()
+
+
+@needs_node
+def test_f_case_18_folded_the_sure_line_says_recognises_under_the_name():
+    got = sure_row("sureRowHTML(G, ['Household'], 0)")
+
+    assert _name_cell(got) == "Indigoair Sgd recognises INDIGOAIR"
+
+
+@needs_node
+def test_f_case_19_opened_the_line_under_the_name_is_not_repeated():
+    got = sure_row("(sureShown.add('g1'), sureRowHTML(G, ['Household'], 0))")
+
+    assert _name_cell(got) == "Indigoair Sgd"
+    assert "recognises" not in _name_cell(got).lower()
+
+
+@needs_node
+def test_f_case_19_opening_and_folding_a_drawn_line_takes_its_mini_line_away_and_back():
+    """The line is drawn folded, then opened in place (sure-open does not draw
+    the row again): opening takes the mini line away, folding puts it back."""
+    act = _act("sure-open")
+    code = "\n".join([PRELUDE, SURE_ROW_STUBS, "const ACT = {};",
+                      *(_function(n) for n in ("rowDetailToggle", "recMiniHTML", "toggleRowDetail")), r"""
+let drew = 0;
+function drawSureState() { drew++; }
+const sureList = [G];
+// A stand-in row: the name cell's HTML, the mini line a removable piece of it.
+const cell = { html: `<button class="disc" aria-expanded="false"></button>${recMiniHTML('INDIGOAIR', 'g1')}` };
+const mini = { remove() { cell.html = cell.html.replace(/<span class="rec-mini"[^]*?<\/span><\/span>|<span class="rec-mini"[^]*?<\/b><\/span>/, ''); } };
+const box = { hidden: true, cells: [{ innerHTML: '' }] };
+const tr = { dataset: { at: '0' }, classList: { toggle() {} },
+             querySelector: sel => sel === '[data-rec-mini]' && cell.html.includes('data-rec-mini') ? mini : null };
+const btn = { attrs: { 'aria-expanded': 'false', 'aria-controls': 'sd-0' }, dataset: { key: 'g1' },
+              getAttribute(k) { return this.attrs[k]; }, setAttribute(k, v) { this.attrs[k] = v; },
+              closest: () => tr, insertAdjacentHTML(where, h) { cell.html = cell.html.replace('</button>', '</button>' + h); } };
+const document = { getElementById: () => box };
+const $ = (sel, root) => root.querySelector(sel);
+""", act, r"""
+ACT['sure-open'](btn);
+const opened = cell.html;
+ACT['sure-open'](btn);
+console.log(JSON.stringify({ opened, folded: cell.html }));
+"""])
+    got = _node(code)
+
+    assert "recognises" not in text(got["opened"]).lower()
+    assert text(got["folded"]) == "recognises INDIGOAIR"
+
+
+@needs_node
+def test_f_case_19_the_detail_names_the_whole_books_rows_and_the_cards_when_they_differ():
+    got = words("{ differ: recLineHTML('g1', 'INDIGOAIR', { count: 3, only_this: false, others: [] }, false, 2),"
+                " equal: recLineHTML('g1', 'INDIGOAIR', { count: 2, only_this: false, others: [] }, false, 2),"
+                " none: recLineHTML('ww', 'INDIGOAIR', { count: 3, only_this: false, others: [] }, false) }")
+
+    assert text(got["differ"]) == "Recognises rows containing INDIGOAIR · 3 rows in the book, 2 of them here · change"
+    assert text(got["equal"]) == "Recognises rows containing INDIGOAIR · 2 rows in the book · change"
+    assert text(got["none"]) == "Recognises rows containing INDIGOAIR · 3 rows in the book · change"
+
+
+def test_f_case_19_the_sure_card_gives_its_line_the_rows_it_holds_and_the_line_keeps_them():
+    """The sure card's teach carries its rows' count as here; the line is
+    drawn with it, at first and when its count comes back."""
+    assert "here: g.items.length" in _function("sureDetailHTML")
+    assert "ctx.here)" in _function("recShown") and "ctx.here)" in _function("recDraw")
+
+
+@needs_node
+def test_f_case_20_the_live_count_says_whose_rows_it_counts():
+    got = words("{ count: recCountHTML({ count: 3, only_this: false, others: [] }),"
+                " editing: recLineHTML('g1', 'INDIGOAIR', { count: 3, only_this: false, others: [] }, true, 2) }")
+
+    assert text(got["count"]) == "matches 3 rows in the book"
+    assert re.search(r'data-rec-n="g1"[^>]*>matches 3 rows in the book</p>', got["editing"])

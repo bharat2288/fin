@@ -61,8 +61,10 @@ def key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def spread(pick: str, top: float, **others: float) -> dict:
     """A probability for every option: `top` on the pick, the named others as
-    given, and what is left shared evenly over the rest."""
-    options = list(suggest.question()["criteria"])
+    given, and what is left shared evenly over the rest. The options are the
+    question the book in use asks."""
+    with db.get_db() as conn:
+        options = list(suggest.question(conn)["criteria"])
     rest = [o for o in options if o != pick and o not in others]
     left = (1.0 - top - sum(others.values())) / len(rest)
     return {o: top if o == pick else others.get(o, left) for o in options}
@@ -713,9 +715,9 @@ def test_g1_the_serialised_body_holds_only_the_merchant_string_the_model_id_and_
     assert json.loads(body) == {
         "state": {"merchant": "LANTERN NOODLE HOUSE"},
         "model": suggest.MODEL_ID,
-        "questions": {"type": suggest.question()},
+        "questions": {"type": suggest.question(conn)},
     }
-    asked_question = json.dumps(suggest.question())
+    asked_question = json.dumps(suggest.question(conn))
     assert body.replace(asked_question, "<question>").replace(suggest.MODEL_ID, "<model>") == (
         '{"state": {"merchant": "LANTERN NOODLE HOUSE"}, "model": "<model>",'
         ' "questions": {"type": <question>}}'

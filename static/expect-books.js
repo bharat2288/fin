@@ -55,15 +55,27 @@
         return `<p class="card-foot">${plural(n, 'item')} left out of the S$ total (${esc(section.left_out[0].reason)}): ${items}</p>`;
     }
 
+    /** A section's sortable columns (app.js's sortRows): money by its S$ figure, a line with none last. */
+    function sortCols(section) {
+        return {
+            date: { label: section.owed ? 'Came in' : 'Paid', kind: 'date', of: l => l.date },
+            who: { label: section.key === 'to_pay_back' ? 'To' : 'From', kind: 'text', of: l => (l.names || []).join(', ') },
+            open: { label: 'Open', kind: 'money', of: l => l.currency === 'SGD' ? l.open_minor : l.sgd_minor },
+            expected: { label: 'Expected', kind: 'money', of: l => l.currency === 'SGD' ? l.amount_minor : null },
+            age: { label: 'Age', kind: 'number', of: l => l.age_days },
+        };
+    }
+
     function sectionHTML(section) {
         const owed = section.owed ? ' (owed)' : '';
         const out = section.in_total ? '' : ' <span class="tag xb-books__out">not in the total yet</span>';
+        const table = `xb-${section.key}`, cols = sortCols(section), head = k => sortHead(table, k, cols);
         return `<section class="card xb-books" data-section="${esc(section.key)}">
         <div class="section-header"><div><h2>${esc(section.heading)}${owed}</h2><p>${esc(SUBS[section.key] || '')}</p></div>
             <span class="num xb-books__total">${esc(money(section.total_minor, 'SGD'))}${out}</span></div>
-        <div class="table-shell"><table class="t"><thead><tr><th>${section.owed ? 'Came in' : 'Paid'}</th><th class="xb-books__who">${section.key === 'to_pay_back' ? 'To' : 'From'}</th>
-            <th class="r">Open</th><th class="r xb-books__who">Expected</th><th class="r">Age</th></tr></thead>
-            <tbody>${section.lines.map(line => rowHTML(line, section)).join('')}</tbody></table></div>
+        <div class="table-shell"><table class="t"><thead><tr><th>${head('date')}</th><th class="xb-books__who">${head('who')}</th>
+            <th class="r">${head('open')}</th><th class="r xb-books__who">${head('expected')}</th><th class="r">${head('age')}</th></tr></thead>
+            <tbody>${sortRows(table, section.lines, cols).map(line => rowHTML(line, section)).join('')}</tbody></table></div>
         ${leftOutHTML(section)}</section>`;
     }
 

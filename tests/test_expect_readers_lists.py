@@ -408,6 +408,7 @@ def test_the_merchant_page_row_strikes_its_amount_and_draws_the_pill():
     const [mpCrumbs, typeOptions, bookOptions, eachSegHTML, bookVariesWords, bookVariesButtons, mpTickedWords,
            mpCanApply, afterRender, monthQuery, pager] = Array(11).fill(blank);
     const plural = (n, w) => `${n} ${w}`;
+    const sortOf = () => ({ key: null }), sortServer = () => ({ sort: 'date', sort_dir: 'desc' }), sortHead = (t, k) => k, sortPicker = blank, MP_SORT = {};
     const mpAccountCell = x => x.account_name;
     const refs = async () => ({ types: [], books: [] });
     const servicesList = async () => [];

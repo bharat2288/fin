@@ -13,6 +13,7 @@ import pytest
 
 import app as fin_app
 import book_type
+import db
 import money
 import suggest
 
@@ -103,7 +104,8 @@ def type_id(conn, name: str) -> int:
 
 
 def spread(pick: str, top: float, **others: float) -> dict:
-    options = list(suggest.question()["criteria"])
+    with db.get_db() as conn:
+        options = list(suggest.question(conn)["criteria"])
     rest = [o for o in options if o != pick and o not in others]
     left = (1.0 - top - sum(others.values())) / len(rest)
     return {o: top if o == pick else others.get(o, left) for o in options}
