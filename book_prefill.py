@@ -70,8 +70,7 @@ def book_prefills(conn: sqlite3.Connection, tx_ids) -> dict[int, dict]:
             if len(held) < 2:
                 held.append((h["id"], h["book"]))
 
-    type_names = book_type.spending_type_names(conn)
-    keys = book_type.keys_by_id(conn)
+    proposes = book_type.proposed_books(conn)  # by spending type
     out = {}
     for r in rows:
         last = next((book for hid, book in latest.get((r["service_id"], r["account_id"]), [])
@@ -81,8 +80,7 @@ def book_prefills(conn: sqlite3.Connection, tx_ids) -> dict[int, dict]:
         elif r["owner"] and r["owner"] != book_type.DEFAULT_BOOK and r["owner"] in book_type.BOOK_NAMES:
             book, reason = r["owner"], ACCOUNT
         else:
-            spending = r["type_id"] is not None and r["type_id"] in type_names
-            book, reason = (book_type.proposed_for_key(keys.get(r["type_id"])) if spending else None), TYPE
+            book, reason = proposes.get(r["type_id"]), TYPE
         out[r["id"]] = {"book": book, "reason": reason, "account": r["account"], "account_kind": r["kind"]}
     return out
 

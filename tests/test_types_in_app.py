@@ -267,7 +267,8 @@ def test_21_jev_is_asked_with_advertisings_fixed_wording(client, conn):
 
 
 @pytest.mark.parametrize("extra", [
-    {"name": "Eating out"}, {"parent_id": 1}, {"one_off": True}, {"kind": "income"}, {"default_one_off": 1},
+    # One-off by default is a setting since type-relationships 02 (tests/test_type_settings.py).
+    {"name": "Eating out"}, {"parent_id": 1}, {"kind": "income"}, {"default_one_off": 1},
 ])
 def test_25_any_field_but_the_wording_is_refused(client, temp_db, extra):
     before = book_rows(temp_db)
@@ -292,7 +293,7 @@ def test_25_an_income_kind_is_refused(client, temp_db):
 @pytest.mark.parametrize("body, reason", [
     ({"covers": ""}, "a type needs words for what it covers"),
     ({"covers": "c" * 301}, "what a type covers can be at most 300 characters"),
-    ({}, "say what the type covers or what it is not for"),
+    ({}, "say what to change about the type"),
     ({"covers": 7}, "covers must be words"),
     ({"not_for": "groceries\u202e"}, "the wording cannot hold control characters"),
 ])

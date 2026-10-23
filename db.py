@@ -363,8 +363,10 @@ def init_db() -> None:
     history.close_left_open(conn)
     conn.commit()
 
-    # The type list, from its one declaration.
+    # The type list, from its one declaration, and each declared type's
+    # settings where it has none yet (type-relationships 02).
     book_type.seed_types(conn)
+    book_type.seed_settings(conn)
     conn.commit()
     # By key: a seed rule still finds its type once the type is renamed.
     type_ids = book_type.keyed_ids(conn)

@@ -7,10 +7,11 @@ here, once, with a plain description for each member, and a new book's
 
 Once a book exists, its `types` table is the home of each type's wording
 (fin RUL-002): the operator may add a spending type and fix a type's wording
-(covers, not for) in the app, each one entry in the change history. A later
-change to a declared type's wording here does not reach a book already
-seeded, as `seed_types` never overwrites; such a change goes in as a
-conversion step. Renaming, merging and removing a type, and every book,
+(covers, not for) in the app, and change its settings (usual book, one-off
+by default, Check each row by default; type-relationships 02), each one
+entry in the change history. A later change to a declared type's wording
+here does not reach a book already seeded, as `seed_types` never
+overwrites; such a change goes in as a conversion step. Renaming, merging and removing a type, and every book,
 stay code changes. The types code means are LOCKED: their names stay as
 declared, but their wording is fixed in the app like any spending type's
 (fin RUL-004).
@@ -203,10 +204,13 @@ INCOME = "income"
 # `type_keys` below). Nothing outside this module names a type in quotes: a
 # test fails when code does.
 #
-# Book for a merchant no rule knows is proposed by its type. These types
-# propose Moom; ASKS_FOR_BOOK types propose nothing and the operator must say;
-# every other type proposes Household. A picker's first value may instead come
-# from the operator's history or the paying account (book_prefill.py).
+# Book for a merchant no rule knows is proposed by its type: the type's usual
+# book, kept per type in the book and changed in the app (`type_settings`,
+# type-relationships 02). These lists are what a start seeds it from: these
+# types propose Moom; ASKS_FOR_BOOK types propose nothing and the operator
+# must say; every other type proposes Household. A picker's first value may
+# instead come from the operator's history or the paying account
+# (book_prefill.py).
 PROPOSES_MOOM = ("Advertising", "Stock purchases", "Payment fees")
 ASKS_FOR_BOOK = ("Software & AI tools",)
 # What fin files the loan interest it works out under (loan_interest.py).
@@ -225,20 +229,87 @@ NOT_PLACED = "Other"
 LOCKED = PROPOSES_MOOM + ASKS_FOR_BOOK + (LOAN_INTEREST, GIFT_GIVEN, NOT_PLACED)
 
 
-def proposed_for_key(key: str | None) -> str | None:
-    """The book a type proposes, from its key (None for a type added in the
-    app, which proposes Household); None means ask."""
+# --- a type's settings (type-relationships 02) -------------------------------
+#
+# The kinds are declared here; their values are data, one `type_settings` row
+# per spending type: its usual book, one of USUAL_BOOKS, and whether a new
+# merchant of it starts as Check each row. One-off by default is the type's
+# own `default_one_off`. A change reaches new merchants only (fin RUL-006 Q3).
+
+# The usual book that proposes none: the operator says whose spending it is.
+ASK = "ask"
+USUAL_BOOKS = BOOK_NAMES + (ASK,)
+
+
+def _seeded_usual_book(key: str | None) -> str:
+    """The usual book a start seeds a type with, from its key: what the code
+    said before the settings were data. A type added in the app (no key)
+    reads Household until the operator sets one."""
     if key in ASKS_FOR_BOOK:
-        return None
+        return ASK
     if key in PROPOSES_MOOM:
         return "Moom"
     return DEFAULT_BOOK
 
 
+def settings_of(usual_book: str | None, check_each_row, key: str | None) -> tuple[str, bool]:
+    """A type's (usual book, Check each row by default) from its settings row's
+    two columns, None when it has no row, and its key."""
+    if usual_book is None:
+        return _seeded_usual_book(key), False
+    return usual_book, bool(check_each_row)
+
+
+def proposed(usual_book: str) -> str | None:
+    """The book a usual book proposes for a new merchant; None means ask."""
+    return None if usual_book == ASK else usual_book
+
+
+def _settings(conn: sqlite3.Connection, type_id: int) -> tuple[str, bool]:
+    found = conn.execute(
+        "SELECT s.usual_book, s.check_each_row, k.key FROM types t"
+        " LEFT JOIN type_settings s ON s.type_id = t.id LEFT JOIN type_keys k ON k.type_id = t.id"
+        " WHERE t.id = ?",
+        (type_id,),
+    ).fetchone()
+    return settings_of(*found) if found else (DEFAULT_BOOK, False)
+
+
 def proposed_book(conn: sqlite3.Connection, type_id: int) -> str | None:
-    """The book a spending type proposes for a merchant no rule knows; None
-    means ask."""
-    return proposed_for_key(keys_by_id(conn).get(type_id))
+    """The book a spending type proposes for a merchant no rule knows, from
+    its usual book; None means ask."""
+    return proposed(_settings(conn, type_id)[0])
+
+
+def proposed_books(conn: sqlite3.Connection) -> dict[int, str | None]:
+    """The book each spending type proposes, by its id; None means ask."""
+    return {
+        type_id: proposed(settings_of(usual_book, check, key)[0])
+        for type_id, usual_book, check, key in conn.execute(
+            "SELECT t.id, s.usual_book, s.check_each_row, k.key FROM types t"
+            " LEFT JOIN type_settings s ON s.type_id = t.id LEFT JOIN type_keys k ON k.type_id = t.id"
+            " WHERE t.kind = ?",
+            (SPENDING,),
+        )
+    }
+
+
+def checks_each_row(conn: sqlite3.Connection, type_id: int | None) -> bool:
+    """Whether a new merchant of this type starts as Check each row."""
+    return type_id is not None and _settings(conn, type_id)[1]
+
+
+def seed_settings(conn: sqlite3.Connection) -> None:
+    """Give every declared spending type that has none its settings row, from
+    what the code said before (_seeded_usual_book), every row the same. Insert
+    if missing, never overwriting: a value the operator set survives every
+    start. Run after seed_types, with no change entry open; no commit."""
+    for key, type_id in keyed_ids(conn).items():
+        conn.execute(
+            "INSERT INTO type_settings (type_id, usual_book, check_each_row) SELECT ?, ?, 0"
+            " WHERE NOT EXISTS (SELECT 1 FROM type_settings WHERE type_id = ?)",
+            (type_id, _seeded_usual_book(key), type_id),
+        )
 
 
 # The same statement as in schema.sql, which stays the source of truth; a test
@@ -396,6 +467,7 @@ USED_BY = (
     ("merchant_rules", "type_override_id"),
     ("suggestion_answers", "chosen_type_id"),
     ("let_go", "type_id"),
+    ("type_settings", "type_id"),
 )
 
 
@@ -522,30 +594,58 @@ def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
     return cur.lastrowid
 
 
-def fix_wording(conn: sqlite3.Connection, type_id: int, data: dict) -> None:
-    """Fix a spending type's wording: what it covers, what it is not for, or
-    both. Anything else in the request is a code change and refused, as is an
-    income kind; nothing is written. A LOCKED type's wording is fixed here
-    too, its name never (fin RUL-004). No commit."""
+SETTING_FIELDS = ("usual_book", "one_off", "check_each_row")
+
+
+def change_type(conn: sqlite3.Connection, type_id: int, data: dict) -> dict:
+    """Change a spending type: its wording (covers, not_for) and its settings
+    (usual_book, one_off, check_each_row), any of them in one request.
+    Anything else is a code change and refused, as is an income kind, and
+    Other's settings (its meaning is fixed); nothing is written. A LOCKED
+    type's wording and settings are changed here too, its name never (fin
+    RUL-004). Returns what changed, field by new value, with "wording" for
+    the wording. No commit."""
     found = conn.execute(
-        "SELECT t.kind, t.name, p.name AS parent, t.covers, t.not_for FROM types t"
-        " LEFT JOIN types p ON p.id = t.parent_id WHERE t.id = ?",
+        "SELECT t.kind, t.covers, t.not_for, t.default_one_off, s.usual_book, s.check_each_row, k.key"
+        " FROM types t LEFT JOIN type_settings s ON s.type_id = t.id"
+        " LEFT JOIN type_keys k ON k.type_id = t.id WHERE t.id = ?",
         (type_id,),
     ).fetchone()
     if found is None:
         raise NoSuchType(type_id)
-    kind, name, parent, covers, not_for = found
+    kind, covers, not_for, one_off, usual_book, check, key = found
     if kind != SPENDING:
         raise TypeRefused("income kinds are set in code")
-    if any(k not in WORDING_FIELDS for k in data):
+    if any(k not in WORDING_FIELDS + SETTING_FIELDS for k in data):
         raise TypeRefused(CODE_CHANGE)
     if not data:
-        raise TypeRefused("say what the type covers or what it is not for")
-    if "covers" in data:
-        covers = _covers(data["covers"])
-    if "not_for" in data:
-        not_for = _not_for(data["not_for"])
-    conn.execute("UPDATE types SET covers = ?, not_for = ? WHERE id = ?", (covers, not_for, type_id))
+        raise TypeRefused("say what to change about the type")
+    usual_book, check = settings_of(usual_book, check, key)
+    was = {"usual_book": usual_book, "one_off": bool(one_off), "check_each_row": check,
+           "wording": (covers, not_for)}
+    now = dict(was)
+    if "usual_book" in data and data["usual_book"] not in USUAL_BOOKS:
+        raise TypeRefused(f"the usual book is one of {', '.join(BOOK_NAMES)} or {ASK}")
+    for field in ("one_off", "check_each_row"):
+        if field in data and not isinstance(data[field], bool):
+            raise TypeRefused(f"{field} must be true or false")
+    if key == NOT_PLACED and any(k in SETTING_FIELDS for k in data):
+        raise TypeRefused(f"{NOT_PLACED} means not placed yet: its settings are fixed")
+    now.update({k: data[k] for k in SETTING_FIELDS if k in data})
+    now["wording"] = (_covers(data["covers"]) if "covers" in data else covers,
+                      _not_for(data["not_for"]) if "not_for" in data else not_for)
+    conn.execute(
+        "UPDATE types SET covers = ?, not_for = ?, default_one_off = ? WHERE id = ?",
+        (*now["wording"], 1 if now["one_off"] else 0, type_id),
+    )
+    if (now["usual_book"], now["check_each_row"]) != (was["usual_book"], was["check_each_row"]):
+        conn.execute(
+            "INSERT INTO type_settings (type_id, usual_book, check_each_row) VALUES (?, ?, ?)"
+            " ON CONFLICT (type_id) DO UPDATE SET usual_book = excluded.usual_book,"
+            " check_each_row = excluded.check_each_row",
+            (type_id, now["usual_book"], 1 if now["check_each_row"] else 0),
+        )
+    return {k: v for k, v in now.items() if v != was[k]}
 
 
 def refusal_to_undo(conn: sqlite3.Connection, entry_id: int) -> str | None:
@@ -560,6 +660,9 @@ def refusal_to_undo(conn: sqlite3.Connection, entry_id: int) -> str | None:
         shown = names.get(type_id)
         if shown is None:
             continue  # gone already, or an income kind, which the app never adds
+        # A type's settings row is made by a later change, never by its add.
+        if conn.execute("SELECT 1 FROM type_settings WHERE type_id = ?", (type_id,)).fetchone():
+            return f"{shown}'s settings were changed since; undo that first"
         for table, column in USED_BY:
             # Both names come from USED_BY above, never from a request.
             if conn.execute(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", (type_id,)).fetchone():

@@ -168,6 +168,22 @@ CREATE TABLE IF NOT EXISTS type_keys (
     UNIQUE (kind, key)
 );
 
+-- A spending type's settings (type-relationships 02): its usual book, the
+-- one a new merchant of it is proposed (a book book_type.py declares, or
+-- 'ask': the operator says), and whether a new merchant of it starts as Check
+-- each row. A change reaches new merchants only. Seeded at start for every
+-- declared spending type from what the code said before, never overwriting
+-- (book_type.seed_settings); a type added in the app has a row once one is
+-- set, and reads Household with every row the same until then. One-off by
+-- default stays types.default_one_off. Tracked by the change history. A new
+-- table, made by CREATE IF NOT EXISTS on start; no existing row is converted.
+CREATE TABLE IF NOT EXISTS type_settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type_id INTEGER NOT NULL UNIQUE REFERENCES types(id),
+    usual_book TEXT NOT NULL,                  -- a book, or 'ask' (book_type.USUAL_BOOKS)
+    check_each_row INTEGER NOT NULL DEFAULT 0  -- 1: a new merchant of this type starts as Check each row
+);
+
 -- Answers from the outside judgment model to "which type is this merchant?",
 -- one per cleaned merchant string, model and version (suggest.py). A
 -- suggestion only: nothing here labels a row. A new table, made empty by
@@ -796,6 +812,31 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_keys', OLD.id, 'delete',
         json_object('id', OLD.id, 'kind', OLD.kind, 'key', OLD.key, 'type_id', OLD.type_id), NULL);
+END;
+-- Type settings (type-relationships 02): a new table, so a book gains its
+-- triggers on its next start (history.ADDED_ON_START).
+CREATE TRIGGER IF NOT EXISTS history_type_settings_insert AFTER INSERT ON type_settings
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_settings', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'type_id', NEW.type_id, 'usual_book', NEW.usual_book, 'check_each_row', NEW.check_each_row));
+END;
+CREATE TRIGGER IF NOT EXISTS history_type_settings_update AFTER UPDATE ON type_settings
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'type_id', OLD.type_id, 'usual_book', OLD.usual_book, 'check_each_row', OLD.check_each_row) IS NOT json_object('id', NEW.id, 'type_id', NEW.type_id, 'usual_book', NEW.usual_book, 'check_each_row', NEW.check_each_row)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_settings', NEW.id, 'update',
+        json_object('id', OLD.id, 'type_id', OLD.type_id, 'usual_book', OLD.usual_book, 'check_each_row', OLD.check_each_row),
+        json_object('id', NEW.id, 'type_id', NEW.type_id, 'usual_book', NEW.usual_book, 'check_each_row', NEW.check_each_row));
+END;
+CREATE TRIGGER IF NOT EXISTS history_type_settings_delete AFTER DELETE ON type_settings
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_settings', OLD.id, 'delete',
+        json_object('id', OLD.id, 'type_id', OLD.type_id, 'usual_book', OLD.usual_book, 'check_each_row', OLD.check_each_row), NULL);
 END;
 -- history:end
 

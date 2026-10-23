@@ -186,6 +186,12 @@ def _proposed_book(conn, type_id: int | None) -> str | None:
     return book_type.proposed_book(conn, type_id)
 
 
+def _new_checks_each_row(conn, type_id: int | None) -> int:
+    """A new merchant's Check each row flag, from its type's setting
+    (type-relationships 02): 1 when the type says check each row."""
+    return 1 if book_type.checks_each_row(conn, type_id) else 0
+
+
 class BookNeeded(ValueError):
     """The type proposes no book, so the operator has to say whose it is."""
 
@@ -277,7 +283,7 @@ def _paynow_fallback_label(description: str | None, conn) -> tuple[str | None, i
     type_id = book_type.keyed_ids(conn).get(key) if key else None
     if type_id is None:
         return None, None
-    return book_type.proposed_for_key(key), type_id
+    return book_type.proposed_book(conn, type_id), type_id
 
 
 class BadAmount(ValueError):
@@ -604,7 +610,7 @@ _CHANGE_SUMMARIES = {
     "api_history_undo": "Undid a change",
     # Each names its type in its own summary; these are the fallback.
     "api_types_create": "Added a type",
-    "api_types_fix_wording": "Fixed a type's wording",
+    "api_types_change": "Changed a type",
 }
 _CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
 
@@ -1018,9 +1024,10 @@ def index():
 
 _TYPES_SELECT = (
     "SELECT t.id, t.kind, t.name, t.parent_id, p.name as parent_name, "
-    "t.default_one_off, t.covers, t.not_for, k.key "
+    "t.default_one_off, t.covers, t.not_for, k.key, s.usual_book, s.check_each_row "
     "FROM types t LEFT JOIN types p ON t.parent_id = p.id "
     "LEFT JOIN type_keys k ON k.type_id = t.id "
+    "LEFT JOIN type_settings s ON s.type_id = t.id "
 )
 
 
@@ -1028,6 +1035,7 @@ def _type_shown(r) -> dict:
     """One type as the screens and the chat's types tool read it."""
     spending = r["kind"] == book_type.SPENDING
     shown = format_type_display(r["parent_name"], r["name"])
+    usual_book, check_each_row = book_type.settings_of(r["usual_book"], r["check_each_row"], r["key"])
     return {
         "id": r["id"],
         "kind": r["kind"],
@@ -1038,8 +1046,12 @@ def _type_shown(r) -> dict:
         "default_one_off": r["default_one_off"],
         "covers": r["covers"],
         "not_for": r["not_for"],
-        # The book this type proposes for a merchant no rule knows; null = ask.
-        "proposed_book": book_type.proposed_for_key(r["key"]) if spending else None,
+        # Its usual book: a book, or "ask" (type-relationships 02); and the
+        # book it proposes for a merchant no rule knows, null = ask.
+        "usual_book": usual_book if spending else None,
+        "proposed_book": book_type.proposed(usual_book) if spending else None,
+        # Whether a new merchant of this type starts as Check each row.
+        "check_each_row": check_each_row if spending else False,
         # Name set in code: fin means this type. Its wording is still fixed here
         # (fin RUL-004); an income kind's is not.
         "locked": (r["key"] in book_type.LOCKED) if spending else True,
@@ -1088,24 +1100,45 @@ def api_types_create():
     return jsonify({"type": _type_shown(r)}), 201
 
 
+def _type_change_words(changed: dict) -> list[str]:
+    """What a type change did, in the words Changes shows: the settings, then
+    the wording."""
+    words = []
+    if "usual_book" in changed:
+        book = changed["usual_book"]
+        words.append("usual book: ask" if book == book_type.ASK else f"usual book {book}")
+    if "one_off" in changed:
+        words.append("one-off by default" if changed["one_off"] else "running by default")
+    if "check_each_row" in changed:
+        words.append("Check each row by default" if changed["check_each_row"] else "Every row the same by default")
+    if words and "wording" in changed:
+        words.append("wording fixed")
+    return words
+
+
 @app.route("/api/types/<int:type_id>", methods=["PUT"])
-def api_types_fix_wording(type_id: int):
-    """Fix a spending type's wording: covers, not_for, or both. Anything else
-    is a code change and refused, as is an income kind; nothing is written.
-    A type whose name is set in code has its wording fixed here too (fin RUL-004)."""
+def api_types_change(type_id: int):
+    """Change a spending type: its wording (covers, not_for) and its settings
+    (usual_book: a book or "ask"; one_off and check_each_row, true or false),
+    any of them, as one change. Anything else is a code change and refused,
+    as is an income kind and Other's settings; nothing is written. A type
+    whose name is set in code is changed here too (fin RUL-004). A settings
+    change reaches new merchants only (fin RUL-006 Q3)."""
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
-        return jsonify({"error": "send the wording as JSON"}), 400
+        return jsonify({"error": "send the change as JSON"}), 400
     with get_db() as conn:
         try:
-            book_type.fix_wording(conn, type_id, data)
+            changed = book_type.change_type(conn, type_id, data)
         except book_type.NoSuchType:
             return jsonify({"error": "no such type"}), 404
         except book_type.TypeRefused as e:
             conn.rollback()
             return jsonify({"error": str(e)}), 400
         r = conn.execute(_TYPES_SELECT + "WHERE t.id = ?", (type_id,)).fetchone()
-        _name_change(conn, f"Fixed the wording of {format_type_display(r['parent_name'], r['name'])}")
+        shown = format_type_display(r["parent_name"], r["name"])
+        words = _type_change_words(changed)
+        _name_change(conn, f"Changed {shown}: {', '.join(words)}" if words else f"Fixed the wording of {shown}")
         conn.commit()
     return jsonify({"type": _type_shown(r)})
 
@@ -1800,6 +1833,8 @@ def api_services_create():
             book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
         except (UnknownLabel, BookNeeded) as e:
             return jsonify({"error": str(e)}), 400
+        # Left unsaid, Check each row is the type's (type-relationships 02).
+        each_row = data["review_each_time"] if "review_each_time" in data else _new_checks_each_row(conn, type_id)
         return _crud_insert(
             conn,
             "INSERT INTO services (name, book, type_id, notes, exclude_from_expense_views, "
@@ -1810,7 +1845,7 @@ def api_services_create():
                 type_id,
                 data.get("notes"),
                 data.get("exclude_from_expense_views", 0),
-                1 if data.get("review_each_time") else 0,
+                1 if each_row else 0,
             ),
             "service",
             post_commit=invalidate_rules_cache,
@@ -3246,8 +3281,8 @@ def api_resolve_transaction():
                 _write_plan(conn, merchant_plan, past_rows)
             if not svc:
                 conn.execute(
-                    "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
-                    (service_name, book, type_id),
+                    "INSERT INTO services (name, book, type_id, review_each_time) VALUES (?, ?, ?, ?)",
+                    (service_name, book, type_id, _new_checks_each_row(conn, type_id)),
                 )
                 service_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             if taken_plan is not None:
@@ -4364,8 +4399,8 @@ def api_import_confirm():
                     svc_type_id = ns.get("type_id") or None
                     svc_book = _book_or_proposed(conn, ns.get("book") or None, svc_type_id)
                     conn.execute(
-                        "INSERT INTO services (name, book, type_id) VALUES (?, ?, ?)",
-                        (svc_name, svc_book, svc_type_id),
+                        "INSERT INTO services (name, book, type_id, review_each_time) VALUES (?, ?, ?, ?)",
+                        (svc_name, svc_book, svc_type_id, _new_checks_each_row(conn, svc_type_id)),
                     )
                     svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     services_created += 1

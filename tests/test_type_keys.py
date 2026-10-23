@@ -28,7 +28,8 @@ from test_movements_and_review import (  # noqa: F401 (fixtures)
 
 REPO = Path(__file__).resolve().parent.parent
 BEFORE = Path(__file__).parent / "fixtures" / "book_before_type_keys.sql"
-NEW_TABLES = {"type_keys"}
+# The same start makes ticket 02's settings table (tests/test_type_settings.py).
+NEW_TABLES = {"type_keys", "type_settings"}
 
 
 def book_before(tmp_path, monkeypatch) -> Path:
