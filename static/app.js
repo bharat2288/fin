@@ -2268,12 +2268,24 @@ function sureGroups(q, guesses, r, services) {
     });
     return groups;
 }
+/** A line's prefilled book, with its hint. Under Check each row (queue-naming
+ *  D) it is the book the latest of its rows carries (by date, then id), as
+ *  that row's picker starts: each row is checked with its own, so the usual
+ *  book does not wait on a pick. Else fin's book prefill for every row. */
+function surePrefill(g) {
+    if (!sureEach(g)) return g.prefill;
+    // A row's book: fin's prefill with its own hint, else one it holds (it has
+    // a source; an empty book reads as Household and is not one).
+    const own = x => eachPrefill(x) || (x.sources?.book ? { book: x.book, hint: `${x.book} on the latest row` } : null);
+    // The rows run oldest first: the last that carries a book is the latest.
+    return g.items.map(i => own(i.row)).filter(Boolean).pop() || g.prefill;
+}
 /** The book a group would be saved with: the held merchant's, else the one
  *  picked, else its prefill, else its type's. */
 function sureBook(g) {
     const held = sureHeld(g);
     if (held?.book) return held.book;
-    return sureBooks.has(g.key) ? sureBooks.get(g.key) : (g.prefill?.book || g.proposed || '');
+    return sureBooks.has(g.key) ? sureBooks.get(g.key) : (surePrefill(g)?.book || g.proposed || '');
 }
 /** The title row's words and its button, from what is ready now. */
 function sureHead() {
@@ -2332,7 +2344,7 @@ function sureRowHTML(g, books, at) {
         <td class="r num sl-n">${n}<span class="ph-w"> ${n === 1 ? 'row' : 'rows'}</span></td>
         <td class="r num sl-a">${esc(sumByCurrency(g.items))}</td>
         <td class="sl-ty">${esc(type.name)} ${type.held ? '<em>in fin</em>' : `<em>${Math.round(type.probability * 100)}%</em>`}</td>
-        <td class="sl-bk"><select class="sel${book ? '' : ' need'}" data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy || held ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(g.prefill, book, 'sl-hint')}</td>
+        <td class="sl-bk"><select class="sel${book ? '' : ' need'}" data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy || held ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(surePrefill(g), book, 'sl-hint')}</td>
         <td class="sl-go"><button type="button" class="btn sm subtle icon" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${sureReady(g) && !queueBusy ? '' : ' disabled'}>${icon('check')}</button></td></tr>
         <tr class="sl-det" id="${id}"${open ? '' : ' hidden'}><td colspan="6">${open ? sureDetailHTML(g, at) : ''}</td></tr>`;
 }
@@ -2378,7 +2390,7 @@ function drawSureState() {
         $$('select', tr).forEach(x => { x.disabled = queueBusy || sureBookHeld(g); });
         $$('select, .seg button, [data-sure-name]', tr.nextElementSibling).forEach(x => { x.disabled = queueBusy; });
         const hint = $('.sl-hint', tr);
-        if (hint) hint.hidden = sureBook(g) !== g.prefill.book;
+        if (hint) hint.hidden = sureBook(g) !== surePrefill(g)?.book;
         $('[data-act="sure-save"]', tr).disabled = queueBusy || !ready;
     });
     const h = sureHead();
