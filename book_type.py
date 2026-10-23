@@ -12,7 +12,8 @@ change to a declared type's wording here does not reach a book already
 seeded, as `seed_types` never overwrites; such a change goes in as a
 conversion step, as a rename does. Renaming, merging and removing a type,
 and every book, stay code changes. The types code reads by name are LOCKED:
-the app does not fix their wording either.
+their names are the code's, but their wording is fixed in the app like any
+spending type's (fin RUL-004).
 """
 
 from __future__ import annotations
@@ -201,8 +202,9 @@ PROPOSES_MOOM = ("Advertising", "Stock purchases", "Payment fees")
 ASKS_FOR_BOOK = ("Software & AI tools",)
 
 
-# The types code reads by name, so their meaning is the code's: the app
-# neither renames them nor fixes their wording. The book-proposing lists above,
+# The types code reads by name, so their names are the code's: the app never
+# renames them, though their wording is fixed like any type's (fin RUL-004).
+# The book-proposing lists above,
 # loan interest's type (loan_interest.TYPE_NAME), a gift given
 # (review.GIFT_GIVEN_TYPE, letgo_api.GIFTS), and Other, which means "not
 # placed yet" and is never asked of Jev (suggest.NOT_ASKED). A test fails
@@ -443,8 +445,9 @@ def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
 
 def fix_wording(conn: sqlite3.Connection, type_id: int, data: dict) -> None:
     """Fix a spending type's wording: what it covers, what it is not for, or
-    both. Anything else in the request is a code change and refused, as is a
-    locked type and an income kind; nothing is written. No commit."""
+    both. Anything else in the request is a code change and refused, as is an
+    income kind; nothing is written. A LOCKED type's wording is fixed here
+    too, its name never (fin RUL-004). No commit."""
     found = conn.execute(
         "SELECT t.kind, t.name, p.name AS parent, t.covers, t.not_for FROM types t"
         " LEFT JOIN types p ON p.id = t.parent_id WHERE t.id = ?",
@@ -457,9 +460,6 @@ def fix_wording(conn: sqlite3.Connection, type_id: int, data: dict) -> None:
         raise TypeRefused("income kinds are set in code")
     if any(k not in WORDING_FIELDS for k in data):
         raise TypeRefused(CODE_CHANGE)
-    shown = display_name(name, parent)
-    if shown in LOCKED:
-        raise TypeRefused(f"{shown} is set in code: fin reads it by name")
     if not data:
         raise TypeRefused("say what the type covers or what it is not for")
     if "covers" in data:

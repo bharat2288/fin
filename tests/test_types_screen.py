@@ -135,22 +135,49 @@ def test_case_15_the_types_card_says_what_is_true_and_offers_add(server):
     assert re.search(r'<button class="btn"[^>]*data-act="type-add"[^>]*>.*?Add a type</button>', html, re.S)
 
 
-# --- case 25 ---------------------------------------------------------------------
+# --- case 25 (walk-fixes), now queue-naming cases 21-22 (fin RUL-004) -------------
 
 
-def test_case_25_a_locked_type_says_set_in_code_and_has_no_fix(server, api):
+def test_a_locked_type_offers_fix_the_wording_and_says_its_name_is_set_in_code(server, api):
     html = run(server, "return await viewLists('types');")
-    rows = type_rows(html)
+    # The spending table only: an income kind may share a name ("Other").
+    rows = type_rows(html.split("Income kinds", 1)[0])
+    shown = listed(api)
     for locked in ("Advertising", "Other", "Gifts & Donations"):
-        assert "Set in code" in words(rows[locked]), locked
-        assert 'data-act="type-fix"' not in rows[locked], locked
-    dining = listed(api)["Dining"]
+        assert re.search(rf'<button[^>]*data-act="type-fix" data-id="{shown[locked]["id"]}"[^>]*>Fix the wording</button>', rows[locked]), locked
+        assert "name set in code" in words(rows[locked]), locked
+        assert "Set in code" not in words(rows[locked]), locked
+    dining = shown["Dining"]
     assert re.search(rf'<button[^>]*data-act="type-fix" data-id="{dining["id"]}"[^>]*>Fix the wording</button>', rows["Dining"])
-    assert "Set in code" not in words(rows["Dining"])
-    # The income kinds are set in code too.
+    assert "set in code" not in words(rows["Dining"]).lower()
+    # The income kinds stay set in code: no fix offered.
     kinds = html.split("Income kinds", 1)
     if len(kinds) == 2 and "<tbody>" in kinds[1]:
         assert 'data-act="type-fix"' not in kinds[1]
+        assert "Set in code" in words(kinds[1])
+
+
+def test_case_21_advertisings_wording_fixed_from_the_screen_is_one_change(server, api):
+    ad = listed(api)["Advertising"]
+    fixed = "paid adverts and promotion on search, social media, marketplaces and podcasts"
+    out = run(server, FILL + f"""
+        await ACT['type-fix']({{ dataset: {{ id: '{ad["id"]}' }} }});
+        const opened = sheet();
+        fill({{ 'ty-covers': {json.dumps(fixed)}, 'ty-notfor': {json.dumps(ad["not_for"])} }});
+        await press(opened);
+        return {{ opened, after: sheet(), toasts: __toasts, view: __byId('view').innerHTML }};
+    """)
+    # The sheet fixes the wording only: no name field, and it says the name is the code's.
+    assert 'id="ty-name"' not in out["opened"]
+    assert "Its name is set in code: fin reads it by name." in words(out["opened"])
+    [entry] = entries(api)
+    assert entry["summary"] == "Fixed the wording of Advertising"
+    [toast] = out["toasts"]
+    assert not toast["bad"] and toast["undo"]
+    assert out["after"] == ""
+    after = listed(api)["Advertising"]
+    assert (after["name"], after["covers"], after["not_for"], after["locked"]) == ("Advertising", fixed, ad["not_for"], True)
+    assert "podcasts" in words(type_rows(out["view"])["Advertising"])
 
 
 # --- cases 21 and 23 -------------------------------------------------------------
@@ -323,7 +350,7 @@ def test_the_phone_puts_fix_in_the_rows_end_cell_and_every_control_is_44px(serve
     rows = type_rows(html)
     cell = re.search(r'<td class="([^"]*)"><button[^>]*class="([^"]*)"[^>]*data-act="type-fix"', rows["Dining"])
     assert cell and "sl-end" in cell.group(1).split() and {"btn", "sm"} <= set(cell.group(2).split())
-    assert "sl-end" in re.search(r'<td class="([^"]*)">[^<]*<span[^>]*>Set in code', rows["Advertising"]).group(1).split()
+    assert "sl-end" in re.search(r'<td class="([^"]*)">[^<]*<span[^>]*>name set in code', rows["Advertising"]).group(1).split()
     # A small control and a plain button are each the 44px tap target on a phone.
     assert re.search(r"--tap: 44px", STYLES)
     assert re.search(r"@media \(max-width: 720px\) \{ :root \{[^}]*--ctl-sm: var\(--tap\)", STYLES)

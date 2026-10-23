@@ -231,16 +231,39 @@ LOCKED = ["Advertising", "Stock purchases", "Payment fees", "Software & AI tools
           "Bank & government fees", "Gifts & Donations", "Other"]
 
 
+ADVERTISING_FIXED = "paid adverts and promotion on search, social media, marketplaces and podcasts"
+
+
+# queue-naming case 21 (fin RUL-004): a type code reads by name keeps its name
+# locked, but its wording is fixed like any spending type's.
 @pytest.mark.parametrize("display", LOCKED)
-def test_25_a_type_code_reads_by_name_is_locked_and_its_wording_refused(client, temp_db, display):
+def test_21_a_locked_types_wording_is_fixed_as_one_entry_and_its_name_stays_locked(client, display):
     assert types(client)[display]["locked"] is True
+
+    resp = fix(client, display, covers="anything it covers", not_for="what it is not")
+
+    assert resp.status_code == 200, resp.get_json()
+    [entry] = entries(client)
+    assert (entry["summary"], entry["rows"]) == (f"Fixed the wording of {display}", 1)
+    got = types(client)[display]
+    assert (got["covers"], got["not_for"], got["locked"]) == ("anything it covers", "what it is not", True)
+
+
+@pytest.mark.parametrize("display", LOCKED)
+def test_21_a_locked_type_still_cannot_be_renamed(client, temp_db, display):
     before = book_rows(temp_db)
 
-    resp = fix(client, display, covers="anything")
+    resp = fix(client, display, covers="anything", name="Something else")
 
     assert resp.status_code == 400
-    assert resp.get_json()["error"] == f"{display} is set in code: fin reads it by name"
+    assert resp.get_json()["error"] == "renaming, merging or removing a type is a code change"
     assert book_rows(temp_db) == before
+
+
+def test_21_jev_is_asked_with_advertisings_fixed_wording(client, conn):
+    assert fix(client, "Advertising", covers=ADVERTISING_FIXED).status_code == 200
+
+    assert suggest.question(conn)["criteria"]["Advertising"]["what"] == ADVERTISING_FIXED
 
 
 @pytest.mark.parametrize("extra", [
@@ -256,6 +279,7 @@ def test_25_any_field_but_the_wording_is_refused(client, temp_db, extra):
     assert book_rows(temp_db) == before
 
 
+# Also queue-naming case 22: an income kind's wording stays set in code.
 def test_25_an_income_kind_is_refused(client, temp_db):
     salary = client.get("/api/types?kind=income").get_json()[0]["id"]
     before = book_rows(temp_db)

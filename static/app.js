@@ -1209,7 +1209,7 @@ ACT['home-guess-yes'] = async el => {
     const row = await findRow(Number(el.dataset.tx));
     if (!row) { toast('That row is no longer waiting', { bad: true }); return; }
     const pattern = suggestPattern(row.description);
-    const body = { tx_id: row.id, service_name: el.dataset.merchant || row.service_name || titleCase(pattern || row.description),
+    const body = { tx_id: row.id, service_name: el.dataset.merchant || row.service_name || suggestName(row.description) || titleCase(pattern || row.description),
         type_id: Number(el.dataset.type), apply_scope: pattern ? 'service_default' : 'transaction', pattern, match_type: 'contains', suggestion_visible: true };
     const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
     if (r.cancelled) return;
@@ -1979,7 +1979,8 @@ function recBlocks(key) {
 }
 /** Read the count for a wording, after REC_WAIT ms of quiet (0: at once). */
 function recLoad(key, wording, wait = REC_WAIT) {
-    const ctx = recCtx.get(key);
+    let ctx = recCtx.get(key);
+    if (ctx?.of) ctx = recCtx.get(ctx.of);   // an added wording: its line's
     clearTimeout(recTimers.get(key));
     recFound.set(key, { wording, reach: null });
     if (!ctx) return;
@@ -2011,6 +2012,7 @@ function recShown(key, ctx) {
 function recDraw(key, { whole = false } = {}) {
     const ctx = recCtx.get(key);
     if (!ctx) return;
+    if (ctx.of) { recMoreDraw(ctx.of); recCtx.get(ctx.of)?.changed?.(); return; }
     const box = $$('[data-rec-line]').find(x => x.dataset.recLine === key);
     if (box && recOpen.has(key) && !whole) {
         const n = $('.rec__n', box);
@@ -2042,6 +2044,94 @@ function recWhenShown(key) {
     });
     recWatch.observe(document.body, { childList: true, subtree: true });
 }
+
+// Several wordings (queue-naming C, cases 14-18): the sure card's opened line
+// adds wordings under its own with "+ another wording", each with its own
+// field, live count and warning (the same reach read) and a remove link; the
+// save sends them with its own, one rule each, in one change. An empty
+// wording, or one the line already has, is refused before saving.
+const recMore = new Map();     // a teach's key -> the keys of the wordings added under it
+let recMoreN = 0;
+/** Why an added wording cannot be saved, before its count: it is empty, or
+ *  the line already has it (ignoring case). '' when it can. */
+function recMoreRefused(key, xk) {
+    const wording = recKeyWording(xk).toUpperCase();
+    if (!wording) return 'Say the wording the rule recognises';
+    const keys = recMore.get(key) || [];
+    const before = [recKeyWording(key), ...keys.slice(0, keys.indexOf(xk)).map(recKeyWording)];
+    return before.some(w => (w || '').toUpperCase() === wording) ? 'Already a wording here' : '';
+}
+/** An added wording's words: why it is refused, else its live count. */
+function recMoreCountHTML(key, xk) {
+    const refused = recMoreRefused(key, xk);
+    if (refused) return `<span class="warn-word">${esc(refused)}</span>`;
+    const f = recFound.get(xk), wording = recKeyWording(xk);
+    if (!f || f.wording !== wording) recLoad(xk, wording, 0);
+    return recCountHTML(recReach(xk));
+}
+/** The wordings added under a teach's line, then the link that adds one. */
+function recMoreHTML(key) {
+    const lines = (recMore.get(key) || []).map(xk => {
+        const id = `rec-${xk.replace(/[^A-Za-z0-9]/g, '_')}`;
+        return `<div class="rec rec--edit rec--more" data-rec-line="${esc(xk)}"><label class="sr-only" for="${id}">Another wording</label>
+            <div class="rec__row"><input type="text" id="${id}" class="mono" data-rec-more="${esc(xk)}" value="${esc(recKeyWording(xk))}" autocomplete="off" spellcheck="false">
+            <button type="button" class="link" data-act="rec-more-remove" data-key="${esc(xk)}" aria-label="Remove the wording">remove</button></div>
+            <p class="rec__n" data-rec-n="${esc(xk)}" aria-live="polite">${recMoreCountHTML(key, xk)}</p></div>`;
+    }).join('');
+    return `<div class="rec-more" data-rec-more-of="${esc(key)}">${lines}<button type="button" class="link" data-act="rec-more" data-key="${esc(key)}">+ another wording</button></div>`;
+}
+/** The wordings a teach's save sends beside its own. */
+function recMoreWordings(key) { return (recMore.get(key) || []).map(recKeyWording); }
+/** An added wording cannot be saved: refused, or by its reach read refused or
+ *  matching no row, as the first wording (recBlocks); not while it is read. */
+function recMoreBlocks(key) { return (recMore.get(key) || []).some(xk => recMoreRefused(key, xk) || recBlocks(xk)); }
+/** Each added wording's words drawn again in place (a wording before it may have changed). */
+function recMoreDraw(key) {
+    (recMore.get(key) || []).forEach(xk => {
+        const n = $$('[data-rec-n]').find(x => x.dataset.recN === xk);
+        if (n) n.innerHTML = recMoreCountHTML(key, xk);
+    });
+}
+/** The list drawn again whole, then the line's save state. */
+function recMoreRedraw(key) {
+    const box = $$('[data-rec-more-of]').find(x => x.dataset.recMoreOf === key);
+    if (box) box.outerHTML = recMoreHTML(key);
+    recCtx.get(key)?.changed?.();
+}
+/** A saved line's added wordings, gone. */
+function recMoreForget(key) {
+    (recMore.get(key) || []).forEach(xk => { clearTimeout(recTimers.get(xk)); [recWords, recFound, recCtx, recTimers].forEach(m => m.delete(xk)); });
+    recMore.delete(key);
+}
+ACT['rec-more'] = el => {
+    const key = el.dataset.key, xk = `${key}+${++recMoreN}`;
+    recMore.set(key, [...(recMore.get(key) || []), xk]);
+    recWords.set(xk, '');
+    recCtx.set(xk, { of: key });
+    recMoreRedraw(key);
+    $$('[data-rec-more]').find(x => x.dataset.recMore === xk)?.focus();
+};
+ACT['rec-more-word'] = el => {
+    const xk = el.dataset.recMore, ctx = recCtx.get(xk);
+    if (!ctx) return;
+    const wording = el.value.trim();
+    recWords.set(xk, wording);
+    if (wording && !recMoreRefused(ctx.of, xk)) recLoad(xk, wording);
+    recDraw(xk);
+};
+ACT['rec-more-remove'] = el => {
+    const xk = el.dataset.key, key = recCtx.get(xk)?.of;
+    if (!key) return;
+    clearTimeout(recTimers.get(xk));
+    [recWords, recFound, recCtx, recTimers].forEach(m => m.delete(xk));
+    recMore.set(key, recMore.get(key).filter(k => k !== xk));
+    recMoreRedraw(key);
+    $$('[data-act="rec-more"]').find(x => x.dataset.key === key)?.focus();
+};
+document.addEventListener('input', e => {
+    const el = e.target.closest && e.target.closest('[data-rec-more]');
+    if (el) ACT['rec-more-word'](el);
+});
 ACT['rec-edit'] = el => {
     recOpen.add(el.dataset.key);
     recDraw(el.dataset.key, { whole: true });
@@ -2082,6 +2172,7 @@ const sureShown = new Set();   // the keys of the lines opened to their detail
 const sureAll = new Set();     // the keys of the lines showing every row
 const sureSets = new Map();    // a group's key -> true for Check each row, false for Every row the same, as picked
 const sureRowBooks = new Map(); // a row's id -> the book picked on its line under Check each row
+const sureNames = new Map();   // a group's key -> the name as typed in its Name field
 let sureList = [];             // the groups as last drawn, in card order
 
 // Teaching with Check each row (fin-surfaces 13): wherever a merchant is
@@ -2107,13 +2198,44 @@ function sureRows(g) {
     const rows = g.items.map(i => i.row);
     return sureAll.has(g.key) ? rows : rows.slice(0, SURE_ROWS);
 }
-/** Ready to save: a book, and under Check each row a book on every row drawn. */
-function sureReady(g) { return !!sureBook(g) && !recBlocks(g.key) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
+/** Ready to save: a name, a book, every wording savable, and under Check each row a book on every row drawn. */
+function sureReady(g) { return !!g.name && !!sureBook(g) && !recBlocks(g.key) && !recMoreBlocks(g.key) && (!sureEach(g) || sureRows(g).every(x => sureRowBook(g, x))); }
 
-/** The merchant a line's save makes: resolve's name from its first row's
- *  text, or the merchant fin already holds by that name (the save reuses it). */
-function sureName(row, services) {
-    const name = resolveBody(row, null).service_name;
+// The name on the card (queue-naming B): the opened line's Name field holds
+// the name its save makes, fin's suggestion until it is changed, with a
+// chooser of the merchants fin holds. A name that is one of them, ignoring
+// case, attaches the save to it: its own type and book are what the save
+// uses, and the line shows them (a merchant with none keeps the line's).
+/** The merchant fin holds by the line's name, ignoring case; null when none. */
+function sureHeld(g) {
+    const name = (g.name || '').toLowerCase();
+    return name ? (queueModel?.services || []).find(s => s.name.toLowerCase() === name) || null : null;
+}
+/** The name a line shows: the held merchant's own spelling, else as typed. */
+function sureShownName(g) { return sureHeld(g)?.name || g.name; }
+/** The type a line saves: the held merchant's, else Jev's. held: it is the merchant's. */
+function sureType(g) {
+    const held = sureHeld(g);
+    const type = held?.type_id && queueModel.r.typeById.get(held.type_id);
+    return type ? { type_id: type.id, name: type.display_name || type.name, held: true } : g.type;
+}
+/** The book is the held merchant's own: its picker shows it and cannot change it. */
+function sureBookHeld(g) { return !!sureHeld(g)?.book; }
+/** The words under the Name field: the merchant it saves to, or that it needs a name. */
+function sureNameSay(g) {
+    if (!g.name) return '<span class="warn-word">Give it a name</span>';
+    const held = sureHeld(g);
+    if (!held) return 'Type to find a merchant already in fin.';
+    return `Saves to ${esc(held.name)}, already in fin: ${esc(sureType(g).name)} · ${sureBook(g) ? esc(sureBook(g)) : 'the book you pick'}`;
+}
+
+/** The merchant a line's save makes: the name suggested from its first
+ *  row's text, or the merchant fin already holds by that name, ignoring case
+ *  (the save reuses it). asks: a wording that names no merchant gives no
+ *  name, for a sheet whose save asks for one (This was…); else resolve's. */
+function sureName(row, services, { asks = false } = {}) {
+    const name = asks ? suggestName(row.description) : resolveBody(row, null).service_name;
+    if (!name) return '';
     return services.find(s => s.name.toLowerCase() === name.toLowerCase())?.name || name;
 }
 /** The lanes' rows with no type whose guess is sure, one group per merchant
@@ -2139,15 +2261,36 @@ function sureGroups(q, guesses, r, services) {
         // A line's rows run oldest first, and the first names the merchant its save makes.
         byMerchant.forEach(group => {
             group.items.sort((a, b) => (a.row.date || '').localeCompare(b.row.date || '') || a.row.id - b.row.id);
-            group.name = sureName(group.items[0].row, services);
+            group.suggested = sureName(group.items[0].row, services, { asks: true });
+            group.name = sureNames.has(group.key) ? sureNames.get(group.key).trim() : group.suggested;
             group.checksEach = merchantChecksEach(group.name, services);
         });
         groups.push(...[...byMerchant.values()].sort((a, b) => b.amount - a.amount));
     });
     return groups;
 }
-/** The book a group would be saved with: the one picked, else its prefill, else its type's. */
-function sureBook(g) { return sureBooks.has(g.key) ? sureBooks.get(g.key) : (g.prefill?.book || g.proposed || ''); }
+/** A line's prefilled book, with its hint. Under Check each row (queue-naming
+ *  D) it is the book the latest of its rows carries (by date, then id), as
+ *  that row's picker starts: each row is checked with its own, so the usual
+ *  book does not wait on a pick. Else fin's book prefill for every row. */
+function surePrefill(g) {
+    if (!sureEach(g)) return g.prefill;
+    // The rows run oldest first: the last that carries a book is the latest
+    // (it has a source; an empty book reads as Household and is not one).
+    // Its own book, as case 19 says, not its picker's prefill; with no row
+    // carrying one, the latest picker's prefill with its own hint.
+    const rows = g.items.map(i => i.row);
+    const held = rows.filter(x => x.sources?.book).pop();
+    if (held) return { book: held.book, hint: `${held.book} on the latest row` };
+    return rows.map(eachPrefill).filter(Boolean).pop() || g.prefill;
+}
+/** The book a group would be saved with: the held merchant's, else the one
+ *  picked, else its prefill, else its type's. */
+function sureBook(g) {
+    const held = sureHeld(g);
+    if (held?.book) return held.book;
+    return sureBooks.has(g.key) ? sureBooks.get(g.key) : (surePrefill(g)?.book || g.proposed || '');
+}
 /** The title row's words and its button, from what is ready now. */
 function sureHead() {
     const ready = sureList.filter(sureReady).length;
@@ -2165,9 +2308,10 @@ function jevName(g) { return g.merchant.toLowerCase() === g.name.toLowerCase() ?
 /** The one sentence for a line's setting, then Jev's name when it differs. */
 function sureSay(g) {
     const book = sureBook(g) ? esc(sureBook(g)) : 'the book you pick';
+    const name = g.name ? esc(sureShownName(g)) : 'this merchant', type = esc(sureType(g).name);
     const say = sureEach(g)
-        ? `You give the rows below their own book. Each new row from ${esc(g.name)} arrives as ${esc(g.type.name)} in its usual book, ${book}, marked not checked, and waits in the Queue’s Check each row step.`
-        : `Every new row from ${esc(g.name)} will be ${esc(g.type.name)} · ${book}, without asking.`;
+        ? `You give the rows below their own book. Each new row from ${name} arrives as ${type} in its usual book, ${book}, marked not checked, and waits in the Queue’s Check each row step.`
+        : `Every new row from ${name} will be ${type} · ${book}, without asking.`;
     const jev = jevName(g);
     return `${say}${jev ? ` Jev’s name for it: ${esc(jev)}.` : ''}`;
 }
@@ -2183,7 +2327,11 @@ function sureDetailHTML(g, at) {
     const first = g.items[0].row;
     const rec = recShown(g.key, { tx: first.id, txs: g.items.map(i => i.row.id), name: g.name, suggested: suggestPattern(first.description),
         here: g.items.length, changed: drawSureState });
-    return `<div class="det">${rec}
+    const nameId = `sn-${at}`;
+    const field = `<div class="sname"><label class="cap" for="${nameId}">Name</label>
+        <input type="text" id="${nameId}" data-sure-name="${esc(g.key)}" list="sure-merchants" value="${esc(g.name)}" autocomplete="off" spellcheck="false" aria-describedby="${nameId}-say"${queueBusy ? ' disabled' : ''}>
+        <p class="sname__say" id="${nameId}-say" data-sure-said="${esc(g.key)}" aria-live="polite">${sureNameSay(g)}</p></div>`;
+    return `<div class="det">${field}${rec}${rec ? recMoreHTML(g.key) : ''}
         <div class="det__top"><div class="det__set"><span class="cap" id="nr-${at}">New rows</span>${eachSegHTMLQ('sure-set', g.key, g.name, each, { labelledBy: `nr-${at}` })}</div>
             <button type="button" class="btn sm ghost" data-act="sure-else" data-key="${esc(g.key)}">Something else…</button></div>
         <p class="det__say">${sureSay(g)}</p>
@@ -2193,14 +2341,14 @@ function sureDetailHTML(g, at) {
 /** A line: the name opens its detail; the setting shows only as a tag, and
  *  only when it is Check each row; the select alone says it needs a book. */
 function sureRowHTML(g, books, at) {
-    const book = sureBook(g), each = sureEach(g);
+    const book = sureBook(g), each = sureEach(g), type = sureType(g), held = sureBookHeld(g);
     const n = g.items.length, open = sureShown.has(g.key), id = `sd-${at}`;
     return `<tr class="sl${open ? ' is-open' : ''}" data-key="${esc(g.key)}" data-at="${at}">
-        <td class="sl-m">${rowDetailToggle({ id, label: g.name, open, act: 'sure-open', data: { key: g.key } })}${open ? '' : recMiniHTML(recWording(g.key, g.items[0].row), g.key)}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
+        <td class="sl-m">${rowDetailToggle({ id, label: sureShownName(g) || 'Give it a name', open, act: 'sure-open', data: { key: g.key } })}${open ? '' : recMiniHTML(recWording(g.key, g.items[0].row), g.key)}${each ? '<span class="tag each">Check each row</span>' : ''}</td>
         <td class="r num sl-n">${n}<span class="ph-w"> ${n === 1 ? 'row' : 'rows'}</span></td>
         <td class="r num sl-a">${esc(sumByCurrency(g.items))}</td>
-        <td class="sl-ty">${esc(g.type.name)} <em>${Math.round(g.type.probability * 100)}%</em></td>
-        <td class="sl-bk"><select class="sel${book ? '' : ' need'}" data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(g.prefill, book, 'sl-hint')}</td>
+        <td class="sl-ty">${esc(type.name)} ${type.held ? '<em>in fin</em>' : `<em>${Math.round(type.probability * 100)}%</em>`}</td>
+        <td class="sl-bk"><select class="sel${book ? '' : ' need'}" data-change="sure-book" data-key="${esc(g.key)}" aria-label="${each ? 'Usual book' : 'Book'} for ${esc(g.name)}"${queueBusy || held ? ' disabled' : ''}>${bookOptions(books, book, 'Choose book')}</select>${prefillHintHTML(surePrefill(g), book, 'sl-hint')}</td>
         <td class="sl-go"><button type="button" class="btn sm subtle icon" data-act="sure-save" data-key="${esc(g.key)}" aria-label="Save ${esc(g.name)}"${sureReady(g) && !queueBusy ? '' : ' disabled'}>${icon('check')}</button></td></tr>
         <tr class="sl-det" id="${id}"${open ? '' : ' hidden'}><td colspan="6">${open ? sureDetailHTML(g, at) : ''}</td></tr>`;
 }
@@ -2223,7 +2371,9 @@ function sureCardHTML(books) {
     });
     const table = bandedTable({ caption: 'Merchants Jev is sure of', cls: 'sure-t', colgroup: [0, 64, 124, 200, 150, 64], rows,
         columns: [{ label: 'Merchant' }, { label: 'Rows', cls: 'r' }, { label: 'Amount', cls: 'r' }, { label: 'Jev’s type' }, { label: 'Book' }, { label: 'Save', sr: true }] });
-    return `<section class="card sure-card" id="sure-card" aria-labelledby="sure-title">
+    // One chooser for every line's Name field: the merchants fin holds.
+    const chooser = `<datalist id="sure-merchants">${(queueModel?.services || []).map(s => `<option value="${esc(s.name)}">`).join('')}</datalist>`;
+    return `<section class="card sure-card" id="sure-card" aria-labelledby="sure-title">${chooser}
         <div class="sure-head">
             <div><h2 id="sure-title"><button type="button" class="disc sure-fold" data-act="sure-fold" aria-expanded="${open}" aria-controls="sure-body">${icon('caret-right', 'caret')}<span>Jev is sure of ${esc(plural(sureList.length, 'merchant'))}</span></button></h2>
                 <p class="sub"><span id="sure-meta">${esc(h.meta)}</span> ${SURE_NOTE}</p></div>
@@ -2241,10 +2391,10 @@ function drawSureState() {
         if (!tr) return;
         const ready = sureReady(g);
         $('[data-change="sure-book"]', tr).classList.toggle('need', !sureBook(g));
-        $$('select', tr).forEach(x => { x.disabled = queueBusy; });
-        $$('select, .seg button', tr.nextElementSibling).forEach(x => { x.disabled = queueBusy; });
+        $$('select', tr).forEach(x => { x.disabled = queueBusy || sureBookHeld(g); });
+        $$('select, .seg button, [data-sure-name]', tr.nextElementSibling).forEach(x => { x.disabled = queueBusy; });
         const hint = $('.sl-hint', tr);
-        if (hint) hint.hidden = sureBook(g) !== g.prefill.book;
+        if (hint) hint.hidden = sureBook(g) !== surePrefill(g)?.book;
         $('[data-act="sure-save"]', tr).disabled = queueBusy || !ready;
     });
     const h = sureHead();
@@ -2292,6 +2442,32 @@ ACT['sure-set'] = el => {
     sureShown.add(g.key);
     drawSureLine(g, `[data-act="sure-set"][data-v="${el.dataset.v}"]`);
 };
+// The Name field, typed in or chosen from: the line's name, the merchant it
+// attaches to, and what that sets (its type, its book, how its rows arrive),
+// drawn again in place; the field keeps its focus.
+ACT['sure-name'] = el => {
+    const g = sureList.find(x => x.key === el.dataset.sureName);
+    if (!g) return;
+    sureNames.set(g.key, el.value);
+    g.name = el.value.trim();
+    g.checksEach = merchantChecksEach(g.name);
+    const tr = $$('#sure-card tr.sl').find(x => x.dataset.key === g.key);
+    if (tr) {
+        const body = document.createElement('tbody');
+        body.innerHTML = sureRowHTML(g, queueModel.r.books, Number(tr.dataset.at));
+        const box = tr.nextElementSibling;
+        tr.replaceWith(body.rows[0]);
+        const said = $('[data-sure-said]', box);
+        if (said) said.innerHTML = sureNameSay(g);
+        const say = $('.det__say', box);
+        if (say) say.innerHTML = sureSay(g);
+    }
+    drawSureState();
+};
+document.addEventListener('input', e => {
+    const el = e.target.closest && e.target.closest('[data-sure-name]');
+    if (el) ACT['sure-name'](el);
+});
 ACT['sure-row-book'] = el => {
     const g = sureList.find(x => x.key === el.dataset.key);
     if (!g) return;
@@ -2340,8 +2516,8 @@ async function saveSureGroup(g, labelled) {
     if (!rows.length) return { skipped: true };
     const each = sureEach(g);
     const drawn = new Set(sureRows(g).map(x => x.id));
-    const res = await saveResolve(resolveBody(rows[0], g.type.type_id, { merchant: g.name, visible: true, book: sureBook(g), each,
-        pattern: recWording(g.key, g.items[0].row) }), rows,
+    const res = await saveResolve(resolveBody(rows[0], sureType(g).type_id, { merchant: g.name, visible: true, book: sureBook(g), each,
+        pattern: recWording(g.key, g.items[0].row), wordings: recMoreWordings(g.key) }), rows,
         { quiet: true, check: each ? x => sureRowBook(g, x) : null, onScreen: each ? rows.filter(x => drawn.has(x.id)) : null });
     res.labelledIds.forEach(id => labelled.add(id));
     return res;
@@ -2356,7 +2532,7 @@ ACT['sure-save'] = async el => {
     if (!res.skipped) {   // skipped: its rows already have a type
         if (res.ok) sureForget(g);
         // Under Check each row the rows not drawn are named as waiting.
-        savedToast(g.name, g.type.name, book, res, each ? sureRows(g) : g.items.map(i => i.row), { each });
+        savedToast(sureShownName(g), sureType(g).name, book, res, each ? sureRows(g) : g.items.map(i => i.row), { each });
     }
     rerender(); refreshFrame();
 };
@@ -2364,6 +2540,8 @@ ACT['sure-save'] = async el => {
 function sureForget(g) {
     sureBooks.delete(g.key);
     sureSets.delete(g.key);
+    sureNames.delete(g.key);
+    recMoreForget(g.key);
     g.items.forEach(i => sureRowBooks.delete(i.row.id));
 }
 /** One merchant's save said: the sure card's ✓, Pick a type's Save and "This
@@ -2395,16 +2573,16 @@ ACT['sure-all'] = async () => {
     let pasts = '';            // what the offer's answers did to past rows
     let saved = 0, cancelled = 0, error = null, at = ready.length;
     for (const [n, g] of ready.entries()) {
-        const checks = sureEach(g);
+        const checks = sureEach(g), name = sureShownName(g);   // as fin holds it, not as typed
         const res = await saveSureGroup(g, labelled);
-        if (res.skipped) { skipped.push([g.name, by.get(g.items[0].row.id)]); continue; }
+        if (res.skipped) { skipped.push([name, by.get(g.items[0].row.id)]); continue; }
         if (res.cancelled) { cancelled += 1; continue; }   // its question closed: that line is left as it was
-        pasts += pastWords(g.name, res.past);
+        pasts += pastWords(name, res.past);
         changes.push(...res.changes);
-        res.labelledIds.forEach(id => { if (!by.has(id)) by.set(id, g.name); });
+        res.labelledIds.forEach(id => { if (!by.has(id)) by.set(id, name); });
         // A merchant whose rule was made counts as saved even if one of its
         // rows then failed: its changes are in the Undo.
-        if (res.resolved) { sureForget(g); saved += 1; if (checks) each.push(g.name); }
+        if (res.resolved) { sureForget(g); saved += 1; if (checks) each.push(name); }
         if (!res.ok) { error = res.error; at = n + 1; break; }
     }
     queueBusy = false;
@@ -2581,6 +2759,47 @@ function suggestPattern(description) {
 }
 function titleCase(s) { return s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); }
 
+/** The name a teach suggests for a merchant: fin's own tidy-up of the
+ *  statement wording (queue-naming A; suggest.py's clean, which is what Jev
+ *  is sent, stays as it is). Its rules are the data below. Empty when the
+ *  wording names no merchant (a PayNow, a transfer): the save asks for one. */
+const NAME_RULES = {
+    // a payee or transfer shape (suggest.py's _PAYEE_SHAPE): no merchant to name
+    payee: /PAY ?NOW|PAYLAH|\bFAST\b|\bIBG\b|GIRO|TRANSFER|\bTRF\b|INWARD|REMITT|\bATM\b|\bCASH\b|\bFUNDS\b|I-BANK|:IB\b|\bMEP\b|\bFT\d/,
+    // bank advice, card payment and fee or tax lines (suggest.py's _BANK_LINE): rules, not merchants
+    bank: /^(ADVICE|BILL PAYMENT|PAYMENT\b|PAYMT\b|CARD PAYMENT|SERVICE CHARGE|MISC DEBIT|BUSINESS ADVANCE|INTEREST|CASH REBATE|SALARY|DIVIDEND|GST\b|FINANCE CHARGE|CCY CONVERSION FEE|FEE$)|\b(SERVICE FEE|ADMINISTRATIVE FEE|FOREIGN CURRENCY TRANSACTION FEE|ANNUAL (MEMBERSHIP )?FEE|LATE (PAYMENT )?(CHARGE|FEE)|ADMIN(ISTRATION)? FEE|OVERLIMIT FEE|GOODS (AND|&) SERVICES TAX|((CREDIT )?CARDS?|CC) (PAYMENT|PAYMT))\b/,
+    // processors that print their name before the merchant's (suggest.py's, with SP and EZYPAY)
+    // (SP Group, the power company, is a merchant: its SP is not the prefix)
+    processor: /^(?:(?:2C2P|2C2|PAYPAL|PP|STRIPE|SQUARE|SQ|OMISE|GLOBAL-E|GLOBALE|ADYEN|SUMUP|ATOME|SMP|PYU|EZYPAYSGD|EZYPAY)\s*[*/]\s*|(?:2C2P|PAYPAL|STRIPE|OMISE|GLOBAL-E|GLOBALE|SP)\s+(?!(?:GROUP|SERVICES)\b)(?=\S))/,
+    // a web address, its subdomains dropped ("HELP.UBER.COM" is Uber's)
+    web: /^(?:WWW\.)?(?:[A-Z0-9-]+\.)*?([A-Z0-9-]+)\.(?:COM|NET|ORG|IO|CO|AI|APP|SHOP|STORE)(?:\.[A-Z]{2})?\/?$/,
+    branch: /\s+-\s+.*$/,
+    // trailing countries, cities and currencies (suggest.py's _PLACES, and the currencies)
+    trailing: /(\s+(SINGAPORE|SGP|SGD|SG|SIN|USA|USD|US|GBR|GBP|GB|UK|LONDON|AUS|AUD|AU|SYDNEY|IND|INR|IN|HKG|HKD|HK|JPN|JPY|JP|TOKYO|MYS|MYR|MY|THA|THB|TH|BANGKOK|IDN|IDR|ID|NLD|NL|IRL|IE|DUBLIN|CAN|CAD|CA|DEU|DE|FRA|FR|EUR|EU|CHF|NZD|CNY))+$/,
+};
+function suggestName(description) {
+    let text = (description || '').toUpperCase().replace(/\s+/g, ' ').trim().replace(/ ?\* ?/g, '*');
+    if (NAME_RULES.payee.test(text)) return '';
+    text = text.replace(NAME_RULES.processor, '');
+    let words = text.split(' ');
+    if (!/[A-Z]/.test(words[0])) return '';
+    // "X*REST": a web address X names the merchant ("ETSY.COM*MULTIPLE SHOP");
+    // any other X keeps the rest, so "GOOGLE*ADS" is not cut to "Google"
+    const star = words[0].indexOf('*');
+    if (star > 0 && NAME_RULES.web.test(words[0].slice(0, star))) words = [words[0].slice(0, star)];
+    else words = words.join(' ').replace(/\*/g, ' ').trim().split(' ');
+    words = words.map((w, i) => {
+        const web = NAME_RULES.web.exec(w);
+        return !web ? w : i === 0 ? web[1] : '';
+    }).filter(Boolean);
+    // every word from the first after the name's own with a digit is a reference
+    const ref = words.findIndex((w, i) => i > 0 && /\d/.test(w));
+    if (ref > 0) words = words.slice(0, ref);
+    text = words.join(' ').replace(NAME_RULES.branch, '').replace(NAME_RULES.trailing, '').replace(/^[\s*\-\/.]+|[\s*\-\/.]+$/g, '');
+    if (!/[A-Z]/.test(text) || NAME_RULES.bank.test(text)) return '';
+    return text.toLowerCase().replace(/(^|[\s\-\/&(])([a-z])/g, (m, at, c) => at + c.toUpperCase());
+}
+
 // "This was…": one step for every row that waits for a label (Q4.1). The row,
 // then fin's guess with one "Yes" (Q4.2), then the choices; once one is picked
 // the others fold away and its questions sit straight under it (Q4.4). For a
@@ -2613,7 +2832,7 @@ async function openWhatWas(row, group, { mixed = false, notGuess = '' } = {}) {
     const minor = toMinor(row.amount_sgd, row.currency);
     const untyped = row.flow_type !== 'review';
     const pattern = suggestPattern(row.description);
-    const merchant = row.service_name || titleCase(pattern || row.description || '');
+    const merchant = row.service_name || sureName(row, services, { asks: true });
     const waiting = q.lanes.out.concat(q.lanes.in).filter(i => i.kind === 'untyped' && i.row.id !== row.id);
     const others = pattern ? waiting.filter(i => (i.row.description || '').toUpperCase().includes(pattern)).length : group.length - 1;
     let guess;
@@ -2712,7 +2931,7 @@ ACT['ww-pick'] = el => {
         }
         const name = $('#rs-merchant')?.value.trim() || step.merchant;
         w.textContent = s === 'transaction' ? 'Label only this row'
-            : s === 'rule' ? `Label rows whose text contains ${recKeyWording('ww') || '…'}` : `Label every row from ${name} the same way`;
+            : s === 'rule' ? `Label rows whose text contains ${recKeyWording('ww') || '…'}` : `Label every row from ${name || 'this merchant'} the same way`;
         // The rule's wording is shown wherever this save teaches one; its
         // count names other merchants' rows by the merchant taught.
         const ctx = recCtx.get('ww');
@@ -2741,13 +2960,14 @@ ACT['ww-scope'] = el => {
 };
 /** What resolve takes for a row with no type and the type chosen for it.
  *  each: the merchant setting as taught (true: Check each row); left out,
- *  the merchant keeps its own. */
-function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern, book = '', visible = false, each } = {}) {
-    const name = merchant || row.service_name || titleCase(suggestPattern(row.description) || row.description || '');
+ *  the merchant keeps its own. wordings: the others its rule recognises. */
+function resolveBody(row, typeId, { merchant, scope = 'service_default', pattern, book = '', visible = false, each, wordings = [] } = {}) {
+    const name = merchant || row.service_name || suggestName(row.description) || titleCase(suggestPattern(row.description) || row.description || '');
     const body = { tx_id: row.id, service_name: name, type_id: typeId, apply_scope: scope,
         pattern: pattern ?? suggestPattern(row.description), match_type: 'contains', suggestion_visible: visible };
     if (book) body.book = book;
     if (typeof each === 'boolean' && scope === 'service_default') body.check_each_row = each;
+    if (wordings.length && scope !== 'transaction') body.wordings = wordings;
     return body;
 }
 /** Save a type for a row with no type. A merchant text too plain to make a
@@ -2795,7 +3015,7 @@ async function saveResolve(body, group = [], { quiet = false, check = null, onSc
         : group.filter(x => x.id !== body.tx_id && !reached.has(x.id) && !x.type_id);
     let done = 0, error = null;
     for (const x of rest) {
-        const { check_each_row: _, ...one } = body;   // the setting went with the first
+        const { check_each_row: _, wordings: __, ...one } = body;   // the setting and the wordings went with the first
         const more = await send('POST', '/api/transactions/resolve', { ...one, tx_id: x.id, apply_scope: 'transaction', service_id: r.data.service_id ?? body.service_id });
         if (!more.ok) {
             error = more.data.error || 'One of the rows could not be labelled';
@@ -4084,9 +4304,9 @@ async function viewLists(tab) {
 
     if (tab === 'types') {
         const income = await get('/api/types?kind=income').catch(() => []);
-        // A type fin reads by name (and every income kind) is set in code; any other can have its wording fixed here.
-        const fix = t => t.locked ? '<span class="small muted">Set in code</span>'
-            : `<button type="button" class="btn sm" data-act="type-fix" data-id="${t.id}" aria-label="Fix the wording of ${esc(t.display_name || t.name)}">Fix the wording</button>`;
+        // Every spending type's wording can be fixed here; a type fin reads by name keeps its name (fin RUL-004). Income kinds are set in code.
+        const fix = t => t.kind === 'income' ? '<span class="small muted">Set in code</span>'
+            : `${t.locked ? '<span class="small muted">name set in code</span> ' : ''}<button type="button" class="btn sm" data-act="type-fix" data-id="${t.id}" aria-label="Fix the wording of ${esc(t.display_name || t.name)}">Fix the wording</button>`;
         const row = t => `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b>${t.added_in_fin ? ` ${tag('yours', 'added in fin')}` : ''}</td><td class="small">${esc(plainWords(t.covers))}</td>
             <td class="small muted">${esc(plainWords(t.not_for || ''))}</td><td class="small">${t.kind === 'income' ? '' : `${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}</td>
             <td class="sl-sub">${esc(plainWords(t.covers))}${t.kind === 'income' ? '' : ` · ${esc(t.proposed_book || 'any book')}${t.default_one_off ? ', one-off by default' : ''}`}${t.not_for ? `<div>Not for: ${esc(plainWords(t.not_for))}</div>` : ''}</td>
@@ -4235,7 +4455,7 @@ ACT['type-fix'] = async el => {
     const t = (await refs()).typeById.get(Number(el.dataset.id));
     if (!t) { toast('That type is no longer in fin', { bad: true }); return; }
     openSheet(esc(t.display_name || t.name), `<div class="fields">${typeWordingFields(t)}</div>
-        <p class="hint">Renaming, merging or removing a type is a code change.</p>`,
+        <p class="hint">${t.locked ? 'Its name is set in code: fin reads it by name. ' : ''}Renaming, merging or removing a type is a code change.</p>`,
     { eyebrow: 'Fix the wording', foot: `<button class="btn primary" data-act="type-fix-save" data-id="${t.id}">Save the wording</button>` });
 };
 /** Send a type write; on success toast the type's name with Undo and redraw, on a refusal say the server's words. */
@@ -5047,7 +5267,10 @@ function valueText(table, field, value, ctx, cur = 'SGD') {
     if (isEmpty(value)) return '';
     if (field === 'type_id' || field === 'type_override_id') return esc(ctx.r.typeById.get(value)?.display_name || 'a type no longer listed');
     if (field === 'other_side_id' || field === 'account_id') return esc(ctx.r.accountById.get(value)?.name || 'an account no longer listed');
-    if (field === 'service_id') return esc(ctx.services.find(s => s.id === value)?.name || 'a merchant no longer listed');
+    if (field === 'service_id') {
+        const gone = ctx.gone?.get(value);
+        return esc(ctx.services.find(s => s.id === value)?.name || (gone ? `${gone}, since removed` : 'a merchant no longer listed'));
+    }
     if (['is_one_off', 'review_each_time', 'exclude_from_expense_views'].includes(field)) return value ? 'yes' : 'no';
     if (field === 'flow_type') return esc(FLOW_WORDS[value] || String(value).replace(/_/g, ' '));
     // Each changed row comes with its own currency (its account's): rupees
@@ -5059,6 +5282,18 @@ function valueText(table, field, value, ctx, cur = 'SGD') {
     return esc(String(value));
 }
 function emptyText(field) { return EMPTY_WORDS[field] || 'empty'; }
+/** The merchants a change's own rows name (an undone save that made one:
+ *  its after, the undo's before), by id: a merchant gone from fin is still
+ *  named on the change's row lines. */
+function goneMerchants(changes) {
+    const out = new Map();
+    for (const c of changes) {
+        if (c.table !== 'services') continue;
+        const row = c.after || c.before || {};
+        if (row.name) out.set(c.row_id, row.name);
+    }
+    return out;
+}
 function rowName(c) {
     const row = c.after || c.before || {};
     return row.description || c.display_name || row.name || row.pattern || row.pair || '';
@@ -5376,8 +5611,8 @@ function afterCell(c, k, ctx) {
 /** A change opened (walk C4.1): one line per field, with the row's account
  *  and amount, before and after in their own columns. */
 async function changeRowsHTML(entry) {
-    const ctx = { r: await refs(), services: await servicesList() };
     const changes = entry.changes;
+    const ctx = { r: await refs(), services: await servicesList(), gone: goneMerchants(changes) };
     const out = [];
     const txRows = new Set(changes.filter(c => c.table === 'transactions').map(c => c.row_id));
     // A changed row sorts by its name, account or amount; its field lines stay together under it.
