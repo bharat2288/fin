@@ -248,8 +248,9 @@ async function get(url, { fresh = false } = {}) {
 }
 
 /** A write. Returns {ok, status, data, change}: change is the history entry
- *  it made, for the toast's Undo. Every write clears what was read. */
-async function send(method, url, body) {
+ *  it made, for the toast's Undo. Every write clears what was read, but one
+ *  that changes no book data (keep: "looked") keeps it and re-reads its own. */
+async function send(method, url, body, { keep = false } = {}) {
     const opts = { method, headers: { Accept: 'application/json' } };
     if (body instanceof FormData) opts.body = body;
     else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
@@ -257,7 +258,7 @@ async function send(method, url, body) {
     try { res = await fetch(url, opts); }
     catch (_) { return { ok: false, status: 0, data: { error: 'fin could not be reached; nothing was changed' } }; }
     const data = await res.json().catch(() => ({}));
-    cache.clear();
+    if (!keep) cache.clear();
     const change = res.headers.get('X-Fin-Change');
     return { ok: res.ok && !data.error, status: res.status, data, change: change ? Number(change) : null };
 }
@@ -1074,9 +1075,9 @@ function laneSummary(list) {
     }).filter(Boolean).join('<span class="sep" aria-hidden="true">·</span>');
 }
 
-async function homeGuesses(items) {
+/** The guesses Home shows: `all` is loadGuesses' Map, read with the rest of Home. */
+function homeGuesses(items, all) {
     const rows = items.filter(i => i.kind === 'untyped' && i.row).map(i => i.row.id);
-    const all = await loadGuesses();
     const out = new Map();
     rows.forEach(id => {
         const s = all.get(id);
@@ -1155,13 +1156,14 @@ function homeBookTiles(cards, books) {
 async function viewHome() {
     const month = currentMonth();
     const prev = prevMonth(month);
-    const [settings, now, before, q, cards, r] = await Promise.all([
+    // Jev's guesses are read with the Queue, not after it: one round.
+    const [settings, now, before, q, cards, r, allGuesses] = await Promise.all([
         get('/api/settings'), sheetFor(month),
         prev >= SHEET_START ? sheetFor(prev).catch(() => null) : Promise.resolve(null),
-        loadQueue(), get(`/api/dashboard/stat-cards?ref_month=${prev}&history=12`), refs(),
+        loadQueue(), get(`/api/dashboard/stat-cards?ref_month=${prev}&history=12`), refs(), loadGuesses(),
     ]);
     const shown = { out: q.lanes.out.slice(0, 3), in: q.lanes.in.slice(0, 3), books: q.lanes.books.slice(0, 3) };
-    const guesses = await homeGuesses([...shown.out, ...shown.in]);
+    const guesses = homeGuesses([...shown.out, ...shown.in], allGuesses);
 
     const lane = (key, title, list) => `<div class="home-lane home-lane--${key}">
         <div class="home-lane__head"><h3>${key === 'out' || key === 'in' ? dirTag(key) : ''}${title}</h3>
@@ -1218,9 +1220,10 @@ ACT['home-guess-yes'] = async el => {
 };
 
 ACT['looks-right'] = async el => {
-    const r = await send('POST', '/api/changes/looked', { upto: Number(el.dataset.upto) });
+    const r = await send('POST', '/api/changes/looked', { upto: Number(el.dataset.upto) }, { keep: true });
     if (!r.ok) { toast(r.data.error || 'That did not work', { bad: true }); return; }
     toast('Marked as looked at. Nothing was undone.');
+    await refreshFrame();   // the Claude count, read fresh, before Home draws it again
     rerender();
 };
 ACT['go-month-check'] = el => {
@@ -2483,16 +2486,22 @@ function alsoHTML(q) {
 }
 
 async function viewQueue() {
-    const [q, guesses, r, ask, services] = await Promise.all([loadQueue(), loadGuesses(), refs(), suggestionsOn(), servicesList()]);
+    // The book prefills need only the Queue's rows, so they are asked the moment
+    // those are in, alongside the guesses, merchants and switch still on the way.
+    // Every row a book picker could show is asked (rows with no type, rows to
+    // check); one that ends up with no picker is read and left unused.
+    const queue = loadQueue();
+    const prefillsRead = queue.then(q => loadPrefills(['out', 'in'].flatMap(lane =>
+        q.lanes[lane].filter(i => i.kind === 'untyped' || i.kind === 'mixed').map(i => i.row.id))));
+    const [q, guesses, r, ask, services, prefills] = await Promise.all([queue, loadGuesses(), refs(), suggestionsOn(), servicesList(), prefillsRead]);
     // The sure groups sit in their card, so they leave the lanes below.
     const sure = sureGroups(q, guesses, r, services);
     const sureIds = new Set(sure.flatMap(g => g.items.map(i => i.row.id)));
     const left = lane => q.lanes[lane].filter(i => !(i.kind === 'untyped' && sureIds.has(i.row.id)));
     const cards = { out: laneCards('out', left('out'), guesses), in: laneCards('in', left('in'), guesses) };
-    // One prefill read for every row a book picker shows: the sure card, Pick
-    // a type and the rows each checked on their own (queueModel.prefills).
+    // The prefills read above, on every row a book picker shows: the sure card,
+    // Pick a type and the rows each checked on their own (queueModel.prefills).
     const lines = [...cards.out, ...cards.in].filter(c => c.step === 'pick' || c.step === 'mixed');
-    const prefills = await loadPrefills([...sureIds, ...lines.flatMap(c => c.rows.map(x => x.id))]);
     sure.forEach(g => { g.prefill = sharedPrefill(g.items.map(i => i.row), prefills); });
     lines.forEach(c => { if (c.step === 'pick') c.prefill = sharedPrefill(c.rows, prefills); });
     queueModel = { r, ask, sure, cards, prefills, services };
@@ -3353,14 +3362,15 @@ const ACCT_ROW_SORT = {
 const accountPage = { page: 1, month: null };
 SORT_REDRAW['acct-rows'] = () => { accountPage.page = 1; rerender(); };
 async function viewAccount(id) {
-    const [r, sheet, ties, anchorsList, refused] = await Promise.all([
+    // The page of rows needs none of the other reads: all six go in one round.
+    if (accountPage.id !== id) { accountPage.id = id; accountPage.page = 1; accountPage.month = null; }
+    const order = sortOf('acct-rows').key ? `&${new URLSearchParams(sortServer('acct-rows', ACCT_ROW_SORT))}` : '';
+    const [r, sheet, ties, anchorsList, refused, rows] = await Promise.all([
         refs(), sheetFor(S.month), get(`/api/accounts/${id}/ties`), get(`/api/anchors?account_id=${id}`), get(`/api/statements/refused?account_id=${id}`),
+        get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}${accountPage.month ? `&month=${accountPage.month}` : ''}${order}`),
     ]);
     const acct = r.accountById.get(id);
     if (!acct) throw new Error('No such account');
-    if (accountPage.id !== id) { accountPage.id = id; accountPage.page = 1; accountPage.month = null; }
-    const order = sortOf('acct-rows').key ? `&${new URLSearchParams(sortServer('acct-rows', ACCT_ROW_SORT))}` : '';
-    const rows = await get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}${accountPage.month ? `&month=${accountPage.month}` : ''}${order}`);
     const line = sheet.sections.flatMap(s => s.lines).find(l => l.account_id === id);
     const cur = acct.currency || 'SGD';
     const asAtShort = day(sheet.as_at, { year: false });
@@ -5215,7 +5225,7 @@ async function viewChanges() {
         S.lastSeenMark = h.last_looked;
         S.lastSeenAt = h.last_looked_at;
         if (h.newest && h.newest !== h.last_looked) {
-            send('POST', '/api/changes/looked', { upto: h.newest }).then(() => refreshFrame());
+            send('POST', '/api/changes/looked', { upto: h.newest }, { keep: true }).then(() => refreshFrame());
         }
     }
     S.manyRows = h.many_rows;
