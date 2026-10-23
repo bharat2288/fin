@@ -1053,9 +1053,10 @@ def _type_shown(r) -> dict:
         "proposed_book": book_type.proposed(usual_book) if spending else None,
         # Whether a new merchant of this type starts as Check each row.
         "check_each_row": check_each_row if spending else False,
-        # Name set in code: fin means this type. Its wording is still fixed here
-        # (fin RUL-004); an income kind's is not.
-        "locked": (r["key"] in book_type.LOCKED) if spending else True,
+        # Its name cannot be changed here: Other's meaning is fixed, and an
+        # income kind is set in code. Any other spending type is renamed in
+        # the app (type-relationships 04).
+        "locked": (r["key"] == book_type.NOT_PLACED) if spending else True,
         # A spending type with no key is not declared: it was added in fin.
         "added_in_fin": spending and r["key"] is None,
     }
@@ -1119,16 +1120,19 @@ def _type_change_words(changed: dict) -> list[str]:
 
 @app.route("/api/types/<int:type_id>", methods=["PUT"])
 def api_types_change(type_id: int):
-    """Change a spending type: its wording (covers, not_for) and its settings
-    (usual_book: a book or "ask"; one_off and check_each_row, true or false),
-    any of them, as one change. Anything else is a code change and refused,
-    as is an income kind and Other's settings; nothing is written. A type
-    whose name is set in code is changed here too (fin RUL-004). A settings
-    change reaches new merchants only (fin RUL-006 Q3)."""
+    """Change a spending type: its name, its wording (covers, not_for) and its
+    settings (usual_book: a book or "ask"; one_off and check_each_row, true
+    or false), any of them, as one change. Anything else is a code change
+    and refused, as is an income kind and Other's name and settings; nothing
+    is written. A name is checked as an added type's is; a rename keeps the
+    type's id, so its merchants, rules and rows follow it, and Jev's stored
+    answers are re-pointed to the new name (type-relationships 04). A
+    settings change reaches new merchants only (fin RUL-006 Q3)."""
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "send the change as JSON"}), 400
     with get_db() as conn:
+        was = book_type.spending_type_names(conn).get(type_id)
         try:
             changed = book_type.change_type(conn, type_id, data)
         except book_type.NoSuchType:
@@ -1139,7 +1143,13 @@ def api_types_change(type_id: int):
         r = conn.execute(_TYPES_SELECT + "WHERE t.id = ?", (type_id,)).fetchone()
         shown = format_type_display(r["parent_name"], r["name"])
         words = _type_change_words(changed)
-        _name_change(conn, f"Changed {shown}: {', '.join(words)}" if words else f"Fixed the wording of {shown}")
+        if "name" in changed and words:
+            summary = f"Changed {shown}: renamed from {was}, {', '.join(words)}"
+        elif "name" in changed:
+            summary = f"Renamed {was} to {shown}" + (", wording fixed" if "wording" in changed else "")
+        else:
+            summary = f"Changed {shown}: {', '.join(words)}" if words else f"Fixed the wording of {shown}"
+        _name_change(conn, summary)
         conn.commit()
     return jsonify({"type": _type_shown(r)})
 
@@ -3684,8 +3694,8 @@ def api_transaction_suggestion(tx_id: int):
 def _suggested(answer, type_ids: dict) -> tuple[str, list]:
     """A stored answer as the screens are given it: the route and the types
     it offers. No answer is blank. A type the answer names that the book no
-    longer has (renamed or removed since) is left out; an answer left with
-    none is blank."""
+    longer has is left out (a rename re-points the answers, so this is one
+    taken out by Undo); an answer left with none is blank."""
     if answer is None:
         return "blank", []
     where, offered = suggest.route(answer["pick"], json.loads(answer["probabilities"]))

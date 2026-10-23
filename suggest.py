@@ -308,6 +308,31 @@ def stored_answers(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
     }
 
 
+def follow_renames(conn: sqlite3.Connection, was: dict[int, str]) -> None:
+    """Re-point every stored answer, its pick and its probabilities, from each
+    spending type's display name in `was` (by id, read before a write) to
+    the type's display name now: an answer names types by display name, so it
+    follows a rename (type-relationships 04), a parent's rename its
+    sub-types', and the Undo of one. A name the answer holds that a renamed
+    type now has belonged to a type the book no longer has, and is dropped.
+    No commit: the caller owns it."""
+    now = book_type.spending_type_names(conn)
+    renamed = {old: now[type_id] for type_id, old in was.items() if now.get(type_id, old) != old}
+    if not renamed:
+        return
+    gone = set(renamed.values()) - set(renamed)
+    for answer_id, pick, probabilities in conn.execute(
+        "SELECT id, pick, probabilities FROM suggestion_answers"
+    ).fetchall():
+        held = json.loads(probabilities)
+        moved = {renamed.get(name, name): p for name, p in held.items() if name not in gone}
+        if renamed.get(pick, pick) != pick or moved != held:
+            conn.execute(
+                "UPDATE suggestion_answers SET pick = ?, probabilities = ? WHERE id = ?",
+                (renamed.get(pick, pick), json.dumps(moved), answer_id),
+            )
+
+
 def unanswered(conn: sqlite3.Connection) -> list[str]:
     """The distinct merchant strings of rows with no type and no merchant that
     no rule matches, that pass the gate (so: card purchases only) and have no

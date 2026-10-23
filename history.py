@@ -363,6 +363,20 @@ def _write_back(conn: sqlite3.Connection, entry_id: int) -> None:
         "SELECT tbl, row_id, op, before FROM change_rows WHERE entry_id = ? ORDER BY id DESC",
         (entry_id,),
     ).fetchall()
+    # Jev's stored answers name types by display name and are not tracked:
+    # a type's name written back takes them with it, as the rename did
+    # (type-relationships 04). Imported here: suggest imports db, which
+    # imports this module.
+    import book_type
+    import suggest
+
+    names = book_type.spending_type_names(conn) if any(c[0] == "types" for c in changes) else None
+    _write_rows(conn, changes)
+    if names is not None:
+        suggest.follow_renames(conn, names)
+
+
+def _write_rows(conn: sqlite3.Connection, changes: list) -> None:
     for tbl, row_id, op, before in changes:
         if tbl not in TRACKED:
             raise UndoRefused("this change touched a table undo does not write")

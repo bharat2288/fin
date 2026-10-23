@@ -145,8 +145,12 @@ def test_a_locked_type_offers_fix_the_wording_and_says_its_name_is_set_in_code(s
     shown = listed(api)
     for locked in ("Advertising", "Other", "Gifts & Donations"):
         assert re.search(rf'<button[^>]*data-act="type-fix" data-id="{shown[locked]["id"]}"[^>]*>Fix the wording</button>', rows[locked]), locked
-        assert "name set in code" in words(rows[locked]), locked
         assert "Set in code" not in words(rows[locked]), locked
+    # Only Other's name stays as declared (type-relationships 04): code finds
+    # every other type it means by its key, so those are renamed in the app.
+    assert "name set in code" in words(rows["Other"])
+    for renamed in ("Advertising", "Gifts & Donations"):
+        assert "name set in code" not in words(rows[renamed]), renamed
     dining = shown["Dining"]
     assert re.search(rf'<button[^>]*data-act="type-fix" data-id="{dining["id"]}"[^>]*>Fix the wording</button>', rows["Dining"])
     assert "set in code" not in words(rows["Dining"]).lower()
@@ -167,16 +171,17 @@ def test_case_21_advertisings_wording_fixed_from_the_screen_is_one_change(server
         await press(opened);
         return {{ opened, after: sheet(), toasts: __toasts, view: __byId('view').innerHTML }};
     """)
-    # The sheet fixes the wording only: no name field, and it says the name is the code's.
+    # The sheet fixes the wording only: no name field (Lists › Types gains one
+    # in type-relationships 06). Advertising's name is no longer the code's.
     assert 'id="ty-name"' not in out["opened"]
-    assert "Its name is set in code: fin reads it by name." in words(out["opened"])
+    assert "Its name is set in code" not in words(out["opened"])
     [entry] = entries(api)
     assert entry["summary"] == "Fixed the wording of Advertising"
     [toast] = out["toasts"]
     assert not toast["bad"] and toast["undo"]
     assert out["after"] == ""
     after = listed(api)["Advertising"]
-    assert (after["name"], after["covers"], after["not_for"], after["locked"]) == ("Advertising", fixed, ad["not_for"], True)
+    assert (after["name"], after["covers"], after["not_for"], after["locked"]) == ("Advertising", fixed, ad["not_for"], False)
     assert "podcasts" in words(type_rows(out["view"])["Advertising"])
 
 
@@ -347,10 +352,11 @@ def test_a_refused_undo_names_the_type_that_blocks_it_as_every_screen_does(serve
 
 def test_the_phone_puts_fix_in_the_rows_end_cell_and_every_control_is_44px(server):
     html = run(server, "return await viewLists('types');")
-    rows = type_rows(html)
+    # The spending table only: an income kind shares Other's name.
+    rows = type_rows(html.split("Income kinds", 1)[0])
     cell = re.search(r'<td class="([^"]*)"><button[^>]*class="([^"]*)"[^>]*data-act="type-fix"', rows["Dining"])
     assert cell and "sl-end" in cell.group(1).split() and {"btn", "sm"} <= set(cell.group(2).split())
-    assert "sl-end" in re.search(r'<td class="([^"]*)">[^<]*<span[^>]*>name set in code', rows["Advertising"]).group(1).split()
+    assert "sl-end" in re.search(r'<td class="([^"]*)">[^<]*<span[^>]*>name set in code', rows["Other"]).group(1).split()
     # A small control and a plain button are each the 44px tap target on a phone.
     assert re.search(r"--tap: 44px", STYLES)
     assert re.search(r"@media \(max-width: 720px\) \{ :root \{[^}]*--ctl-sm: var\(--tap\)", STYLES)

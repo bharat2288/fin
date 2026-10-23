@@ -8,15 +8,15 @@ here, once, with a plain description for each member, and a new book's
 Once a book exists, its `types` table is the home of each type's wording
 (fin RUL-002): the operator may add a spending type and fix a type's wording
 (covers, not for) in the app, change its settings (usual book, one-off
-by default, Check each row by default; type-relationships 02), and move
+by default, Check each row by default; type-relationships 02), move
 which type each of fin's own filings goes under (loan interest, a gift given,
-a gift received; type-relationships 03), each one entry in the change
-history. A later change to a declared type's wording
-here does not reach a book already seeded, as `seed_types` never
-overwrites; such a change goes in as a conversion step. Renaming, merging and removing a type, and every book,
-stay code changes. The types code means are LOCKED: their names stay as
-declared, but their wording is fixed in the app like any spending type's
-(fin RUL-004).
+a gift received; type-relationships 03), and rename a spending type
+(type-relationships 04), each one entry in the change history. A later
+change to a declared type's wording or name here does not reach a book
+already seeded, as `seed_types` never overwrites; such a change goes in as a
+conversion step. Moving a type under another, merging and removing a type,
+every income kind, and every book stay code changes. Other's name and
+settings stay as declared: its meaning is fixed.
 
 Code never finds a type by the name it shows. Each declared type and income
 kind keeps a key, its declared name frozen, in the `type_keys` table, and the
@@ -226,9 +226,9 @@ GIFT_RECEIVED = "Gift received"
 NOT_PLACED = "Other"
 
 
-# The spending types code means, so their names stay as declared: the app
-# never renames them, though their wording is fixed like any type's (fin
-# RUL-004).
+# The spending types code means. Since code finds each by its key they are
+# renamed in the app like any type (type-relationships 04), but for Other,
+# whose name stays as declared (NOT_PLACED).
 LOCKED = PROPOSES_MOOM + ASKS_FOR_BOOK + (LOAN_INTEREST, GIFT_GIVEN, NOT_PLACED)
 
 
@@ -558,7 +558,7 @@ NAME_MOST = 40
 WORDING_MOST = 300
 WORDING_FIELDS = ("covers", "not_for")
 ADD_FIELDS = ("name", "parent_id", "one_off", "covers", "not_for", "kind")
-CODE_CHANGE = "renaming, merging or removing a type is a code change"
+CODE_CHANGE = "moving, merging or removing a type is a code change"
 
 # Every column that points at a type, as schema.sql declares it: a type added
 # in the app is taken out again, by Undo, only while none of them names it. A
@@ -629,33 +629,27 @@ def _not_for(value) -> str | None:
     return not_for
 
 
-def _spending_named(conn: sqlite3.Connection, name: str) -> str | None:
+def _spending_named(conn: sqlite3.Connection, name: str, but: int | None = None) -> str | None:
     """The display name of the spending type with this name, ignoring case,
-    wherever it sits in the list; None when there is none."""
+    wherever it sits in the list, other than the type `but`; None when there
+    is none."""
     wanted = name.casefold()
-    for held, parent in conn.execute(
-        "SELECT t.name, p.name FROM types t LEFT JOIN types p ON p.id = t.parent_id WHERE t.kind = ?",
+    for type_id, held, parent in conn.execute(
+        "SELECT t.id, t.name, p.name FROM types t LEFT JOIN types p ON p.id = t.parent_id WHERE t.kind = ?",
         (SPENDING,),
     ):
-        if held.casefold() == wanted:
+        if held.casefold() == wanted and type_id != but:
             return display_name(held, parent)
     return None
 
 
-def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
-    """Add a spending type the operator named, and return its id. The name is
-    unique ignoring case across every spending type (the table holds names
-    unique, whatever the parent); the parent, when there is one, is a
-    top-level spending type. Refused, writing nothing, with the reason in
-    words. No commit: the caller owns it."""
+def _name(conn: sqlite3.Connection, value, but: int | None = None) -> str:
+    """A spending type's name as stored, for a type added or for the type
+    `but` renamed: one line of plain words that no other spending type has,
+    ignoring case. Refused in words."""
     import suggest  # imported here: it imports this module
 
-    unknown = [k for k in data if k not in ADD_FIELDS]
-    if unknown:
-        raise TypeRefused(f"unknown field: {unknown[0]}")
-    if data.get("kind", SPENDING) != SPENDING:
-        raise TypeRefused("only a spending type can be added here")
-    name = _words(data.get("name"), "name")
+    name = _words(value, "name")
     if name is None:
         raise TypeRefused("a type needs a name")
     if ">" in name:
@@ -671,9 +665,24 @@ def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
         raise TypeRefused(f"a type's name can be at most {NAME_MOST} characters")
     if " ".join(name.replace("_", " ").split()).casefold() == suggest.NONE_OF_THESE.replace("_", " "):
         raise TypeRefused('"None of these" is what Jev answers when no type fits')
-    held = _spending_named(conn, name)
+    held = _spending_named(conn, name, but)
     if held is not None:
         raise TypeRefused(f"{held} is already a type")
+    return name
+
+
+def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
+    """Add a spending type the operator named, and return its id. The name is
+    unique ignoring case across every spending type (the table holds names
+    unique, whatever the parent); the parent, when there is one, is a
+    top-level spending type. Refused, writing nothing, with the reason in
+    words. No commit: the caller owns it."""
+    unknown = [k for k in data if k not in ADD_FIELDS]
+    if unknown:
+        raise TypeRefused(f"unknown field: {unknown[0]}")
+    if data.get("kind", SPENDING) != SPENDING:
+        raise TypeRefused("only a spending type can be added here")
+    name = _name(conn, data.get("name"))
     parent_id = data.get("parent_id")
     if parent_id is not None:
         top = None
@@ -700,35 +709,42 @@ def add_spending_type(conn: sqlite3.Connection, data: dict) -> int:
 
 
 SETTING_FIELDS = ("usual_book", "one_off", "check_each_row")
+CHANGE_FIELDS = ("name",) + WORDING_FIELDS + SETTING_FIELDS
 
 
 def change_type(conn: sqlite3.Connection, type_id: int, data: dict) -> dict:
-    """Change a spending type: its wording (covers, not_for) and its settings
-    (usual_book, one_off, check_each_row), any of them in one request.
-    Anything else is a code change and refused, as is an income kind, and
-    Other's settings (its meaning is fixed); nothing is written. A LOCKED
-    type's wording and settings are changed here too, its name never (fin
-    RUL-004). Returns what changed, field by new value, with "wording" for
-    the wording. No commit."""
+    """Change a spending type: its name, its wording (covers, not_for) and its
+    settings (usual_book, one_off, check_each_row), any of them in one
+    request. Anything else is a code change and refused, as is an income
+    kind, and Other's name and settings (its meaning is fixed); nothing is
+    written. A type code means is renamed like any other (type-relationships
+    04): code finds it by its key. A rename re-points Jev's stored answers
+    from the old display name, and every sub-type's, to the new one
+    (suggest.follow_renames). Returns what changed, field by new value, with
+    "wording" for the wording. No commit."""
     found = conn.execute(
-        "SELECT t.kind, t.covers, t.not_for, t.default_one_off, s.usual_book, s.check_each_row, k.key"
+        "SELECT t.kind, t.name, t.covers, t.not_for, t.default_one_off, s.usual_book, s.check_each_row, k.key"
         " FROM types t LEFT JOIN type_settings s ON s.type_id = t.id"
         " LEFT JOIN type_keys k ON k.type_id = t.id WHERE t.id = ?",
         (type_id,),
     ).fetchone()
     if found is None:
         raise NoSuchType(type_id)
-    kind, covers, not_for, one_off, usual_book, check, key = found
+    kind, name, covers, not_for, one_off, usual_book, check, key = found
     if kind != SPENDING:
         raise TypeRefused("income kinds are set in code")
-    if any(k not in WORDING_FIELDS + SETTING_FIELDS for k in data):
+    if any(k not in CHANGE_FIELDS for k in data):
         raise TypeRefused(CODE_CHANGE)
     if not data:
         raise TypeRefused("say what to change about the type")
     usual_book, check = settings_of(usual_book, check, key)
-    was = {"usual_book": usual_book, "one_off": bool(one_off), "check_each_row": check,
+    was = {"name": name, "usual_book": usual_book, "one_off": bool(one_off), "check_each_row": check,
            "wording": (covers, not_for)}
     now = dict(was)
+    if key == NOT_PLACED and "name" in data:
+        raise TypeRefused(f"{NOT_PLACED} means not placed yet: its name is fixed")
+    if "name" in data:
+        now["name"] = _name(conn, data["name"], but=type_id)
     if "usual_book" in data and data["usual_book"] not in USUAL_BOOKS:
         raise TypeRefused(f"the usual book is one of {', '.join(BOOK_NAMES)} or {ASK}")
     for field in ("one_off", "check_each_row"):
@@ -739,10 +755,18 @@ def change_type(conn: sqlite3.Connection, type_id: int, data: dict) -> dict:
     now.update({k: data[k] for k in SETTING_FIELDS if k in data})
     now["wording"] = (_covers(data["covers"]) if "covers" in data else covers,
                       _not_for(data["not_for"]) if "not_for" in data else not_for)
-    conn.execute(
-        "UPDATE types SET covers = ?, not_for = ?, default_one_off = ? WHERE id = ?",
-        (*now["wording"], 1 if now["one_off"] else 0, type_id),
-    )
+    shown_before = spending_type_names(conn) if now["name"] != name else None
+    try:
+        conn.execute(
+            "UPDATE types SET name = ?, covers = ?, not_for = ?, default_one_off = ? WHERE id = ?",
+            (now["name"], *now["wording"], 1 if now["one_off"] else 0, type_id),
+        )
+    except sqlite3.IntegrityError:
+        raise TypeRefused(f"{now['name']} is already a type") from None
+    if shown_before is not None:
+        import suggest  # imported here: it imports this module
+
+        suggest.follow_renames(conn, shown_before)
     if (now["usual_book"], now["check_each_row"]) != (was["usual_book"], was["check_each_row"]):
         conn.execute(
             "INSERT INTO type_settings (type_id, usual_book, check_each_row) VALUES (?, ?, ?)"

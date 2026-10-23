@@ -158,14 +158,14 @@ def test_case_2_a_renamed_type_is_not_seeded_again_and_the_seed_rules_still_find
 # --- what code reads by key keeps working after a rename -------------------------
 
 
-def test_a_renamed_type_keeps_the_book_it_proposes_and_its_lock(client, temp_db):
+def test_a_renamed_type_keeps_the_book_it_proposes(client, temp_db):
     rename(temp_db, "spending", "Advertising", "Ads")
     rename(temp_db, "spending", "Software & AI tools", "Software")
 
     shown = types(client)
 
-    assert (shown["Ads"]["proposed_book"], shown["Ads"]["locked"]) == ("Moom", True)
-    assert (shown["Software"]["proposed_book"], shown["Software"]["locked"]) == (None, True)
+    assert shown["Ads"]["proposed_book"] == "Moom"
+    assert shown["Software"]["proposed_book"] is None
     assert shown["Ads"]["added_in_fin"] is False
 
 
