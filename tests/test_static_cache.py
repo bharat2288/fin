@@ -23,7 +23,7 @@ import app as fin_app
 from gate_tokens import AUTH_REQUIRED, app_token, book, composed, header, send  # noqa: F401 (book: fixture)
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
-YEAR = "public, max-age=31536000, immutable"
+YEAR = "private, max-age=31536000, immutable"
 REF = re.compile(r'(?:src|href)="/static/([^"]+)"')
 
 
@@ -95,6 +95,23 @@ def test_changing_a_files_bytes_changes_its_version_and_only_its(client, tmp_pat
     response = client.get(f"/static/app.js?v={after['app.js']}")
     assert response.headers["Cache-Control"] == YEAR
     assert response.get_data().endswith(b"// a deploy\n")
+
+
+def test_editing_a_file_in_place_changes_its_version_without_a_restart(client, tmp_path, monkeypatch):
+    # the dev server reloads on .py edits only: a static file edited under a
+    # running process must get a new version, or the old bytes stay pinned
+    folder = tmp_path / "static"
+    shutil.copytree(STATIC, folder)
+    monkeypatch.setattr(fin_app.app, "static_folder", str(folder))
+    before = _refs(_page(client))["app.js"]
+
+    with open(folder / "app.js", "ab") as f:
+        f.write(b"\n// an edit\n")
+    after = _refs(_page(client))["app.js"]
+
+    assert after != before
+    assert client.get(f"/static/app.js?v={before}").headers["Cache-Control"] == "no-cache"
+    assert client.get(f"/static/app.js?v={after}").headers["Cache-Control"] == YEAR
 
 
 # ---------------------------------------------------------------- case 3

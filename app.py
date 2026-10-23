@@ -940,30 +940,47 @@ def api_account_ties(acct_id: int):
 # ---------------------------------------------------------------------------
 
 # The browser keeps fin's CSS and JS until a file changes (speed-pass 01). The
-# page names each file with ?v=<a short hash of its bytes>, hashed once per
-# process; a request carrying the file's own version may be kept a year, since
-# a changed file gets a new URL. The page itself, and a file asked for without
-# its version (an old tab, a bookmark), are revalidated every time. The repo's
-# index.html stays plain; the versions are written in as it is served.
+# page names each file with ?v=<a short hash of its bytes>; a request carrying
+# the file's own version may be kept a year, since a changed file gets a new
+# URL. The page itself, and a file asked for without its version (an old tab, a
+# bookmark), are revalidated every time. The hashes are redone only when a
+# file's size or modified time moves, so an edit under the running dev server
+# (whose reloader watches .py files only) shows on the next reload. Kept by the
+# browser only ("private"): the files sit behind the access gate when hosted.
+# The repo's index.html stays plain; the versions are written in as it is served.
 
 _STATIC_REF = re.compile(r'((?:src|href)="/static/)([^"?]+)(")')
-_KEEP_A_YEAR = "public, max-age=31536000, immutable"
+_KEEP_A_YEAR = "private, max-age=31536000, immutable"
 
 
-@functools.lru_cache(maxsize=None)
+def _static_stamp(folder: str) -> tuple:
+    """(name, size, modified ns) for every file in the folder: what the hashes are keyed on."""
+    return tuple(sorted(
+        (e.name, e.stat().st_size, e.stat().st_mtime_ns) for e in os.scandir(folder) if e.is_file()
+    ))
+
+
 def _static_versions(folder: str) -> dict[str, str]:
+    return _hashed_versions(folder, _static_stamp(folder))
+
+
+@functools.lru_cache(maxsize=4)
+def _hashed_versions(folder: str, stamp: tuple) -> dict[str, str]:
     """{file name: first 10 hex of its sha256} for every file in the folder."""
     versions = {}
-    for entry in os.scandir(folder):
-        if entry.is_file():
-            with open(entry.path, "rb") as f:
-                versions[entry.name] = hashlib.sha256(f.read()).hexdigest()[:10]
+    for name, *_ in stamp:
+        with open(os.path.join(folder, name), "rb") as f:
+            versions[name] = hashlib.sha256(f.read()).hexdigest()[:10]
     return versions
 
 
-@functools.lru_cache(maxsize=None)
 def _versioned_page(folder: str) -> str:
-    versions = _static_versions(folder)
+    return _stamped_page(folder, _static_stamp(folder))
+
+
+@functools.lru_cache(maxsize=4)
+def _stamped_page(folder: str, stamp: tuple) -> str:
+    versions = _hashed_versions(folder, stamp)
     with open(os.path.join(folder, "index.html"), encoding="utf-8") as f:
         html = f.read()
 
