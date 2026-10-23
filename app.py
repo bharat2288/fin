@@ -8,6 +8,8 @@ Usage:
     py app.py --port 8450      # Explicit port
 """
 
+import functools
+import hashlib
 import json
 import os
 import re
@@ -15,7 +17,7 @@ import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, Response, g, jsonify, request
 from werkzeug.utils import secure_filename
 
 import access_gate
@@ -937,9 +939,60 @@ def api_account_ties(acct_id: int):
 # Static file serving
 # ---------------------------------------------------------------------------
 
+# The browser keeps fin's CSS and JS until a file changes (speed-pass 01). The
+# page names each file with ?v=<a short hash of its bytes>, hashed once per
+# process; a request carrying the file's own version may be kept a year, since
+# a changed file gets a new URL. The page itself, and a file asked for without
+# its version (an old tab, a bookmark), are revalidated every time. The repo's
+# index.html stays plain; the versions are written in as it is served.
+
+_STATIC_REF = re.compile(r'((?:src|href)="/static/)([^"?]+)(")')
+_KEEP_A_YEAR = "public, max-age=31536000, immutable"
+
+
+@functools.lru_cache(maxsize=None)
+def _static_versions(folder: str) -> dict[str, str]:
+    """{file name: first 10 hex of its sha256} for every file in the folder."""
+    versions = {}
+    for entry in os.scandir(folder):
+        if entry.is_file():
+            with open(entry.path, "rb") as f:
+                versions[entry.name] = hashlib.sha256(f.read()).hexdigest()[:10]
+    return versions
+
+
+@functools.lru_cache(maxsize=None)
+def _versioned_page(folder: str) -> str:
+    versions = _static_versions(folder)
+    with open(os.path.join(folder, "index.html"), encoding="utf-8") as f:
+        html = f.read()
+
+    def stamp(m):
+        version = versions.get(m.group(2))
+        return m.group(0) if version is None else f"{m.group(1)}{m.group(2)}?v={version}{m.group(3)}"
+
+    return _STATIC_REF.sub(stamp, html)
+
+
+@app.after_request
+def _static_lifetime(response):
+    # Kept a year only under the file's own version: a page from before a
+    # deploy asking after it gets today's bytes, which must not be pinned.
+    if request.endpoint == "static":
+        name = (request.view_args or {}).get("filename")
+        current = _static_versions(app.static_folder).get(name)
+        kept = current is not None and request.args.get("v") == current
+        response.headers["Cache-Control"] = _KEEP_A_YEAR if kept else "no-cache"
+    return response
+
+
 @app.route("/")
 def index():
-    return send_from_directory("static", "index.html")
+    page = _versioned_page(app.static_folder)
+    response = Response(page, mimetype="text/html")
+    response.headers["Cache-Control"] = "no-cache"
+    response.set_etag(hashlib.sha256(page.encode("utf-8")).hexdigest()[:16])
+    return response.make_conditional(request)
 
 
 # ---------------------------------------------------------------------------
