@@ -189,13 +189,16 @@ def _write(conn: sqlite3.Connection, refund: dict, purchase: dict, source: str) 
     return link(conn, link_id)
 
 
-def link_refunds(conn: sqlite3.Connection) -> list[dict]:
+def link_refunds(conn: sqlite3.Connection, only: set[int] | frozenset | None = None) -> list[dict]:
     """Link every refund that has exactly one purchase that fits, in the
-    caller's open change; returns the links made, in the order made."""
+    caller's open change; returns the links made, in the order made. With
+    `only`, just those rows (the rows a label just said were refunds), in
+    the same order and passes, so the order they were named in never
+    matters."""
     _begin(conn)
     purchases = _purchases(conn)
     dismissed = _dismissed(conn)
-    refunds = _unlinked_refunds(conn)
+    refunds = [r for r in _unlinked_refunds(conn) if only is None or r["id"] in only]
     made: list[dict] = []
     while True:
         linked = []
@@ -211,30 +214,18 @@ def link_refunds(conn: sqlite3.Connection) -> list[dict]:
         refunds = [r for r in refunds if r["id"] not in linked]
 
 
-def link_refund(conn: sqlite3.Connection, refund_row_id: int) -> dict | None:
-    """Link one refund as link_refunds would, in the caller's open change: a
-    row just said to be a refund, with no link yet and exactly one purchase
-    that fits. Returns the link made, or None."""
-    _begin(conn)
-    found = _dated(conn.execute(
-        _ROWS + "WHERE t.id = ? AND t.flow_type = 'refund' AND t.amount_minor < 0 "
-        "AND NOT EXISTS (SELECT 1 FROM refund_link l WHERE l.refund_row_id = t.id)", (refund_row_id,)
-    ).fetchall())
-    if not found:
-        return None
-    fits = _fits(found[0], _purchases(conn), _dismissed(conn))
-    return _write(conn, found[0], fits[0], AUTO) if len(fits) == 1 else None
-
-
 def drop(conn: sqlite3.Connection, refund_row_id: int) -> int:
     """A row that stops being a refund leaves its purchase: its link goes,
     with the set-offs the link placed (source `refund`). No dismissal is
     written: the pair was not turned down, the row stopped being a refund.
     Refused (expect_back.Refused) while the purchase's expectation is let
-    go; the caller's change is then rolled back. Returns the links dropped."""
+    go, and (Refused, in Unlink's words) while the refund is To pay back;
+    the caller's change is then rolled back. Returns the links dropped."""
     _begin(conn)
     links = conn.execute("SELECT id, purchase_row_id FROM refund_link WHERE refund_row_id = ? ORDER BY id",
                          (refund_row_id,)).fetchall()
+    if links:
+        _refused_while_to_pay_back(conn, refund_row_id)
     for found in links:
         for (set_off_id,) in conn.execute(
                 "SELECT so.id FROM set_off so JOIN expectation e ON e.id = so.expectation_id "
@@ -398,6 +389,15 @@ def pay_back(conn: sqlite3.Connection, link_id: int) -> int:
                                           ask["amount_minor"], names=names)
 
 
+def _refused_while_to_pay_back(conn: sqlite3.Connection, refund_row_id: int) -> None:
+    """A linked refund marked To pay back keeps its link until the mark is
+    undone: Unlink and a label taking the row out of refund refuse alike."""
+    found = conn.execute("SELECT t.description FROM expectation e JOIN transactions t ON t.id = e.row_id "
+                         "WHERE e.row_id = ?", (refund_row_id,)).fetchone()
+    if found is not None:
+        raise Refused(f"{found[0]} is to pay back since; undo the mark on it first")
+
+
 def unlink(conn: sqlite3.Connection, link_id: int) -> dict:
     """Unlink a refund from its purchase: the link goes with the set-offs it
     placed (source `refund`), and a `refund_link` dismissal for the pair is
@@ -406,8 +406,7 @@ def unlink(conn: sqlite3.Connection, link_id: int) -> dict:
     purchase's expectation is let go since (expect_back's words)."""
     _begin(conn)
     held = _held_link(conn, link_id)
-    if conn.execute("SELECT 1 FROM expectation WHERE row_id = ?", (held["refund_row_id"],)).fetchone():
-        raise Refused(f"{held['description']} is to pay back since; undo the mark on it first")
+    _refused_while_to_pay_back(conn, held["refund_row_id"])
     placed = [r[0] for r in conn.execute(
         "SELECT so.id FROM set_off so JOIN expectation e ON e.id = so.expectation_id "
         "WHERE so.payment_row_id = ? AND e.row_id = ? AND so.source = ? ORDER BY so.id",

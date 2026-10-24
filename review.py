@@ -55,7 +55,8 @@ CHOICES = (
 MORE_CHOICES = (
     Choice("refund", "a refund", "refund", None, (),
            "spending that came back: it keeps its book and type, or takes type_id, nets against its "
-           "book's spending in the month it arrives, and links to its purchase when one fits"),
+           "book's spending in the month it arrives, and links to its purchase when one fits (with "
+           "no type to keep, it takes the purchase's book and type)"),
     Choice("card_payment", "a card payment", "payment", None, (),
            "paying a card's bill, or a payment reversed: the bank side or the card side; "
            "no spending and no income"),

@@ -71,7 +71,8 @@ Rulings this module carries:
   preview: a call naming more than one row writes nothing and answers with
   the preview and its token, and writes only when sent back with a token
   that still holds. The token is not the operator's count: over MANY_ROWS
-  rows the call takes expected_count as any write. create_merchant adds a
+  rows changed (the preview's changes, refund links too) the call takes
+  expected_count as any write, the number the preview shows. create_merchant adds a
   merchant over the app's own route, which refuses a name fin holds.
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
@@ -456,7 +457,8 @@ _WRITES = [
         "type proposes none), gift, own_account (account_id of a bank account, card or untracked "
         "account), company (account_id), "
         "loan_repayment (account_id of a loan), income (income_kind_id), refund (it keeps the row's "
-        "book and type, or takes type_id; it links to its purchase when exactly one fits), "
+        "book and type, or takes type_id; it links to its purchase when exactly one fits, and a "
+        "row with no type to keep then takes the purchase's), "
         "card_payment (paying a card's bill or a payment reversed: no book or type), holding "
         "(account_id of a holding: money that bought, or came back from, something owned). A row "
         "that stops being a refund drops its refund link. A person is no "
@@ -466,7 +468,8 @@ _WRITES = [
         "writes nothing and answers with a preview (each row as it was and would be, and a token): "
         "show the operator, and on their yes call again with the same arguments and the token. A "
         "token from a preview that no longer holds (a row changed since) is refused: preview "
-        "again. Over " + str(MANY_ROWS) + " rows it also takes expected_count.",
+        "again. The preview's changes count every row the change writes (refund links too); over "
+        + str(MANY_ROWS) + " it also takes expected_count, the preview's expected_count.",
         {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I, "income_kind_id": _I,
          "tx_ids": {"type": "array", "items": _I, "maxItems": 99,
                     "description": "More rows labelled the same way, in the same change."},

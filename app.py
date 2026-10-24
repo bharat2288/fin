@@ -5966,6 +5966,7 @@ def _label_row(conn, choice, data: dict, tx_id: int) -> dict:
 
     flow_name = flow.checked_flow(choice.flow)
     book = type_id = other_side = None
+    sources = {"book_source": label_source.CHOSEN, "type_source": label_source.CHOSEN}
     if choice.asks == review.ASKS_TYPE:
         type_id = _checked_type_id(conn, data.get("type_id"))
         if type_id is None:
@@ -5991,7 +5992,14 @@ def _label_row(conn, choice, data: dict, tx_id: int) -> dict:
             type_id = tx["type_id"] if tx["type_id"] is not None and conn.execute(
                 "SELECT 1 FROM types WHERE id = ? AND kind = ?", (tx["type_id"], book_type.SPENDING)
             ).fetchone() else None
-            book = _checked_book(data.get("book")) or tx["book"]
+            given_book = _checked_book(data.get("book"))
+            book = given_book or tx["book"]
+            if type_id is None:
+                # No type worth keeping: the refund waits for its purchase's
+                # book and type, which the linker gives a row not labelled by
+                # hand, or for its merchant's. Neither is the operator's
+                # choice, so neither is marked chosen; a book sent is.
+                sources = {"book_source": label_source.CHOSEN if given_book else None, "type_source": None}
     elif choice.asks == review.ASKS_INCOME_KIND:
         kind_id = data.get("income_kind_id")
         if isinstance(kind_id, bool) or not isinstance(kind_id, int) or not conn.execute(
@@ -6023,12 +6031,8 @@ def _label_row(conn, choice, data: dict, tx_id: int) -> dict:
     held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
     _write_label(conn, held, {
         "flow_type": flow_name, "flow_type_manual": 1, "other_side_id": other_side,
-        "book": book, "type_id": type_id,
-        "book_source": label_source.CHOSEN, "type_source": label_source.CHOSEN,
+        "book": book, "type_id": type_id, **sources,
     })
-    # A refund finds its purchase as the linker would: one that fits, linked.
-    if flow_name == "refund":
-        refund_links.link_refund(conn, tx_id)
     return {"id": tx_id, "flow_type": flow_name, "other_side_id": other_side}
 
 
@@ -6097,11 +6101,14 @@ def api_review_label(tx_id: int):
     and the chat's reach beyond the review list (review.MORE_CHOICES):
         refund          nothing: it keeps its book and type; or type_id (and
                         book where the type proposes none). It links to its
-                        purchase when exactly one fits (refund_links)
+                        purchase when exactly one fits (refund_links, oldest
+                        first); with no type to keep, the purchase's book
+                        and type, not marked chosen
         card_payment    nothing: no other side, no book, no type
         holding         account_id of a holding
 
-    A row that stops being a refund drops its refund link. A person is no
+    A row that stops being a refund drops its refund link, refused while
+    it is To pay back (Unlink's words). A person is no
     movement's other side (personal-ledger 23, the contract):
     "loan_to_person", or a person's account under any choice, is refused in
     review.PERSON_MOVEMENT_REFUSED's words and writes nothing.
@@ -6109,7 +6116,9 @@ def api_review_label(tx_id: int):
     Many rows (fin redesign ticket 11): tx_ids, more rows the same label
     says the same of, in the same change. A label naming more than one row
     writes nothing without `token`: it answers 409 with a preview (each
-    row as it was and as it would be, the rows, and the token). Sent back
+    row as it was and as it would be, the rows, the changes the history and
+    the chat's count read, the expected_count over MANY_ROWS, and the
+    token). Sent back
     with that token, it writes, as one change, only while the label would
     make the same change to the same rows (a row changed since, by a rule or
     anything else, is refused stale: preview again). A refusal on any row
@@ -6134,24 +6143,35 @@ def api_review_label(tx_id: int):
         mark = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_rows").fetchone()[0]
         try:
             labelled = [_label_row(conn, choice, data, row) for row in rows]
+            # Refunds find their purchases as the linker finds them: oldest
+            # first, one that fits, until nothing more links.
+            if choice.flow == "refund":
+                refund_links.link_refunds(conn, only=frozenset(rows))
             # A row that now names a loan, or no longer does, changes what was paid.
             loan_interest.derive(conn)
         except _NoSuchRow as e:
             conn.rollback()
             return jsonify({"error": "no such row" if len(rows) == 1 else f"no such row: {e.args[0]}"}), 404
-        except (UnknownLabel, BookNeeded, review.LabelRefused, expect_back.Refused) as e:
+        except (UnknownLabel, BookNeeded, review.LabelRefused, expect_back.Refused, refund_links.Refused) as e:
             conn.rollback()
             return jsonify({"error": str(e)}), 400
         if previewed:
             lines, stamped = _label_preview_lines(conn, rows, mark)
             asked = {**{k: v for k, v in data.items() if k != "token"}, "tx_id": tx_id}
             made = relabel_preview._stamp("label", json.dumps(asked, sort_keys=True, default=str), stamped)
+            changes = len({(tbl, row_id) for tbl, row_id, *_ in stamped})
             if token is None:
                 conn.rollback()
                 return jsonify({
                     "error": (f"this says what {len(rows)} rows were, so nothing was changed: show the "
                               "operator the preview, and on their yes call again with its token"),
-                    "preview": {"rows": len(lines), "lines": lines, "token": made},
+                    # changes: the rows of every table the change writes,
+                    # as the history and the chat's count read them (refund
+                    # links and their set-offs too); over MANY_ROWS it is the
+                    # expected_count the call then takes.
+                    "preview": {"rows": len(lines), "changes": changes,
+                                "expected_count": changes if changes > mcp_tools.MANY_ROWS else None,
+                                "lines": lines, "token": made},
                 }), 409
             if token != made:
                 conn.rollback()

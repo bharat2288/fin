@@ -185,6 +185,107 @@ def test_refunds_labelled_together_link_each_to_its_purchase_on_the_previews_tok
             for r in (trip.credit, seat)} == {trip.purchase, row_id(trip.client, "SAMPLE AIR SEAT", 12000)}
 
 
+def expectation_on(conn, tx_id: int) -> int:
+    return conn.execute("SELECT id FROM expectation WHERE row_id = ?", (tx_id,)).fetchone()[0]
+
+
+def test_a_refund_to_pay_back_is_not_taken_out_of_refund_until_the_mark_is_undone(trip, conn):
+    # The purchase was paid back in full by a friend, so the fare credited
+    # later is money to pass on: the operator chose To pay back on it.
+    assert call("mark_expect_back", tx_id=trip.purchase, direction="back", all=True,
+                new_names=["Sample Friend"])["ok"]
+    bring_in(trip.client, BANK, [("2026-08-10", "INWARD PAYNOW SAMPLE FRIEND REF 0001", -94800)])
+    paid = row_id(trip.client, "SAMPLE FRIEND REF 0001", -94800)
+    settled = call("set_off", tx_id=paid, placements=[
+        {"expectation_id": expectation_on(conn, trip.purchase), "amount": "948.00"}])
+    assert settled["ok"], settled
+    assert call("label_review", tx_id=trip.credit, choice="refund")["ok"]
+    link = trip.client.get(f"/api/refund-links?row={trip.credit}").get_json()["refund_link"]["id"]
+    assert trip.client.post(f"/api/refund-links/{link}/pay-back").status_code == 200
+    before, count = state(conn), len(entries())
+
+    answer = call("label_review", tx_id=trip.credit, choice="spending", type_id=trip.travel)
+
+    # In Unlink's words: the refund stays a refund, linked and to pay back.
+    assert answer == {"ok": False,
+                      "error": "SAMPLE AIR BOOKING 4471 is to pay back since; undo the mark on it first"}
+    assert (state(conn), len(entries())) == (before, count)
+
+
+def test_a_refund_with_no_type_of_its_own_takes_its_purchases_book_and_type_when_linked(trip, conn):
+    assert call("label_review", tx_id=trip.credit, choice="card_payment")["ok"]
+    assert (held(conn, trip.credit)["book"], held(conn, trip.credit)["type_id"]) == (None, None)
+
+    answer = call("label_review", tx_id=trip.credit, choice="refund")
+
+    assert answer["ok"], answer
+    assert trip.client.get(f"/api/refund-links?row={trip.credit}").get_json()["purchase"]["id"] == trip.purchase
+    tx = held(conn, trip.credit)
+    assert (tx["flow_type"], tx["book"], tx["type_id"]) == ("refund", "Household", trip.travel)
+    # From the purchase, as the linker gives it: not the operator's choice.
+    assert "chosen" not in (tx["book_source"], tx["type_source"])
+
+
+def test_dropping_a_refunds_link_takes_the_set_off_it_placed_and_undo_puts_both_back(trip, conn):
+    # A friend owes part of the fare; the refund, once linked, closes it.
+    assert call("mark_expect_back", tx_id=trip.purchase, direction="back", amount="400.00",
+                new_names=["Sample Friend"])["ok"]
+    assert call("label_review", tx_id=trip.credit, choice="refund")["ok"]
+    placed = conn.execute("SELECT id, amount_minor, source FROM set_off WHERE payment_row_id = ?",
+                          (trip.credit,)).fetchall()
+    assert [(p["amount_minor"], p["source"]) for p in placed] == [(40000, "refund")]
+    before, count = state(conn), len(entries())
+
+    answer = call("label_review", tx_id=trip.credit, choice="card_payment")
+
+    assert answer["ok"], answer
+    assert conn.execute("SELECT COUNT(*) FROM set_off WHERE payment_row_id = ?", (trip.credit,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM refund_link").fetchone()[0] == 0
+    one_change_that_undoes_exactly(conn, answer, before, count)
+
+
+def test_a_refund_two_purchases_fit_stays_unlinked_and_is_asked(trip, conn):
+    bring_in(trip.client, CARD, [("2026-08-04", "SAMPLE AIR BOOKING 4471", 94800)], kind="card")
+
+    answer = call("label_review", tx_id=trip.credit, choice="refund")
+
+    assert answer["ok"], answer
+    assert trip.client.get(f"/api/refund-links?row={trip.credit}").get_json()["refund_link"] is None
+    [ask] = trip.client.get("/api/refund-links/asks").get_json()["asks"]
+    assert (ask["kind"], ask["refund"]["id"], len(ask["purchases"])) == ("which", trip.credit, 2)
+
+
+@pytest.mark.parametrize("order", ["oldest first", "newest first"])
+def test_refunds_labelled_together_link_oldest_first_whatever_order_they_are_named(trip, conn, order):
+    # One purchase both credits fit: the older one takes it, as the linker does.
+    bring_in(trip.client, CARD, [("2026-08-25", "SAMPLE AIR BOOKING 4471", -94800)], kind="card")
+    later = [r["id"] for r in trip.client.get("/api/transactions", query_string={
+        "search": "SAMPLE AIR BOOKING", "per_page": 50}).get_json()["transactions"]
+        if r["amount_minor"] == -94800 and r["id"] != trip.credit][0]
+    named = [trip.credit, later] if order == "oldest first" else [later, trip.credit]
+    token = call("label_review", tx_id=named[0], tx_ids=named[1:], choice="refund")["preview"]["token"]
+
+    answer = call("label_review", tx_id=named[0], tx_ids=named[1:], choice="refund", token=token)
+
+    assert answer["ok"], answer
+    assert trip.client.get(f"/api/refund-links?row={trip.credit}").get_json()["purchase"]["id"] == trip.purchase
+    assert trip.client.get(f"/api/refund-links?row={later}").get_json()["refund_link"] is None
+
+
+def test_the_preview_shows_the_count_the_chat_is_asked_for(trip, conn):
+    bring_in(trip.client, CARD, [("2026-08-06", "SAMPLE AIR SEAT 2210", 12000),
+                                 ("2026-08-22", "SAMPLE AIR SEAT 2210", -12000)], kind="card")
+    seat = row_id(trip.client, "SAMPLE AIR SEAT", -12000)
+    preview = call("label_review", tx_id=trip.credit, tx_ids=[seat], choice="refund")["preview"]
+
+    answer = call("label_review", tx_id=trip.credit, tx_ids=[seat], choice="refund", token=preview["token"])
+
+    # Two rows labelled, and two refund links made: four changes, as the
+    # history and the chat's count read them.
+    assert (preview["rows"], preview["changes"]) == (2, 4)
+    assert answer["change"]["rows"] == preview["changes"]
+
+
 # --- case 21: a payment reversal is a card payment --------------------------------
 
 
@@ -308,7 +409,10 @@ def test_a_relabel_applied_with_a_token_gone_stale_after_a_rule_changed_is_refus
 
 def test_a_batch_of_27_rows_without_expected_count_is_put_back_and_with_it_stands(credits, conn):
     first, *more = credits["ids"]
-    token = call("label_review", tx_id=first, tx_ids=more, choice="card_payment")["preview"]["token"]
+    preview = call("label_review", tx_id=first, tx_ids=more, choice="card_payment")["preview"]
+    token = preview["token"]
+    # The number the operator is asked for is the one the preview shows.
+    assert (preview["changes"], preview["expected_count"]) == (27, 27)
     before, count = state(conn), len(entries())
 
     stopped = call("label_review", tx_id=first, tx_ids=more, choice="card_payment", token=token)
