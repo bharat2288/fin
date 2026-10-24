@@ -88,6 +88,11 @@ class Tool:
     # args -> (method, path, query or json body)
     request: Callable[[dict], tuple[str, str, dict | None]]
 
+    @property
+    def title(self) -> str | None:
+        """The plain title the Claude app shows (TITLES, below)."""
+        return TITLES.get(self.name)
+
 
 def _schema(properties: dict | None = None, required: tuple = ()) -> dict:
     return {
@@ -646,6 +651,57 @@ _SWITCHES = [
 ]
 
 TOOLS = _READS + _WRITES + _PLANS + _SWITCHES
+# What the Claude app shows on a tool's permission prompt, in the operator's
+# words: a read says "Read", a write says what it changes. One per tool; a
+# test holds the two lists together.
+TITLES = {
+    "balance_sheet": "Read the balance sheet",
+    "spending_cards": "Read a month's spending figures",
+    "spending_by_type": "Read spending by type",
+    "spending_by_month": "Read spending by month",
+    "transactions": "Read rows",
+    "review_summary": "Read the transfers waiting for a label",
+    "queue": "Read your Queue",
+    "accounts": "Read your accounts",
+    "figures": "Read statement balances and typed figures",
+    "merchants": "Read your merchants",
+    "rules": "Read your merchant rules",
+    "rule_drift": "Read rows the rules would now label differently",
+    "types": "Read the type list",
+    "books": "Read the books",
+    "flows": "Read the flows",
+    "coverage": "Read which statements are imported",
+    "rates": "Read saved exchange rates",
+    "history": "Read the change history",
+    "change": "Read one change, before and after",
+    "expected_back": "Read what is expected back",
+    "set_label": "Change a row's book or type",
+    "set_note": "Change a row's note",
+    "label_review": "Label a transfer waiting for review",
+    "enter_figure": "Enter a figure for an account",
+    "correct_figure": "Correct a typed figure",
+    "delete_figure": "Delete a typed figure",
+    "add_rule": "Add a merchant rule",
+    "change_rule": "Change a merchant rule",
+    "delete_rule": "Delete a merchant rule",
+    "change_merchant": "Change a merchant",
+    "merge_merchants": "Merge two merchants",
+    "add_company_or_person": "Add a company or a person",
+    "pair_transfers": "Pair transfers between your accounts",
+    "fetch_rate": "Fetch and save an exchange rate",
+    "set_rate": "Enter an exchange rate",
+    "mark_expect_back": "Mark money as expected back",
+    "undo_mark": "Remove an expected-back mark",
+    "set_off": "Set a payment off against what is expected back",
+    "unlink_set_off": "Unlink a set-off",
+    "let_go": "Let an expected-back amount go",
+    "undo_let_go": "Undo a let-go",
+    "not_a_payback": "Say a row is not a payback",
+    "undo": "Undo a chat change",
+    "plan_preview": "Preview a batch of Queue changes",
+    "plan_apply": "Apply a batch of Queue changes",
+    "turn_off_writes": "Turn off Claude's writes to fin",
+}
 # The tools the switch stops: every write but the switch itself, and the
 # plan's preview, which leads only to a write.
 _STOPPED_WHEN_OFF = frozenset(t.name for t in _WRITES + _PLANS)

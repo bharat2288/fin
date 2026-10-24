@@ -188,3 +188,17 @@ def _history(db_path):
         return conn.execute("SELECT id, via, actor FROM change_entries").fetchall()
     finally:
         conn.close()
+
+
+def test_every_tool_has_a_plain_title_the_listing_carries(book):
+    # The Claude app shows a tool's title on its permission prompt; a raw
+    # name ("plan_apply") tells the operator nothing (walk 2026-10-24).
+    assert set(mcp_tools.TITLES) == {tool.name for tool in mcp_tools.TOOLS}
+    for name, title in mcp_tools.TITLES.items():
+        assert title and title[0].isupper() and "_" not in title, name
+
+    [response] = _rpc(composed(), ("tools/list", {}))
+
+    for tool in response.json()["result"]["tools"]:
+        assert tool["title"] == mcp_tools.TITLES[tool["name"]]
+        assert tool["annotations"]["title"] == mcp_tools.TITLES[tool["name"]]

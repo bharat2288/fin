@@ -88,9 +88,12 @@ def build_server(tools: Sequence[Any], call: Callable[[str, dict, str], dict] | 
     listed = [
         types.Tool(
             name=tool.name,
+            title=getattr(tool, "title", None),
             description=tool.description,
             input_schema=tool.input_schema,
-            annotations=types.ToolAnnotations(read_only_hint=not tool.write),
+            annotations=types.ToolAnnotations(
+                title=getattr(tool, "title", None), read_only_hint=not tool.write
+            ),
         )
         for tool in tools
     ]
