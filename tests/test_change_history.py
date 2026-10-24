@@ -417,17 +417,19 @@ def test_undoing_a_merchant_rule_leaves_no_stale_rule_in_the_cache(imported):
 def test_a_start_after_a_crash_closes_the_entry_left_open_before_reseeding(temp_db):
     conn = db.get_connection()
     try:
-        # A crash mid-write: an entry still open, and a default rule gone.
+        # A crash mid-write: an entry still open, and a book with no rules and
+        # no seeding marker, so the start seeds the default rules again.
         left_open = history.open_entry(conn, history.VIA_APP, history.APP_ACTOR)
         conn.execute("UPDATE change_entries SET open = 1 WHERE id = ?", (left_open,))
         pattern = db.DEFAULT_MERCHANT_RULES[0][0]
-        conn.execute("DELETE FROM merchant_rules WHERE pattern = ?", (pattern,))
+        conn.execute("DELETE FROM merchant_rules")
+        conn.execute("DELETE FROM seeded_once WHERE seed = ?", (db.DEFAULT_RULES_SEED,))
         conn.execute("DELETE FROM change_rows WHERE entry_id = ?", (left_open,))
         conn.commit()
     finally:
         conn.close()
 
-    db.init_db()  # re-seeds the rule
+    db.init_db()  # seeds the default rules again
 
     conn = db.get_connection()
     try:

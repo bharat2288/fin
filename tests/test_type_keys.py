@@ -142,10 +142,13 @@ def test_case_2_a_renamed_type_is_not_seeded_again_and_the_seed_rules_still_find
     rename(path, "spending", "Dining", "Food")
     conn = sqlite3.connect(str(path))
     food = conn.execute("SELECT id FROM types WHERE name = 'Food'").fetchone()[0]
-    # A seed rule taken out, with its merchant, is put back on the next start.
+    # A seed rule taken out, with its merchant, is put back when the defaults
+    # are seeded: on a book with no rules and no seeding marker (a book that
+    # holds rules is seeded once, test_seed_rules_once.py).
     svc = conn.execute("SELECT service_id FROM merchant_rules WHERE pattern = 'CULINA'").fetchone()[0]
-    conn.execute("DELETE FROM merchant_rules WHERE pattern = 'CULINA'")
+    conn.execute("DELETE FROM merchant_rules")
     conn.execute("DELETE FROM services WHERE id = ?", (svc,))
+    conn.execute("DELETE FROM seeded_once WHERE seed = ?", (db.DEFAULT_RULES_SEED,))
     conn.commit()
     count = conn.execute("SELECT COUNT(*) FROM types").fetchone()[0]
     conn.close()
