@@ -19,6 +19,7 @@ import convert_book_type
 import convert_minor_units
 import convert_label_source
 import convert_printed_statements
+import convert_statement_periods
 import db
 import history
 import retire_categories
@@ -447,6 +448,7 @@ def test_the_app_serves_a_converted_database_by_book_and_type(old, started_on, m
     conversion.run_step(old, convert_change_history.STEP)
     conversion.run_step(old, convert_label_source.STEP)
     conversion.run_step(old, retire_single_mark.STEP)
+    conversion.run_step(old, convert_statement_periods.STEP)
     client = started_on(old)
 
     rows = {t["id"]: t for t in client.get("/api/transactions?per_page=50").get_json()["transactions"]}

@@ -120,7 +120,7 @@ def test_convert_all_plan_names_the_steps_to_run_and_prints_the_plan(tmp_path, c
     assert code == 1, out
     assert fingerprint(path) == before
     [waiting] = [line for line in out.splitlines() if line.startswith("steps still to run, in order: ")]
-    assert waiting.endswith("change-history, expect-back, label-source, retire-single-mark"), waiting
+    assert waiting.endswith("change-history, expect-back, label-source, retire-single-mark, statement-periods"), waiting
     assert "  Sam: 2026-01-01 SGD 800.00; 2026-04-01 SGD 500.00" in out
 
 

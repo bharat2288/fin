@@ -23,6 +23,7 @@ import convert_minor_units
 import convert_movements
 import convert_label_source
 import convert_printed_statements
+import convert_statement_periods
 import db
 import history
 import retire_float_amounts
@@ -558,6 +559,7 @@ def test_the_app_shows_a_converted_database_the_figures_its_floats_stated(old, s
     conversion.run_step(old, convert_change_history.STEP)
     conversion.run_step(old, convert_label_source.STEP)
     conversion.run_step(old, retire_single_mark.STEP)
+    conversion.run_step(old, convert_statement_periods.STEP)
     client = started_on(old)
 
     rows = {

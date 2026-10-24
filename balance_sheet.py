@@ -73,6 +73,7 @@ import flow
 import loan_interest
 import money
 import rates
+import statement_period
 
 # No balance and no net worth is shown for a date before this.
 START = date(2026, 1, 1)
@@ -116,15 +117,15 @@ PAID_FOR_FLOWS = ("expense", "refund")
 # holds only month records, but its statement balances are anchored, and the
 # first statement imported afterwards must not reach back into a period one
 # of them already closed.
+#
+# Which closings those are has one home, statement_period.PREVIOUS_CLOSINGS:
+# a statement's period, which coverage and missing months read, starts the day
+# after the same closing.
 ROW_DAY = (
     "(CASE WHEN s.printed = 1 THEN MIN(s.statement_date, MAX(t.date, COALESCE(("
     "SELECT date(MAX(closed), '+1 day') FROM ("
-    "SELECT p.statement_date AS closed FROM statements p "
-    "WHERE p.account_id = s.account_id AND p.printed = 1 "
-    "AND p.statement_date < s.statement_date "
-    "UNION ALL SELECT n.date FROM anchors n "
-    "WHERE n.account_id = s.account_id AND n.source = 'statement' "
-    "AND n.date < s.statement_date)), t.date))) ELSE t.date END)"
+    + statement_period.PREVIOUS_CLOSINGS.format(account="s.account_id", closing="s.statement_date")
+    + ")), t.date))) ELSE t.date END)"
 )
 
 # Kinds whose balance moves by the account's own rows; the others move by the
