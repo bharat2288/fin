@@ -41,8 +41,8 @@ Rulings this module carries:
   card by card, as the operator sees it, and one pile a page at a time from
   a cursor when asked (fin-redesign item 27); queue_summary counts every
   pile. Neither asks Jev or writes anything. Chat saves cards only in
-  batches, through plan_preview and plan_apply (below); no other tool here
-  labels a group.
+  batches, through plan_preview and plan_apply (below); add_rule and
+  change_merchant label the past rows a pattern or merchant matches.
 - Plans (chat-plan-apply 02): chat labels the Queue in bulk only through
   plan_preview, which writes nothing, and plan_apply, which writes the
   previewed batch as one change entry on that preview's token, refused when
@@ -248,7 +248,9 @@ _READS = [
         "or transfers; with limit (the rows a page holds, 1 to 100; 100 when not given) and after "
         "(the next cursor the page before gave; next is null on the last page). A page of cards "
         "ends at a card's end; a card over the limit comes alone with its first rows, row_count "
-        "saying how many it holds. queue_summary counts every pile first. "
+        "saying how many it holds (its later rows come once its first are labelled). A card stands "
+        "where its biggest row does, so if rows are labelled, imported or put back while you page, "
+        "page again from the start: queue_summary counts every pile, before and after. "
         "This only reads and applies nothing: saving cards (a group's name, wording, type and "
         "book at once) is plan_preview then plan_apply, in batches, on the operator's yes.",
         _schema({

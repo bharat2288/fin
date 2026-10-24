@@ -4259,8 +4259,11 @@ def _queue_page():
     split across pages; a card over the limit comes alone with its first
     rows, and its row_count says how many it holds. next is the cursor for
     the page after, None on the last. The cursor is where the page's last
-    card or row stands in the Queue's order, so a card labelled between pages
-    moves no other card."""
+    card or row stands in the Queue's order, so a card labelled whole between
+    pages moves no other card. A card stands where its biggest row does: one
+    that gains a bigger row can jump behind the cursor, and one whose biggest
+    row alone is labelled can come again, so chat pages again from the start
+    when the pile moved (the tool says so)."""
     section = request.args.get("section")
     if section is None:
         return jsonify({"error": "limit and after go with a section"}), 400
