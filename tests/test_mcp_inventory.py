@@ -32,6 +32,8 @@ GOLDEN: list[str] = [
     "review_summary",
     # chat-queue-read 02: the Queue's labelling work, card by card (a read)
     "queue",
+    # fin-redesign item 27: every pile's cards and rows, counted (a read)
+    "queue_summary",
     "accounts", "figures", "merchants", "rules",
     # fin-surfaces 51: the rows that differ from their rule (Re-run every rule's place)
     "rule_drift",

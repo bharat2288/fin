@@ -32,6 +32,8 @@ READS = [
 READS.insert(READS.index("rules") + 1, "rule_drift")
 # chat-queue-read 02: the Queue's labelling work, card by card.
 READS.insert(READS.index("review_summary") + 1, "queue")
+# fin-redesign item 27: the Queue's piles counted, so chat can page every card.
+READS.insert(READS.index("queue") + 1, "queue_summary")
 # chat-plan-apply 02: a batch of teaches previewed (it writes nothing, and
 # stops with the switch off, as it leads only to a write), then applied.
 READS.append("plan_preview")
@@ -312,3 +314,18 @@ def test_the_chat_may_undo_only_a_chat_change(book):
     # The operator's own undo, in fin, is not limited.
     assert book.post(f"/api/history/{entry}/undo").status_code == 200
     assert first_row()["book"] == row["book"]
+
+
+def test_transactions_types_takes_type_names_and_untyped_picks_the_rows_with_no_type(book, conn):
+    said = mcp_tools.BY_NAME["transactions"].description
+    assert "type names" in said and "__untyped__" in said and "ids" not in said
+    rows = call("transactions", per_page=50)["result"]["transactions"]
+    grocer = next(r for r in rows if r["description"] == "SAMPLE GROCER")
+    dining = conn.execute("SELECT id FROM types WHERE name = 'Dining'").fetchone()[0]
+    assert call("set_label", tx_id=grocer["id"], type_id=dining)["ok"]
+
+    by_name = call("transactions", types="Dining")["result"]["transactions"]
+    untyped = call("transactions", types="__untyped__")["result"]["transactions"]
+
+    assert [r["description"] for r in by_name] == ["SAMPLE GROCER"]
+    assert [r["description"] for r in untyped] == ["SAMPLE CAFE"]
