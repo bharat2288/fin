@@ -3,6 +3,11 @@
 The list is declared here, once, with a plain description for each choice.
 Each choice states the flow it writes and what it asks for; the label action
 validates against this declaration and nothing else.
+
+MORE_CHOICES are the chat's reach beyond the list (fin redesign, design
+evaluation §3): the label action takes them on any row; the review list the
+app offers (/api/review) does not show them, and label_review's text names
+them.
 """
 
 from __future__ import annotations
@@ -44,7 +49,22 @@ CHOICES = (
            "money the household earned or was given; it takes an income kind"),
 )
 
-BY_NAME = {choice.name: choice for choice in CHOICES}
+# What the label action takes beyond the review list: a refund keeps the
+# row's type (or takes type_id), a card payment and a holding's move carry
+# no book or type.
+MORE_CHOICES = (
+    Choice("refund", "a refund", "refund", None, (),
+           "spending that came back: it keeps its book and type, or takes type_id, nets against its "
+           "book's spending in the month it arrives, and links to its purchase when one fits"),
+    Choice("card_payment", "a card payment", "payment", None, (),
+           "paying a card's bill, or a payment reversed: the bank side or the card side; "
+           "no spending and no income"),
+    Choice("holding", "a move into or out of a holding", "movement", ASKS_ACCOUNT, ("holding",),
+           "money that bought, or came back from, something the household owns that no statement "
+           "reports (crypto held elsewhere, a car); it moves the holding's value"),
+)
+
+BY_NAME = {choice.name: choice for choice in CHOICES + MORE_CHOICES}
 
 # A person is no movement's other side since the contract (personal-ledger 23,
 # release 3): what is lent to or owed to a person is an expectation on the

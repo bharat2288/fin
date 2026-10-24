@@ -211,6 +211,40 @@ def link_refunds(conn: sqlite3.Connection) -> list[dict]:
         refunds = [r for r in refunds if r["id"] not in linked]
 
 
+def link_refund(conn: sqlite3.Connection, refund_row_id: int) -> dict | None:
+    """Link one refund as link_refunds would, in the caller's open change: a
+    row just said to be a refund, with no link yet and exactly one purchase
+    that fits. Returns the link made, or None."""
+    _begin(conn)
+    found = _dated(conn.execute(
+        _ROWS + "WHERE t.id = ? AND t.flow_type = 'refund' AND t.amount_minor < 0 "
+        "AND NOT EXISTS (SELECT 1 FROM refund_link l WHERE l.refund_row_id = t.id)", (refund_row_id,)
+    ).fetchall())
+    if not found:
+        return None
+    fits = _fits(found[0], _purchases(conn), _dismissed(conn))
+    return _write(conn, found[0], fits[0], AUTO) if len(fits) == 1 else None
+
+
+def drop(conn: sqlite3.Connection, refund_row_id: int) -> int:
+    """A row that stops being a refund leaves its purchase: its link goes,
+    with the set-offs the link placed (source `refund`). No dismissal is
+    written: the pair was not turned down, the row stopped being a refund.
+    Refused (expect_back.Refused) while the purchase's expectation is let
+    go; the caller's change is then rolled back. Returns the links dropped."""
+    _begin(conn)
+    links = conn.execute("SELECT id, purchase_row_id FROM refund_link WHERE refund_row_id = ? ORDER BY id",
+                         (refund_row_id,)).fetchall()
+    for found in links:
+        for (set_off_id,) in conn.execute(
+                "SELECT so.id FROM set_off so JOIN expectation e ON e.id = so.expectation_id "
+                "WHERE so.payment_row_id = ? AND e.row_id = ? AND so.source = ? ORDER BY so.id",
+                (refund_row_id, found["purchase_row_id"], REFUND_SOURCE)).fetchall():
+            expect_back.delete_set_off(conn, set_off_id)
+        conn.execute("DELETE FROM refund_link WHERE id = ?", (found["id"],))
+    return len(links)
+
+
 def link_on_import(conn: sqlite3.Connection) -> list[dict]:
     """The import confirm's run, inside the import's change: link_refunds."""
     return link_refunds(conn)

@@ -1898,11 +1898,21 @@ def api_services_bulk_rename():
 
 @app.route("/api/services", methods=["POST"])
 def api_services_create():
-    """Create a new service."""
+    """Create a new service (chat's create_merchant is this route). A name
+    fin already holds, in any case and with spaces either side, is refused:
+    a teach and a plan find a merchant by its name, so a second one under it
+    would split its rows."""
     data = request.get_json()
-    if not data or not data.get("name"):
+    name = data.get("name") if isinstance(data, dict) else None
+    if not isinstance(name, str) or not name.strip():
         return jsonify({"error": "Service name is required"}), 400
+    name = name.strip()
     with get_db() as conn:
+        held = conn.execute(
+            "SELECT name FROM services WHERE UPPER(TRIM(name)) = UPPER(?) ORDER BY id", (name,)
+        ).fetchone()
+        if held is not None:
+            return jsonify({"error": f"fin already has a merchant named {held['name']}; nothing was added"}), 409
         # A merchant carries a default book and type. With a type and no book
         # given, the book is the one the type proposes.
         try:
@@ -1917,7 +1927,7 @@ def api_services_create():
             "INSERT INTO services (name, book, type_id, notes, exclude_from_expense_views, "
             "review_each_time) VALUES (?, ?, ?, ?, ?, ?)",
             (
-                data["name"],
+                name,
                 book,
                 type_id,
                 data.get("notes"),
@@ -3519,7 +3529,7 @@ _PLAN_ITEM_TEXT = ("service_name", "pattern", "match_type", "book", "past", "pas
 PLAN_STALE = "the book changed since the preview: preview again"
 # Columns a write stamps with the clock: left out of the token, so a preview
 # and its apply a second later stamp the same.
-_CLOCK_COLUMNS = frozenset({"created_at"})
+_CLOCK_COLUMNS = frozenset({"created_at", "made_at"})
 # The ids an item names, held to what SQLite stores (a signed 64-bit integer).
 _PLAN_ITEM_IDS = ("service_id", "type_id")
 _SQLITE_INT = range(-2 ** 63, 2 ** 63)
@@ -5910,11 +5920,145 @@ def _label_account(conn, choice, account_id, row_account_id) -> int:
     return account["id"]
 
 
+class _NoSuchRow(LookupError):
+    """A row a label names is not in fin; nothing was written."""
+
+
+def _label_row(conn, choice, data: dict, tx_id: int) -> dict:
+    """Say what one row was, on `conn` and not committed: the choice's flow
+    (set by hand), its other side, and its book and type each chosen.
+    Raises _NoSuchRow, or a refusal (UnknownLabel, BookNeeded,
+    review.LabelRefused, expect_back.Refused) with nothing to keep."""
+    tx = conn.execute(
+        "SELECT t.id, t.amount_minor, t.flow_type, t.book, t.type_id, s.account_id FROM transactions t "
+        "JOIN statements s ON t.statement_id = s.id WHERE t.id = ?",
+        (tx_id,),
+    ).fetchone()
+    if tx is None:
+        raise _NoSuchRow(tx_id)
+
+    flow_name = flow.checked_flow(choice.flow)
+    book = type_id = other_side = None
+    if choice.asks == review.ASKS_TYPE:
+        type_id = _checked_type_id(conn, data.get("type_id"))
+        if type_id is None:
+            raise review.LabelRefused("type_id is required: spending takes a type")
+        book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
+    elif choice.name == "gift":
+        # Positive is money out: a gift given. Otherwise one received.
+        if tx["amount_minor"] < 0:
+            flow_name = "income"
+            type_id = book_type.slot_type(conn, book_type.GIFT_RECEIVED_SLOT)
+        else:
+            type_id = book_type.slot_type(conn, book_type.GIFT_GIVEN_SLOT)
+            book = book_type.DEFAULT_BOOK
+    elif choice.name == "refund":
+        # A refund keeps the row's book and type (spending that came back
+        # counts against what it was), or takes the type given. An income
+        # kind is no spending type: the refund keeps none.
+        given = _checked_type_id(conn, data.get("type_id"))
+        if given is not None:
+            type_id = given
+            book = _book_or_proposed(conn, _checked_book(data.get("book")), given)
+        else:
+            type_id = tx["type_id"] if tx["type_id"] is not None and conn.execute(
+                "SELECT 1 FROM types WHERE id = ? AND kind = ?", (tx["type_id"], book_type.SPENDING)
+            ).fetchone() else None
+            book = _checked_book(data.get("book")) or tx["book"]
+    elif choice.asks == review.ASKS_INCOME_KIND:
+        kind_id = data.get("income_kind_id")
+        if isinstance(kind_id, bool) or not isinstance(kind_id, int) or not conn.execute(
+            "SELECT 1 FROM types WHERE id = ? AND kind = ?", (kind_id, book_type.INCOME)
+        ).fetchone():
+            raise review.LabelRefused("income_kind_id is required: one of the income kinds")
+        type_id = kind_id
+    elif choice.asks == review.ASKS_ACCOUNT:
+        other_side = _label_account(conn, choice, data.get("account_id"), tx["account_id"])
+    # A card payment asks nothing: no other side, no book, no type.
+
+    # A row that stops being a refund leaves its purchase (its link and the
+    # set-offs the link placed), before what rests on it is weighed.
+    if tx["flow_type"] == "refund" and flow_name != "refund":
+        refund_links.drop(conn, tx_id)
+    # A row a record rests on keeps to what the sheet counts once.
+    other_kind = (conn.execute(
+        "SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone() or [None])[0]
+    why = _label_refusal(conn, tx_id, flow_name, book, other_kind)
+    if why:
+        raise review.LabelRefused(why)
+
+    # Saying what it was is a deliberate act: the book and the type are each
+    # chosen, one it leaves empty too (a movement, a gift received's book),
+    # so no merchant or rule fills it later (spec 24, case 7), and the flow
+    # is set by hand (personal-ledger 50). With the single mark retired
+    # (personal-ledger 51) the field's own source is the one place that says
+    # so.
+    held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
+    _write_label(conn, held, {
+        "flow_type": flow_name, "flow_type_manual": 1, "other_side_id": other_side,
+        "book": book, "type_id": type_id,
+        "book_source": label_source.CHOSEN, "type_source": label_source.CHOSEN,
+    })
+    # A refund finds its purchase as the linker would: one that fits, linked.
+    if flow_name == "refund":
+        refund_links.link_refund(conn, tx_id)
+    return {"id": tx_id, "flow_type": flow_name, "other_side_id": other_side}
+
+
+def _label_rows(tx_id: int, more) -> list[int]:
+    """The rows a label names: the row in its path, then tx_ids (at most
+    QUEUE_ROW_CAP in all, each once, every id one SQLite can hold). Raises
+    review.LabelRefused."""
+    if more is None:
+        more = []
+    if not isinstance(more, list) or not all(
+            isinstance(i, int) and not isinstance(i, bool) and i in _SQLITE_INT for i in more):
+        raise review.LabelRefused("tx_ids must be a list of row ids")
+    rows = [tx_id, *more]
+    if len(set(rows)) != len(rows):
+        raise review.LabelRefused("a row is named twice: name each once")
+    if len(rows) > QUEUE_ROW_CAP:
+        raise review.LabelRefused(f"at most {QUEUE_ROW_CAP} rows at once, as many as the Queue shows")
+    return rows
+
+
+def _label_preview_lines(conn, rows: list[int], mark: int) -> tuple[list[dict], list[tuple]]:
+    """What this request's change entry recorded since `mark`: each named
+    row as it was and as it would be (flow, other side, book, type, in
+    words), and every recorded change as the token stamps it."""
+    changes = conn.execute(
+        "SELECT tbl, row_id, op, before, after FROM change_rows WHERE entry_id = ? AND id > ? ORDER BY id",
+        (g.get("change_entry"), mark),
+    ).fetchall()
+    types = {r[0]: r[1] for r in conn.execute("SELECT id, name FROM types")}
+    accounts = {r[0]: mask_card_number(r[1]) for r in conn.execute("SELECT id, name FROM accounts")}
+
+    def said(value: dict) -> dict:
+        return {"flow_type": value.get("flow_type"), "other_side": accounts.get(value.get("other_side_id")),
+                "book": value.get("book"), "type": types.get(value.get("type_id"))}
+
+    first = {}
+    for c in changes:
+        if c["tbl"] == "transactions" and c["row_id"] in rows and c["row_id"] not in first:
+            first[c["row_id"]] = json.loads(c["before"]) if c["before"] else {}
+    lines = []
+    for tx_id in rows:
+        if tx_id not in first:
+            continue  # it already was what the label says
+        now = conn.execute("SELECT * FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+        was = first[tx_id]
+        lines.append({"id": tx_id, "date": now["date"], "description": now["description"],
+                      "amount_minor": now["amount_minor"], "was": said(was), "now": said(dict(now))})
+    stamped = [(c["tbl"], c["row_id"], c["op"], _stable(c["before"]), _stable(c["after"])) for c in changes]
+    return lines, stamped
+
+
 @app.route("/api/review/<int:tx_id>/label", methods=["POST"])
 def api_review_label(tx_id: int):
-    """Say what a waiting transfer was. Writes the choice's flow (set by hand)
-    and its other side, and its book and type each chosen, so no merchant
-    change, rule or re-run reaches them afterwards.
+    """Say what a row was: a waiting transfer, or any row. Writes the
+    choice's flow (set by hand) and its other side, and its book and type
+    each chosen, so no merchant change, rule or re-run reaches them
+    afterwards.
 
     Body: choice, and what the choice asks for (see /api/review):
         spending        type_id; book where the type proposes none
@@ -5923,10 +6067,26 @@ def api_review_label(tx_id: int):
         company         account_id of a company
         loan_repayment  account_id of a loan
         income          income_kind_id
+    and the chat's reach beyond the review list (review.MORE_CHOICES):
+        refund          nothing: it keeps its book and type; or type_id (and
+                        book where the type proposes none). It links to its
+                        purchase when exactly one fits (refund_links)
+        card_payment    nothing: no other side, no book, no type
+        holding         account_id of a holding
 
-    A person is no movement's other side (personal-ledger 23, the contract):
+    A row that stops being a refund drops its refund link. A person is no
+    movement's other side (personal-ledger 23, the contract):
     "loan_to_person", or a person's account under any choice, is refused in
     review.PERSON_MOVEMENT_REFUSED's words and writes nothing.
+
+    Many rows (fin redesign ticket 11): tx_ids, more rows the same label
+    says the same of, in the same change. A label naming more than one row
+    writes nothing without `token`: it answers 409 with a preview (each
+    row as it was and as it would be, the rows, and the token). Sent back
+    with that token, it writes, as one change, only while the label would
+    make the same change to the same rows (a row changed since, by a rule or
+    anything else, is refused stale: preview again). A refusal on any row
+    writes nothing.
     """
     data = request.get_json(silent=True) or {}
     if data.get("choice") in review.RETIRED:
@@ -5934,75 +6094,51 @@ def api_review_label(tx_id: int):
     choice = review.BY_NAME.get(data.get("choice")) if isinstance(data.get("choice"), str) else None
     if choice is None:
         return jsonify({"error": f"unknown choice: {data.get('choice')!r}"}), 400
+    try:
+        rows = _label_rows(tx_id, data.get("tx_ids"))
+    except review.LabelRefused as e:
+        return jsonify({"error": str(e)}), 400
+    token = data.get("token")
+    if token is not None and (not isinstance(token, str) or not token):
+        return jsonify({"error": "token is the preview's token"}), 400
+    previewed = len(rows) > 1 or token is not None
 
     with get_db() as conn:
-        tx = conn.execute(
-            "SELECT t.id, t.amount_minor, s.account_id FROM transactions t "
-            "JOIN statements s ON t.statement_id = s.id WHERE t.id = ?",
-            (tx_id,),
-        ).fetchone()
-        if tx is None:
-            return jsonify({"error": "no such row"}), 404
-
-        flow_name = flow.checked_flow(choice.flow)
-        book = type_id = other_side = None
+        mark = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_rows").fetchone()[0]
         try:
-            if choice.asks == review.ASKS_TYPE:
-                type_id = _checked_type_id(conn, data.get("type_id"))
-                if type_id is None:
-                    raise review.LabelRefused("type_id is required: spending takes a type")
-                book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
-            elif choice.name == "gift":
-                # Positive is money out: a gift given. Otherwise one received.
-                if tx["amount_minor"] < 0:
-                    flow_name = "income"
-                    type_id = book_type.slot_type(conn, book_type.GIFT_RECEIVED_SLOT)
-                else:
-                    type_id = book_type.slot_type(conn, book_type.GIFT_GIVEN_SLOT)
-                    book = book_type.DEFAULT_BOOK
-            elif choice.asks == review.ASKS_INCOME_KIND:
-                kind_id = data.get("income_kind_id")
-                if isinstance(kind_id, bool) or not isinstance(kind_id, int) or not conn.execute(
-                    "SELECT 1 FROM types WHERE id = ? AND kind = ?", (kind_id, book_type.INCOME)
-                ).fetchone():
-                    raise review.LabelRefused("income_kind_id is required: one of the income kinds")
-                type_id = kind_id
-            else:
-                other_side = _label_account(conn, choice, data.get("account_id"), tx["account_id"])
-        except (UnknownLabel, BookNeeded, review.LabelRefused) as e:
+            labelled = [_label_row(conn, choice, data, row) for row in rows]
+            # A row that now names a loan, or no longer does, changes what was paid.
+            loan_interest.derive(conn)
+        except _NoSuchRow as e:
+            conn.rollback()
+            return jsonify({"error": "no such row" if len(rows) == 1 else f"no such row: {e.args[0]}"}), 404
+        except (UnknownLabel, BookNeeded, review.LabelRefused, expect_back.Refused) as e:
+            conn.rollback()
             return jsonify({"error": str(e)}), 400
-
-        # A row a record rests on keeps to what the sheet counts once.
-        other_kind = (conn.execute(
-            "SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone() or [None])[0]
-        why = _label_refusal(conn, tx_id, flow_name, book, other_kind)
-        if why:
-            return jsonify({"error": why}), 400
-
-        # Everything asked for is there: the label, in one transaction. Saying
-        # what it was is a deliberate act: the book and the type are each
-        # chosen, one it leaves empty too (a movement, a gift received's
-        # book), so no merchant or rule fills it later (spec 24, case 7), and
-        # the flow is set by hand (personal-ledger 50). With the single mark
-        # retired (personal-ledger 51) the field's own source is the one
-        # place that says so.
-        held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
-        book_source = type_source = label_source.CHOSEN
-        _write_label(conn, held, {
-            "flow_type": flow_name, "flow_type_manual": 1, "other_side_id": other_side,
-            "book": book, "type_id": type_id, "book_source": book_source, "type_source": type_source,
-        })
-        # A row that now names a loan, or no longer does, changes what was paid.
-        loan_interest.derive(conn)
+        if previewed:
+            lines, stamped = _label_preview_lines(conn, rows, mark)
+            asked = {**{k: v for k, v in data.items() if k != "token"}, "tx_id": tx_id}
+            made = relabel_preview._stamp("label", json.dumps(asked, sort_keys=True, default=str), stamped)
+            if token is None:
+                conn.rollback()
+                return jsonify({
+                    "error": (f"this says what {len(rows)} rows were, so nothing was changed: show the "
+                              "operator the preview, and on their yes call again with its token"),
+                    "preview": {"rows": len(lines), "lines": lines, "token": made},
+                }), 409
+            if token != made:
+                conn.rollback()
+                return jsonify({"error": PLAN_STALE, "stale": True}), 409
         conn.commit()
-        named = conn.execute("SELECT name FROM accounts WHERE id = ?", (other_side,)).fetchone()
-    return jsonify({
+        named = conn.execute("SELECT name FROM accounts WHERE id = ?", (labelled[0]["other_side_id"],)).fetchone()
+    answer = {
+        **labelled[0],
         "success": True,
-        "id": tx_id,
-        "flow_type": flow_name,
-        "other_side_id": other_side,
         "other_side_name": mask_card_number(named["name"]) if named else None,
-    })
+    }
+    if len(rows) > 1:
+        answer["ids"] = rows
+    return jsonify(answer)
 
 
 # How many of the latest labels a transfer's guess looks back over, how many
