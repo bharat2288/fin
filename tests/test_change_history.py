@@ -401,7 +401,7 @@ def test_a_start_after_a_crash_closes_the_entry_left_open_before_reseeding(temp_
     finally:
         conn.close()
 
-    db.init_db()  # re-seeds the rule
+    db.init_db()  # seeds the default rules again
 
     conn = db.get_connection()
     try:
