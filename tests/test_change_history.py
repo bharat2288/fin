@@ -216,6 +216,34 @@ def test_undo_twice_is_refused_and_undo_of_the_undo_redoes(imported):
     assert a_row(imported)["book"] == "Moom"
 
 
+def book_history(conn) -> list[tuple]:
+    """Every entry as stored, with how many rows it recorded."""
+    return [tuple(r) for r in conn.execute(
+        "SELECT e.id, e.open, e.summary, e.undoes, e.undone_by, "
+        "(SELECT COUNT(*) FROM change_rows c WHERE c.entry_id = e.id) FROM change_entries e ORDER BY e.id")]
+
+
+def test_an_undo_that_would_change_nothing_is_refused_and_leaves_the_history_as_it_was(imported, conn):
+    # The note set in the app, then put back by hand in the database, outside
+    # fin: no entry records that, so nothing blocks the undo, and there is
+    # nothing left for it to write.
+    tx = a_row(imported)
+    entry = int(label(imported, tx["id"], notes="moved").headers["X-Fin-Change"])
+    conn.execute("UPDATE transactions SET notes = ? WHERE id = ?", (tx["notes"], tx["id"]))
+    conn.commit()
+    before = book_history(conn)
+
+    resp = imported.post(f"/api/history/{entry}/undo")
+
+    assert resp.status_code == 409
+    assert resp.get_json()["error"] == history.NOTHING_TO_UNDO
+    assert "X-Fin-Change" not in resp.headers
+    assert book_history(conn) == before
+    # Still in force: the undo can be asked again, and is refused the same way.
+    assert imported.post(f"/api/history/{entry}/undo").status_code == 409
+    assert book_history(conn) == before
+
+
 def test_an_unknown_change_cannot_be_undone(client):
     assert client.post("/api/history/999/undo").status_code == 409
     assert client.get("/api/history/999").status_code == 404
