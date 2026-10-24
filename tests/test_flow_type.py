@@ -144,8 +144,9 @@ def test_recurring_internal_ib_ref_classifies_as_transfer():
     assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
 
 
-def test_local_own_alias_overrides_are_loaded(conn, monkeypatch):
-    """Private aliases stay outside source while still feeding classifier context."""
+def test_local_own_alias_overrides_are_no_longer_loaded(conn, monkeypatch):
+    """The host's private aliases are retired (fin-redesign 08): an own-account
+    name is a rule the operator sees, never a variable (RUL-010)."""
     from flow import build_context
 
     monkeypatch.setenv("FIN_OWN_ALIAS_OVERRIDES", "LOCAL PAYNOW ALIAS;ALT ALIAS")
@@ -155,7 +156,7 @@ def test_local_own_alias_overrides_are_loaded(conn, monkeypatch):
         "description": "Inward PayNow LOCAL PAYNOW ALIAS",
         "amount_minor": -10000,
     }
-    assert classify_flow(facts, ctx) == "transfer"
+    assert classify_flow(facts, ctx) == "income"
 
 
 def test_named_paynow_counterparty_stays_expense():
@@ -301,7 +302,7 @@ def test_backfill_populates_all_rows(conn, tmp_path):
     # are dropped after grep gate (ADR v2 bullet 10) so we no longer seed them.
     seed = [
         "Inward Credit A C J rent",                         # income
-        "TRANSFER OF FUND TRF SURI BHARAT I-BANK",          # transfer
+        "TOP-UP TO PAYLAH! SAMPLE",                         # transfer
         "AMAZON WEB SERVICES",                              # expense
         "BAT Cash Rebate Something",                        # refund
         "DBSC-5420891100884777 : I-BANK REF",               # payment (via linked CC)
@@ -691,7 +692,7 @@ def test_parser_post_parse_classification_sets_flow_type(conn):
     # Synthetic parsed txns covering all 5 flow types
     txns = [
         ParsedTransaction(date="2025-04-09", description="Inward Credit-FAST A C J tenant rent", amount_minor=-1020000, is_transfer=True),
-        ParsedTransaction(date="2025-04-10", description="TRANSFER OF FUND TRF SURI BHARAT I-BANK", amount_minor=-100000, is_transfer=True),
+        ParsedTransaction(date="2025-04-10", description="TOP-UP TO PAYLAH! SAMPLE", amount_minor=-100000, is_transfer=True),
         ParsedTransaction(date="2025-04-11", description="BUSINESS ADVANCE CARD TRANSACTION BAT AMAZON WEB SERVICES", amount_minor=8756),
         ParsedTransaction(date="2025-04-12", description="BAT Cash Rebate", amount_minor=-88, is_payment=True),
     ]

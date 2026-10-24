@@ -33,7 +33,7 @@ import money
 from parse_dbs import _parse_statement_date
 
 # The loan account fin keeps for the car loan: the one the car-loan
-# instalments name (flow.LOAN_MERCHANTS).
+# instalments name (db.LOAN_MERCHANTS).
 ACCOUNT = "DBS auto loan"
 CURRENCY = "SGD"
 

@@ -13,6 +13,7 @@ import pytest
 import book_type
 import conversion
 import convert_account_kinds
+import convert_flow_rules
 import convert_rule_flow
 import db
 import history
@@ -151,6 +152,8 @@ def test_the_app_will_not_start_on_a_database_from_before_the_step(old, monkeypa
 
 def test_the_app_starts_once_converted(old, monkeypatch):
     convert(old)
+    # And the step after it (fin-redesign 08).
+    assert conversion.run_step(old, convert_flow_rules.STEP, today=DAY)["status"] == "applied"
     monkeypatch.setattr(db, "DB_PATH", old)
 
     db.init_db()
@@ -158,9 +161,9 @@ def test_the_app_starts_once_converted(old, monkeypatch):
     assert query(old, "SELECT id, pattern, flow FROM merchant_rules WHERE id = 1") == [(1, "HPR900001X", None)]
 
 
-def test_the_step_runs_last_in_the_chain():
+def test_the_step_runs_after_retire_single_mark_in_the_chain():
     names = [name for name, _ in conversion.CHAIN]
-    assert names[-1] == convert_rule_flow.NAME
+    assert names[names.index(convert_rule_flow.NAME) - 1] == "retire-single-mark"
     assert conversion.chain_step(dict(conversion.CHAIN)[convert_rule_flow.NAME]) is convert_rule_flow.STEP
 
 

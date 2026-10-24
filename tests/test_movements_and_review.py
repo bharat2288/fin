@@ -394,10 +394,15 @@ RULED = [
 
 @pytest.fixture
 def loan_merchants(client, ledger) -> dict:
-    """The two loan merchants as the ledger knows them, each with a rule."""
-    for name, pattern in (("UOB Home Loan", "SAMPLE HOME LOAN"), ("Car Loan", "SAMPLE CAR LOAN")):
+    """The two loan merchants as the ledger knows them, each with a rule that
+    says its rows repay the loan (as the flow-rules step makes theirs,
+    fin-redesign 08)."""
+    for name, pattern, loan in (("UOB Home Loan", "SAMPLE HOME LOAN", "UOB home loan"),
+                                ("Car Loan", "SAMPLE CAR LOAN", "DBS auto loan")):
         svc = client.post("/api/services", json={"name": name}).get_json()["id"]
-        assert client.post("/api/rules", json={"pattern": pattern, "service_id": svc}).status_code == 200
+        assert client.post("/api/rules", json={
+            "pattern": pattern, "service_id": svc, "flow": "movement", "other_side_id": ledger[loan],
+        }).status_code == 200
     return ledger
 
 

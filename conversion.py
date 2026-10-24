@@ -68,6 +68,8 @@ CHAIN = (
     ("retire-single-mark", "retire_single_mark"),
     # fin-redesign 07 (ADR-009): a merchant rule may state a flow and an other side.
     ("rule-flow", "convert_rule_flow"),
+    # fin-redesign 08: the hard-coded flow lists become rules, seeded once.
+    ("flow-rules", "convert_flow_rules"),
 )
 
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")

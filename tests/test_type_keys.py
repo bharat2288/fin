@@ -17,6 +17,7 @@ import sqlite3
 from pathlib import Path
 
 import book_type
+import convert_flow_rules
 import convert_rule_flow
 import db
 import history
@@ -30,19 +31,23 @@ from test_movements_and_review import (  # noqa: F401 (fixtures)
 REPO = Path(__file__).resolve().parent.parent
 BEFORE = Path(__file__).parent / "fixtures" / "book_before_type_keys.sql"
 # The same start makes ticket 02's settings table (tests/test_type_settings.py) and
-# ticket 03's slots table (tests/test_type_slots.py) and ticket 05's marker
-# that the PayNow wordings were made rules (tests/test_paynow_rules.py).
-NEW_TABLES = {"type_keys", "type_settings", "type_slots", "seeded_once"}
+# ticket 03's slots table (tests/test_type_slots.py); the markers' table, which
+# ticket 05's marker that the PayNow wordings were made rules
+# (tests/test_paynow_rules.py) goes in, the flow-rules step made already
+# (fin-redesign 08, book_before).
+NEW_TABLES = {"type_keys", "type_settings", "type_slots"}
 
 
 def book_before(tmp_path, monkeypatch) -> Path:
     """The book main made, as a file fin is pointed at: brought through the
-    conversion steps added since (rule-flow, fin-redesign 07), which add to
-    its shape and change no row, as the operator's book is before a start."""
+    conversion steps added since (rule-flow, fin-redesign 07; flow-rules, 08),
+    which add to its shape and its rules and change no row, as the operator's
+    book is before a start."""
     path = tmp_path / "before.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(BEFORE.read_text(encoding="utf-8"))
     convert_rule_flow.STEP.apply(conn)
+    convert_flow_rules.STEP.apply(conn)
     conn.commit()
     conn.close()
     monkeypatch.setattr(db, "DB_PATH", path)
@@ -63,10 +68,11 @@ def every_row(path: Path) -> dict[str, list[tuple]]:
 
 def kept_every_row(before: dict, after: dict) -> None:
     """Every row the book held is there unchanged; the start added rows only
-    to merchants and rules (ticket 05's PayNow wording rules)."""
+    to merchants and rules (ticket 05's PayNow wording rules) and the marks
+    of its seeding (the flow-rules step made their table)."""
     for table, rows in before.items():
         assert set(rows) <= set(after[table]), table
-        if table not in ("services", "merchant_rules"):
+        if table not in ("services", "merchant_rules", "seeded_once"):
             assert after[table] == rows, table
 
 

@@ -282,8 +282,12 @@ def test_a_rule_added_later_leaves_the_flow_of_a_row_the_hold_never_held(
 
 
 def test_a_loan_instalment_a_rule_names_is_still_a_movement_naming_its_loan(client, ledger):
+    # The loan merchant's rule says its rows repay the loan (fin-redesign 08).
     loan = client.post("/api/services", json={"name": "Car Loan"}).get_json()["id"]
-    add_rule(client, "SAMPLE CAR LOAN", loan)
+    assert client.post("/api/rules", json={
+        "pattern": "SAMPLE CAR LOAN", "service_id": loan, "flow": "movement",
+        "other_side_id": ledger["DBS auto loan"],
+    }).status_code == 200
 
     bring_in(client, BANK, [(6, "FAST PAYMENT SAMPLE CAR LOAN INSTALMENT 08", 2000.00)])
 

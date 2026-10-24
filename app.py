@@ -5794,7 +5794,13 @@ def api_rules_update(rule_id):
                                     (rule_id,)).fetchone()
                 stated = proposed.get("flow", held["flow"]) or None
                 side = proposed.get("other_side_id", held["other_side_id"] if stated else None)
-                proposed["flow"], proposed["other_side_id"] = _checked_rule_flow(conn, stated, side)
+                # What the rule already states is kept unchecked: a seeded
+                # own-account rule states a transfer and names no other side
+                # (db.OWN_ACCOUNT_RULES), and the screen sends it with every edit.
+                if (stated, side) == (held["flow"], held["other_side_id"]):
+                    proposed["flow"], proposed["other_side_id"] = stated, side
+                else:
+                    proposed["flow"], proposed["other_side_id"] = _checked_rule_flow(conn, stated, side)
         except UnknownLabel as e:
             return jsonify({"error": str(e)}), 400
         try:

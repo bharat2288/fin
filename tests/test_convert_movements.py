@@ -16,6 +16,7 @@ import app as fin_app
 import book_type
 import conversion
 import convert_change_history
+import convert_flow_rules
 import convert_label_source
 import convert_account_kinds
 import convert_movements
@@ -51,8 +52,12 @@ ROWS = [
     ((2, 1, "GIRO SALARY MOOM PTE LTD", -9000.00, "income", 0, None, False, None), ("income", None)),
     ((3, 1, "INWARD PAYNOW FROM KALESH INC REF 3002", -6500.00, "transfer", 0, None, False, None), ("income", None)),
     ((4, 1, "INWARD CREDIT INDEPENDENT RESERVE SG REF 3003", -42000.00, "transfer", 0, None, False, None), ("movement", CRYPTO)),
-    ((5, 1, "SAMPLE HOME LOAN INSTALMENT 08", 8800.00, "expense", 0, 1, False, "Household"), ("movement", HOME_LOAN)),
-    ((6, 1, "SAMPLE CAR LOAN INSTALMENT 08", 2000.00, "expense", 0, 2, False, "Household"), ("movement", AUTO_LOAN)),
+    # A loan merchant's instalment is left as it is: since fin-redesign 08 the
+    # classifier knows no loan merchant by its name; the merchant's rule says
+    # its rows repay the loan (convert_flow_rules.py), and a rule reaches past
+    # rows only when the operator applies it.
+    ((5, 1, "SAMPLE HOME LOAN INSTALMENT 08", 8800.00, "expense", 0, 1, False, "Household"), ("expense", None)),
+    ((6, 1, "SAMPLE CAR LOAN INSTALMENT 08", 2000.00, "expense", 0, 2, False, "Household"), ("expense", None)),
     # Unlabelled bank transfers go to the review list.
     ((7, 1, "OUTWARD TELEGRAPHIC TRANSFER REF 550012", 40000.00, "expense", 0, None, False, None), ("review", None)),
     ((8, 1, "FAST PAYMENT REF 771203 OTHR", 25000.00, "expense", 0, None, False, None), ("review", None)),
@@ -290,11 +295,11 @@ def test_the_command_reports_what_it_did(old, capsys):
     assert "backup:" in out
     assert "expense -> review: 2" in out
     assert "income -> review: 1" in out
-    assert "expense -> movement: 2" in out
+    assert "expense -> movement" not in out  # the loan merchants' rules say so since fin-redesign 08
     assert "transfer -> movement: 1" in out
     assert "income -> movement: 1" in out
     assert "transfer -> income: 1" in out
-    assert "8 rows reclassified" in out
+    assert "6 rows reclassified" in out
     # Counts only: no description and no amount is printed.
     assert "SAMPLE" not in out and "40000" not in out
 
@@ -345,6 +350,7 @@ def test_the_app_shows_the_converted_rows_and_their_other_sides(old, started_on)
     conversion.run_step(old, convert_change_history.STEP)
     conversion.run_step(old, convert_label_source.STEP)
     conversion.run_step(old, retire_single_mark.STEP)
+    conversion.run_step(old, convert_flow_rules.STEP)
     client = started_on(old)
 
     waiting = client.get("/api/transactions?flow=review&sort=amount&sort_dir=desc").get_json()["transactions"]
@@ -352,7 +358,7 @@ def test_the_app_shows_the_converted_rows_and_their_other_sides(old, started_on)
     assert client.get("/api/review").get_json()["waiting"] == 3
     movements = client.get("/api/transactions?flow=movement&sort=date").get_json()["transactions"]
     assert {tx["id"]: tx["other_side_name"] for tx in movements} == {
-        1: "Moom", 4: "Crypto held outside fin", 5: "UOB home loan", 6: "DBS auto loan",
+        1: "Moom", 4: "Crypto held outside fin",
     }
 
 
