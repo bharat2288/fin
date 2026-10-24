@@ -475,16 +475,6 @@ def _classify_flow_for_tx(
     return flow.classify_row(facts, flow_ctx)
 
 
-def _reclassified(conn, held, service_id, type_id) -> tuple[str, int | None]:
-    """The flow of a row already in the book (`held`, with its flow_type),
-    worked out again for the merchant and type it now has and the rule that
-    labels it now, read from the book (a teach may have just written it):
-    flow.worked_out_again. The caller keeps a flow set by hand."""
-    rule = db.pick_rule(db.load_rules(conn), held["description"] or "", held["amount_minor"])
-    return flow.worked_out_again(held, service_id, type_id, rule, _account_facts(conn, held["id"]),
-                                 flow.build_context(conn))
-
-
 def _checked_other_side(conn, value, flow_name) -> int | None:
     """An other side as a writer may store it: the id of an account, on a row
     whose flow may name one; or none."""
@@ -555,14 +545,26 @@ def _checked_rule_flow(conn, flow_name, other_side) -> tuple[str | None, int | N
     account = conn.execute("SELECT type, owner, status FROM accounts WHERE id = ?", (other_side,)).fetchone()
     if account is None:
         raise UnknownLabel(f"unknown other side: {other_side!r}")
-    if account["type"] == "person":
-        raise UnknownLabel(RULE_PERSON_REFUSED)
-    if account["status"] == "archived":
-        raise UnknownLabel(RULE_ARCHIVED_REFUSED)
-    if account["type"] not in kinds or account["owner"] != account_kind.HOUSEHOLD:
-        raise UnknownLabel(f"a {flow_name}'s other side is one of the household's accounts of kind "
-                           + " or ".join(kinds))
+    why = _rule_side_refusal(flow_name, account)
+    if why is not None:
+        raise UnknownLabel(why)
     return flow_name, other_side
+
+
+def _rule_side_refusal(flow_name: str, account) -> str | None:
+    """Why an account (its type, owner and status) may not be the other side
+    of a rule that says its rows are `flow_name`, or None: a person never is,
+    nor an archived account, nor an account of a kind the flow does not
+    allow or not the household's (flow.RULE_FLOWS). _checked_rule_flow
+    refuses a rule so, and api_accounts_update an account a rule names."""
+    kinds = flow.RULE_FLOWS[flow_name][0]
+    if account["type"] == "person":
+        return RULE_PERSON_REFUSED
+    if account["status"] == "archived":
+        return RULE_ARCHIVED_REFUSED
+    if account["type"] not in kinds or account["owner"] != account_kind.HOUSEHOLD:
+        return f"a {flow_name}'s other side is one of the household's accounts of kind " + " or ".join(kinds)
+    return None
 
 
 def _expense_visibility_filter(service_alias: str = "svc") -> str:
@@ -1431,8 +1433,34 @@ def api_accounts_update(acct_id):
             _checked_currency(data["currency"])
     except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
         return jsonify({"error": str(e)}), 400
+    with get_db() as conn:
+        why = _ruled_account_refusal(conn, acct_id, data or {})
+    if why:
+        return jsonify({"error": why}), 400
     return _crud_update("accounts", acct_id, data,
                         ["name", "short_name", "type", "last_four", "currency", "status", "owner"])
+
+
+def _ruled_account_refusal(conn, acct_id: int, data: dict) -> str | None:
+    """Why an account update would leave a rule naming the account as its
+    other side one it may not name (_rule_side_refusal: archived, retyped
+    to a kind the rule's flow does not allow, a person, or no longer the
+    household's), naming the rule, or None. Nothing is written then."""
+    held = conn.execute("SELECT type, owner, status FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+    if held is None:
+        return None
+    account = {**dict(held), **{k: data[k] for k in ("type", "owner", "status") if k in data}}
+    refused = [(r["pattern"], why) for r in conn.execute(
+        "SELECT pattern, flow FROM merchant_rules WHERE other_side_id = ? AND flow IN "
+        f"({','.join('?' * len(flow.RULE_FLOWS))}) ORDER BY pattern", (acct_id, *flow.RULE_FLOWS))
+        if (why := _rule_side_refusal(r["flow"], account)) is not None]
+    if not refused:
+        return None
+    patterns = [p for p, _ in refused]
+    why = refused[0][1]
+    named = (f"The rule {patterns[0]} names" if len(patterns) == 1
+             else f"The rules {', '.join(patterns[:-1])} and {patterns[-1]} name")
+    return f"{named} this account as its other side. {why[0].upper()}{why[1:]}{'' if why.endswith('.') else '.'}"
 
 
 def _account_records_refusal(conn, acct_id: int) -> str | None:
@@ -1840,8 +1868,8 @@ def _would_change(held, sets: dict) -> bool:
     return any(held[k] != v for k, v in sets.items())
 
 
-def _teach_fills(conn, service_id: int, tx_id: int, pattern: str, match_type: str,
-                 book, type_id, taught: tuple, rules: tuple | None = None) -> list[tuple]:
+def _teach_fills(conn, service_id: int | None, tx_id: int, pattern: str, match_type: str,
+                 book, type_id, taught: tuple) -> list[tuple]:
     """The rows a teach (resolve) labels itself, whatever the preview's
     answer: those its wording matches that have no merchant, or have this
     merchant (`service_id`) and still no type, with the label columns each
@@ -1853,10 +1881,7 @@ def _teach_fills(conn, service_id: int, tx_id: int, pattern: str, match_type: st
     and a checked one stays checked; a row with no field to reach is left out
     and keeps its merchant too (fin-surfaces 54). The backfill writes these
     rows, and a preview counts the merchant's among them, so the two read
-    the same list. `rules` is the rules before the teach and as it leaves
-    them (relabel_preview.taught_rules): where the rule that labels a row,
-    before or after, states a flow, its flow is worked out again as a rule's
-    Apply works it out (_fill_flow)."""
+    the same list. Their flows are _teach_flows'."""
     fill_where = (
         "(service_id IS NULL OR (service_id = ? AND type_id IS NULL AND id != ?)) "
         f"AND {_build_match_condition(match_type)}"
@@ -1875,26 +1900,55 @@ def _teach_fills(conn, service_id: int, tx_id: int, pattern: str, match_type: st
             value, source = given[field]
             sets[field] = value
             sets[column] = label_source.reached(_source(held, column), value, source)
-        if rules is not None:
-            sets.update(_fill_flow(conn, held, {"service_id": service_id, **sets}, *rules))
         out.append((held, sets))
     return out
 
 
-def _fill_flow(conn, held, sets: dict, before_rules: list[dict], after_rules: list[dict]) -> dict:
-    """The flow and other side a teach's backfill writes to a row besides its
-    label (`sets`), where a rule that states a flow labels it, before the
-    teach or after: what a rule's Apply writes (relabel_preview.flow_writes:
-    never a flow set by hand, one fin did not work out, or one a record of
-    expect back rests on)."""
+# A merchant a teach creates has no id until it is saved; the flow its rows
+# would have reads only that they have one (flow.worked_out_again).
+_MERCHANT_TO_BE = -1
+
+
+def _teach_flows(conn, service_id: int | None, tx_id: int, words: list[str], match_type: str, book, type_id,
+                 taught: tuple, rules: tuple) -> tuple[dict, list]:
+    """The flows a teach's backfill (_teach_fills, each wording's in turn)
+    would move, worked out before anything is written: {row id: the flow
+    and other side Apply writes} and the rows whose flow it keeps
+    (relabel_preview.Kept). `rules` is the rules before the teach and as it
+    leaves them (relabel_preview.taught_rules): where the rule that labels a
+    row, before or after, states a flow, its flow is worked out again as a
+    rule's Apply works it out (_fill_flow). A teach that moves any asks
+    first, and writes them only on past_rows apply. The row taught is not
+    one of them: its flow is the teach's own (_teach, step 3)."""
+    merchant = service_id if service_id is not None else _MERCHANT_TO_BE
+    moves, kept, seen = {}, [], {tx_id}
+    for wording in words:
+        for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
+            if held["id"] in seen:
+                continue
+            seen.add(held["id"])
+            writes, keeps = _fill_flow(conn, held, {"service_id": merchant, **sets}, *rules)
+            if writes:
+                moves[held["id"]] = writes
+            if keeps is not None:
+                kept.append(keeps)
+    return moves, kept
+
+
+def _fill_flow(conn, held, sets: dict, before_rules: list[dict], after_rules: list[dict]) -> tuple[dict, object]:
+    """The flow and other side a teach's backfill would write to a row besides
+    its label (`sets`), where a rule that states a flow labels it, before the
+    teach or after, and the row kept or None: what a rule's Apply writes
+    (relabel_preview.flow_writes: never a flow set by hand, one fin did not
+    work out, or a move a hand label would refuse, a record resting on the
+    row)."""
     description, amount = held["description"] or "", held["amount_minor"]
     before = db.pick_rule(before_rules, description, amount)
     after = db.pick_rule(after_rules, description, amount)
     if not (flow.stated(before) or flow.stated(after)):
-        return {}
-    writes, _ = relabel_preview.flow_writes(conn, held, sets, before, after, flow.build_context(conn),
-                                            _account_facts(conn, held["id"]))
-    return writes
+        return {}, None
+    return relabel_preview.flow_writes(conn, held, sets, before, after, flow.build_context(conn),
+                                       _account_facts(conn, held["id"]))
 
 
 def _source(held, column: str) -> str | None:
@@ -3110,29 +3164,18 @@ def api_transactions():
 # money twice, so it is refused, naming the record; labelling the row's own
 # part (spending, income, a gift) stays allowed. Since the contract no label
 # or flow edit names a person as a movement's other side at all
-# (review.PERSON_MOVEMENT_REFUSED). A rule never moves such a row's flow, as
-# pair matching leaves it alone: its Apply, a teach and the drift keep it, and
-# the rule's preview lists it kept, in the refusal's words
-# (expect_back.records_refusal, relabel_preview.flow_writes).
+# (review.PERSON_MOVEMENT_REFUSED). A rule moves such a row's flow only where
+# a hand label could: its Apply, a teach and the drift keep the flow where the
+# label would be refused, and the rule's preview lists it kept, in the
+# refusal's words (expect_back.label_refusal, relabel_preview.flow_writes).
 # ---------------------------------------------------------------------------
-
-def _counted_elsewhere(flow_name: str | None, book: str | None, other_kind: str | None) -> bool:
-    """Whether a row with this flow, book and other side's kind is one the
-    sheet already counts whole, so no record may rest on it."""
-    if flow_name in ("transfer", "payment"):
-        return True
-    if (book or book_type.DEFAULT_BOOK) != account_kind.HOUSEHOLD:
-        return True
-    return flow_name == flow.MOVEMENT and other_kind != "person"
-
 
 def _label_refusal(conn, tx_id: int, flow_name: str | None, book: str | None,
                    other_kind: str | None) -> str | None:
     """Why a label may not make this row what it would then be (its flow, book
-    and other side's kind after the write), or None."""
-    if not _counted_elsewhere(flow_name, book, other_kind):
-        return None
-    return expect_back.records_refusal(conn, tx_id)
+    and other side's kind after the write), or None
+    (expect_back.label_refusal, which a rule's flow keeps to as well)."""
+    return expect_back.label_refusal(conn, tx_id, flow_name, book, other_kind)
 
 
 def _relabel_refusal(conn, tx_id: int, book: str | None) -> str | None:
@@ -3327,6 +3370,11 @@ def api_resolve_transaction():
             for a merchant fin already held as Every row the same: 'leave'
             marks its past rows checked (labels unchanged), in the same
             change; 'queue', or left out, leaves them waiting.
+        past_rows, token: the answer to the preview (409) a teach asks with
+            when it reaches past rows: a merchant's new default, rows another
+            merchant holds, or a backfilled row whose flow it would move
+            (preview.flows; flows_kept the rows whose flow it keeps). Only
+            'apply' writes those flows.
 
     Flow:
         1. Find existing service by service_id or name, or create new one
@@ -3476,9 +3524,21 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         plan = relabel_preview.joined(merchant_plan, taken_plan)
         # The rules before the teach and as it leaves them: a backfilled row a
         # rule that states a flow labels takes its flow as a rule's Apply
-        # gives it (_fill_flow).
+        # gives it, and a teach that would move any asks first
+        # (_teach_flows): they are written only on past_rows apply.
         rules_before = db.load_rules(conn)
         taught_rules = (rules_before, relabel_preview.taught_rules(rules_before, taught_words, match_type))
+        taught = label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book))
+        fill_flows, fill_kept = _teach_flows(conn, service_id, tx_id, taught_words, match_type,
+                                             book, type_id, taught, taught_rules)
+        # The row taught as it is before the teach writes anything: its flow
+        # is worked out again only where it is still fin's (step 3).
+        target_held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
+        if plan is None and fill_flows:
+            name = conn.execute("SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()[0] \
+                if svc else service_name
+            plan = relabel_preview.Plan(subject={"kind": "merchant", "id": service_id, "name": name},
+                                        change={}, called=name)
         if plan is not None:
             # Where the teach asks anyway, the merchant's own rows still
             # waiting for a type that it labels itself in the same change,
@@ -3486,17 +3546,20 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             # merchant sheet counts them (case 13): so the count is the
             # past rows the change writes. Rows with no merchant are the
             # teach's own, waiting as the row taught is, never counted
-            # (case 29); where nothing else asks, so are these.
-            if plan.count and svc and taught_words:
-                taught = label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book))
+            # (case 29), but for one whose flow it would move: the preview
+            # lists every such row (flows), and those it keeps (flows_kept).
+            if (plan.count or fill_flows) and taught_words:
                 fills = {}
                 for wording in taught_words:
-                    for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught,
-                                                   taught_rules):
+                    for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id,
+                                                   taught):
                         sets = {"service_id": service_id, **sets}
-                        if held["id"] not in fills and held["service_id"] == service_id and _would_change(held, sets):
+                        if held["id"] in fills:
+                            continue
+                        if held["id"] in fill_flows or (
+                                svc and held["service_id"] == service_id and _would_change(held, sets)):
                             fills[held["id"]] = sets
-                plan = relabel_preview.with_fills(conn, plan, fills)
+                plan = relabel_preview.with_fills(conn, plan, fills, fill_flows, fill_kept)
             refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
             if refused is not None:
                 raise TeachRefused(refused[0].get_json(), refused[1])
@@ -3535,7 +3598,10 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         backfilled_ids = []
         overrides = _taught_overrides(apply_scope, book, type_id, merchant_book)
         override_type_id, override_book = overrides["type_override_id"], overrides["book_override"]
-        taught = label_source.rule_sources(overrides)
+        # The flows the backfill writes: on past_rows apply only, those the
+        # preview listed (_teach_flows).
+        flows_written = fill_flows if past_rows == relabel_preview.APPLY else {}
+        moved_flow = False
         for wording in taught_words:
             rule_exists = conn.execute(
                 "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
@@ -3560,40 +3626,51 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             # Backfill the other rows matching this wording that have no
             # merchant, or have this merchant but still no type: the
             # rows a preview, where one was asked, counted as the teach's
-            # own (_teach_fills).
-            for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught,
-                                           taught_rules):
-                if _write_label(conn, held, {"service_id": service_id, **sets}):
+            # own (_teach_fills), with the flows it listed on apply.
+            for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
+                flows = flows_written.get(held["id"], {})
+                if _write_label(conn, held, {"service_id": service_id, **sets, **flows}):
                     backfilled_ids.append(held["id"])
+                    moved_flow = moved_flow or any(held[k] != v for k, v in flows.items())
         rule_id = rule_ids[0] if rule_ids else None
         backfilled = len(backfilled_ids)
 
         # Step 3: Update the target transaction with explicit provenance.
         # flow_type override is independent of the label (ADR v2):
         #   - if caller supplies flow_type, set it + mark flow_type_manual=1
-        #   - otherwise leave a hand-set flow alone, and a row a record of
-        #     expect back rests on (a rule never moves its flow), and
-        #     re-derive the rest, as for a row already in the book
-        #     (_reclassified)
+        #   - otherwise work the flow out again as a rule's Apply does
+        #     (relabel_preview.flow_writes, with the rule that labelled the
+        #     row before the teach and the one that labels it now): never a
+        #     flow set by hand or one fin did not work out, and kept where a
+        #     hand label would refuse the move, a record resting on the row
         tx_row = conn.execute(
             f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
         ).fetchone()
         label = (book, type_id, service_id,
                  *_resolved_sources(tx_row, apply_scope, book, type_id, merchant_book))
         written = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, book_source = ?, type_source = ?"
+        kept = list(fill_kept)
         if flow_type is not None:
             conn.execute(
                 f"{written}, flow_type = ?, flow_type_manual = 1 WHERE id = ?",
                 (*label, flow_type, tx_id),
             )
-        elif tx_row and not tx_row["flow_type_manual"] and expect_back.records_refusal(conn, tx_id) is None:
-            flow_type, other_side = _reclassified(conn, tx_row, service_id, type_id)
-            conn.execute(
-                f"{written}, flow_type = ?, other_side_id = ? WHERE id = ?",
-                (*label, flow_type, other_side, tx_id),
-            )
+        elif tx_row:
+            description, amount = tx_row["description"] or "", tx_row["amount_minor"]
+            flows, keeps = relabel_preview.flow_writes(
+                conn, target_held, {"service_id": service_id, "type_id": type_id, "book": book},
+                db.pick_rule(rules_before, description, amount), db.pick_rule(db.load_rules(conn), description, amount),
+                flow.build_context(conn), _account_facts(conn, tx_id))
+            if keeps is not None:
+                kept.append(keeps)
+            sets = ", ".join(f"{column} = ?" for column in flows)
+            conn.execute(f"{written}{', ' + sets if sets else ''} WHERE id = ?", (*label, *flows.values(), tx_id))
+            moved_flow = moved_flow or bool(flows)
         else:
             conn.execute(f"{written} WHERE id = ?", (*label, tx_id))
+        # A row that now names a loan, or no longer does, changes what was paid.
+        if moved_flow:
+            loan_interest.derive(conn)
 
         # Afterwards, for a merchant the model was asked about: the type
         # the operator chose and whether the suggestion was on screen.
@@ -3611,6 +3688,7 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             "type_id": type_id,
             "backfilled": backfilled,
             "backfilled_ids": backfilled_ids,
+            **({"flows_kept": relabel_preview.kept_lines(conn, kept)} if kept else {}),
         }, plan
     except TeachRefused:
         raise

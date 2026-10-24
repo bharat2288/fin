@@ -458,29 +458,35 @@ def joined(first: Plan | None, second: Plan | None) -> Plan | None:
     return plan
 
 
-def with_fills(conn: sqlite3.Connection, plan: Plan, fills: dict[int, dict]) -> Plan:
+def with_fills(conn: sqlite3.Connection, plan: Plan, fills: dict[int, dict], flows: dict[int, dict] | None = None,
+               kept: list[Kept] | tuple = ()) -> Plan:
     """A teach's preview (resolve, from the Queue): the plan's rows and the
     merchant's own rows the teach labels itself whatever the answer
     (`fills`, {row id: the label columns its backfill writes}: those its
     wording matches that have no type yet, which merchant_change leaves out
     when teaching). They are written in the same change entry, so the
     preview counts and shows them, as the merchant sheet does, and the count
-    is the past rows the entry writes (spec 24, Deepened; case 13). The token
-    stamps them too. The route writes them, not the plan; with no fills, the
-    plan as it is."""
-    if not fills:
+    is the past rows the entry writes (spec 24, Deepened; case 13). The
+    flow and other side Apply alone writes to a filled row (`flows`, {row
+    id: flow_writes}; Only new rows leaves them) and the rows whose flow it
+    keeps (`kept`) are the preview's flows and flows_kept, as a rule's are.
+    The token stamps them too. The route writes them, not the plan; with no
+    fills and none kept, the plan as it is."""
+    flows = flows or {}
+    if not fills and not kept:
         return plan
     filled = []
     for held in _held_rows(conn, list(fills)):
         sets = fills[held["id"]]
         checked = any(_source(held, f) == label_source.CHECKED for f in label_source.FIELDS if f in sets)
-        filled.append(Planned(held, sets, sets, checked=checked))
+        filled.append(Planned(held, {**sets, **flows.get(held["id"], {})}, sets, checked=checked))
     shown = Plan(subject=plan.subject, change=dict(plan.change), chosen=plan.chosen, called=plan.called,
                  doing=plan.doing, words=plan.words, others=list(plan.others), extra=dict(plan.extra),
-                 wording=plan.wording, moves_to=plan.moves_to, names=dict(plan.names))
+                 wording=plan.wording, moves_to=plan.moves_to, names=dict(plan.names),
+                 kept=[*plan.kept, *kept])
     shown.rows = sorted(plan.rows + filled, key=lambda p: (p.held["date"] or "", p.held["id"]), reverse=True)
     shown.token = _stamp(plan.token, sorted((i, tuple(sorted(s.items()))) for i, s in fills.items()),
-                         [tuple(p.held) for p in filled])
+                         [tuple(p.held) for p in filled], _stamp_flows(shown))
     return shown
 
 
@@ -598,15 +604,15 @@ def held_account(held) -> dict:
 
 def fins_own(held, before, account: dict, ctx: flow.ClassifierContext) -> bool:
     """Whether a row's stored flow and other side are still what fin worked
-    out for it before the change: what the rule that labelled it then
-    states (`before`, or None), or what the classifier gives it as it is.
-    Only such a row's flow is worked out again on a rule change (ADR-009); a
-    flow anything else said (an older book's refund, a pairing, the
-    linker) stays."""
+    out for it under the rules before the change: the flow and other side
+    the rule that labelled it then (`before`, or None) states, where it
+    states one; else what the classifier gives the row as it is. Only such a
+    row's flow is worked out again on a rule change (ADR-009). A flow
+    anything else said stays: an older book's refund, a pairing, the linker,
+    and the classifier's flow Only new rows left under a rule that states
+    another."""
     stored = (held["flow_type"], held["other_side_id"])
-    said = (before, None) if flow.stated(before) else (None,)
-    return any(flow.worked_out_again(held, held["service_id"], held["type_id"], rule, account, ctx) == stored
-               for rule in said)
+    return flow.worked_out_again(held, held["service_id"], held["type_id"], before, account, ctx) == stored
 
 
 def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: flow.ClassifierContext,
@@ -616,15 +622,15 @@ def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: 
     flow.worked_out_again gives for the merchant and type the row would have
     and the rule that would label it (`after`, or None; the flow it states
     says what the row is). And the row kept, where the change would move its
-    flow but a record rests on it, or None.
+    flow but a record of expect back rests on it, or None.
 
     Never a flow set by hand, nor its other side; nor a flow fin did not
     work out (fins_own, with the rule that labelled the row before the
-    change, `before`); nor the flow of a row an expectation or a set-off
-    rests on, as pair matching leaves it alone: that one is kept, in the
-    words a hand label's refusal names its record with
-    (expect_back.records_refusal). `account` is the kind and owner of the
-    account the row is on (held_account, by default)."""
+    change, `before`); nor a move a hand label would refuse the row, a
+    record resting on it (expect_back.label_refusal, with the flow, book and
+    other side's kind the row would have): that row is kept, in the
+    refusal's own words. `account` is the kind and owner of the account the
+    row is on (held_account, by default)."""
     if held["flow_type_manual"]:
         return {}, None
     if account is None:
@@ -634,7 +640,10 @@ def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: 
     writes = {k: v for k, v in zip(("flow_type", "other_side_id"), worked_out) if held[k] != v}
     if not writes or not fins_own(held, before, account, ctx):
         return {}, None
-    why = expect_back.records_refusal(conn, held["id"])
+    flow_name, other_side = worked_out
+    other_kind = (conn.execute("SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone()
+                  or [None])[0] if other_side is not None else None
+    why = expect_back.label_refusal(conn, held["id"], flow_name, sets.get("book", held["book"]), other_kind)
     if why is not None:
         return {}, Kept(held, writes, why)
     return writes, None
@@ -1130,11 +1139,16 @@ def flows_kept(conn: sqlite3.Connection, plan: Plan) -> list[dict]:
     """Every row whose flow Apply would change but keeps, a record of expect
     back resting on it: now, what it would have been, and why, in the words
     a hand label's refusal uses (flow_writes)."""
-    if not plan.kept:
+    return kept_lines(conn, plan.kept)
+
+
+def kept_lines(conn: sqlite3.Connection, kept: list[Kept]) -> list[dict]:
+    """Rows kept (flow_writes), as flows_kept names them."""
+    if not kept:
         return []
     names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM accounts")}
     out = []
-    for k in plan.kept:
+    for k in kept:
         held = k.held
         would = {c: k.would.get(c, held[c]) for c in ("flow_type", "other_side_id")}
         out.append({**_flow_line(held, _said_flow(names, held["flow_type"], held["other_side_id"])),

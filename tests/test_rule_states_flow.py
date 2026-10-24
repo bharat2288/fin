@@ -363,7 +363,7 @@ def test_the_loans_interest_is_worked_out_again_when_the_apply_names_the_loan(cl
 def test_the_rules_drawer_says_what_the_rows_become_and_the_sheet_sends_the_flow():
     code = "\n".join([
         "const esc = s => String(s);",
-        _function("flowsLine"),
+        _function("keptWords"), _function("flowsLine"),
         "console.log(JSON.stringify(flowsLine({ flows: [",
         "  { now: 'spending', after: 'a movement · Sample car loan' },",
         "  { now: 'spending', after: 'a movement · Sample car loan' },",

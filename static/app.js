@@ -4761,10 +4761,14 @@ function flowsLine(p) {
     const pairs = {};
     (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}`; pairs[k] = (pairs[k] || 0) + 1; });
     const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
-    // Rows a record of expect back rests on keep their flow: each, and why.
-    const kept = (p.flows_kept || []).map(k => `${esc(k.description)} stays ${esc(k.now)}: ${esc(k.why)}`).join(' ');
+    const kept = keptWords(p);
     return (said ? `<p class="sub">What the rows are: ${said}.</p>` : '')
-        + (kept ? `<p class="sub">Kept as they are: ${kept}</p>` : '');
+        + (kept ? `<p class="sub">Kept as they are: ${esc(kept)}</p>` : '');
+}
+/** The rows whose flow is kept, a record of expect back resting on each, in
+ *  plain words: each, and why. The drawer and a saved rule's toast say them. */
+function keptWords(p) {
+    return (p.flows_kept || []).map(k => `${k.description} stays ${k.now}: ${k.why}`).join(' ');
 }
 /** Ask the preview: 'apply', 'only_new', or null when it is closed. */
 function askPreview(p, parts = previewParts(p)) {
@@ -4797,11 +4801,13 @@ function previewedWords(r, done) {
     return `${done}. Only new rows take it; the ${plural(a.count, 'past row')} keep theirs, marked checked.`;
 }
 /** A previewed write's end: false when the drawer was closed, or the write
- *  refused (said in a toast); else its toast, with Undo. */
+ *  refused (said in a toast); else its toast, with Undo, naming the rows whose
+ *  flow it kept (a rule saved with no other row to ask about names them only here). */
 function previewedDone(r, done) {
     if (r.cancelled) return false;
     if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return false; }
-    toast(previewedWords(r, done), { undo: r.change });
+    const said = previewedWords(r, done), kept = keptWords(r.data || {});
+    toast(kept ? `${said.replace(/\.$/, '')}. Kept as they are: ${kept}` : said, { undo: r.change });
     refreshFrame();
     return true;
 }
