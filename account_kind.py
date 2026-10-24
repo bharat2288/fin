@@ -21,6 +21,9 @@ KINDS = (
     ("company", "the household's money in a company: costs paid for it plus capital put in, "
                 "less what it has paid back"),
     ("person", "money lent to, or owed by, a person outside the household"),
+    ("untracked", "the household's own account that fin holds no statements for, such as a "
+                  "family member's own bank; money moved there leaves fin's sight, and it is "
+                  "never a missing statement"),
 )
 
 KIND_NAMES = tuple(name for name, _ in KINDS)

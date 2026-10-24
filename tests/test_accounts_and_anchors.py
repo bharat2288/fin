@@ -9,7 +9,7 @@ import pytest
 
 from ingest import ensure_account, ensure_statement
 
-KINDS = ["bank", "card", "loan", "holding", "company", "person"]
+KINDS = ["bank", "card", "loan", "holding", "company", "person", "untracked"]
 
 
 def make_account(client, name: str, kind: str, **extra) -> int:
@@ -143,6 +143,33 @@ def test_statement_coverage_lists_only_accounts_that_have_statements(client):
 
     assert sorted(a["short_name"] for a in covered["accounts"]) == ["Sample bank", "Sample card"]
     assert covered["summary"]["total"] == 2
+
+
+def test_an_untracked_account_takes_no_figure_and_has_no_line_on_the_sheet(client):
+    # Mili's own bank: money goes there, and fin holds no statement for it.
+    # It is never a missing statement and never a figure to type.
+    partner = make_account(client, "Sample Partner Bank", "untracked")
+
+    resp = enter(client, partner, "100.00")
+
+    assert resp.status_code == 400
+    assert anchors(client) == []
+    assert accounts(client)["Sample Partner Bank"]["takes_a_figure"] is False
+    shown = client.get("/api/balance-sheet?month=2026-08").get_json()
+    assert "Sample Partner Bank" not in str(shown)
+
+
+def test_an_account_is_not_made_twice_under_one_name(client):
+    loan = make_account(client, "Sample auto loan", "loan")
+
+    for name in ("Sample auto loan", "Sample Auto Loan", " sample auto loan "):
+        resp = client.post("/api/accounts", json={"name": name, "type": "loan"})
+
+        assert resp.status_code == 409, name
+        assert resp.get_json()["error"] == (
+            "fin already has an account named Sample auto loan, of kind loan; nothing was added"
+        )
+    assert {a["name"]: a["id"] for a in accounts(client).values()} == {"Sample auto loan": loan}
 
 
 # --- P3: a supplied figure is saved and shown ---------------------------------
@@ -391,6 +418,7 @@ def test_each_account_says_whether_it_takes_a_figure(client):
     assert {name: a["takes_a_figure"] for name, a in accounts(client).items()} == {
         "Sample bank": True, "Sample card": False, "Sample loan": True,
         "Sample holding": True, "Sample company": True, "Sample person": True,
+        "Sample untracked": False,
     }
 
 

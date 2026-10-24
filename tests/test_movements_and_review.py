@@ -496,6 +496,20 @@ def test_a_move_to_my_own_account_is_a_transfer_naming_that_account(client, wait
     assert household_spend(client) == 80.25
 
 
+def test_a_move_to_an_untracked_account_is_a_transfer_naming_it(client, waiting):
+    # Mili's own bank: the household's, with no statement in fin. Offered
+    # beside the bank accounts and cards, and nothing else changes.
+    own = {c["name"]: c["kinds"] for c in client.get("/api/review").get_json()["choices"]}
+    assert own["own_account"] == ["bank", "card", "untracked"]
+    partner = make_account(client, "Sample Partner Bank", "untracked")
+
+    tx = labelled(client, TRANSFERS[0][1], choice="own_account", account_id=partner)
+
+    assert what_it_is(tx) == ("transfer", "Sample Partner Bank", "Household", "")
+    assert (tx["other_side_id"], tx["flow_type_manual"]) == (partner, 1)
+    assert household_spend(client) == 80.25
+
+
 def test_money_into_a_company_is_a_movement_naming_the_company(client, waiting):
     tx = labelled(client, TRANSFERS[1][1], choice="company", account_id=waiting["Kalesh"])
 
