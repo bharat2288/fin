@@ -38,6 +38,8 @@ GOLDEN: list[str] = [
     # fin-surfaces 51: the rows that differ from their rule (Re-run every rule's place)
     "rule_drift",
     "types", "books", "flows", "coverage", "rates", "history", "change", "expected_back",
+    # fin-redesign 12: the Queue's payback suggestions (a read)
+    "paybacks",
     # writes
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     # fin-surfaces 51: rerun_rules removed, as Re-run every rule is retired
@@ -49,7 +51,10 @@ GOLDEN: list[str] = [
     "create_merchant",
     "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
-    "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
+    "mark_expect_back", "undo_mark", "set_off",
+    # fin-redesign 12: several payments set off against one expectation, one change
+    "set_off_payments",
+    "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
     "undo",
     # chat-plan-apply 02: a batch of teaches, previewed (writes nothing) then applied as one change
     "plan_preview", "plan_apply",
