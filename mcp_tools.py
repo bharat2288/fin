@@ -64,6 +64,16 @@ Rulings this module carries:
   account of any declared kind over the app's Add an account, so the
   statements imported after find it with its right kind. The route refuses a
   name fin already holds.
+- The chat's relabel reach (fin redesign ticket 11): label_review, on any
+  row, also says a refund (keeping its type), a card payment, or a move into
+  or out of a holding (review.MORE_CHOICES); a person stays no movement's
+  other side. With tx_ids it labels many rows as one change, behind a
+  preview: a call naming more than one row writes nothing and answers with
+  the preview and its token, and writes only when sent back with a token
+  that still holds. The token is not the operator's count: over MANY_ROWS
+  rows changed (the preview's changes, refund links too) the call takes
+  expected_count as any write, the number the preview shows. create_merchant adds a
+  merchant over the app's own route, which refuses a name fin holds.
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
 the client the chat gate verified, labelled as folio labels it: `chat:<sub>`,
@@ -444,14 +454,29 @@ _WRITES = [
         "label_review",
         "Say what a row was: a transfer waiting for review, or any row (the app's \"Change "
         "what this was…\" uses it too), whose flow, other side, book and type it rewrites. choice: spending (type_id; book where the "
-        "type proposes none), gift, own_account (account_id), company (account_id), "
-        "loan_repayment (account_id of a loan), income (income_kind_id). A person is no "
+        "type proposes none), gift, own_account (account_id of a bank account, card or untracked "
+        "account), company (account_id), "
+        "loan_repayment (account_id of a loan), income (income_kind_id), refund (it keeps the row's "
+        "book and type, or takes type_id; it links to its purchase when exactly one fits, and a "
+        "row with no type to keep then takes the purchase's), "
+        "card_payment (paying a card's bill or a payment reversed: no book or type), holding "
+        "(account_id of a holding: money that bought, or came back from, something owned). A row "
+        "that stops being a refund drops its refund link. A person is no "
         "movement's other side: money lent to or owed to a person is mark_expect_back on the row "
-        "(direction back on money out, pay on money in), named for them.",
-        {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I, "income_kind_id": _I},
+        "(direction back on money out, pay on money in), named for them. Many rows: tx_ids, more "
+        "rows the same label says the same of, in one change. A call naming more than one row "
+        "writes nothing and answers with a preview (each row as it was and would be, and a token): "
+        "show the operator, and on their yes call again with the same arguments and the token. A "
+        "token from a preview that no longer holds (a row changed since) is refused: preview "
+        "again. The preview's changes count every row the change writes (refund links too); over "
+        + str(MANY_ROWS) + " it also takes expected_count, the preview's expected_count.",
+        {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I, "income_kind_id": _I,
+         "tx_ids": {"type": "array", "items": _I, "maxItems": 99,
+                    "description": "More rows labelled the same way, in the same change."},
+         "token": {"type": "string", "description": "The preview's token, sent back on the operator's yes."}},
         ("tx_id", "choice"),
         lambda a: ("POST", f"/api/review/{int(a['tx_id'])}/label",
-                   _pick(a, "choice", "type_id", "book", "account_id", "income_kind_id")),
+                   _pick(a, "choice", "type_id", "book", "account_id", "income_kind_id", "tx_ids", "token")),
     ),
     _w(
         "enter_figure",
@@ -546,6 +571,17 @@ _WRITES = [
         ("name", "kind"),
         lambda a: ("POST", "/api/accounts",
                    {**_account_body(a), **_pick(a, "currency", "owner", "last_four")}),
+    ),
+    _w(
+        "create_merchant",
+        "Add a merchant, with the book and type its rows take (type_id from the types tool; a type "
+        "with no book takes the book the type proposes, and one that proposes none needs a book). "
+        "It labels no row: add_rule gives it a wording, and plan_preview and plan_apply attach a "
+        "card's rows. Refused when fin already holds a merchant of that name, in any case: read "
+        "merchants first.",
+        {"name": _S, "book": _S, "type_id": _I},
+        ("name",),
+        lambda a: ("POST", "/api/services", _pick(a, "name", "book", "type_id")),
     ),
     _w(
         "pair_transfers",
@@ -799,6 +835,7 @@ TITLES = {
     "merge_merchants": "Merge two merchants",
     "add_company_or_person": "Add a company or a person",
     "create_account": "Add an account",
+    "create_merchant": "Add a merchant",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",
     "set_rate": "Enter an exchange rate",

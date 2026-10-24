@@ -47,6 +47,8 @@ GOLDEN: list[str] = [
     "add_company_or_person",
     # fin redesign: accounts made with their kind before their statements are imported
     "create_account",
+    # fin redesign ticket 11: a merchant made over the app's own route
+    "create_merchant",
     "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off",
