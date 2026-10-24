@@ -62,6 +62,7 @@ specs/              ← Project specs (design, status, pipeline, decisions)
 python app.py                    # Start server (port 8450)
 python seed_mock_data.py         # Generate demo DB (refuses if fin.db exists)
 FIN_LOCAL_DEV=1 python serve.py  # The hosted process on loopback, gate off (port 8000)
+FIN_CONVERT_ON_START=1 python serve.py  # Hosted, one deploy: convert_all on the book before it opens; remove after
 python fin_snapshot.py snap fin.db s0.json  # Baseline snapshot, book read on a copy; then diff / check-reference (module doc)
 ```
 

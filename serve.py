@@ -33,6 +33,9 @@ Settings come from the environment only (names here; values never):
     FIN_SEED_OBJECT_KEY, FIN_SEED_SHA256, FIN_SEED_ACCESS_KEY_ID, FIN_SEED_SECRET_ACCESS_KEY
                                one-time: seed a new volume's book from the bucket with
                                the seed's own read-only key; deleted after the move
+    FIN_CONVERT_ON_START       1 runs `python convert_all.py <book>` before the book is
+                               opened; 0 or unset never converts (the default). For
+                               one deploy: set it, deploy, read the log, remove it
 
 The gate is enforced by default. With any of its settings missing the process
 refuses to start, naming the variable (never a value). The laptop's
@@ -40,12 +43,24 @@ refuses to start, naming the variable (never a value). The laptop's
 
 Start order (D3, D6): the seed step, when asked for, before the book is
 opened (a book that exists refuses: a second boot with the seed variables
-still set does not start); then init_db, which refuses an unconverted book;
-then serve.
+still set does not start); then, only with FIN_CONVERT_ON_START=1, the
+conversion steps (convert_all.py's own run: each pending step writes its dated
+backup beside the book and checks its invariant; the first that fails or
+refuses stops the start, leaving the book as the runner left it); then
+init_db, which refuses an unconverted book; then serve.
+
+fin does not convert a book as it starts unless the operator asks, once: the
+variable is the hosted stand-in for running convert_all.py in a shell. Set it,
+deploy, read the log (each step's name, its status, its backup's file name
+and row counts: never a name, a row or an amount, which convert_all's own
+report can carry and which stay out of the log), then remove it. Left set it
+is harmless: a converted book logs that there is nothing to convert.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import logging
 import re
 import sys
@@ -59,6 +74,8 @@ from typing import Callable, Mapping
 from a2wsgi import WSGIMiddleware
 from flask import Flask
 
+import conversion
+import convert_all
 import db
 from access_gate import (
     CHAT_GATE,
@@ -96,6 +113,7 @@ UPLOAD_VARIABLES = (
 DB_PATH_VARIABLE = db.DB_PATH_VARIABLE
 LOCAL_DEV_VARIABLE = "FIN_LOCAL_DEV"
 HOST_VARIABLE = "FIN_HOST"
+CONVERT_ON_START_VARIABLE = "FIN_CONVERT_ON_START"
 PORT_VARIABLE = "PORT"
 
 PUBLIC_HOST = "0.0.0.0"
@@ -132,6 +150,7 @@ class RuntimeConfig:
     backup: S3Settings | None = None
     backup_missing: tuple[str, ...] = ()
     seed: SeedRequest | None = None
+    convert_on_start: bool = False
 
 
 def is_loopback_host(host: str) -> bool:
@@ -169,7 +188,15 @@ def load_runtime_config(environ: Mapping[str, str]) -> RuntimeConfig:
     db_path = _read(environ, DB_PATH_VARIABLE) or None
     backup, backup_missing = load_backup_settings(environ)
     seed = _load_seed_request(environ, db_path=db_path)
-    backups = {"backup": backup, "backup_missing": backup_missing, "seed": seed}
+    convert_raw = _read(environ, CONVERT_ON_START_VARIABLE)
+    if convert_raw not in ("", "0", "1"):
+        raise StartupRefused(f"{CONVERT_ON_START_VARIABLE} must be 1 or 0")
+    backups = {
+        "backup": backup,
+        "backup_missing": backup_missing,
+        "seed": seed,
+        "convert_on_start": convert_raw == "1",
+    }
 
     if local_dev:
         return RuntimeConfig(local_dev=True, host=host, port=port, db_path=db_path, gate=None, **backups)
@@ -236,16 +263,127 @@ def seed_if_requested(config: RuntimeConfig, *, make_store: Callable[[S3Settings
         raise StartupRefused(str(refused)) from None
 
 
+# The lines of convert_all's run that reach the log: step names, statuses,
+# the backup's file name and row counts per table. Every other line of a
+# step's report (account names, totals, labels, a refusal's or a failure's
+# own words) is held back: it can carry a name or an amount.
+_LOGGED_LINES = (
+    re.compile(r"--- (step \d+ of \d+: [a-z0-9-]+) \(python [a-z0-9_]+\.py\)"),
+    re.compile(r"step [a-z0-9-]+: (?:applied|already-applied)"),
+    re.compile(r"rows (?:before|after): +\{(?:'[a-z_]+': \d+(?:, )?)*\}"),
+    re.compile(r"stopped at step \d+ of \d+: [a-z0-9-]+\. Nothing after it was run\."),
+    re.compile(r"not run: [a-z0-9-]+(?:, [a-z0-9-]+)*"),
+    re.compile(r"all \d+ steps applied"),
+)
+_STOPPED_AT = re.compile(r"stopped at step (\d+ of \d+: [a-z0-9-]+)\. Nothing after it was run\.")
+_BACKUP_LINE = re.compile(r"backup: (.+)")
+# How the step ended: the runner's two outcomes, or convert_all's line for
+# any other exception (its type only).
+_STEP_FAILED = re.compile(r"(ConversionRefused|ConversionFailed): |([A-Z]\w*(?:Error|Exception)) raised$")
+_FAILED_WORDS = {
+    "ConversionRefused": "it was not started and changed nothing",
+    "ConversionFailed": "it was rolled back",
+}
+
+
+def _needs_converting(path: Path) -> bool:
+    """init_db's own test of an unconverted book, read from a copy: nothing
+    is written. A path with no book yet has nothing to convert."""
+    if not path.is_file():
+        return False
+    copy = conversion.read_copy(path)
+    try:
+        return db._needs_converting(copy)
+    finally:
+        copy.close()
+
+
+def convert_if_requested(config: RuntimeConfig) -> None:
+    """FIN_CONVERT_ON_START=1: run convert_all on the book, after the seed
+    step and before init_db. Each pending step writes its own dated backup
+    beside the book and checks its invariant (the conversion runner's
+    contract). The first step that fails or refuses stops the start: the
+    book stays as the runner left it, that step rolled back, earlier steps
+    applied behind their backups. Logs only step names, statuses, backup
+    file names and row counts."""
+    if not config.convert_on_start:
+        return
+    path = Path(config.db_path) if config.db_path is not None else db.DB_PATH
+    if not _needs_converting(path):
+        logger.info(
+            "%s: nothing to convert, every conversion step is applied; remove the variable",
+            CONVERT_ON_START_VARIABLE,
+        )
+        return
+    logger.info("%s: converting the book, as python convert_all.py <book> does", CONVERT_ON_START_VARIABLE)
+    report = io.StringIO()
+    with contextlib.redirect_stdout(report):
+        code = convert_all.main([str(path)])
+    lines = report.getvalue().splitlines()
+    held_back = 0
+    for line in lines:
+        logged = _logged_line(line)
+        if logged is None:
+            held_back += 1
+        else:
+            logger.info("convert: %s", logged)
+    if held_back:
+        logger.info(
+            "convert: %d lines of the steps' own report held back (they can carry names or amounts)", held_back
+        )
+    if code != 0:
+        raise StartupRefused(_stopped(lines))
+    logger.info("%s: done; remove the variable before the next deploy", CONVERT_ON_START_VARIABLE)
+
+
+def _logged_line(line: str) -> str | None:
+    backup = _BACKUP_LINE.fullmatch(line)
+    if backup:
+        return f"backup: {Path(backup.group(1)).name}"
+    for pattern in _LOGGED_LINES:
+        match = pattern.fullmatch(line)
+        if match:
+            return match.group(1) if match.groups() else line
+    return None
+
+
+def _stopped(lines: list[str]) -> str:
+    """The refusal when a step does not pass: which step, how it ended, the
+    steps not run. The step's own words are not repeated (names, amounts)."""
+    stopped = next(filter(None, map(_STOPPED_AT.fullmatch, lines)), None)
+    not_run = next((line for line in lines if line.startswith("not run: ") and _logged_line(line)), None)
+    kind = None
+    for line in lines:
+        match = _STEP_FAILED.match(line)
+        if match:
+            kind = match.group(1) or f"{match.group(2)} raised"
+    if stopped is None:
+        return f"{CONVERT_ON_START_VARIABLE}: the conversion did not finish; the book was not opened"
+    ended = f"{kind}: {_FAILED_WORDS[kind]}" if kind in _FAILED_WORDS else (kind or "it did not pass")
+    return (
+        f"{CONVERT_ON_START_VARIABLE}: the conversion stopped at step {stopped.group(1)} ({ended}); "
+        f"nothing after it was run{f' ({not_run})' if not_run else ''}. "
+        "Steps before it stay applied, each behind its dated backup beside the book. "
+        "The step's own reason is not logged here (it can name accounts or carry amounts): "
+        "read it by running python convert_all.py on a copy of the book."
+    )
+
+
 def open_book(config: RuntimeConfig) -> None:
     """Point fin at the book and run init_db, which refuses an unconverted one
-    with its own message (what to run); an empty path creates an empty book."""
+    with its own message (what to run), and the hosted way to run it; an
+    empty path creates an empty book."""
     if config.db_path is not None:
         db.DB_PATH = Path(config.db_path)
         db.invalidate_rules_cache()
     try:
         db.init_db()
     except db.DatabaseNotConverted as refused:
-        raise StartupRefused(str(refused)) from None
+        raise StartupRefused(
+            f"{refused}\n"
+            f"Hosted, with no shell: set {CONVERT_ON_START_VARIABLE}=1 and deploy, and serve.py runs that "
+            "command before it opens the book; remove the variable after."
+        ) from None
 
 
 async def _serve_lifespan(receive, send, mcp_lifespan) -> None:
@@ -330,6 +468,8 @@ def main(environ: Mapping[str, str] | None = None) -> int:
         announce_backups(config)
         # Before the book is opened: opening it would create an empty one.
         seed_if_requested(config)
+        # After the seed, before the book is opened; only when asked for.
+        convert_if_requested(config)
         open_book(config)
     except StartupRefused as refused:
         print(f"fin refused to start: {refused}", file=sys.stderr)
