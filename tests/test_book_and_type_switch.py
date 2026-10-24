@@ -1239,7 +1239,8 @@ def test_resolve_and_the_drift_apply_keep_a_flow_set_by_hand(client, conn, state
     })
     assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
-    # Set by hand: kept. Derived: read again from the wording.
+    # Set by hand: kept. Held as income though the wording reads as a refund
+    # today: not what fin works out, so kept too (ADR-009, fin-redesign 07).
     assert shown(client, tx)["flow_type"] == "refund"
-    assert shown(client, derived)["flow_type"] == "refund"
+    assert shown(client, derived)["flow_type"] == "income"
     assert label(client, derived) == ("Household", "Dining", "service_default")
