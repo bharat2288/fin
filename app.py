@@ -449,19 +449,19 @@ def _account_facts(conn, tx_id) -> dict:
 
 def _classify_flow_for_tx(
     conn, description: str, amount_minor: int, *,
-    flow_ctx=None, tx_id=None, service_id=None, labelled: bool = False,
+    flow_ctx=None, tx_id=None, service_id=None,
 ) -> tuple[str, int | None]:
     """Classify a row using the shared flow model: (flow, its other side).
 
-    tx_id says which account the row is on; service_id and labelled say what
-    the merchant rules made of it."""
+    tx_id says which account the row is on; service_id is the merchant the
+    rules gave it. A merchant or a type does not take a transfer off the
+    review list: a rule that states no flow labels only (ADR-009)."""
     if flow_ctx is None:
         flow_ctx = flow.build_context(conn)
     facts = {
         "description": description,
         "amount_minor": amount_minor,
         "service_id": service_id,
-        "labelled": labelled,
         **_account_facts(conn, tx_id),
     }
     return flow.classify_row(facts, flow_ctx)
@@ -1947,15 +1947,15 @@ def _previewed_answer(conn, plan, answer: str | None, token, answer_key: str = "
 
 def _reflowed(conn, p, flow_ctx) -> dict:
     """A rule's relabel, with the row's flow worked out again for its new
-    merchant (a flow set by hand keeps its flow and its other side)."""
+    merchant (a flow set by hand keeps its flow and its other side). The
+    rule states no flow, so a transfer it names still waits on the review
+    list (ADR-009)."""
     sets = dict(p.apply)
     if p.held["flow_type_manual"]:
         return sets
-    service_id = sets.get("service_id", p.held["service_id"])
-    labelled = bool(sets.get("type_id", p.held["type_id"]) or service_id)
     sets["flow_type"], sets["other_side_id"] = _classify_flow_for_tx(
         conn, p.held["description"], p.held["amount_minor"], flow_ctx=flow_ctx,
-        tx_id=p.held["id"], service_id=service_id, labelled=labelled,
+        tx_id=p.held["id"], service_id=sets.get("service_id", p.held["service_id"]),
     )
     return sets
 
@@ -3453,7 +3453,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         # Step 3: Update the target transaction with explicit provenance.
         # flow_type override is independent of the label (ADR v2):
         #   - if caller supplies flow_type, set it + mark flow_type_manual=1
-        #   - otherwise leave a hand-set flow alone and re-derive the rest
+        #   - otherwise leave a hand-set flow alone and re-derive the rest:
+        #     a teach states no flow, so a transfer it names still waits
         tx_row = conn.execute(
             f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
         ).fetchone()
@@ -3468,7 +3469,7 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         elif tx_row and not tx_row["flow_type_manual"]:
             flow_type, other_side = _classify_flow_for_tx(
                 conn, tx_row["description"], tx_row["amount_minor"],
-                tx_id=tx_id, service_id=service_id, labelled=True,
+                tx_id=tx_id, service_id=service_id,
             )
             conn.execute(
                 f"{written}, flow_type = ?, other_side_id = ? WHERE id = ?",
@@ -4663,13 +4664,13 @@ def api_import_upload():
                         currencies[account] = stmt.currency
 
                 # Classify flow_type post-parse, from the row's own wording,
-                # the account it is on and what the merchant rules made of it
+                # the account it is on and the merchant the rules gave it. A
+                # rule states no flow: a transfer it names still waits.
                 tx.flow_type, other_side_id = flow.classify_row(
                     {
                         "description": tx.description,
                         "amount_minor": tx.amount_minor,
                         "service_id": svc_id,
-                        "labelled": bool(type_id or svc_id),
                         **account_facts[account],
                     },
                     flow_ctx,
@@ -4692,9 +4693,10 @@ def api_import_upload():
                     "flow_type": tx.flow_type,
                     "other_side_id": other_side_id,
                     "account": account,
-                    "status": "typed" if type_id else (
+                    # A row that waits is waiting, whatever type a rule gave it.
+                    "status": flow.REVIEW if tx.flow_type == flow.REVIEW else "typed" if type_id else (
                         tx.flow_type
-                        if tx.flow_type in ("transfer", "payment", flow.MOVEMENT, flow.REVIEW)
+                        if tx.flow_type in ("transfer", "payment", flow.MOVEMENT)
                         else "untyped"
                     ),
                     # Every row is imported: nothing is skipped by default.
@@ -4815,6 +4817,21 @@ def _imported_sources(conn, tx: dict, amount_minor: int) -> tuple:
         else:
             out.append(label_source.CHOSEN)
     return tuple(out)
+
+
+def _chosen_in_preview(conn, tx: dict, amount_minor: int) -> bool:
+    """Whether the operator gave a waiting row a type or a merchant in the
+    preview: one the rules do not give it. That labels it, and it no longer
+    waits. The rules' own merchant and type do not: a rule that states no
+    flow labels only (ADR-009)."""
+    found = _label_for(conn, tx["description"] or "", amount_minor)
+    return any(tx.get(field) and tx.get(field) != found[field] for field in ("type_id", "service_id"))
+
+
+def _unheld(amount_minor: int) -> str:
+    """The flow of a waiting row the operator labelled in the preview:
+    money in is income, money out is spending."""
+    return "income" if amount_minor < 0 else "expense"
 
 
 @app.route("/api/import/confirm", methods=["POST"])
@@ -5079,11 +5096,9 @@ def api_import_confirm():
                     # Link each transaction to its statement record
                     for tx in import_by_key[key][:to_insert]:
                         statement_id = statement_of(tx)
-                        # A waiting row the operator gave a type or a merchant
-                        # in the preview is labelled: it no longer waits.
                         tx_flow = tx.get("flow_type")
-                        if tx_flow == flow.REVIEW and (tx.get("type_id") or tx.get("service_id")):
-                            tx_flow = "income" if amount_val < 0 else "expense"
+                        if tx_flow == flow.REVIEW and _chosen_in_preview(conn, tx, amount_val):
+                            tx_flow = _unheld(amount_val)
                         book_source, type_source = _imported_sources(conn, tx, amount_val)
                         cur = conn.execute(
                             "INSERT INTO transactions "
@@ -5112,13 +5127,15 @@ def api_import_confirm():
                             # A row sent with no flow takes the classifier's,
                             # read with the account it is on: a row is never
                             # saved without one (a start does not fill it in).
-                            labelled = bool(tx.get("type_id") or tx.get("service_id"))
+                            worked_out = _classify_flow_for_tx(
+                                conn, tx["description"], amount_val, tx_id=cur.lastrowid,
+                                service_id=tx.get("service_id"),
+                            )
+                            if worked_out[0] == flow.REVIEW and _chosen_in_preview(conn, tx, amount_val):
+                                worked_out = (_unheld(amount_val), None)
                             conn.execute(
                                 "UPDATE transactions SET flow_type = ?, other_side_id = ? WHERE id = ?",
-                                (*_classify_flow_for_tx(
-                                    conn, tx["description"], amount_val, tx_id=cur.lastrowid,
-                                    service_id=tx.get("service_id"), labelled=labelled,
-                                ), cur.lastrowid),
+                                (*worked_out, cur.lastrowid),
                             )
                         total_saved += 1
 

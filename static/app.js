@@ -5304,7 +5304,7 @@ function importPreviewHTML(p) {
         <div class="table-shell" style="margin-top:10px"><table class="t rows acct-rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Money in</th><th class="r">Money out</th></tr></thead><tbody>
         ${g.transactions.map(t => {
             const minor = toMinor(t.amount_sgd, g.currency);
-            return `<tr><td class="num row-date">${esc(day(t.date, { year: false }))}</td><td class="row-desc">${esc(t.description)}</td><td class="row-label">${t.type_name ? esc(t.type_name) : t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.flow_type !== 'expense' ? `<span class="muted">${esc(t.flow_type)}</span>` : tag('nofig', 'no type')}</td>
+            return `<tr><td class="num row-date">${esc(day(t.date, { year: false }))}</td><td class="row-desc">${esc(t.description)}</td><td class="row-label">${t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.type_name ? esc(t.type_name) : t.flow_type !== 'expense' ? `<span class="muted">${esc(t.flow_type)}</span>` : tag('nofig', 'no type')}</td>
             <td class="r num row-in">${minor < 0 ? esc(money(-minor, g.currency)) : ''}</td><td class="r num row-out">${minor >= 0 ? esc(money(minor, g.currency)) : ''}</td></tr>`;
         }).join('')}</tbody></table></div></details>`).join('');
     return `<div class="results">${card('ties', tag('ties', 'Ties'), ties.reduce((a, g) => a + g.statements.length, 0), tiesBody)}${card('off', tag('off', 'Off by'), refused.length, refusedBody)}${card('notchecked', tag('notchecked', 'Not checked'), unchecked.length, uncheckedBody)}</div>

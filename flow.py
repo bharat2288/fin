@@ -364,7 +364,11 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     facts: {date, description, amount_minor} and, where the caller knows them:
       account_kind, account_owner — the account the row is on;
       service_id — the merchant a rule gave the row;
-      labelled — whether a rule or the payee wording gave it a merchant or a type.
+      labelled — the reading the conversions that have run made of a row: a
+        merchant or a type from a rule took a transfer off the review list.
+        They keep it, so a book they converted still reads as converted. No
+        writer passes it since fin-redesign 06: a rule that states no flow
+        labels only, and a transfer it names still waits (ADR-009).
     Without these the rules that need them do not apply. The amount is in
     whole minor units; only its sign is read.
     """
@@ -409,8 +413,8 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     if _matches_known_transfer_rail(description, ctx.owned_bank_refs):
         return "transfer"
 
-    # 4b. A transfer on a household bank account that nothing above knows and
-    #     no merchant rule labelled waits for the operator.
+    # 4b. A transfer on a household bank account that nothing above knows
+    #     waits for the operator, whatever merchant a rule gave it.
     if _on_household_bank(facts) and not facts.get("labelled") and _has_transfer_shape(description):
         return REVIEW
 
