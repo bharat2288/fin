@@ -776,8 +776,9 @@ _PLANS = [
         "batch: the answer gives, per merchant, the rows that would be labelled (a row's was is the "
         "label it holds now, which the batch overwrites: tell the operator), the rows of "
         "another merchant a wording would reach (overlaps: ask whether they move too, past_rows), "
-        "any refusal by merchant, the batch's merchants and rows labelled, the rows only checked "
-        "(rows_checked), and a token (none while "
+        "every row whose flow or other side it would move, a row labelled for itself among them "
+        "(flows: tell the operator), any refusal by merchant, the batch's merchants and rows labelled, "
+        "the rows only checked (rows_checked), and a token (none while "
         "anything is refused). Show the operator those numbers; call plan_apply only on their yes.",
         _schema({"items": _PLAN_ITEMS}, ("items",)),
         False,

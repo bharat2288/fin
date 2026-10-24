@@ -1853,12 +1853,17 @@ _LABEL_HELD = ("t.id, t.description, t.amount_minor, t.book, t.type_id, t.servic
 
 def _write_label(conn, held, sets: dict) -> bool:
     """Write `sets` to the row `held` (as _LABEL_HELD reads it). Returns
-    whether anything changed."""
+    whether anything changed. A row it takes out of refund leaves its
+    purchase in the same change, as a hand label's does (refund_links.drop;
+    a rule's preview kept any row the drop would refuse,
+    relabel_preview.move_refusal)."""
     if not set(sets) <= _LABEL_COLUMNS:
         raise ValueError(f"not a label column: {sorted(set(sets) - _LABEL_COLUMNS)}")
     sets = {k: v for k, v in sets.items() if held[k] != v}
     if not sets:
         return False
+    if held["flow_type"] == "refund" and sets.get("flow_type", "refund") != "refund":
+        refund_links.drop(conn, held["id"])
     conn.execute(
         f"UPDATE transactions SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
         (*sets.values(), held["id"]),
@@ -1936,6 +1941,26 @@ def _teach_flows(conn, service_id: int | None, tx_id: int, words: list[str], mat
             if keeps is not None:
                 kept.append(keeps)
     return moves, kept
+
+
+def _taken_flows(conn, plan, service_id: int | None, tx_id: int, rules: tuple) -> None:
+    """The flows the rows a taught wording takes from other merchants
+    (relabel_preview.taking) would move, worked out as the backfill's are
+    (_fill_flow, with `rules` as _teach_flows reads them): each row's Apply
+    carries them, Only new rows leaves them, the rows whose flow it keeps
+    are the plan's kept, and its token stamps them, so the preview lists
+    every one (flows, flows_kept) and Apply writes exactly those. The row
+    taught is not one of them: its flow is the teach's own (_teach, step 3)."""
+    merchant = service_id if service_id is not None else _MERCHANT_TO_BE
+    for p in plan.rows:
+        if p.held["id"] == tx_id:
+            continue
+        label = {k: p.apply[k] for k in ("book", "type_id") if k in p.apply}
+        writes, keeps = _fill_flow(conn, p.held, {"service_id": merchant, **label}, *rules)
+        p.apply.update(writes)
+        if keeps is not None:
+            plan.kept.append(keeps)
+    plan.token = relabel_preview._stamp(plan.token, relabel_preview._stamp_flows(plan))
 
 
 def _fill_flow(conn, held, sets: dict, before_rules: list[dict], after_rules: list[dict]) -> tuple[dict, object]:
@@ -3379,6 +3404,10 @@ def api_resolve_transaction():
             (preview.flows; flows_kept the rows whose flow it keeps). Only
             'apply' writes those flows.
 
+    Answers flows: the row's own flow change, where the teach moves it (a
+    merchant whose rules state a flow, for a row labelled for itself), and
+    flows_kept where a record resting on a row keeps its flow.
+
     Flow:
         1. Find existing service by service_id or name, or create new one
         2. Create merchant rule linking pattern → service (→ its book and type)
@@ -3515,6 +3544,18 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             moved = {f: v for f, v in (("book", book), ("type_id", type_id)) if v != svc[f]}
             merchant_plan = relabel_preview.merchant_change(conn, service_id, moved, leave_out={tx_id},
                                                              teaching=True)
+        # The rules before the teach and as it leaves them: a backfilled row,
+        # or one the wording takes from another merchant, that a rule
+        # stating a flow labels takes its flow as a rule's Apply gives it,
+        # and a teach that would move any asks first (_teach_flows,
+        # _taken_flows): they are written only on past_rows apply.
+        rules_before = db.load_rules(conn)
+        # The merchant's stated flow (flow.merchant_stated): a rule the teach
+        # adds states it, as does a wording's rule it moves here from another
+        # merchant, and a row labelled for itself takes it (step 3).
+        merchant_said = flow.merchant_stated(rules_before, service_id) if svc else None
+        taught_rules = (rules_before, relabel_preview.taught_rules(
+            rules_before, taught_words, match_type, merchant_said, service_id if svc else None))
         if taught_words:
             reach = relabel_preview.together([
                 relabel_preview.wording_reach(conn, w, match_type, service_id if svc else None) for w in taught_words])
@@ -3524,17 +3565,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
                 taken_plan = relabel_preview.taking(
                     conn, reach, shown_name, {"book": book, "type_id": type_id},
                     label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book)))
+                _taken_flows(conn, taken_plan, service_id if svc else None, tx_id, taught_rules)
         plan = relabel_preview.joined(merchant_plan, taken_plan)
-        # The rules before the teach and as it leaves them: a backfilled row a
-        # rule that states a flow labels takes its flow as a rule's Apply
-        # gives it, and a teach that would move any asks first
-        # (_teach_flows): they are written only on past_rows apply.
-        rules_before = db.load_rules(conn)
-        # The merchant's stated flow (flow.merchant_stated): a rule the teach
-        # adds states it, and a row labelled for itself takes it (step 3).
-        merchant_said = flow.merchant_stated(rules_before, service_id) if svc else None
-        taught_rules = (rules_before, relabel_preview.taught_rules(rules_before, taught_words, match_type,
-                                                                   merchant_said))
         taught = label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book))
         fill_flows, fill_kept = _teach_flows(conn, service_id, tx_id, taught_words, match_type,
                                              book, type_id, taught, taught_rules)
@@ -3544,8 +3576,10 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         if plan is None and fill_flows:
             name = conn.execute("SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()[0] \
                 if svc else service_name
+            # Its rows are the merchant's to be: shown as moving to it, as a
+            # taught wording's rows are (relabel_preview._example).
             plan = relabel_preview.Plan(subject={"kind": "merchant", "id": service_id, "name": name},
-                                        change={}, called=name)
+                                        change={}, called=name, moves_to=name)
         if plan is not None:
             # Where the teach asks anyway, the merchant's own rows still
             # waiting for a type that it labels itself in the same change,
@@ -3609,10 +3643,12 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         # The flows the backfill writes: on past_rows apply only, those the
         # preview listed (_teach_flows).
         flows_written = fill_flows if past_rows == relabel_preview.APPLY else {}
-        moved_flow = False
+        # Rows taken from another merchant whose flow Apply moved (_taken_flows).
+        moved_flow = past_rows == relabel_preview.APPLY and taken_plan is not None and any(
+            relabel_preview.moves_flow(p) for p in taken_plan.rows)
         for wording in taught_words:
             rule_exists = conn.execute(
-                "SELECT id FROM merchant_rules WHERE UPPER(pattern) = ?",
+                "SELECT id, service_id FROM merchant_rules WHERE UPPER(pattern) = ?",
                 (wording.upper(),),
             ).fetchone()
             if not rule_exists:
@@ -3631,6 +3667,12 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
                     "type_override_id = ? WHERE id = ?",
                     (service_id, override_book, override_type_id, rule_exists["id"]),
                 )
+                # A rule moved here from another merchant states this
+                # merchant's stated flow, or none: never the old merchant's
+                # (relabel_preview.taught_rules, as the preview read it).
+                if rule_exists["service_id"] != service_id:
+                    conn.execute("UPDATE merchant_rules SET flow = ?, other_side_id = ? WHERE id = ?",
+                                 (*(merchant_said or (None, None)), rule_exists["id"]))
 
             # Backfill the other rows matching this wording that have no
             # merchant, or have this merchant but still no type: the
@@ -3660,7 +3702,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         label = (book, type_id, service_id,
                  *_resolved_sources(tx_row, apply_scope, book, type_id, merchant_book))
         written = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, book_source = ?, type_source = ?"
-        kept = list(fill_kept)
+        kept = [*fill_kept, *(taken_plan.kept if taken_plan is not None else ())]
+        moved_lines = []
         if flow_type is not None:
             conn.execute(
                 f"{written}, flow_type = ?, flow_type_manual = 1 WHERE id = ?",
@@ -3677,9 +3720,15 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
                 flow.build_context(conn), _account_facts(conn, tx_id))
             if keeps is not None:
                 kept.append(keeps)
+            # Out of refund, the row leaves its purchase, as _write_label's rows do.
+            if target_held["flow_type"] == "refund" and flows.get("flow_type", "refund") != "refund":
+                refund_links.drop(conn, tx_id)
             sets = ", ".join(f"{column} = ?" for column in flows)
             conn.execute(f"{written}{', ' + sets if sets else ''} WHERE id = ?", (*label, *flows.values(), tx_id))
             moved_flow = moved_flow or bool(flows)
+            # The answer names the row's flow change: none moves unsaid.
+            if flows:
+                moved_lines.append((target_held, flows))
         else:
             conn.execute(f"{written} WHERE id = ?", (*label, tx_id))
         # A row that now names a loan, or no longer does, changes what was paid.
@@ -3702,6 +3751,7 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             "type_id": type_id,
             "backfilled": backfilled,
             "backfilled_ids": backfilled_ids,
+            "flows": relabel_preview.moved_lines(conn, moved_lines),
             **({"flows_kept": relabel_preview.kept_lines(conn, kept)} if kept else {}),
         }, plan
     except TeachRefused:
@@ -3730,6 +3780,8 @@ PLAN_STALE = "the book changed since the preview: preview again"
 # Columns a write stamps with the clock: left out of the token, so a preview
 # and its apply a second later stamp the same.
 _CLOCK_COLUMNS = frozenset({"created_at", "made_at"})
+# What a row is, as a plan's preview lists its moves.
+_FLOW_COLUMNS = ("flow_type", "other_side_id")
 # The ids an item names, held to what SQLite stores (a signed 64-bit integer).
 _PLAN_ITEM_IDS = ("service_id", "type_id")
 _SQLITE_INT = range(-2 ** 63, 2 ** 63)
@@ -3879,18 +3931,23 @@ def _run_plan(conn, items: list[dict]) -> dict:
         ).fetchall()
         stamped.append((n, plan.token if plan is not None else None,
                         [(c["tbl"], c["row_id"], c["op"], _stable(c["before"]), _stable(c["after"])) for c in changes]))
-        labelled, was = {}, {}
+        labelled, was, flows = {}, {}, {}
         for c in changes:
             if c["tbl"] != "transactions":
                 continue
             rows.add(c["row_id"])
+            before = json.loads(c["before"]) if c["before"] else {}
+            after = json.loads(c["after"]) if c["after"] else {}
             # The row as it stood before this item: a row that held a type
-            # shows its label, so the yes sees the plan overwrite it.
+            # shows its label, so the yes sees the plan overwrite it; and its
+            # flow and other side then and after the item, so the preview
+            # lists every row whose flow the item moves.
             if c["row_id"] not in was:
-                before = json.loads(c["before"]) if c["before"] else {}
                 was[c["row_id"]] = None if before.get("type_id") is None else {
                     k: before.get(k) for k in ("service_id", "book", "type_id", "book_source", "type_source")}
-            after = json.loads(c["after"]) if c["after"] else {}
+                flows[c["row_id"]] = {"id": c["row_id"], **{k: before.get(k) for k in _FLOW_COLUMNS}}
+            if c["op"] == "update":
+                flows[c["row_id"]]["writes"] = {k: after.get(k) for k in _FLOW_COLUMNS}
             if after.get("service_id") == service_id:
                 labelled[c["row_id"]] = {**{k: after.get(k) for k in ("id", "date", "description", "amount_minor")},
                                          "was": was[c["row_id"]]}
@@ -3912,6 +3969,11 @@ def _run_plan(conn, items: list[dict]) -> dict:
             # The answer the past rows take: unanswered, only new rows.
             "past_rows": (item.get("past_rows") or relabel_preview.ONLY_NEW) if preview else None,
             "preview": preview,
+            # Every row whose flow or other side the item moves, the rows
+            # labelled for themselves among them: the token stamps each.
+            "flows": relabel_preview.moved_lines(conn, [
+                (f, f["writes"]) for f in flows.values()
+                if "writes" in f and any(f[k] != f["writes"][k] for k in _FLOW_COLUMNS)]),
         })
     token = None if refusals else relabel_preview._stamp(
         "plan", json.dumps(items, sort_keys=True), stamped)
