@@ -11,6 +11,7 @@ import sqlite3
 
 import pytest
 
+import history
 import mcp_tools
 from test_balance_sheet import bring_in, make_account
 
@@ -277,6 +278,24 @@ def test_a_change_that_could_not_be_put_back_is_reported_as_standing(many, monke
     assert "could not be put back" in answer["error"]
     assert str(answer["change"]["entry_id"]) in answer["error"]
     assert "FOREIGN KEY" not in answer["error"]
+
+
+def test_a_chat_undo_that_would_change_nothing_says_so_and_leaves_the_history_as_it_was(book, conn):
+    row = first_row()
+    done = call("set_note", tx_id=row["id"], notes="moved")
+    assert done["ok"], done
+    entry = done["change"]["entry_id"]
+    # Put back by hand in the database, outside fin: no entry records it.
+    conn.execute("UPDATE transactions SET notes = ? WHERE id = ?", (row["notes"], row["id"]))
+    conn.commit()
+    stored = "SELECT id, open, undoes, undone_by FROM change_entries ORDER BY id"
+    before = [tuple(r) for r in conn.execute(stored)]
+
+    answer = call("undo", entry_id=entry)
+
+    assert answer == {"ok": False, "error": history.NOTHING_TO_UNDO}
+    assert [tuple(r) for r in conn.execute(stored)] == before
+    assert call("change", entry_id=entry)["result"]["undone_by"] is None
 
 
 def test_the_chat_may_undo_only_a_chat_change(book):
