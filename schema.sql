@@ -908,8 +908,8 @@ CREATE TABLE IF NOT EXISTS conversion_steps (
 );
 
 -- A seed fin makes once, at start, and never again, so what the operator
--- removes of it stays removed: the PayNow wordings made rules
--- (type-relationships 05; db.py names each seed). Not a tracked table: an
+-- removes of it stays removed: the default merchant rules, and the PayNow
+-- wordings made rules (type-relationships 05; db.py names each seed). Not a tracked table: an
 -- Undo never removes it. A new table, made empty by CREATE IF NOT EXISTS on
 -- start; no existing row is converted.
 CREATE TABLE IF NOT EXISTS seeded_once (
