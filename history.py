@@ -78,6 +78,15 @@ class UndoRefused(Exception):
     """The entry was not undone. Nothing was changed."""
 
 
+# An undo whose rows already read as they did before the change (put back
+# outside fin, or the field it changed is gone): it is refused, so the change
+# is not marked undone by an entry that wrote nothing.
+NOTHING_TO_UNDO = (
+    "undoing this change would change nothing: its rows already read as they did before it. "
+    "Nothing was changed."
+)
+
+
 def schema_statements(leave_out: dict[str, tuple[str, ...]] | None = None) -> list[str]:
     """The history block of schema.sql (tables, indexes, triggers), one
     statement each, for a caller that must run them inside its own
@@ -402,7 +411,8 @@ def _write_rows(conn: sqlite3.Connection, changes: list) -> None:
 def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     """Undo an entry inside the open entry `undo_entry_id`, and commit.
     Refused, changing nothing, when the entry is unknown, still open, already
-    undone, or a later entry changed one of its rows; and, naming it, when it
+    undone, or a later entry changed one of its rows, or when writing it back
+    changes no row (NOTHING_TO_UNDO); and, naming it, when it
     would leave an expect-back record pointing at nothing or broken
     (expect_back.refusal_to_undo, expect_back.invariant_check), or take out
     a type something still uses (book_type.refusal_to_undo)."""
@@ -438,6 +448,9 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     except sqlite3.IntegrityError:
         conn.rollback()
         raise UndoRefused("undoing this change would break a link between rows; nothing was changed") from None
+    if row_count(conn, undo_entry_id) == 0:
+        conn.rollback()
+        raise UndoRefused(NOTHING_TO_UNDO)
     broken = expect_back.invariant_check(conn, entry_id)
     if broken:
         conn.rollback()
