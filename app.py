@@ -49,6 +49,7 @@ import trend_routes
 import expect_back
 import trend_series
 import expect_routes
+import expectation_api
 import refund_links
 import relabel_preview
 from scope import _HOUSEHOLD_ACCOUNT, _SGD_ACCOUNT, _TYPE_JOINS, book_expr
@@ -3067,15 +3068,26 @@ def api_update_transaction(tx_id: int):
     """Update a transaction's notes, book, type, or one-off flag. A row may
     override both the book and the type its merchant gives it. Each of book
     and type sent becomes chosen (label_source); a field not sent keeps its
-    source. Chat's set_label is this route."""
+    source. Chat's set_label is this route.
+
+    With `expectation` (the mark route's body: {direction, all, amount, names,
+    new_names, note}) the row is also marked as expected back, or to pay back,
+    in the same change (fin-redesign 12: chat's mark_expect_back with a book
+    or type): the label is written first, so the mark's own guards read the
+    row as labelled, and a refused mark writes neither."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
+    if not isinstance(data, dict):
+        return jsonify({"error": "No valid fields to update"}), 400
 
     sets, values = _build_update_sets(data, ["notes", "is_one_off"])
     labels = {field: data[field] or None for field in label_source.FIELDS if field in data}
+    expectation = data.get("expectation")
+    if expectation is not None and not isinstance(expectation, dict):
+        return jsonify({"error": "send the mark as JSON"}), 400
 
-    if not sets and not labels:
+    if not sets and not labels and expectation is None:
         return jsonify({"error": "No valid fields to update"}), 400
 
     with get_db() as conn:
@@ -3090,11 +3102,26 @@ def api_update_transaction(tx_id: int):
         if sets:
             conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", (*values, tx_id))
         held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
+        labelled = False
         if held is not None and labels:
             chosen = {label_source.FIELDS[f]: label_source.given(v, label_source.CHOSEN) for f, v in labels.items()}
-            _write_label(conn, held, {**labels, **chosen})
-        conn.commit()
-    return jsonify({"ok": True, "id": tx_id})
+            labelled = _write_label(conn, held, {**labels, **chosen})
+        if expectation is None:
+            conn.commit()
+            return jsonify({"ok": True, "id": tx_id})
+        # The mark commits the label with it, or rolls both back.
+        try:
+            marked = expectation_api.write_mark(conn, tx_id, expectation)
+        except expectation_api.NotFound as e:
+            return jsonify({"error": str(e)}), 404
+        except expect_back.Refused as e:
+            return jsonify({"error": str(e)}), 400
+        entry_id = g.get("change_entry")
+        if labelled and entry_id is not None:
+            conn.execute("UPDATE change_entries SET summary = summary || ' and labelled it' "
+                         "WHERE id = ? AND summary != ''", (entry_id,))
+            conn.commit()
+    return jsonify({"ok": True, "id": tx_id, **marked})
 
 
 @app.route("/api/transactions/bulk-label", methods=["POST"])

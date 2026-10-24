@@ -37,6 +37,8 @@ READS.insert(READS.index("queue") + 1, "queue_summary")
 # chat-plan-apply 02: a batch of teaches previewed (it writes nothing, and
 # stops with the switch off, as it leads only to a write), then applied.
 READS.append("plan_preview")
+# fin-redesign 12: the Queue's payback suggestions, read by the chat.
+READS.insert(READS.index("expected_back") + 1, "paybacks")
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
@@ -45,7 +47,10 @@ WRITES = [
     "create_account",
     "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
-    "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
+    "mark_expect_back", "undo_mark", "set_off",
+    # fin-redesign 12: several payments set off against one expectation, one change
+    "set_off_payments",
+    "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
     "undo",
     # chat-plan-apply 02: the previewed batch, applied as one change
     "plan_apply",

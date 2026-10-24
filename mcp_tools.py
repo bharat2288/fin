@@ -37,6 +37,12 @@ Rulings this module carries:
   routes the app's drawers call, and expected_back reads the open list and an item's page;
   Claude does what the app does, one change each, stamped as the chat's, under the switch.
   A let-go must name mine or a gift: there is no default.
+- Paybacks over chat (fin-redesign 12; RUL-016, no per-person shares): paybacks
+  reads the Queue's payback suggestions as the Money in lane shows them;
+  mark_expect_back given a book or type_id labels the row in the same change
+  as the mark (set_label's route, carrying the mark); set_off_payments sets
+  several payments off against one expectation, all or none, as one change,
+  under MANY_ROWS like any write.
 - The Queue (chat-queue-read 02): queue reads the Queue's labelling work
   card by card, as the operator sees it, and one pile a page at a time from
   a cursor when asked (fin-redesign item 27); queue_summary counts every
@@ -375,10 +381,39 @@ _READS = [
         False,
         lambda a: _expected_back_request(a),
     ),
+    Tool(
+        "paybacks",
+        "The Queue's payback suggestions, as its Money in lane shows them: each money-in row "
+        "waiting for its label with something left to place (payment: id, description, date, "
+        "amount_minor, left_minor, currency), newest first, and the open expected-back items it "
+        "could be paying back (suggestions: expectation_id, title, date, open_minor, and the "
+        "reasons in words: who is named on it, how many days after, the amount against what is "
+        "open). An item whose names do not match the sender is never suggested; equal amounts "
+        "are offered alone, else every fit, oldest first. waiting_offers: money in left waiting "
+        "for its row, with the rows that have come in since. Amounts are in minor units of the "
+        "row's currency. This only reads: set_off places one payment, set_off_payments several "
+        "against one item, not_a_payback sets one aside.",
+        _schema(),
+        False,
+        _get("/api/queue/paybacks"),
+    ),
 ]
 
 
 # --- writes ------------------------------------------------------------------
+
+_MARK = ("direction", "all", "amount", "names", "new_names", "note")
+
+
+def _mark_request(a: dict) -> tuple[str, str, dict | None]:
+    """A mark on its own goes to the mark route; with a book or type it goes
+    to the row's own route, carrying the mark, so both are one change."""
+    tx_id = int(a["tx_id"])
+    label = _pick(a, "book", "type_id")
+    if not label:
+        return "POST", f"/api/transactions/{tx_id}/expectation", _pick(a, *_MARK)
+    return "PUT", f"/api/transactions/{tx_id}", {**label, "expectation": _pick(a, *_MARK)}
+
 
 def _w(name, description, properties, required, request):
     properties = {**properties, "expected_count": _EXPECTED}
@@ -542,13 +577,15 @@ _WRITES = [
         "currency, e.g. \"200.00\") for a part; names: person account ids; new_names: names "
         "of people not yet in fin (found or made); note. The part expected back stops being "
         "spending at once. Marking a row that is already marked edits its mark; undo_mark "
-        "removes it (this is not the undo tool).",
+        "removes it (this is not the undo tool). book and/or type_id (from the types tool) label "
+        "the row in the same change, as set_label does (each marked chosen): a group order with "
+        "no type yet is labelled and marked at once, and a mark the label makes impossible (a "
+        "company's book) writes neither.",
         {"tx_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]}, "all": _B,
          "amount": _S, "names": {"type": "array", "items": _I},
-         "new_names": {"type": "array", "items": _S}, "note": _S},
+         "new_names": {"type": "array", "items": _S}, "note": _S, "book": _S, "type_id": _I},
         ("tx_id", "direction"),
-        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/expectation",
-                   _pick(a, "direction", "all", "amount", "names", "new_names", "note")),
+        lambda a: _mark_request(a),
     ),
     _w(
         "undo_mark",
@@ -577,6 +614,23 @@ _WRITES = [
         ("tx_id",),
         lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/set-offs",
                    {"placements": a.get("placements", []), **_pick(a, "waiting")}),
+    ),
+    _w(
+        "set_off_payments",
+        "Set several payments off against one expectation in one call (a group order the people "
+        "paid back one by one): payments, each {tx_id, amount} with amount text in whole units of "
+        "that payment's currency. All or none, as one change that one undo takes back; a refusal "
+        "names the payment it stopped on and writes nothing. Each payment is set off as set_off "
+        "would set it off against this one item (what is left of it stays its own to label, and "
+        "the sender's wording is learnt). The paybacks read gives the payments and what each has "
+        "left (left_minor).",
+        {"expectation_id": _I,
+         "payments": {"type": "array", "minItems": 1, "items": {
+             "type": "object", "properties": {"tx_id": _I, "amount": _S},
+             "required": ["tx_id", "amount"], "additionalProperties": False}}},
+        ("expectation_id", "payments"),
+        lambda a: ("POST", f"/api/expectations/{int(a['expectation_id'])}/set-offs",
+                   {"payments": a.get("payments", [])}),
     ),
     _w(
         "unlink_set_off",
@@ -731,6 +785,7 @@ TITLES = {
     "history": "Read the change history",
     "change": "Read one change, before and after",
     "expected_back": "Read what is expected back",
+    "paybacks": "Read the payback suggestions",
     "set_label": "Change a row's book or type",
     "set_note": "Change a row's note",
     "label_review": "Say what a row was",
@@ -750,6 +805,7 @@ TITLES = {
     "mark_expect_back": "Mark money as expected back",
     "undo_mark": "Remove an expected-back mark",
     "set_off": "Set a payment off against what is expected back",
+    "set_off_payments": "Set several payments off against one expectation",
     "unlink_set_off": "Unlink a set-off",
     "let_go": "Let an expected-back amount go",
     "undo_let_go": "Undo a let-go",
