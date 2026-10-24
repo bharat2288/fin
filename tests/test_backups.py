@@ -184,8 +184,8 @@ def test_back_up_now_runs_a_backup_and_reports_the_status(temp_db, client, monke
 def test_back_up_now_opens_no_change_entry_so_the_backup_holds_none_open(temp_db, client, monkeypatch, tmp_path):
     """A backup writes nothing to the book (its status is a file beside it),
     so it opens no change entry. One open while it copies the book would be in
-    the copy, and a book started from that copy would record its next writes,
-    a conversion's included, into an entry nobody made."""
+    the copy, and a conversion run on that copy before any start would find
+    an entry nobody made (the runner closes it; this keeps it from arising)."""
     store = FakeObjectStore()
     monkeypatch.setitem(fin_app.app.config, "BACKUP_STORE", store)
 
