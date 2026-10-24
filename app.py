@@ -1254,7 +1254,9 @@ def api_accounts():
 
 @app.route("/api/accounts", methods=["POST"])
 def api_accounts_create():
-    """Create a new account."""
+    """Create a new account. A name fin already holds, in any case and with
+    spaces either side, is refused: an import and a rule find an account by
+    its name, so a second one under it would split what lands there."""
     data = request.get_json()
     if not data or not data.get("name"):
         return jsonify({"error": "Account name is required"}), 400
@@ -1266,14 +1268,24 @@ def api_accounts_create():
     except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
         return jsonify({"error": str(e)}), 400
 
+    name = str(data["name"]).strip()
     with get_db() as conn:
+        held = conn.execute(
+            "SELECT name, type FROM accounts WHERE LOWER(TRIM(name)) = LOWER(?) ORDER BY id",
+            (name,),
+        ).fetchone()
+        if held is not None:
+            return jsonify({"error": (
+                f"fin already has an account named {mask_card_number(held['name'])}, "
+                f"of kind {held['type']}; nothing was added"
+            )}), 409
         return _crud_insert(
             conn,
             "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
-                data["name"],
-                data.get("short_name", data["name"]),
+                name,
+                data.get("short_name", name),
                 kind,
                 data.get("last_four"),
                 currency,
@@ -5778,7 +5790,7 @@ def api_review_label(tx_id: int):
     Body: choice, and what the choice asks for (see /api/review):
         spending        type_id; book where the type proposes none
         gift            nothing: spending when given, income when received
-        own_account     account_id of a household bank account or card
+        own_account     account_id of a household bank account, card or untracked account
         company         account_id of a company
         loan_repayment  account_id of a loan
         income          income_kind_id

@@ -40,7 +40,10 @@ READS.append("plan_preview")
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
-    "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate",
+    "add_company_or_person",
+    # fin redesign: accounts made with their kind before their statements are imported
+    "create_account",
+    "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
     "undo",
@@ -196,6 +199,72 @@ def test_a_company_or_person_can_be_added_and_nothing_else(client):
     )
     kinds = {a["name"]: a["type"] for a in call("accounts")["result"]}
     assert kinds["Sample Friend"] == "person"
+
+
+def test_create_account_makes_an_account_with_its_kind_currency_and_last_four(client):
+    made = {}
+    for name, kind, extra in [
+        ("Sample Savings 3528", "bank", {"currency": "INR", "last_four": "3528"}),
+        ("Sample Miles Card 9692", "card", {"currency": "INR", "last_four": "9692"}),
+        ("Sample Exchange", "holding", {}),
+        ("Sample Partner Bank", "untracked", {}),
+        ("Sample Business 0002", "bank", {"owner": "Kalesh"}),
+    ]:
+        done = call("create_account", name=name, kind=kind, **extra)
+        assert done["ok"], done
+        assert done["change"]["rows"] == 1
+        made[name] = done["result"]["id"]
+
+    listed = {a["name"]: a for a in call("accounts")["result"]}
+    assert {n: (a["id"], a["type"], a["currency"], a["last_four"], a["owner"]) for n, a in listed.items()} == {
+        "Sample Savings 3528": (made["Sample Savings 3528"], "bank", "INR", "3528", "Household"),
+        "Sample Miles Card 9692": (made["Sample Miles Card 9692"], "card", "INR", "9692", "Household"),
+        "Sample Exchange": (made["Sample Exchange"], "holding", "SGD", None, "Household"),
+        "Sample Partner Bank": (made["Sample Partner Bank"], "untracked", "SGD", None, "Household"),
+        "Sample Business 0002": (made["Sample Business 0002"], "bank", "SGD", None, "Kalesh"),
+    }
+    latest = call("history")["result"]["entries"][0]
+    assert (latest["via"], latest["actor"], latest["summary"]) == ("chat", ACTOR, "Added an account")
+    # Made from the chat, so the chat can take it back.
+    assert call("undo", entry_id=latest["id"])["ok"]
+    assert "Sample Business 0002" not in {a["name"] for a in call("accounts")["result"]}
+
+
+def test_create_account_offers_exactly_the_kinds_and_owners_the_route_takes(client):
+    listed = client.get("/api/account-kinds").get_json()
+    schema = mcp_tools.BY_NAME["create_account"].input_schema["properties"]
+
+    assert schema["kind"]["enum"] == [k["name"] for k in listed["kinds"]]
+    assert schema["owner"]["enum"] == [o["name"] for o in listed["owners"]]
+
+
+@pytest.mark.parametrize("args, error", [
+    ({"kind": "savings"}, "kind must be one of bank, card, loan, holding, company, person, untracked"),
+    ({"kind": "bank", "owner": "Someone Else"}, "owner must be one of Household, Moom, Kalesh"),
+    ({"kind": "bank", "currency": "XYZ"}, "unknown currency: 'XYZ'; an account is kept in one of INR, SGD"),
+    ({"kind": "card", "last_four": "92"}, "last_four must be four digits: the account's last four, e.g. 3528"),
+    ({"kind": "card", "last_four": "96-2"}, "last_four must be four digits: the account's last four, e.g. 3528"),
+])
+def test_create_account_refuses_what_the_route_refuses_and_adds_nothing(client, args, error):
+    before = call("history")["result"]["entries"]
+
+    answer = call("create_account", name="Sample Refused 0001", **args)
+
+    assert answer == {"ok": False, "error": error}
+    assert call("accounts")["result"] == []
+    assert call("history")["result"]["entries"] == before
+
+
+def test_create_account_never_makes_a_second_account_under_a_name_fin_holds(client):
+    loan = make_account(client, "Sample auto loan", "loan")
+
+    answer = call("create_account", name="Sample Auto Loan", kind="loan")
+
+    assert answer == {
+        "ok": False,
+        "error": "fin already has an account named Sample auto loan, of kind loan; nothing was added",
+    }
+    assert [(a["id"], a["name"]) for a in call("accounts")["result"]] == [(loan, "Sample auto loan")]
 
 
 # --- many rows --------------------------------------------------------------

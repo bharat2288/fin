@@ -33,8 +33,9 @@ CHOICES = (
     Choice("gift", "a gift", "expense", None, (),
            "a gift: spending when given, income when received, each under the type fin files gifts under"),
     Choice("own_account", "a move to my own account", "transfer", ASKS_ACCOUNT,
-           account_kind.STATEMENT_KINDS,
-           "money moved to or from another of the household's bank accounts or cards"),
+           (*account_kind.STATEMENT_KINDS, "untracked"),
+           "money moved to or from another of the household's bank accounts or cards, "
+           "or one of its own that fin holds no statements for"),
     Choice("company", "money into a company", "movement", ASKS_ACCOUNT, ("company",),
            "capital put into a company, or the company paying it back; it moves the company's balance"),
     Choice("loan_repayment", "a loan repayment", "movement", ASKS_ACCOUNT, ("loan",),

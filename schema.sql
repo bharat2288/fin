@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,           -- e.g., "DBS Altitude Visa 1229"
     short_name TEXT NOT NULL,    -- e.g., "DBS-Altitude-5054"
-    type TEXT NOT NULL,          -- the account's kind: bank, card, loan, holding, company, person (declared in account_kind.py)
+    type TEXT NOT NULL,          -- the account's kind: bank, card, loan, holding, company, person, untracked (declared in account_kind.py)
     last_four TEXT,              -- last 4 digits
     currency TEXT DEFAULT 'SGD', -- three-letter code with a declared minor unit (money.py): SGD, INR
     status TEXT DEFAULT 'active', -- 'active', 'archived'

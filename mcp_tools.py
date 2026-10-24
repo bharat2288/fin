@@ -49,10 +49,15 @@ Rulings this module carries:
   the book moved since (a replay included). Both stop with the switch off. The
   token stands in for expected_count: a batch over MANY_ROWS rows applies on
   it and is recorded as asked first.
-- No tool imports a statement, changes or deletes an imported row, edits an
-  account other than adding a company or a person, sends merchants to the
-  type-suggestion service, runs a conversion or touches subscriptions.
+- No tool imports a statement, changes or deletes an imported row, changes
+  or deletes an account (adding one is create_account, or
+  add_company_or_person), sends merchants to the type-suggestion service,
+  runs a conversion or touches subscriptions.
   Statements reach the hosted fin through the upload command (fin_upload.py).
+- Accounts (fin redesign, design evaluation §4): create_account adds an
+  account of any declared kind over the app's Add an account, so the
+  statements imported after find it with its right kind. The route refuses a
+  name fin already holds.
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
 the client the chat gate verified, labelled as folio labels it: `chat:<sub>`,
@@ -62,10 +67,12 @@ is no default actor: every call names who asks.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Callable
 
 import access_gate
+import account_kind
 import chat_writes
 import db
 import history
@@ -490,6 +497,22 @@ _WRITES = [
         lambda a: ("POST", "/api/accounts", _account_body(a)),
     ),
     _w(
+        "create_account",
+        "Add an account before its statements are imported, so the import finds it by its name "
+        "or last four digits and does not make one with a kind guessed from the name. kind: a "
+        "holding is something owned that no statement reports; untracked is the household's own "
+        "account fin holds no statements for (a family member's own bank). currency: SGD unless "
+        "given; owner: Household unless a company's. Refused when fin already has an account of "
+        "that name, in any case: read accounts first.",
+        {"name": _S, "kind": {"type": "string", "enum": list(account_kind.KIND_NAMES)},
+         "currency": _S, "owner": {"type": "string", "enum": list(account_kind.OWNER_NAMES)},
+         "last_four": {"type": "string", "pattern": "^[0-9]{4}$",
+                       "description": "four digits: the account's last four, e.g. 3528"}},
+        ("name", "kind"),
+        lambda a: ("POST", "/api/accounts",
+                   {**_account_body(a), **_pick(a, "currency", "owner", "last_four")}),
+    ),
+    _w(
         "pair_transfers",
         "Pair moves between household accounts (same amount, opposite sign, within three "
         "days). Never changes a row set by hand.",
@@ -720,6 +743,7 @@ TITLES = {
     "change_merchant": "Change a merchant",
     "merge_merchants": "Merge two merchants",
     "add_company_or_person": "Add a company or a person",
+    "create_account": "Add an account",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",
     "set_rate": "Enter an exchange rate",
@@ -774,6 +798,10 @@ def _checked(tool: Tool, args: dict) -> dict:
         allowed = schema["properties"][k].get("enum")
         if allowed and v not in allowed:
             raise ToolRefused(f"{k} must be one of {', '.join(allowed)}")
+        # A pattern the schema declares; the refusal says it as the description does.
+        pattern = schema["properties"][k].get("pattern")
+        if pattern and not re.fullmatch(pattern, v, re.ASCII):
+            raise ToolRefused(f"{k} must be {schema['properties'][k]['description']}")
     return args
 
 

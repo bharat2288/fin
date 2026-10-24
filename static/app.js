@@ -3522,7 +3522,7 @@ function drawBridge(sheet) {
 // One account's page: its balance, its tie line, its figures and rows
 // ---------------------------------------------------------------------------
 
-const KIND_WORDS = { bank: 'Bank account', card: 'Card', loan: 'Loan', holding: 'Holding', company: 'Company', person: 'Person' };
+const KIND_WORDS = { bank: 'Bank account', card: 'Card', loan: 'Loan', holding: 'Holding', company: 'Company', person: 'Person', untracked: 'Untracked account' };
 /** What a row is labelled, as an account's rows show it. */
 function acctRowLabel(row) {
     const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted">transfer</span>', payment: '<span class="muted">card payment</span>', movement: `<span class="muted">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted">income</span>' }[row.flow_type];
@@ -4356,6 +4356,7 @@ async function viewLists(tab) {
             const line = lineOf.get(a.id);
             const enter = a.takes_a_figure ? `<button type="button" class="link sl-enter" data-act="figure" data-account="${a.id}">Enter a figure</button>` : '';
             if (!a.anchor) {
+                if (a.type === 'untracked') return 'untracked: no statement or figure';
                 return a.takes_a_figure ? tag('nofig', 'no figure: enter one', { act: 'figure', data: { account: a.id }, title: 'Enter a figure' })
                     : tag('nofig', 'no statement yet: import one', { href: '#/books/import', title: 'Import a statement' });
             }
