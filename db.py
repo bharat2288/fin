@@ -244,6 +244,13 @@ PAYNOW_WORDINGS = [
 ]
 # The marker (seeded_once) that the wordings were made rules on this book.
 PAYNOW_SEED = "paynow-wordings"
+# The marker that DEFAULT_MERCHANT_RULES were seeded on this book: once, at a
+# new book's first start, so a default rule the operator deletes or rewords
+# stays that way through every later start and deploy. A book that already
+# holds rules was seeded by the starts before this marker existed, and gains
+# only the marker. A default added to the list later reaches a new book only;
+# one meant for existing books needs its own marker.
+DEFAULT_RULES_SEED = "default-rules"
 
 # Rule patterns too generic to be safe on PayNow and transfer traffic.
 _GENERIC_TRANSFER_PATTERNS = {
@@ -428,12 +435,15 @@ def init_db() -> None:
     # By key: a seed rule still finds its type once the type is renamed.
     type_ids = book_type.keyed_ids(conn)
 
-    # Seed merchant rules — skip if pattern already exists in any form
+    # Seed merchant rules, once (DEFAULT_RULES_SEED); a pattern already there is skipped
     # Rules require service_id (service-centric model)
     added = 0
-    for pattern, label, match_type in DEFAULT_MERCHANT_RULES:
-        book, type_name = SEED_LABELS.get(label, (book_type.DEFAULT_BOOK, label))
-        added += _seed_rule(conn, pattern, match_type, book, type_ids[type_name] if type_name else None)
+    if not conn.execute("SELECT 1 FROM seeded_once WHERE seed = ?", (DEFAULT_RULES_SEED,)).fetchone():
+        if not conn.execute("SELECT 1 FROM merchant_rules LIMIT 1").fetchone():
+            for pattern, label, match_type in DEFAULT_MERCHANT_RULES:
+                book, type_name = SEED_LABELS.get(label, (book_type.DEFAULT_BOOK, label))
+                added += _seed_rule(conn, pattern, match_type, book, type_ids[type_name] if type_name else None)
+        conn.execute("INSERT INTO seeded_once (seed) VALUES (?)", (DEFAULT_RULES_SEED,))
     # The PayNow wordings, once: a start after the marker adds none back.
     if not conn.execute("SELECT 1 FROM seeded_once WHERE seed = ?", (PAYNOW_SEED,)).fetchone():
         for pattern, key in PAYNOW_WORDINGS:
