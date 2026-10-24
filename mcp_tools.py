@@ -177,8 +177,8 @@ _RULE_FLOW = {
 _RULE_FLOW_SAID = (
     "A rule may state what its rows are (flow, other_side_id): it beats what fin works out, never a flow "
     "the operator set by hand, and the preview lists every past row whose flow would change (flows). "
-    "Only a flow fin worked out moves; a row a record of expect back rests on keeps its flow (flows_kept, "
-    "with why). "
+    "Only a flow fin worked out under the rules before the change moves (not one Only new rows left); a row "
+    "a record of expect back rests on keeps its flow where a hand label would be refused (flows_kept, with why). "
 )
 # The tools that answer with the preview.
 _PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})

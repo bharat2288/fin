@@ -382,8 +382,11 @@ def test_resolve_accepts_flow_type_override_and_sets_manual_flag(client, conn):
     assert row["flow_type_manual"] == 1
 
 
-def test_resolve_recomputes_flow_type_from_the_wording(client, conn):
-    """Resolve without explicit override should refresh classifier-derived flow_type."""
+def test_resolve_keeps_a_flow_the_classifier_no_longer_gives(client, conn):
+    """Resolve without explicit override works a row's flow out again only
+    where it is still what fin works out for the row as it is (ADR-009,
+    relabel_preview.fins_own): a stored income the wording now reads as a
+    refund was not, so it stays."""
     conn.execute("INSERT INTO services (name) VALUES ('Refund Service')")
     svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -422,7 +425,7 @@ def test_resolve_recomputes_flow_type_from_the_wording(client, conn):
         "SELECT flow_type, flow_type_manual FROM transactions WHERE id = ?",
         (tx_id,),
     ).fetchone()
-    assert row["flow_type"] == "refund"
+    assert row["flow_type"] == "income"
     assert row["flow_type_manual"] == 0
 
 

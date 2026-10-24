@@ -217,8 +217,9 @@ def records_refusal(conn: sqlite3.Connection, tx_id: int) -> str | None:
     """What rests on a row, in a refusal's words: its expectation, else what it
     places as a payment. None when the row carries no record. A hand label
     that would make the row something the sheet already counts is refused in
-    these words (app._label_refusal); a rule never moves such a row's flow,
-    and its preview says why in them (relabel_preview.flow_writes)."""
+    these words (label_refusal); a rule keeps such a row's flow where that
+    refuses the move, and its preview says why in them
+    (relabel_preview.flow_writes)."""
     marked = conn.execute(
         "SELECT direction, amount_minor, currency FROM expectation WHERE row_id = ?", (tx_id,)
     ).fetchone()
@@ -247,6 +248,31 @@ def records_refusal(conn: sqlite3.Connection, tx_id: int) -> str | None:
         return f"{short(p['amount_minor'], p['currency'])} of this row is {where(p)}; unlink it first."
     each = [f"{short(p['amount_minor'], p['currency'])} {where(p)}" for p in placed]
     return f"This row has {', '.join(each[:-1])} and {each[-1]}; unlink those first."
+
+
+def counted_elsewhere(flow_name: str | None, book: str | None, other_kind: str | None) -> bool:
+    """Whether a row with this flow, book and other side's kind is one the
+    sheet already counts whole, so no record may rest on it: a move between
+    the household's own accounts, a company's row, a movement naming a
+    non-person."""
+    if flow_name in ("transfer", "payment"):
+        return True
+    if (book or book_type.DEFAULT_BOOK) != account_kind.HOUSEHOLD:
+        return True
+    return flow_name == flow.MOVEMENT and other_kind != "person"
+
+
+def label_refusal(conn: sqlite3.Connection, tx_id: int, flow_name: str | None, book: str | None,
+                  other_kind: str | None) -> str | None:
+    """Why a label may not make this row what it would then be (its flow, book
+    and other side's kind after the write), or None: a row a record rests on
+    keeps to what the sheet counts once (records_refusal's words). A hand
+    label is refused so (app._label_refusal); a rule keeps such a row's flow
+    where this refuses the move, and its preview says why in these words
+    (relabel_preview.flow_writes)."""
+    if not counted_elsewhere(flow_name, book, other_kind):
+        return None
+    return records_refusal(conn, tx_id)
 
 
 # --- reads ---------------------------------------------------------------------

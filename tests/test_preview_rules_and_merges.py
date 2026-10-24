@@ -716,7 +716,7 @@ RULE_EDIT = {
 
 def drawer(sample) -> dict:
     return _node("\n".join([PRELUDE, _function("monthName"), _function("bandedTable"), _const("PREVIEW_FIELD"),
-                            _const("PREVIEW_TITLE"), _function("flowsLine"), _function("previewParts"),
+                            _const("PREVIEW_TITLE"), _function("keptWords"), _function("flowsLine"), _function("previewParts"),
                             f"console.log(JSON.stringify(previewParts({json.dumps(sample)})));"]))
 
 

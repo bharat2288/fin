@@ -25,13 +25,16 @@ mcp_tools.call. Every name, wording and figure is invented.
 
 import pytest
 
+import account_kind
+import app as fin_app
 import db
+import loan_interest
 from test_client_seams import needs_node
 from test_movements_and_review import (  # noqa: F401 (ledger is a fixture)
     BANK, CARD, bring_in, ledger, make_account, row, spending_type,
 )
 from test_preview_rules_and_merges import _function, _node
-from test_rule_keeps_review_hold import add_rule, make_merchant
+from test_rule_keeps_review_hold import TUTOR, add_rule, held, lifted, make_merchant  # noqa: F401 (lifted)
 from test_rule_states_flow import (  # noqa: F401 (car is a fixture)
     LOAN, WORDING, as_movement, car, chat, instalment, rule_of, what,
 )
@@ -123,7 +126,9 @@ def test_a_rule_added_with_a_flow_keeps_the_flow_of_a_payment_set_off_against_an
     assert what(client, FRIEND_PAYS) == ("review", None, False)
 
 
-def test_a_resolve_under_a_rule_saved_for_new_rows_keeps_the_flow_of_a_marked_row(client, marked):
+def test_a_resolve_under_a_rule_saved_for_new_rows_leaves_the_flows_only_new_rows_left(client, marked):
+    # Only new rows left both instalments spending while the rule says they
+    # are the loan's: a resolve of either moves neither, marked or not.
     preview = client.put(f"/api/rules/{marked['rule']}", json=as_movement(marked)).get_json()["preview"]
     assert client.put(f"/api/rules/{marked['rule']}", json={
         **as_movement(marked), "past": "only_new", "token": preview["token"]}).status_code == 200
@@ -136,10 +141,10 @@ def test_a_resolve_under_a_rule_saved_for_new_rows_keeps_the_flow_of_a_marked_ro
         assert resp.status_code == 200, resp.get_json()
 
     assert what(client, instalment(6)) == ("expense", None, False)
-    assert what(client, instalment(7)) == ("movement", LOAN, False)        # nothing rests on it
+    assert what(client, instalment(7)) == ("expense", None, False)
 
 
-def test_the_drifts_apply_keeps_the_flow_of_a_marked_row_and_lists_it_kept(client, marked):
+def test_the_drifts_apply_leaves_the_flows_only_new_rows_left(client, marked):
     preview = client.put(f"/api/rules/{marked['rule']}", json=as_movement(marked)).get_json()["preview"]
     assert client.put(f"/api/rules/{marked['rule']}", json={
         **as_movement(marked), "past": "only_new", "token": preview["token"]}).status_code == 200
@@ -152,13 +157,13 @@ def test_the_drifts_apply_keeps_the_flow_of_a_marked_row_and_lists_it_kept(clien
     drift = client.get("/api/rules/drift").get_json()
 
     assert {e["id"] for e in drift["examples"]} >= {marked["six"], marked["seven"]}
-    assert [f["id"] for f in drift["flows"]] == [marked["seven"]]
-    assert kept_of(drift) == [(marked["six"], "spending", f"a movement · {LOAN}", EXPECTED)]
+    assert drift["flows"] == []
+    assert drift["flows_kept"] == []
     resp = client.post("/api/rules/drift", json={"past": "apply", "token": drift["token"]})
     assert resp.status_code == 200, resp.get_json()
-    assert what(client, instalment(6)) == ("expense", None, False)
-    assert row(client, instalment(6))["type_id"] == spending_type(client, "Shopping")
-    assert what(client, instalment(7)) == ("movement", LOAN, False)
+    for n in (6, 7):
+        assert what(client, instalment(n)) == ("expense", None, False)
+        assert row(client, instalment(n))["type_id"] == spending_type(client, "Shopping")
 
 
 def test_a_rule_whose_only_reach_is_a_kept_row_asks_nothing_and_names_it(client, marked):
@@ -178,7 +183,7 @@ def test_a_rule_whose_only_reach_is_a_kept_row_asks_nothing_and_names_it(client,
 def test_the_rules_drawer_names_each_row_kept_and_why():
     code = "\n".join([
         "const esc = s => String(s);",
-        _function("flowsLine"),
+        _function("keptWords"), _function("flowsLine"),
         "console.log(JSON.stringify(flowsLine({ flows: [], flows_kept: [",
         "  { description: 'HP SAMPLE 06', now: 'spending', why: 'S$ 500 of this row is expected back; undo the mark first.' }] })));",
     ])
@@ -352,10 +357,12 @@ def test_an_archived_account_is_no_rules_other_side(client, ledger):
 # --- a teach whose wording is a rule that states a flow ------------------------------------
 
 
-def test_a_teach_gives_the_rows_it_backfills_the_flow_its_rule_states(client, ledger):
+def test_a_teach_under_a_rule_saved_for_new_rows_leaves_the_flows_only_new_rows_left(client, ledger):
     # Two instalments came in before any rule knew them: the merchant the
     # import made for them, no type, spending. The rule that knows them now
-    # says they are the loan's, saved for new rows only.
+    # says they are the loan's, saved for new rows only: the past rows keep
+    # spending, and a teach of the rule's wording, which labels them, keeps
+    # it too (the target row and the row it backfills).
     loan = make_account(client, LOAN, "loan")
     bring_in(client, BANK, [(3, instalment(6), 1850.00), (4, instalment(7), 1850.00)])
     six, seven = row(client, instalment(6)), row(client, instalment(7))
@@ -364,13 +371,247 @@ def test_a_teach_gives_the_rows_it_backfills_the_flow_its_rule_states(client, le
     body = {"pattern": WORDING, "service_id": made, "flow": "movement", "other_side_id": loan}
     token = client.post("/api/rules", json=body).get_json()["preview"]["token"]
     assert client.post("/api/rules", json={**body, "past": "only_new", "token": token}).status_code == 200
-    teach = {"tx_id": six["id"], "service_id": made, "type_id": spending_type(client, "Transport"),
-             "pattern": WORDING, "apply_scope": "service_default"}
 
-    resp = client.post("/api/transactions/resolve", json=teach)
+    for scope in ("service_default", "rule"):
+        teach = {"tx_id": six["id"], "service_id": made, "type_id": spending_type(client, "Transport"),
+                 "pattern": WORDING, "apply_scope": scope}
+        resp = client.post("/api/transactions/resolve", json=teach)
+        assert resp.status_code == 200, resp.get_json()
+
+    assert row(client, instalment(7))["type_id"] == spending_type(client, "Transport")
+    assert what(client, instalment(6)) == ("expense", None, False)
+    assert what(client, instalment(7)) == ("expense", None, False)
+
+
+# --- strict: a later change leaves what Only new rows left ---------------------------------
+# A row's flow is worked out again only where it is what fin worked out under
+# the rules before the change: the stated flow of the rule that labelled it,
+# where that rule states one, else the classifier's. Only new rows leaves the
+# classifier's flow under a rule that states another, so no later change
+# moves it.
+
+
+def only_new(client, car) -> None:
+    preview = client.put(f"/api/rules/{car['rule']}", json=as_movement(car)).get_json()["preview"]
+    assert client.put(f"/api/rules/{car['rule']}", json={
+        **as_movement(car), "past": "only_new", "token": preview["token"]}).status_code == 200
+
+
+def test_a_later_edits_apply_leaves_the_flows_only_new_rows_left(client, car):
+    only_new(client, car)
+    edit = {"type_override_id": spending_type(client, "Shopping")}
+
+    asked = client.put(f"/api/rules/{car['rule']}", json=edit)
+
+    assert asked.status_code == 409
+    preview = asked.get_json()["preview"]
+    assert {e["id"] for e in preview["examples"]} >= set(car["past"])
+    assert (preview["flows"], preview["flows_kept"]) == ([], [])
+    resp = client.put(f"/api/rules/{car['rule']}", json={**edit, "past": "apply", "token": preview["token"]})
+    assert resp.status_code == 200, resp.get_json()
+    for n in (6, 7):
+        assert what(client, instalment(n)) == ("expense", None, False)
+        assert row(client, instalment(n))["type_id"] == spending_type(client, "Shopping")
+
+
+def test_a_resolve_leaves_a_refund_an_older_book_holds_on_the_row_it_names(client, older_refund):
+    # The classifier would make the credit income; the book holds a refund
+    # fin did not work out, so the resolve that names the row keeps it.
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": older_refund["back"], "service_id": older_refund["shop"],
+        "type_id": spending_type(client, "Dining"), "apply_scope": "transaction"})
 
     assert resp.status_code == 200, resp.get_json()
-    assert seven["id"] in resp.get_json()["backfilled_ids"]
-    assert what(client, instalment(6)) == ("movement", LOAN, False)
+    assert what(client, SHOP_BACK) == ("refund", None, False)
+    assert row(client, SHOP_BACK)["type_id"] == spending_type(client, "Dining")
+
+
+# --- fin's own flow is still worked out again (each would fail if it never were) ----------
+
+
+def test_a_no_flow_rules_apply_still_works_out_fins_own_flow_again(client, lifted):
+    # The rule deleted, the PayNow loses its merchant, and with it what kept it
+    # off the review list. Its spending is still the classifier's, so Apply
+    # works it out again: it waits.
+    tutor = row(client, TUTOR)["id"]
+
+    asked = client.delete(f"/api/rules/{lifted['rule']}")
+
+    assert asked.status_code == 409
+    preview = asked.get_json()["preview"]
+    assert [(f["id"], f["now"], f["after"]) for f in preview["flows"]] == [(tutor, "spending", "waiting for review")]
+    resp = client.delete(f"/api/rules/{lifted['rule']}", json={"past": "apply", "token": preview["token"]})
+    assert resp.status_code == 200, resp.get_json()
+    assert held(client, TUTOR) == ("review", None, False)
+
+
+def test_the_drifts_apply_still_works_out_fins_own_flow_again(client, lifted):
+    as_an_older_book("DELETE FROM merchant_rules WHERE id = ?", lifted["rule"])
+    tutor = row(client, TUTOR)["id"]
+
+    drift = client.get("/api/rules/drift").get_json()
+
+    assert [(f["id"], f["now"], f["after"]) for f in drift["flows"]] == [(tutor, "spending", "waiting for review")]
+    resp = client.post("/api/rules/drift", json={"past": "apply", "token": drift["token"]})
+    assert resp.status_code == 200, resp.get_json()
+    assert held(client, TUTOR) == ("review", None, False)
+
+
+# --- kept only where a hand label would refuse the same move -----------------------------
+
+
+def test_a_rules_apply_moves_a_set_off_payments_flow_where_a_hand_label_would(client, marked):
+    # Income is the payment's own part: a hand label may say so of a row set
+    # off against an expectation, so the rule's Apply does too.
+    bring_in(client, BANK, [(12, FRIEND_PAYS, -500.00)])
+    pays = row(client, FRIEND_PAYS)
+    set_off(client, pays["id"], marked["expectation"], "500.00")
+    friend_pay = make_merchant(client, "Sample Friend Pay")
+    body = {"pattern": "SAMPLE FRIEND", "service_id": friend_pay, "flow": "income"}
+
+    asked = client.post("/api/rules", json=body)
+
+    assert asked.status_code == 409
+    preview = asked.get_json()["preview"]
+    assert [(f["id"], f["now"], f["after"]) for f in preview["flows"]] == [(pays["id"], "waiting for review", "income")]
+    assert preview["flows_kept"] == []
+    resp = client.post("/api/rules", json={**body, "past": "apply", "token": preview["token"]})
+    assert resp.status_code == 200, resp.get_json()
+    assert what(client, FRIEND_PAYS) == ("income", None, False)
+
+
+# --- a teach that would move a backfilled row's flow asks first ----------------------------
+
+LONGER = f"{WORDING} SAMPLE MOTOR"
+
+
+@pytest.fixture
+def ruled(client, ledger) -> dict:
+    """Two instalments the import made a merchant for (no type), then a rule
+    of their wording saying they are the loan's, applied: both movements
+    against the loan, still waiting for a type. A teach of a longer wording
+    (a rule that states no flow, winning both) would give them the
+    classifier's spending."""
+    loan = make_account(client, LOAN, "loan")
+    bring_in(client, BANK, [(3, instalment(6), 1850.00), (4, instalment(7), 1850.00)])
+    six = row(client, instalment(6))
+    body = {"pattern": WORDING, "service_id": six["service_id"], "flow": "movement", "other_side_id": loan}
+    token = client.post("/api/rules", json=body).get_json()["preview"]["token"]
+    assert client.post("/api/rules", json={**body, "past": "apply", "token": token}).status_code == 200
+    seven = row(client, instalment(7))
+    assert (what(client, instalment(7)), seven["type_id"]) == (("movement", LOAN, False), None)
+    return {"loan": loan, "six": six["id"], "seven": seven["id"],
+            "teach": {"tx_id": six["id"], "service_id": six["service_id"], "pattern": LONGER,
+                      "type_id": spending_type(client, "Transport"), "apply_scope": "service_default"}}
+
+
+def test_a_teach_that_would_move_a_backfilled_rows_flow_asks_first_and_writes_nothing(client, ruled):
+    before, rules_before = every_row(client), client.get("/api/rules").get_json()
+
+    asked = client.post("/api/transactions/resolve", json=ruled["teach"])
+
+    assert asked.status_code == 409
+    preview = asked.get_json()["preview"]
+    assert [(f["id"], f["now"], f["after"]) for f in preview["flows"]] == [
+        (ruled["seven"], f"a movement · {LOAN}", "spending")]
+    assert preview["flows_kept"] == []
+    assert every_row(client) == before
+    assert client.get("/api/rules").get_json() == rules_before
+
+    resp = client.post("/api/transactions/resolve",
+                       json={**ruled["teach"], "past_rows": "apply", "token": preview["token"]})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert ruled["seven"] in resp.get_json()["backfilled_ids"]
+    assert what(client, instalment(7)) == ("expense", None, False)
+    assert row(client, instalment(7))["type_id"] == spending_type(client, "Transport")
+
+
+def test_a_teach_answered_only_new_rows_labels_the_backfilled_row_and_leaves_its_flow(client, ruled):
+    preview = client.post("/api/transactions/resolve", json=ruled["teach"]).get_json()["preview"]
+
+    resp = client.post("/api/transactions/resolve",
+                       json={**ruled["teach"], "past_rows": "only_new", "token": preview["token"]})
+
+    assert resp.status_code == 200, resp.get_json()
     assert what(client, instalment(7)) == ("movement", LOAN, False)
     assert row(client, instalment(7))["type_id"] == spending_type(client, "Transport")
+
+
+def test_a_teach_that_moves_a_flow_works_out_the_loans_interest_again(client, ruled):
+    for amount, day in (("91000.00", "2026-07-31"), ("88000.00", "2026-08-31")):
+        assert client.post("/api/anchors", json={"account_id": ruled["loan"], "amount": amount,
+                                                 "date": day}).status_code == 200
+
+    resp = client.post("/api/transactions/resolve", json={**ruled["teach"], "past_rows": "apply"})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert what(client, instalment(7)) == ("expense", None, False)
+    conn = db.get_connection()
+    try:
+        assert loan_interest.derive(conn) == 0      # already in line with the instalments left
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+# --- an account a rule names is not changed into one the rule cannot name ------------------
+
+COMPANY = account_kind.OWNER_NAMES[1]
+
+
+@pytest.fixture
+def broker(client, ledger) -> dict:
+    holding = make_account(client, "Sample Holding", "holding")
+    sample = make_merchant(client, "Sample Broker")
+    return {"holding": holding,
+            "rule": add_rule(client, "SAMPLE BROKER", sample, flow="movement", other_side_id=holding)}
+
+
+def account_of(client, acct_id: int) -> dict:
+    return {a["id"]: a for a in client.get("/api/accounts").get_json()}[acct_id]
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"status": "archived"}, fin_app.RULE_ARCHIVED_REFUSED),
+    ({"type": "person"}, fin_app.RULE_PERSON_REFUSED),
+    ({"type": "bank"}, "A movement's other side is one of the household's accounts of kind loan or holding or company."),
+    ({"owner": COMPANY}, "A movement's other side is one of the household's accounts of kind loan or holding or company."),
+])
+def test_an_account_a_rule_names_is_not_made_one_the_rule_cannot_name(client, broker, change, why):
+    before, rules_before = account_of(client, broker["holding"]), client.get("/api/rules").get_json()
+
+    resp = client.put(f"/api/accounts/{broker['holding']}", json={**change, "name": "Sample Holding Two"})
+
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == f"The rule SAMPLE BROKER names this account as its other side. {why}"
+    assert account_of(client, broker["holding"]) == before
+    assert client.get("/api/rules").get_json() == rules_before
+
+
+@pytest.mark.parametrize("change", [{"name": "Sample Holding Two"}, {"type": "loan"}, {"type": "company"}])
+def test_an_account_a_rule_names_may_change_where_the_rule_still_holds(client, broker, change):
+    resp = client.put(f"/api/accounts/{broker['holding']}", json=change)
+
+    assert resp.status_code == 200, resp.get_json()
+    assert {k: account_of(client, broker["holding"])[k] for k in change} == change
+
+
+# --- the rules screen names the rows kept when it asked nothing ---------------------------
+
+
+@needs_node
+def test_a_rule_saved_with_rows_kept_says_so_in_its_toast():
+    code = "\n".join([
+        "const esc = s => String(s);",
+        "function plural(n, one, many) { return `${n} ${n === 1 ? one : (many || one + 's')}`; }",
+        "let said = null; const toast = (m, o) => { said = [m, o]; }; const refreshFrame = () => {};",
+        _function("keptWords"), _function("previewedWords"), _function("previewedDone"),
+        "const done = previewedDone({ ok: true, change: 7, data: { recategorized: 0, flows_kept: [",
+        "  { description: 'HP SAMPLE 06', now: 'spending', why: 'S$ 500 of this row is expected back; undo the mark first.' }] } },",
+        "  'Rule added');",
+        "console.log(JSON.stringify({ done, said }));",
+    ])
+    assert _node(code) == {"done": True, "said": [
+        "Rule added. Kept as they are: HP SAMPLE 06 stays spending: "
+        "S$ 500 of this row is expected back; undo the mark first.", {"undo": 7}]}
