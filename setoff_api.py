@@ -517,6 +517,8 @@ def set_off_payments(conn: sqlite3.Connection, expectation_id: int, payments) ->
             done.append(set_off_payment(conn, tx_id, [{"expectation_id": expectation_id, "amount": p["amount"]}]))
         except Refused as e:
             raise Refused(f"{payment['description']}: {e}") from None
+        except placement_rate.NoRate as e:
+            raise placement_rate.NoRate(f"{payment['description']}: {e}", e.pair, e.month, e.fetch_on) from None
     name = item["description"] if item["row_id"] is not None else f"Opening figure · {item['person_name']}"
     entry_id = g.get("change_entry")
     if entry_id is not None:

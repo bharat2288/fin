@@ -300,6 +300,7 @@ def test_a_bad_label_writes_no_mark(client, conn, feast):
     answer = chat("mark_expect_back", tx_id=feast.feast, direction="back", all=True, type_id=99999)
 
     assert answer["ok"] is False
+    assert answer["error"] == "unknown type: 99999"
     assert tracked(conn) == before
     assert entries(conn) == history_before
 
@@ -333,3 +334,27 @@ def test_the_new_tools_are_titled_and_stopped_by_the_switch():
     assert "set_off_payments" in mcp_tools._STOPPED_WHEN_OFF
     assert "paybacks" not in mcp_tools._STOPPED_WHEN_OFF
     assert mcp_tools.BY_NAME["set_off_payments"].input_schema["required"] == ["expectation_id", "payments"]
+
+
+def test_a_payment_with_no_saved_rate_is_named_in_the_refusal(client, conn, monkeypatch):
+    # A rupee expectation and a dollar payment with no saved rate: the
+    # refusal says which payment of the batch it stopped on.
+    monkeypatch.setattr(setoff_api, "today", lambda: "2026-10-20")
+    o = october(conn)
+    item = mark(conn, o.swiggy, 240000)
+    before, history_before = tracked(conn), entries(conn)
+
+    answer = chat("set_off_payments", expectation_id=item, payments=[{"tx_id": o.jay_0412, "amount": "10.00"}])
+
+    assert answer["ok"] is False
+    assert str(answer["error"]).startswith(conn.execute(
+        "SELECT description FROM transactions WHERE id = ?", (o.jay_0412,)).fetchone()[0] + ": ")
+    assert tracked(conn) == before and entries(conn) == history_before
+
+
+def test_a_body_that_is_not_an_object_is_refused_as_before(client, conn):
+    o = october(conn)
+
+    resp = client.put(f"/api/transactions/{o.harbour}", json=[1])
+
+    assert resp.status_code == 400

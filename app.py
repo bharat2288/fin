@@ -3078,6 +3078,8 @@ def api_update_transaction(tx_id: int):
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
+    if not isinstance(data, dict):
+        return jsonify({"error": "No valid fields to update"}), 400
 
     sets, values = _build_update_sets(data, ["notes", "is_one_off"])
     labels = {field: data[field] or None for field in label_source.FIELDS if field in data}
