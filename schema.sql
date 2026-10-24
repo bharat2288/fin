@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS statements (
     filename TEXT,                  -- original PDF filename
     imported_at TEXT DEFAULT (datetime('now')),
     printed INTEGER NOT NULL DEFAULT 0,  -- 1 = one statement as printed: statement_date is its closing day and it holds the rows it printed; 0 = a calendar-month record (statement_date the 1st) of rows from a source that states no balance. An existing database gains it through convert_printed_statements.py
+    period_start TEXT,              -- YYYY-MM-DD, the first day the statement covers (statement_period.py): a printed statement's opening day, so it covers period_start to statement_date; a calendar-month record's 1st, so it covers its month. NULL reads as the 1st of statement_date's month. An existing database gains it through convert_statement_periods.py
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     UNIQUE(account_id, statement_date)
 );
@@ -575,23 +576,23 @@ WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'statements', NEW.id, 'insert', NULL,
-        json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed));
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed, 'period_start', NEW.period_start));
 END;
 CREATE TRIGGER IF NOT EXISTS history_statements_update AFTER UPDATE ON statements
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
-    AND json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed)
+    AND json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed, 'period_start', OLD.period_start) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed, 'period_start', NEW.period_start)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'statements', NEW.id, 'update',
-        json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed),
-        json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed));
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed, 'period_start', OLD.period_start),
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed, 'period_start', NEW.period_start));
 END;
 CREATE TRIGGER IF NOT EXISTS history_statements_delete AFTER DELETE ON statements
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'statements', OLD.id, 'delete',
-        json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed), NULL);
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed, 'period_start', OLD.period_start), NULL);
 END;
 CREATE TRIGGER IF NOT EXISTS history_subscriptions_insert AFTER INSERT ON subscriptions
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)

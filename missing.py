@@ -4,7 +4,8 @@ A month is missing for a set of accounts when one of them should have sent a
 statement that month and it has not been imported. "Should have sent" is
 stat-cards' rule: the account is active, of a statement kind, and the month is
 after its first imported statement and before the current month. A statement
-belongs to the month of its statement_date. The current month is never
+holds every month its period reaches into (statement_period.py), so one
+covering July and August holds both. The current month is never
 missing; it is "so far". Rows that did arrive in a missing month do not make
 it present: whether a month is missing depends on statements only.
 
@@ -24,6 +25,7 @@ import sqlite3
 from fractions import Fraction
 
 import account_kind
+import statement_period
 
 
 def missing_months(
@@ -43,7 +45,7 @@ def missing_months(
     kinds = ", ".join("?" for _ in account_kind.STATEMENT_KINDS)
     held = conn.execute(
         f"""
-        SELECT s.account_id, substr(s.statement_date, 1, 7) AS month
+        SELECT s.account_id, s.statement_date, s.period_start, s.printed
         FROM statements s
         JOIN accounts a ON a.id = s.account_id
         WHERE s.account_id IN ({marks})
@@ -54,8 +56,10 @@ def missing_months(
     ).fetchall()
 
     imported: dict[int, set[str]] = {}
-    for account_id, month in held:
-        imported.setdefault(account_id, set()).add(month)
+    for account_id, statement_date, period_start, printed in held:
+        imported.setdefault(account_id, set()).update(
+            statement_period.months(statement_date, period_start, printed)
+        )
 
     def owed(month: str) -> bool:
         return any(

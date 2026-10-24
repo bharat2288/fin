@@ -1,0 +1,403 @@
+"""Statement periods (fin-redesign 04; spec cases 10 and 11).
+
+A statement record holds the day its period starts beside its closing day.
+Case 10 is driven through the import (upload, preview, confirm) and read back
+through the coverage view and missing months. Case 11 is the conversion step
+that gives an existing book the column and backfills it, proved on a book built
+under tmp_path from the oldest frozen schema and taken through the chain, the
+way the operator's book reached today's shape. Every name and figure is
+invented.
+"""
+
+from __future__ import annotations
+
+import calendar
+import io
+import sqlite3
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+import conversion
+import convert_statement_periods
+import db
+import history
+import loan_interest
+import missing
+import parsers
+from parse_dbs import ParsedStatement, ParsedTransaction
+
+CARD = "Sample Card 0001"
+OLD_SCHEMA = Path(__file__).parent / "schema_before_book_and_type.sql"
+DAY = date(2026, 10, 24)
+
+
+# --- months relative to today: the coverage view reads the clock ------------
+
+
+def month_back(n: int, today: date | None = None) -> tuple[int, int]:
+    today = today or date.today()
+    y, m = divmod(today.year * 12 + today.month - 1 - n, 12)
+    return y, m + 1
+
+
+def first_of(n: int, today: date | None = None) -> str:
+    y, m = month_back(n, today)
+    return f"{y:04d}-{m:02d}-01"
+
+
+def last_of(n: int, today: date | None = None) -> str:
+    y, m = month_back(n, today)
+    return f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
+
+
+def key(n: int, today: date | None = None) -> str:
+    y, m = month_back(n, today)
+    return f"{y:04d}-{m:02d}"
+
+
+# --- the import ---------------------------------------------------------------
+
+
+@pytest.fixture
+def stand_in():
+    """A stand-in parser returning the statements it is given, one per upload."""
+    queue: list[ParsedStatement] = []
+
+    def install(rows, *, opening_minor=None, closing_minor=None, opening_date=None, closing_date):
+        queue.append(ParsedStatement(
+            statement_type="credit_card",
+            statement_date=closing_date,
+            accounts=[CARD],
+            filename="sample.pdf",
+            transactions=[ParsedTransaction(date=on, description=what, amount_minor=amount, card_info=CARD)
+                          for on, what, amount in rows],
+            opening_minor=opening_minor,
+            closing_minor=closing_minor,
+            opening_date=opening_date,
+            closing_date=closing_date if closing_minor is not None else None,
+        ))
+
+    parsers._PARSERS = [p for p in parsers._PARSERS if p["name"] != "Stand-in"]
+    parsers._PARSERS.insert(0, {
+        "name": "Stand-in", "ext": ".csv", "detect_fn": lambda _path: True,
+        "parse_fn": lambda _path: [queue.pop(0)],
+    })
+    yield install
+    parsers._PARSERS = [p for p in parsers._PARSERS if p["name"] != "Stand-in"]
+
+
+def imported(client) -> None:
+    resp = client.post("/api/import/upload", data={"files": (io.BytesIO(b"stand-in"), "sample.csv")},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    preview = resp.get_json()
+    resp = client.post("/api/import/confirm", json={
+        "import_id": preview["import_id"],
+        "groups": [{"account": g["account"], "transactions": g["transactions"], "statements": g["statements"]}
+                   for g in preview["groups"]],
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def two_statements(stand_in, client) -> None:
+    """A one-month statement four months back, then one statement covering
+    the next two months whose rows all fall in its second month. A card's
+    balance is negative while it is owed."""
+    stand_in([(last_of(4)[:8] + "10", "SAMPLE GROCER", 5_000)],
+             opening_minor=0, closing_minor=-5_000, opening_date=first_of(4), closing_date=last_of(4))
+    imported(client)
+    stand_in([(last_of(2)[:8] + "12", "SAMPLE CAFE", 2_000)],
+             opening_minor=-5_000, closing_minor=-7_000, opening_date=first_of(3), closing_date=last_of(2))
+    imported(client)
+
+
+def test_case_10_a_statement_covering_two_months_is_stored_with_its_period_start_and_end(stand_in, client, conn):
+    two_statements(stand_in, client)
+
+    held = conn.execute(
+        "SELECT period_start, statement_date, printed FROM statements ORDER BY statement_date"
+    ).fetchall()
+
+    assert [tuple(r) for r in held] == [(first_of(4), last_of(4), 1), (first_of(3), last_of(2), 1)]
+
+
+def test_case_10_the_coverage_view_no_longer_marks_the_first_month_missing(stand_in, client, conn):
+    two_statements(stand_in, client)
+
+    coverage = client.get("/api/statements/coverage?months=6").get_json()
+    [card] = [a["id"] for a in coverage["accounts"]]
+
+    assert [m for m in (key(4), key(3), key(2)) if coverage["matrix"][str(card)][m]["imported"]] \
+        == [key(4), key(3), key(2)]
+    assert missing.missing_months(conn, [card], [key(4), key(3), key(2)], date.today()) == []
+
+
+def test_a_month_still_missing_between_two_statements_is_still_missing(stand_in, client, conn):
+    """Periods hold the months they reach and no others: a gap stays a gap."""
+    stand_in([(last_of(5)[:8] + "10", "SAMPLE GROCER", 5_000)],
+             opening_minor=0, closing_minor=-5_000, opening_date=first_of(5), closing_date=last_of(5))
+    imported(client)
+    stand_in([(last_of(2)[:8] + "12", "SAMPLE CAFE", 2_000)],
+             opening_minor=-5_000, closing_minor=-7_000, opening_date=first_of(3), closing_date=last_of(2))
+    imported(client)
+    card = conn.execute("SELECT id FROM accounts WHERE name = ?", (CARD,)).fetchone()[0]
+
+    coverage = client.get("/api/statements/coverage?months=6").get_json()
+
+    assert coverage["matrix"][str(card)][key(4)] == {"imported": False}
+    assert missing.missing_months(conn, [card], [key(4), key(3)], date.today()) == [key(4)]
+
+
+def test_a_source_that_states_no_balance_makes_month_records_starting_on_the_1st(stand_in, client, conn):
+    stand_in([(last_of(3)[:8] + "20", "SAMPLE GROCER", 5_000), (last_of(2)[:8] + "03", "SAMPLE CAFE", 2_000)],
+             closing_date=last_of(2))
+    imported(client)
+
+    held = conn.execute("SELECT period_start, statement_date, printed FROM statements ORDER BY statement_date")
+
+    assert [tuple(r) for r in held] == [(first_of(3), first_of(3), 0), (first_of(2), first_of(2), 0)]
+
+
+def test_a_printed_statement_that_states_no_opening_day_starts_after_the_one_before(stand_in, client, conn):
+    two_statements(stand_in, client)
+    stand_in([(last_of(1)[:8] + "12", "SAMPLE CAFE", 3_000)],
+             opening_minor=-7_000, closing_minor=-10_000, closing_date=last_of(1))
+    imported(client)
+
+    held = conn.execute("SELECT period_start FROM statements WHERE statement_date = ?", (last_of(1),))
+
+    assert held.fetchone()[0] == first_of(1)
+
+
+def test_derived_loan_interest_records_start_the_day_after_the_figure_before(client, conn):
+    loan = client.post("/api/accounts", json={"name": "Sample Loan 0009", "type": "loan"}).get_json()["id"]
+    for owed, on in (("1000.00", "2026-06-30"), ("990.00", "2026-08-31")):
+        assert client.post("/api/anchors", json={"account_id": loan, "amount": owed, "date": on}).status_code == 200
+    bank = client.post("/api/accounts", json={"name": "Sample Bank 0002", "type": "bank"}).get_json()["id"]
+    sid = conn.execute("INSERT INTO statements (account_id, statement_date, filename, printed, period_start)"
+                       " VALUES (?, '2026-08-01', 'sample.csv', 0, '2026-08-01')", (bank,)).lastrowid
+    conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type,"
+                 " other_side_id) VALUES (?, '2026-08-05', 'SAMPLE LOAN INSTALMENT', 2500, 'movement', ?)",
+                 (sid, loan))
+    conn.commit()
+    loan_interest.derive(conn)
+    conn.commit()
+
+    held = conn.execute("SELECT period_start, statement_date FROM statements WHERE filename = ?",
+                        (loan_interest.DERIVED_STATEMENT,)).fetchall()
+
+    assert [tuple(r) for r in held] == [("2026-07-01", "2026-08-31")]
+
+
+# --- the conversion (case 11) -------------------------------------------------
+
+
+def chain_until(path: Path, stop_before: str) -> None:
+    """Every step of the chain before `stop_before`, through the runner."""
+    for name, module_name in conversion.CHAIN:
+        if name == stop_before:
+            return
+        conversion.run_step(path, conversion.chain_step(module_name), today=DAY)
+    raise AssertionError(f"{stop_before} is not in the chain")
+
+
+@pytest.fixture
+def old(tmp_path: Path) -> Path:
+    """A book in the shape from before the step, holding every kind of
+    statement record: printed statements one after another, a first printed
+    statement, one after a gap, calendar-month records (one moved off the 1st
+    by a printed statement closing there), and a derived loan-interest record."""
+    path = tmp_path / "ledger.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(OLD_SCHEMA.read_text())
+    conn.close()
+    chain_until(path, convert_statement_periods.STEP.name)
+    conn = sqlite3.connect(str(path))
+    # Started before, as the operator's book was: what a start makes is there
+    # (schema.sql's CREATE ... IF NOT EXISTS; the statements table and its
+    # triggers are held already, so they keep the shape from before the step).
+    conn.executescript(db.SCHEMA_PATH.read_text())
+
+    def account(name, kind):
+        return conn.execute("INSERT INTO accounts (name, short_name, type, currency, owner)"
+                            " VALUES (?, ?, ?, 'SGD', 'Household')", (name, name, kind)).lastrowid
+
+    card, bank, loan = account(CARD, "card"), account("Sample Bank 0002", "bank"), account("Sample Loan 0009", "loan")
+    statements = [
+        # (id, account, closing day, printed, filename)
+        (1, card, "2026-03-14", 1, "import_1_card"),   # the card's first printed statement
+        (2, card, "2026-04-14", 1, "import_2_card"),   # the month after
+        (3, card, "2026-05-14", 1, "import_3_card"),
+        (4, card, "2026-08-14", 1, "import_4_card"),   # after a gap: June and July never imported
+        (5, card, "2026-09-01", 1, "import_5_card"),   # closed on the 1st, in the month after
+        (6, card, "2026-09-02", 0, "import_6_card"),   # a month record moved off the 1st by it
+        (7, bank, "2026-07-01", 0, "sample.csv"),
+        (8, bank, "2026-08-01", 0, "sample.csv"),
+        (9, loan, "2026-08-31", 0, loan_interest.DERIVED_STATEMENT),
+    ]
+    conn.executemany("INSERT INTO statements (id, account_id, statement_date, printed, filename)"
+                     " VALUES (?, ?, ?, ?, ?)", statements)
+    conn.execute("INSERT INTO anchors (account_id, date, amount, source) VALUES (?, '2026-06-30', -100000, 'supplied')",
+                 (loan,))
+    conn.execute("INSERT INTO anchors (account_id, date, amount, source) VALUES (?, '2026-08-31', -99000, 'supplied')",
+                 (loan,))
+    conn.executemany(
+        "INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) VALUES (?, ?, ?, ?, ?)",
+        [(1, "2026-03-02", "SAMPLE GROCER", 1_000, "expense"), (2, "2026-04-03", "SAMPLE CAFE", 2_550, "expense"),
+         (3, "2026-05-04", "SAMPLE GROCER", 1_200, "expense"), (4, "2026-08-01", "SAMPLE CAFE", 900, "expense"),
+         (5, "2026-08-20", "SAMPLE GROCER", 700, "expense"), (6, "2026-09-02", "SAMPLE CAFE", 300, "expense"),
+         (7, "2026-07-09", "SAMPLE EMPLOYER SALARY", -500_000, "income"),
+         (8, "2026-08-09", "SAMPLE EMPLOYER SALARY", -500_000, "income"),
+         (9, "2026-07-31", "Loan interest", 1_250, "expense")],
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def query(path: Path, sql: str) -> list[tuple]:
+    conn = sqlite3.connect(str(path))
+    try:
+        return [tuple(r) for r in conn.execute(sql)]
+    finally:
+        conn.close()
+
+
+def dump(path: Path) -> str:
+    conn = sqlite3.connect(str(path))
+    try:
+        return "\n".join(conn.iterdump())
+    finally:
+        conn.close()
+
+
+def convert(path: Path, **kwargs) -> dict:
+    return conversion.run_step(path, convert_statement_periods.STEP, today=DAY, **kwargs)
+
+
+TRANSACTIONS = "SELECT * FROM transactions ORDER BY id"
+STATEMENTS = "SELECT id, account_id, statement_date, filename, imported_at, printed FROM statements ORDER BY id"
+
+
+def test_case_11_every_existing_statement_gets_its_period_start(old):
+    convert(old)
+
+    assert query(old, "SELECT id, period_start FROM statements ORDER BY id") == [
+        (1, "2026-03-01"),  # the first printed statement: the 1st of its month
+        (2, "2026-03-15"),  # the day after the previous closing
+        (3, "2026-04-15"),
+        (4, "2026-08-01"),  # after a gap the previous closing cannot be told: the 1st
+        (5, "2026-08-15"),
+        (6, "2026-09-01"),  # a month record: the 1st of its month, wherever it is dated
+        (7, "2026-07-01"),
+        (8, "2026-08-01"),
+        (9, "2026-07-01"),  # derived interest: the day after the loan's figure before
+    ]
+
+
+def test_case_11_no_row_total_or_statement_moves(old):
+    rows, statements = query(old, TRANSACTIONS), query(old, STATEMENTS)
+
+    report = convert(old)
+
+    assert report["status"] == "applied"
+    assert report["before"]["rows"] == report["after"]["rows"]
+    assert report["before"]["account_totals_cents"] == report["after"]["account_totals_cents"]
+    assert query(old, TRANSACTIONS) == rows
+    assert query(old, STATEMENTS) == statements
+
+
+def test_case_11_the_queue_and_the_numbers_read_the_same_after_the_conversion(old, tmp_path):
+    """The five invariants through fin's own routes (fin_snapshot), before and
+    after. Before is the book as fin read it until now: every record with no
+    period start, which reads as its statement_date's month alone."""
+    import fin_snapshot
+
+    unfilled = tmp_path / "unfilled.db"
+    unfilled.write_bytes(old.read_bytes())
+    conn = sqlite3.connect(str(unfilled))
+    conn.execute("ALTER TABLE statements ADD COLUMN period_start TEXT")
+    conn.commit()
+    conn.close()
+
+    before = fin_snapshot.snap(unfilled)
+    convert(old)
+    after = fin_snapshot.snap(old)
+
+    passed, result = fin_snapshot.diff(before, after)
+    assert result == {name: [] for name in result}
+    assert passed
+
+
+def test_run_twice_changes_nothing_and_writes_one_backup(old):
+    convert(old)
+    after_first = dump(old)
+
+    again = convert(old)
+
+    assert again["status"] == "already-applied"
+    assert dump(old) == after_first
+    assert len(list(old.parent.glob("*.pre-statement-periods-*.bak"))) == 1
+
+
+def test_it_refuses_without_its_backup(old):
+    before = dump(old)
+
+    with pytest.raises(conversion.ConversionRefused, match="backup copy is missing"):
+        convert(old, backup=lambda source, target: None)
+
+    assert dump(old) == before
+    assert Path(convert(old)["backup"]).name == "ledger.db.pre-statement-periods-20261024.bak"
+
+
+def test_the_app_will_not_start_on_a_book_from_before_the_step(old, monkeypatch):
+    before = dump(old)
+    monkeypatch.setattr(db, "DB_PATH", old)
+
+    with pytest.raises(db.DatabaseNotConverted, match="convert_statement_periods.py"):
+        db.init_db()
+
+    assert dump(old) == before
+
+
+def test_a_converted_book_has_the_shape_of_a_new_one(old, tmp_path):
+    new = tmp_path / "new.db"
+    conn = sqlite3.connect(str(new))
+    conn.executescript(db.SCHEMA_PATH.read_text())
+    conn.close()
+
+    convert(old)
+
+    shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('statements')"
+    triggers = "SELECT name, sql FROM sqlite_master WHERE name LIKE 'history_statements_%' ORDER BY name"
+    assert query(old, shape) == query(new, shape)
+    assert query(old, triggers) == query(new, triggers)
+    assert "period_start" in history.table_triggers("statements")[0]
+
+
+def test_the_command(old, capsys, tmp_path):
+    assert convert_statement_periods.main([str(old)]) == 0
+    out = capsys.readouterr().out
+    assert "step statement-periods: applied" in out
+    assert "from the previous closing: 3; month records from the 1st: 3; printed, from the 1st: 2; " \
+           "loan interest from the figure before: 1" in out
+    assert convert_statement_periods.main([str(old)]) == 0
+    assert "already-applied" in capsys.readouterr().out
+    assert convert_statement_periods.main([]) == 2
+    assert convert_statement_periods.main([str(tmp_path / "missing.db")]) == 1
+
+
+def test_a_changed_row_fails_the_steps_invariant(old):
+    """The step's own measure holds every row as it was: a changed row fails it."""
+    conn = sqlite3.connect(str(old))
+    try:
+        measured = convert_statement_periods.STEP.measure(conn)
+        conn.execute("UPDATE transactions SET date = '2026-03-03' WHERE id = 1")
+        moved = convert_statement_periods.STEP.measure(conn)
+    finally:
+        conn.close()
+
+    problems = convert_statement_periods.STEP.invariant(measured, moved)
+    assert problems and "transaction rows changed" in problems[0]

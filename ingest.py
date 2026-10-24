@@ -9,6 +9,7 @@ import re
 import sqlite3
 
 import account_kind
+import statement_period
 
 
 def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
@@ -117,6 +118,7 @@ def ensure_statement(
     statement_date: str,
     filename: str,
     printed: bool = False,
+    period_start: str | None = None,
 ) -> tuple[int, bool]:
     """Get or create a statement record.
 
@@ -130,6 +132,12 @@ def ensure_statement(
     first free day when a printed statement closed on the 1st. A month
     record that sits on the day a printed statement needs is moved to a free
     day of its month, keeping its rows, so the two never share a record.
+
+    A new record stores the first day it covers (statement_period.py): a
+    printed statement's `period_start` (the opening day its parser read), or
+    when it gives none the day after the account's previous printed closing;
+    a month record's 1st. A printed record already held that has none is
+    given it.
     """
     if not printed:
         month = statement_date[:7]
@@ -146,8 +154,9 @@ def ensure_statement(
         ).fetchone()
         on = _free_day_in_month(conn, account_id, month) if held else statement_date
         cur = conn.execute(
-            "INSERT INTO statements (account_id, statement_date, filename, printed) VALUES (?, ?, ?, 0)",
-            (account_id, on, filename),
+            "INSERT INTO statements (account_id, statement_date, filename, printed, period_start)"
+            " VALUES (?, ?, ?, 0, ?)",
+            (account_id, on, filename, f"{month}-01"),
         )
         return (cur.lastrowid, True)
 
@@ -155,7 +164,12 @@ def ensure_statement(
         "SELECT id, printed FROM statements WHERE account_id = ? AND statement_date = ?",
         (account_id, statement_date),
     ).fetchone()
+    start = period_start or statement_period.printed_start(conn, account_id, statement_date)
     if existing and existing[1]:
+        conn.execute(
+            "UPDATE statements SET period_start = ? WHERE id = ? AND period_start IS NULL",
+            (start, existing[0]),
+        )
         return (existing[0], False)
     if existing:
         conn.execute(
@@ -163,7 +177,8 @@ def ensure_statement(
             (_free_day_in_month(conn, account_id, statement_date[:7]), existing[0]),
         )
     cur = conn.execute(
-        "INSERT INTO statements (account_id, statement_date, filename, printed) VALUES (?, ?, ?, 1)",
-        (account_id, statement_date, filename),
+        "INSERT INTO statements (account_id, statement_date, filename, printed, period_start)"
+        " VALUES (?, ?, ?, 1, ?)",
+        (account_id, statement_date, filename, start),
     )
     return (cur.lastrowid, True)

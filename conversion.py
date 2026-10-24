@@ -66,6 +66,9 @@ CHAIN = (
     ("label-source", "convert_label_source"),
     # Personal-ledger 51: the one mark dropped (contract), once nothing reads it.
     ("retire-single-mark", "retire_single_mark"),
+    # fin-redesign 04: the first day each statement covers, beside its
+    # closing day, so coverage and missing months read periods.
+    ("statement-periods", "convert_statement_periods"),
 )
 
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")

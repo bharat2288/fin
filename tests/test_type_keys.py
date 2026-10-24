@@ -17,6 +17,7 @@ import sqlite3
 from pathlib import Path
 
 import book_type
+import convert_statement_periods
 import db
 import history
 import suggest
@@ -35,10 +36,14 @@ NEW_TABLES = {"type_keys", "type_settings", "type_slots", "seeded_once"}
 
 
 def book_before(tmp_path, monkeypatch) -> Path:
-    """The book main made, as a file fin is pointed at."""
+    """The book main made, as a file fin is pointed at, with the period start
+    on its statements that the later statement-periods step gives it (a book
+    from before that step will not start: tests/test_statement_periods.py)."""
     path = tmp_path / "before.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(BEFORE.read_text(encoding="utf-8"))
+    convert_statement_periods.STEP.apply(conn)
+    conn.commit()
     conn.close()
     monkeypatch.setattr(db, "DB_PATH", path)
     db.invalidate_rules_cache()

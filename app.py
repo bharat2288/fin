@@ -43,6 +43,7 @@ import pairing
 import rates
 import review
 import screens
+import statement_period
 import suggest
 import tie
 import trend_routes
@@ -5039,6 +5040,7 @@ def api_import_confirm():
                     name: [
                         ensure_statement(
                             conn, held_id, line["closing_date"], f"import_{import_id}_{name[:30]}", printed=True,
+                            period_start=line.get("opening_date"),
                         )[0]
                         for line in statement_lines
                     ]
@@ -5425,7 +5427,8 @@ def api_statements_coverage():
     """Return 6-month coverage matrix: active accounts × recent months.
 
     Shows which accounts have statements imported for each month,
-    and which are missing. Uses statement_date month as the key.
+    and which are missing. A statement marks every month its period reaches
+    into (statement_period.py): one covering July and August marks both.
     """
     months_count = int(request.args.get("months", 6))
 
@@ -5454,11 +5457,13 @@ def api_statements_coverage():
         # Get all statements for active accounts in the date range
         min_month = months[0] + "-01"
         statements = conn.execute(
-            "SELECT s.account_id, s.statement_date, s.filename, s.imported_at "
+            "SELECT s.account_id, s.statement_date, s.period_start, s.printed, s.filename, s.imported_at "
             "FROM statements s "
             "JOIN accounts a ON s.account_id = a.id "
             "WHERE (a.status = 'active' OR a.status IS NULL) "
             "  AND a.type IN (?, ?) "
+            # A period ends on or after its statement_date, so a statement
+            # dated before the first month shown reaches none of them.
             "  AND s.statement_date >= ? "
             "ORDER BY s.statement_date",
             (*account_kind.STATEMENT_KINDS, min_month),
@@ -5473,14 +5478,17 @@ def api_statements_coverage():
 
     for stmt in statements:
         acct_id = stmt["account_id"]
-        # Extract YYYY-MM from statement_date
-        stmt_month = stmt["statement_date"][:7]
-        if acct_id in matrix and stmt_month in matrix[acct_id]:
-            matrix[acct_id][stmt_month] = {
-                "imported": True,
-                "date": stmt["imported_at"],
-                "filename": stmt["filename"],
-            }
+        for stmt_month in statement_period.months(stmt["statement_date"], stmt["period_start"], stmt["printed"]):
+            if acct_id not in matrix or stmt_month not in matrix[acct_id]:
+                continue
+            # A month shows the statement dated in it, as before periods; a
+            # month none is dated in shows the first whose period reaches it.
+            if stmt_month == stmt["statement_date"][:7] or not matrix[acct_id][stmt_month]["imported"]:
+                matrix[acct_id][stmt_month] = {
+                    "imported": True,
+                    "date": stmt["imported_at"],
+                    "filename": stmt["filename"],
+                }
 
     # Summary targets the previous month (most recent closed billing cycle)
     # On March 12th, you want to know if Feb is fully covered, not March
