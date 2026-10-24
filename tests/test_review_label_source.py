@@ -170,6 +170,23 @@ def test_chats_label_review_chooses_both_fields_and_the_entry_is_via_chat(client
     assert held(client, waiting_row) == ("Household", "", "merchant", None)
 
 
+def test_chats_label_review_says_what_any_row_was_and_its_change_reads_truthfully(client, conn, statement):
+    # The route never asks that the row was waiting: the app's "Change what
+    # this was…" sends a spending row there too. The tool and the change
+    # history say so, rather than "a waiting transfer".
+    said = mcp_tools.BY_NAME["label_review"].description
+    assert "any row" in said and "Change what this was" in said
+    assert mcp_tools.TITLES["label_review"] == "Say what a row was"
+    tx = row(conn, statement, "SAMPLE FLORIST 2210", 80.00, book="Household", type_name="Dining")
+
+    done = mcp_tools.call("label_review", {"tx_id": tx, "choice": "gift"}, actor=CHAT_ACTOR)
+
+    assert done["ok"], done
+    assert held(client, tx) == ("Household", "Gifts & Donations", "chosen", "chosen")
+    latest = entries(client)[0]
+    assert (latest["id"], latest["summary"]) == (done["change"]["entry_id"], "Said what a row was")
+
+
 # --- a refused label writes nothing ----------------------------------------------------------
 
 
