@@ -37,6 +37,8 @@ SUPPLIED_FIGURE_KINDS = ("loan", "holding", "company", "person")
 SUPPLIED_UNTIL_STATEMENT_KINDS = ("bank",)
 # Kinds whose supplied figure is what is owed: typed positive, stored negative.
 OWED_KINDS = ("loan",)
+# Kinds off the sheet: no statement, no figure; money moved there leaves the check.
+UNTRACKED_KINDS = ("untracked",)
 
 # (name, description). The owner says whose sheet the account is on: the
 # household's, or a company's. The companies are the company books, so a new

@@ -4356,6 +4356,7 @@ async function viewLists(tab) {
             const line = lineOf.get(a.id);
             const enter = a.takes_a_figure ? `<button type="button" class="link sl-enter" data-act="figure" data-account="${a.id}">Enter a figure</button>` : '';
             if (!a.anchor) {
+                if (a.type === 'untracked') return 'untracked: no statement or figure';
                 return a.takes_a_figure ? tag('nofig', 'no figure: enter one', { act: 'figure', data: { account: a.id }, title: 'Enter a figure' })
                     : tag('nofig', 'no statement yet: import one', { href: '#/books/import', title: 'Import a statement' });
             }

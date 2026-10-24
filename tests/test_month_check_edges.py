@@ -115,3 +115,21 @@ def test_a_complete_month_moves_nothing_across_the_edge(client):
     shown = check(client)
 
     assert (shown["outside_minor"], shown["left_out"], shown["unexplained_minor"]) == (0, [], 0)
+
+
+def test_money_moved_to_an_untracked_account_crosses_the_edge_not_unexplained(client):
+    # The household's own bank fin holds no statements for: money sent there
+    # leaves the check, stated as moved out, never unexplained.
+    make_account(client, "Sample Partner Bank", "untracked")
+    partner = next(a["id"] for a in client.get("/api/accounts").get_json() if a["name"] == "Sample Partner Bank")
+    bring_in(client, BANK, 5_010_000, [
+        ("2026-07-10", "SAMPLE BAKERY JUL", 10_000, "expense", household("Groceries")),
+    ], closing_date="2026-07-31")
+    bring_in(client, BANK, 5_000_000, [
+        ("2026-08-27", "TRANSFER TO SAMPLE PARTNER", 50_000, "transfer", {"names": partner}),
+    ])
+
+    shown = check(client)
+
+    assert shown["outside_minor"] == -50_000
+    assert shown["unexplained_minor"] == 0

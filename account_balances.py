@@ -28,11 +28,13 @@ from __future__ import annotations
 import calendar
 import sqlite3
 
+import account_kind
 import balance_sheet
 import card_balance
 
 START_NOTE = "Balances start on 1 Jan 2026, as on the balance sheet"
 NO_BALANCE = "No balance yet: import a statement or add an anchor"
+UNTRACKED_NOTE = "Untracked: fin holds no statement or figure for it; money moved here leaves fin's sight"
 
 
 def _month_end(month: str) -> str:
@@ -127,6 +129,7 @@ def balances(conn: sqlite3.Connection, account, months: list[str]) -> dict:
     return {
         "charted_id": whole,
         "card": _card(conn, members),
-        "no_balance": None if anchored else NO_BALANCE,
+        "no_balance": None if anchored
+        else UNTRACKED_NOTE if charted["type"] in account_kind.UNTRACKED_KINDS else NO_BALANCE,
         "months": series,
     }

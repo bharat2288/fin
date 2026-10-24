@@ -29,13 +29,16 @@ def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
     if existing:
         return existing[0]
 
+    # An untracked account holds no statement, so no statement lands on it.
+    untracked = ", ".join("?" for _ in account_kind.UNTRACKED_KINDS)
+
     # 2. Match by last_four digits (strip all non-digits, take last 4)
     all_digits = re.sub(r"\D", "", card_info)
     last_four = all_digits[-4:] if len(all_digits) >= 4 else None
     if last_four:
         match = conn.execute(
-            "SELECT id FROM accounts WHERE last_four = ? AND status = 'active'",
-            (last_four,),
+            f"SELECT id FROM accounts WHERE last_four = ? AND status = 'active' AND type NOT IN ({untracked})",
+            (last_four, *account_kind.UNTRACKED_KINDS),
         ).fetchone()
         if match:
             return match[0]
@@ -44,8 +47,8 @@ def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
     long_digits = re.findall(r"\d{6,}", card_info)
     for num in long_digits:
         match = conn.execute(
-            "SELECT id FROM accounts WHERE name LIKE ? AND status = 'active'",
-            (f"%{num}%",),
+            f"SELECT id FROM accounts WHERE name LIKE ? AND status = 'active' AND type NOT IN ({untracked})",
+            (f"%{num}%", *account_kind.UNTRACKED_KINDS),
         ).fetchone()
         if match:
             return match[0]

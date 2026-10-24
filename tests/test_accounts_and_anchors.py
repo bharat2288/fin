@@ -159,6 +159,21 @@ def test_an_untracked_account_takes_no_figure_and_has_no_line_on_the_sheet(clien
     assert "Sample Partner Bank" not in str(shown)
 
 
+def test_a_statement_is_never_filed_on_an_untracked_account_sharing_its_last_four(client, conn):
+    partner = make_account(client, "Sample Partner Bank", "untracked", last_four="1234")
+
+    card = ensure_account(conn, "SAMPLE CARD 4000-0000-0000-1234", "card")
+
+    assert card != partner
+    assert conn.execute("SELECT type FROM accounts WHERE id = ?", (card,)).fetchone()[0] == "card"
+
+
+def test_an_account_name_is_kept_without_its_outer_spaces(client):
+    make_account(client, " Sample Partner Bank ", "untracked")
+
+    assert "Sample Partner Bank" in accounts(client)
+
+
 def test_an_account_is_not_made_twice_under_one_name(client):
     loan = make_account(client, "Sample auto loan", "loan")
 

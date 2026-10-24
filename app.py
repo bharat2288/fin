@@ -1267,10 +1267,11 @@ def api_accounts_create():
     except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
         return jsonify({"error": str(e)}), 400
 
+    name = str(data["name"]).strip()
     with get_db() as conn:
         held = conn.execute(
-            "SELECT name, type FROM accounts WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) ORDER BY id",
-            (str(data["name"]),),
+            "SELECT name, type FROM accounts WHERE LOWER(TRIM(name)) = LOWER(?) ORDER BY id",
+            (name,),
         ).fetchone()
         if held is not None:
             return jsonify({"error": (
@@ -1282,8 +1283,8 @@ def api_accounts_create():
             "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
-                data["name"],
-                data.get("short_name", data["name"]),
+                name,
+                data.get("short_name", name),
                 kind,
                 data.get("last_four"),
                 currency,
