@@ -101,6 +101,15 @@ class Planned:
 
 
 @dataclass
+class Kept:
+    """A row whose flow Apply would move but keeps: a record of expect back
+    rests on it (flow_writes)."""
+    held: sqlite3.Row
+    would: dict                        # the flow and other side it would have had
+    why: str                           # the record, in a hand label's refusal's words
+
+
+@dataclass
 class Plan:
     subject: dict
     change: dict                       # {field: (from, to)} for a merchant's own book and type
@@ -117,6 +126,7 @@ class Plan:
     wording: str | None = None
     moves_to: str | None = None
     names: dict[int, str] = field(default_factory=dict)
+    kept: list[Kept] = field(default_factory=list)     # rows whose flow Apply keeps (flow_writes)
 
     @property
     def count(self) -> int:
@@ -579,20 +589,73 @@ def _held_rows(conn, ids: list[int]) -> list[sqlite3.Row]:
     return found
 
 
-def flow_writes(held, sets: dict, rule, ctx: flow.ClassifierContext) -> dict:
+def held_account(held) -> dict:
+    """The kind and owner of the account a held row is on, as the classifier
+    reads them (none for a row on no account)."""
+    return ({"account_kind": held["account_kind"], "account_owner": held["account_owner"]}
+            if held["account_kind"] is not None else {})
+
+
+def fins_own(held, before, account: dict, ctx: flow.ClassifierContext) -> bool:
+    """Whether a row's stored flow and other side are still what fin worked
+    out for it before the change: what the rule that labelled it then
+    states (`before`, or None), or what the classifier gives it as it is.
+    Only such a row's flow is worked out again on a rule change (ADR-009); a
+    flow anything else said (an older book's refund, a pairing, the
+    linker) stays."""
+    stored = (held["flow_type"], held["other_side_id"])
+    said = (before, None) if flow.stated(before) else (None,)
+    return any(flow.worked_out_again(held, held["service_id"], held["type_id"], rule, account, ctx) == stored
+               for rule in said)
+
+
+def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: flow.ClassifierContext,
+                account: dict | None = None) -> tuple[dict, Kept | None]:
     """The flow and other side Apply writes to a row already in the book
     besides its new label (`sets`), where they change: what
     flow.worked_out_again gives for the merchant and type the row would have
-    and the rule that would label it (`rule`, or None; the flow it states
-    says what the row is). A flow set by hand keeps its own, and its other
-    side (ADR-009)."""
+    and the rule that would label it (`after`, or None; the flow it states
+    says what the row is). And the row kept, where the change would move its
+    flow but a record rests on it, or None.
+
+    Never a flow set by hand, nor its other side; nor a flow fin did not
+    work out (fins_own, with the rule that labelled the row before the
+    change, `before`); nor the flow of a row an expectation or a set-off
+    rests on, as pair matching leaves it alone: that one is kept, in the
+    words a hand label's refusal names its record with
+    (expect_back.records_refusal). `account` is the kind and owner of the
+    account the row is on (held_account, by default)."""
     if held["flow_type_manual"]:
-        return {}
-    account = ({"account_kind": held["account_kind"], "account_owner": held["account_owner"]}
-               if held["account_kind"] is not None else {})
+        return {}, None
+    if account is None:
+        account = held_account(held)
     worked_out = flow.worked_out_again(held, sets.get("service_id", held["service_id"]),
-                                       sets.get("type_id", held["type_id"]), rule, account, ctx)
-    return {k: v for k, v in zip(("flow_type", "other_side_id"), worked_out) if held[k] != v}
+                                       sets.get("type_id", held["type_id"]), after, account, ctx)
+    writes = {k: v for k, v in zip(("flow_type", "other_side_id"), worked_out) if held[k] != v}
+    if not writes or not fins_own(held, before, account, ctx):
+        return {}, None
+    why = expect_back.records_refusal(conn, held["id"])
+    if why is not None:
+        return {}, Kept(held, writes, why)
+    return writes, None
+
+
+def taught_rules(rules: list[dict], words, match_type: str) -> list[dict]:
+    """The rules as a teach of `words` leaves them, in match order, for which
+    rule wins a row: a wording fin holds a rule for keeps that rule (a teach
+    changes its merchant and overrides, never its match or the flow it
+    states); one it holds none for gains a rule that states no flow."""
+    held = {r["pattern"].upper() for r in rules}
+    added = [{**_NEW_RULE, "pattern": w, "match_type": match_type}
+             for w in dict.fromkeys(words) if w.upper() not in held]
+    return sorted(rules + added, key=db.match_order)
+
+
+def _stamp_flows(plan: Plan) -> list:
+    """What a plan's token stamps of its flows: each row's writes and each
+    row kept, so a preview's list is what its Apply writes."""
+    return [[(p.held["id"], tuple(sorted(p.apply.items()))) for p in plan.rows],
+            [(k.held["id"], k.why) for k in plan.kept]]
 
 
 def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | None) -> Plan:
@@ -707,7 +770,9 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
                         only_new[label_source.FIELDS[field_name]] = accepted
         # The row's flow, worked out again where its label changes or the
         # flow the rule states does: Apply writes it, Only new rows leaves it.
-        flows = flow_writes(held, writes, after, ctx) if writes or restates else {}
+        flows, kept = flow_writes(conn, held, writes, before, after, ctx) if writes or restates else ({}, None)
+        if kept is not None:
+            plan.kept.append(kept)
         if not writes and not flows:
             plan.chosen += left
             continue
@@ -723,7 +788,8 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
                    sorted(others.items(), key=lambda kv: (-kv[1], names.get(kv[0]) or ""))]
     plan.extra = {"unheld": unheld, "labelled": labelled}
     plan.token = _stamp("rule", rule_id, sorted((proposed or {}).items()),
-                        [tuple(sorted(r.items())) for r in rules], [tuple(h) for h in held_rows])
+                        [tuple(sorted(r.items())) for r in rules], [tuple(h) for h in held_rows],
+                        _stamp_flows(plan))
     return plan
 
 
@@ -848,8 +914,15 @@ def drift(conn: sqlite3.Connection) -> Plan:
     ctx = flow.build_context(conn) if writes_of else None
     for held in _held_rows(conn, list(writes_of)):        # newest first
         writes = {k: v for k, v in writes_of[held["id"]].items() if held[k] != v}
-        plan.rows.append(Planned(held, {**writes, **flow_writes(held, writes, rule_of[held["id"]], ctx)}, {}))
-    plan.token = _stamp("drift", [tuple(sorted(r.items())) for r in rules], [tuple(p.held) for p in plan.rows])
+        # The rules are as they were: the rule that wins the row is the one
+        # that labelled it, before and after.
+        rule = rule_of[held["id"]]
+        flows, kept = flow_writes(conn, held, writes, rule, rule, ctx)
+        if kept is not None:
+            plan.kept.append(kept)
+        plan.rows.append(Planned(held, {**writes, **flows}, {}))
+    plan.token = _stamp("drift", [tuple(sorted(r.items())) for r in rules], [tuple(p.held) for p in plan.rows],
+                        _stamp_flows(plan))
     return plan
 
 
@@ -1025,6 +1098,17 @@ def moves_flow(planned: Planned) -> bool:
     return "flow_type" in planned.apply or "other_side_id" in planned.apply
 
 
+def _said_flow(names: dict[int, str], flow_name, other_side) -> str:
+    """A row's flow and other side in words ("a movement · the loan")."""
+    word = FLOW_WORDS.get(flow_name or "expense", flow_name)
+    return f"{word} · {names.get(other_side, 'an account no longer in fin')}" if other_side else word
+
+
+def _flow_line(held, now: str) -> dict:
+    return {"id": held["id"], "date": held["date"], "description": held["description"],
+            "amount_minor": held["amount_minor"], "currency": held["currency"], "now": now}
+
+
 def _flows(conn: sqlite3.Connection, plan: Plan) -> list[dict]:
     """Every row whose flow or other side Apply changes, newest first, now →
     after in words ("spending" → "a movement · the loan"): all of them, not
@@ -1033,25 +1117,35 @@ def _flows(conn: sqlite3.Connection, plan: Plan) -> list[dict]:
     if not moving:
         return []
     names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM accounts")}
-
-    def said(flow_name, other_side) -> str:
-        word = FLOW_WORDS.get(flow_name or "expense", flow_name)
-        return f"{word} · {names.get(other_side, 'an account no longer in fin')}" if other_side else word
-
     out = []
     for p in moving:
         held = p.held
         after = {k: p.apply.get(k, held[k]) for k in ("flow_type", "other_side_id")}
-        out.append({"id": held["id"], "date": held["date"], "description": held["description"],
-                    "amount_minor": held["amount_minor"], "currency": held["currency"],
-                    "now": said(held["flow_type"], held["other_side_id"]),
-                    "after": said(after["flow_type"], after["other_side_id"])})
+        out.append({**_flow_line(held, _said_flow(names, held["flow_type"], held["other_side_id"])),
+                    "after": _said_flow(names, after["flow_type"], after["other_side_id"])})
+    return out
+
+
+def flows_kept(conn: sqlite3.Connection, plan: Plan) -> list[dict]:
+    """Every row whose flow Apply would change but keeps, a record of expect
+    back resting on it: now, what it would have been, and why, in the words
+    a hand label's refusal uses (flow_writes)."""
+    if not plan.kept:
+        return []
+    names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM accounts")}
+    out = []
+    for k in plan.kept:
+        held = k.held
+        would = {c: k.would.get(c, held[c]) for c in ("flow_type", "other_side_id")}
+        out.append({**_flow_line(held, _said_flow(names, held["flow_type"], held["other_side_id"])),
+                    "would": _said_flow(names, would["flow_type"], would["other_side_id"]), "why": k.why})
     return out
 
 
 def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
     """The preview: what the drawer shows and chat is told. `flows` lists
-    every row whose flow or other side Apply changes."""
+    every row whose flow or other side Apply changes; `flows_kept` every row
+    whose flow it would change but keeps, and why."""
     types = _names(conn)
     change = plan.words if plan.words is not None else [
         {"field": f, "from": _word(f, was, types), "to": _word(f, now, types)}
@@ -1073,6 +1167,7 @@ def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
         "examples": [_example(conn, plan, p, types, names) for p in plan.rows[:EXAMPLES]],
         "others": list(plan.others),
         "flows": _flows(conn, plan),
+        "flows_kept": flows_kept(conn, plan),
         **plan.extra,
         "token": plan.token,
     }
@@ -1094,6 +1189,9 @@ def asked(plan: Plan, answer_key: str = "past") -> str:
     moving = sum(1 for p in plan.rows if moves_flow(p))
     if moving:
         said += f", {moving} of them in what {'it is' if moving == 1 else 'they are'} (their flow; listed in flows)"
+    if plan.kept:
+        said += (f"; {len(plan.kept)} row{' keeps its' if len(plan.kept) == 1 else 's keep their'} flow, "
+                 "a record of expect back resting on it (listed in flows_kept)")
     return (f"Nothing was saved yet: {said}. "
             f"Say whether they change too ({answer_key}: {APPLY}) or only new rows take it "
             f"({answer_key}: {ONLY_NEW}).")

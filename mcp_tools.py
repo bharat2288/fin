@@ -170,11 +170,15 @@ _RULE_FLOW = {
     "other_side_id": {"type": "integer", "description": "With flow: the household account on the other side; "
                                                         "required for a transfer (a bank, card or untracked "
                                                         "account) and a movement (a loan, holding or company). "
-                                                        "Never a person."},
+                                                        "Never a person or an archived account. A flow changed "
+                                                        "without it keeps the held one only where the new flow "
+                                                        "allows it."},
 }
 _RULE_FLOW_SAID = (
     "A rule may state what its rows are (flow, other_side_id): it beats what fin works out, never a flow "
     "the operator set by hand, and the preview lists every past row whose flow would change (flows). "
+    "Only a flow fin worked out moves; a row a record of expect back rests on keeps its flow (flows_kept, "
+    "with why). "
 )
 # The tools that answer with the preview.
 _PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})

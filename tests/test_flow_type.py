@@ -446,8 +446,11 @@ def test_the_drift_apply_preserves_flow_type_manual_rows(client, conn):
     assert row["flow_type_manual"] == 1
 
 
-def test_the_drift_apply_recomputes_flow_type_on_the_rows_a_rule_relabels(client, conn):
-    """Relabelling the rows that differ from their rule refreshes derived flow_type on non-manual rows."""
+def test_the_drift_apply_relabels_and_leaves_a_flow_fin_did_not_work_out(client, conn):
+    """Relabelling the rows that differ from their rule works flow out again
+    only where the stored flow is still what fin worked out (ADR-009): this
+    row is held as income though its wording reads as a refund today, so it
+    is relabelled and keeps its flow."""
     shopping = _type_id(conn, "Shopping")
     conn.execute(
         "INSERT INTO services (name, book, type_id) VALUES ('Refund Service', 'Household', ?)",
@@ -488,7 +491,7 @@ def test_the_drift_apply_recomputes_flow_type_on_the_rows_a_rule_relabels(client
     ).fetchone()
     assert (row["book"], row["type_id"]) == ("Household", shopping)
     assert row["service_id"] == svc_id
-    assert row["flow_type"] == "refund"
+    assert row["flow_type"] == "income"
     assert row["flow_type_manual"] == 0
 
 

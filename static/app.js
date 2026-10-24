@@ -4761,7 +4761,10 @@ function flowsLine(p) {
     const pairs = {};
     (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}`; pairs[k] = (pairs[k] || 0) + 1; });
     const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
-    return said ? `<p class="sub">What the rows are: ${said}.</p>` : '';
+    // Rows a record of expect back rests on keep their flow: each, and why.
+    const kept = (p.flows_kept || []).map(k => `${esc(k.description)} stays ${esc(k.now)}: ${esc(k.why)}`).join(' ');
+    return (said ? `<p class="sub">What the rows are: ${said}.</p>` : '')
+        + (kept ? `<p class="sub">Kept as they are: ${kept}</p>` : '');
 }
 /** Ask the preview: 'apply', 'only_new', or null when it is closed. */
 function askPreview(p, parts = previewParts(p)) {
