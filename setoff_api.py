@@ -14,6 +14,11 @@ registers this module with the others. No module here imports app.py.
   of the sender is learnt when exactly one name on the ticked items matches it.
 - DELETE /api/set-offs/<id>              Unlink one set-off, as one change;
   on a waiting set-off this is Un-wait.
+- POST /api/expectations/<id>/set-offs   several payments set off against one
+  expectation (a group order the people paid back one by one; fin-redesign
+  12), all or none, as one change: each payment is one Back for... request
+  with this item ticked, so its guards, its rate and its learnt wording are
+  that request's. A refusal names the payment it stopped on.
 
 Every guard (the payment's remainder, each item's open amount and state) is
 read inside the transaction that writes, under the change history's write
@@ -41,7 +46,7 @@ import re
 import sqlite3
 from datetime import date
 
-from flask import jsonify, request
+from flask import g, jsonify, request
 
 import book_type
 import db
@@ -56,10 +61,13 @@ from expect_back import Refused
 SUMMARIES: dict[str, str] = {
     "set_off": "Set off a payment",
     "unlink_set_off": "Unlinked a payment",
+    "set_off_payments": "Set off several payments",
 }
 
 NO_PLACEMENTS = "tick at least one item to set this payment off against"
 BAD_PLACEMENT = "each placement names an expectation and an amount"
+NO_PAYMENTS = "name at least one payment to set off against this item"
+BAD_PAYMENT = "each payment names its row (tx_id) and an amount"
 BAD_PREVIEW = "preview is true or left out"
 
 # Words a bank puts before the sender's name, and nothing else: a learnt
@@ -479,6 +487,49 @@ def unlink(conn: sqlite3.Connection, set_off_id: int) -> dict:
     }
 
 
+def set_off_payments(conn: sqlite3.Connection, expectation_id: int, payments) -> dict:
+    """Set several payments off against one expectation, all or none: each
+    payment ([{tx_id, amount}], amount as decimal text in that payment's
+    currency) is set_off_payment with this one item ticked, in this one
+    transaction. A refusal names the payment it stopped on; the route rolls
+    everything back. Nothing here commits."""
+    _begin(conn)
+    item = conn.execute("SELECT e.id, e.row_id, t.description, a.name AS person_name FROM expectation e "
+                        "LEFT JOIN transactions t ON t.id = e.row_id LEFT JOIN accounts a ON a.id = e.person_id "
+                        "WHERE e.id = ?", (expectation_id,)).fetchone()
+    if item is None:
+        raise Refused("no such expectation")
+    if not isinstance(payments, list) or not payments:
+        raise Refused(NO_PAYMENTS)
+    done, seen = [], set()
+    for p in payments:
+        tx_id = p.get("tx_id") if isinstance(p, dict) else None
+        if isinstance(tx_id, bool) or not isinstance(tx_id, int) or not isinstance(p.get("amount"), str):
+            raise Refused(BAD_PAYMENT)
+        try:
+            payment = _payment(conn, tx_id)
+        except NotFound:
+            raise Refused(f"no row {tx_id}") from None
+        if tx_id in seen:
+            raise Refused(f"{payment['description']} is listed twice")
+        seen.add(tx_id)
+        try:
+            done.append(set_off_payment(conn, tx_id, [{"expectation_id": expectation_id, "amount": p["amount"]}]))
+        except Refused as e:
+            raise Refused(f"{payment['description']}: {e}") from None
+    name = item["description"] if item["row_id"] is not None else f"Opening figure · {item['person_name']}"
+    entry_id = g.get("change_entry")
+    if entry_id is not None:
+        conn.execute("UPDATE change_entries SET summary = ? WHERE id = ? AND summary = ''",
+                     (f"Set off {len(done)} payment{'' if len(done) == 1 else 's'} against {name}", entry_id))
+    return {
+        "expectation": _brief(conn, expectation_id),
+        "payments": [d["payment"] for d in done],
+        "set_offs": [s for d in done for s in d["set_offs"]],
+        "learnt": [d["learnt"] for d in done if d["learnt"] is not None],
+    }
+
+
 # --- routes -------------------------------------------------------------------
 
 
@@ -532,6 +583,13 @@ def api_unlink(set_off_id: int):
     return _answer(lambda conn: unlink(conn, set_off_id))
 
 
+def api_set_off_payments(expectation_id: int):
+    """POST {payments: [{tx_id, amount}]}: several payments set off against
+    one expectation, as one change; any refusal writes nothing."""
+    data = request.get_json(silent=True) or {}
+    return _answer(lambda conn: set_off_payments(conn, expectation_id, data.get("payments")))
+
+
 def register(bp) -> None:
     """Add this lane's routes to the expect-back blueprint."""
     bp.add_url_rule("/api/transactions/<int:tx_id>/back-for", endpoint="back_for",
@@ -540,3 +598,5 @@ def register(bp) -> None:
                     view_func=api_set_off, methods=["POST"])
     bp.add_url_rule("/api/set-offs/<int:set_off_id>", endpoint="unlink_set_off",
                     view_func=api_unlink, methods=["DELETE"])
+    bp.add_url_rule("/api/expectations/<int:expectation_id>/set-offs", endpoint="set_off_payments",
+                    view_func=api_set_off_payments, methods=["POST"])
