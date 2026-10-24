@@ -38,18 +38,26 @@ Rulings this module carries:
   Claude does what the app does, one change each, stamped as the chat's, under the switch.
   A let-go must name mine or a gift: there is no default.
 - The Queue (chat-queue-read 02): queue reads the Queue's labelling work
-  card by card, as the operator sees it; it never asks Jev and writes
-  nothing. Saving a card is the operator's: no tool here labels a group.
+  card by card, as the operator sees it, and one pile a page at a time from
+  a cursor when asked (fin-redesign item 27); queue_summary counts every
+  pile. Neither asks Jev or writes anything. Chat saves cards only in
+  batches, through plan_preview and plan_apply (below); add_rule and
+  change_merchant label the past rows a pattern or merchant matches.
 - Plans (chat-plan-apply 02): chat labels the Queue in bulk only through
   plan_preview, which writes nothing, and plan_apply, which writes the
   previewed batch as one change entry on that preview's token, refused when
   the book moved since (a replay included). Both stop with the switch off. The
   token stands in for expected_count: a batch over MANY_ROWS rows applies on
   it and is recorded as asked first.
-- No tool imports a statement, changes or deletes an imported row, edits an
-  account other than adding a company or a person, sends merchants to the
-  type-suggestion service, runs a conversion or touches subscriptions.
+- No tool imports a statement, changes or deletes an imported row, changes
+  or deletes an account (adding one is create_account, or
+  add_company_or_person), sends merchants to the type-suggestion service,
+  runs a conversion or touches subscriptions.
   Statements reach the hosted fin through the upload command (fin_upload.py).
+- Accounts (fin redesign, design evaluation §4): create_account adds an
+  account of any declared kind over the app's Add an account, so the
+  statements imported after find it with its right kind. The route refuses a
+  name fin already holds.
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
 the client the chat gate verified, labelled as folio labels it: `chat:<sub>`,
@@ -59,10 +67,12 @@ is no default actor: every call names who asks.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Callable
 
 import access_gate
+import account_kind
 import chat_writes
 import db
 import history
@@ -108,6 +118,9 @@ _I = {"type": "integer"}
 _B = {"type": "boolean"}
 _MONTH = {"type": "string", "description": "YYYY-MM"}
 _DAY = {"type": "string", "description": "YYYY-MM-DD"}
+# The Queue's piles the queue tool pages, as fin's route names them
+# (app.QUEUE_SECTIONS; a test holds the two together).
+QUEUE_SECTIONS = ("untyped", "sure", "pick", "no_guess", "check_each", "transfers")
 _EXPECTED = {
     "type": "integer",
     "description": f"For a change over {MANY_ROWS} rows: the row count the operator agreed to.",
@@ -200,7 +213,9 @@ _READS = [
         "of its account's currency (amount_minor; expected_minor: what is expected back or to "
         "pay back on it; placed_minor: what it has set off against others; own_minor: what is "
         "left of its own, which is what spending or income counts). Filter by date range, month, account, "
-        "book, types (comma-separated ids), flow (e.g. review, movement, expense), or search text.",
+        "book, types (comma-separated type names as the types tool gives them, a parent taking its "
+        "sub-types; __untyped__ picks the spending and refund rows with no type), flow (e.g. review, "
+        "movement, expense), or search text.",
         _schema({
             "start": _DAY, "end": _DAY, "month": _MONTH, "account_id": _I, "book": _S,
             "types": _S, "flow": _S, "search": _S, "sort": _S, "sort_dir": _S,
@@ -233,12 +248,35 @@ _READS = [
         "own prefilled book only when it differs. Then the rows waiting under Check each row "
         "(merchant, type, usual book, the row's own book) and the transfers waiting for a "
         "label (count, totals, rows). Amounts are in minor units of the row's currency. Each "
-        "list holds the biggest 100 and says when it is cut (showing N of M). "
-        "This only reads and applies nothing: saving a card (a group's name, wording, type and "
-        "book at once) is the operator's, in fin's Queue.",
+        "list holds the biggest 100 and says when it is cut (showing N of M); the rows with no "
+        "type share one 100-row budget the biggest cards fill, so small cards wait behind them. "
+        "To reach every card, page one section: untyped (every card with no type), sure, pick or "
+        "no_guess (those Jev is sure of, offers three types for, or has no guess for), check_each "
+        "or transfers; with limit (the rows a page holds, 1 to 100; 100 when not given) and after "
+        "(the next cursor the page before gave; next is null on the last page). A page of cards "
+        "ends at a card's end; a card over the limit comes alone with its first rows, row_count "
+        "saying how many it holds (its later rows come once its first are labelled). A card stands "
+        "where its biggest row does, so if rows are labelled, imported or put back while you page, "
+        "page again from the start: queue_summary counts every pile, before and after. "
+        "This only reads and applies nothing: saving cards (a group's name, wording, type and "
+        "book at once) is plan_preview then plan_apply, in batches, on the operator's yes.",
+        _schema({
+            "section": {"type": "string", "enum": list(QUEUE_SECTIONS)},
+            "after": {**_S, "description": "The next cursor from the page before."},
+            "limit": {**_I, "description": "The rows a page holds, 1 to 100."},
+        }),
+        False,
+        _get("/api/queue/cards", "section", "after", "limit"),
+    ),
+    Tool(
+        "queue_summary",
+        "How much waits in the Queue, counts only: cards and rows in each pile queue pages "
+        "(untyped, and of those sure, pick and no_guess by Jev's guess; check_each; transfers), "
+        "and jev: whether Jev guesses at all (off, every card with no type is no_guess). "
+        "Read it to see the whole Queue before paging a pile with queue.",
         _schema(),
         False,
-        _get("/api/queue/cards"),
+        _get("/api/queue/summary"),
     ),
     Tool(
         "accounts",
@@ -369,7 +407,8 @@ _WRITES = [
     ),
     _w(
         "label_review",
-        "Say what a transfer waiting for review was. choice: spending (type_id; book where the "
+        "Say what a row was: a transfer waiting for review, or any row (the app's \"Change "
+        "what this was…\" uses it too), whose flow, other side, book and type it rewrites. choice: spending (type_id; book where the "
         "type proposes none), gift, own_account (account_id), company (account_id), "
         "loan_repayment (account_id of a loan), income (income_kind_id). A person is no "
         "movement's other side: money lent to or owed to a person is mark_expect_back on the row "
@@ -456,6 +495,22 @@ _WRITES = [
         {"kind": {"type": "string", "enum": ["company", "person"]}, "name": _S},
         ("kind", "name"),
         lambda a: ("POST", "/api/accounts", _account_body(a)),
+    ),
+    _w(
+        "create_account",
+        "Add an account before its statements are imported, so the import finds it by its name "
+        "or last four digits and does not make one with a kind guessed from the name. kind: a "
+        "holding is something owned that no statement reports; untracked is the household's own "
+        "account fin holds no statements for (a family member's own bank). currency: SGD unless "
+        "given; owner: Household unless a company's. Refused when fin already has an account of "
+        "that name, in any case: read accounts first.",
+        {"name": _S, "kind": {"type": "string", "enum": list(account_kind.KIND_NAMES)},
+         "currency": _S, "owner": {"type": "string", "enum": list(account_kind.OWNER_NAMES)},
+         "last_four": {"type": "string", "pattern": "^[0-9]{4}$",
+                       "description": "four digits: the account's last four, e.g. 3528"}},
+        ("name", "kind"),
+        lambda a: ("POST", "/api/accounts",
+                   {**_account_body(a), **_pick(a, "currency", "owner", "last_four")}),
     ),
     _w(
         "pair_transfers",
@@ -662,6 +717,7 @@ TITLES = {
     "transactions": "Read rows",
     "review_summary": "Read the transfers waiting for a label",
     "queue": "Read your Queue",
+    "queue_summary": "Read how much waits in your Queue",
     "accounts": "Read your accounts",
     "figures": "Read statement balances and typed figures",
     "merchants": "Read your merchants",
@@ -677,7 +733,7 @@ TITLES = {
     "expected_back": "Read what is expected back",
     "set_label": "Change a row's book or type",
     "set_note": "Change a row's note",
-    "label_review": "Label a transfer waiting for review",
+    "label_review": "Say what a row was",
     "enter_figure": "Enter a figure for an account",
     "correct_figure": "Correct a typed figure",
     "delete_figure": "Delete a typed figure",
@@ -687,6 +743,7 @@ TITLES = {
     "change_merchant": "Change a merchant",
     "merge_merchants": "Merge two merchants",
     "add_company_or_person": "Add a company or a person",
+    "create_account": "Add an account",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",
     "set_rate": "Enter an exchange rate",
@@ -741,6 +798,10 @@ def _checked(tool: Tool, args: dict) -> dict:
         allowed = schema["properties"][k].get("enum")
         if allowed and v not in allowed:
             raise ToolRefused(f"{k} must be one of {', '.join(allowed)}")
+        # A pattern the schema declares; the refusal says it as the description does.
+        pattern = schema["properties"][k].get("pattern")
+        if pattern and not re.fullmatch(pattern, v, re.ASCII):
+            raise ToolRefused(f"{k} must be {schema['properties'][k]['description']}")
     return args
 
 

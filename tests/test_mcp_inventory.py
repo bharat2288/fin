@@ -32,6 +32,8 @@ GOLDEN: list[str] = [
     "review_summary",
     # chat-queue-read 02: the Queue's labelling work, card by card (a read)
     "queue",
+    # fin-redesign item 27: every pile's cards and rows, counted (a read)
+    "queue_summary",
     "accounts", "figures", "merchants", "rules",
     # fin-surfaces 51: the rows that differ from their rule (Re-run every rule's place)
     "rule_drift",
@@ -40,7 +42,10 @@ GOLDEN: list[str] = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     # fin-surfaces 51: rerun_rules removed, as Re-run every rule is retired
     "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
-    "add_company_or_person", "pair_transfers", "fetch_rate", "set_rate",
+    "add_company_or_person",
+    # fin redesign: accounts made with their kind before their statements are imported
+    "create_account",
+    "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off", "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
     "undo",

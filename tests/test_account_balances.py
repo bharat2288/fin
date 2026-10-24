@@ -162,6 +162,15 @@ def test_case_35_no_balance_before_the_first_anchor(conn):
     assert account_balances.balances(conn, account_row(conn, card), ["2026-01"])["no_balance"] is None
 
 
+
+def test_an_untracked_account_says_fin_holds_nothing_for_it_never_to_import_one(conn):
+    partner = account(conn, "Sample Partner Bank", type="untracked")
+
+    got = account_balances.balances(conn, account_row(conn, partner), ["2026-08"])
+
+    assert got["no_balance"] == account_balances.UNTRACKED_NOTE
+    assert "import" not in got["no_balance"]
+
 # --- Case 56: before the balance sheet starts --------------------------------
 
 def test_case_56_two_years_draw_in_out_and_start_the_line_in_january(conn, everyday_savings):

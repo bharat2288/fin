@@ -21,6 +21,9 @@ KINDS = (
     ("company", "the household's money in a company: costs paid for it plus capital put in, "
                 "less what it has paid back"),
     ("person", "money lent to, or owed by, a person outside the household"),
+    ("untracked", "the household's own account that fin holds no statements for, such as a "
+                  "family member's own bank; money moved there leaves fin's sight, and it is "
+                  "never a missing statement"),
 )
 
 KIND_NAMES = tuple(name for name, _ in KINDS)
@@ -34,6 +37,8 @@ SUPPLIED_FIGURE_KINDS = ("loan", "holding", "company", "person")
 SUPPLIED_UNTIL_STATEMENT_KINDS = ("bank",)
 # Kinds whose supplied figure is what is owed: typed positive, stored negative.
 OWED_KINDS = ("loan",)
+# Kinds off the sheet: no statement, no figure; money moved there leaves the check.
+UNTRACKED_KINDS = ("untracked",)
 
 # (name, description). The owner says whose sheet the account is on: the
 # household's, or a company's. The companies are the company books, so a new

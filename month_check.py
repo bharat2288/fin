@@ -538,8 +538,13 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
 
     # Money moved between an account in the check and one left out of it:
     # it changes the checked net worth and is neither income nor spending.
+    # An untracked account has no line on the sheet: money moved to it leaves
+    # the check the same way.
     with_parts = in_check | {part for part, whole in parts.items() if whole in in_check}
-    outside, touched = _crossing(conn, after, upto, with_parts, out_of_check, end_lines)
+    untracked = {r[0] for r in conn.execute(
+        f"SELECT id FROM accounts WHERE type IN ({', '.join('?' for _ in account_kind.UNTRACKED_KINDS)})",
+        account_kind.UNTRACKED_KINDS)}
+    outside, touched = _crossing(conn, after, upto, with_parts, out_of_check | untracked, end_lines)
     touched = {parts.get(acct, acct) for acct in touched}
 
     # Accounts in another currency: in the check at the month-end rate, or

@@ -588,7 +588,8 @@ _CHANGE_SUMMARIES = {
     "api_rules_drift_apply": "Relabelled the rows that differed from their rule",
     "api_rates_fetch": "Fetched an exchange rate",
     "api_rates_overwrite": "Overwrote an exchange rate",
-    "api_review_label": "Labelled a waiting transfer",
+    # Any row, not only a transfer waiting: "Change what this was…" sends one too.
+    "api_review_label": "Said what a row was",
     "api_pair_matching": "Paired transfers between own accounts",
     "api_subscriptions_create": "Added a subscription",
     "api_subscriptions_update": "Changed a subscription",
@@ -1292,7 +1293,9 @@ def api_accounts():
 
 @app.route("/api/accounts", methods=["POST"])
 def api_accounts_create():
-    """Create a new account."""
+    """Create a new account. A name fin already holds, in any case and with
+    spaces either side, is refused: an import and a rule find an account by
+    its name, so a second one under it would split what lands there."""
     data = request.get_json()
     if not data or not data.get("name"):
         return jsonify({"error": "Account name is required"}), 400
@@ -1304,14 +1307,24 @@ def api_accounts_create():
     except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
         return jsonify({"error": str(e)}), 400
 
+    name = str(data["name"]).strip()
     with get_db() as conn:
+        held = conn.execute(
+            "SELECT name, type FROM accounts WHERE LOWER(TRIM(name)) = LOWER(?) ORDER BY id",
+            (name,),
+        ).fetchone()
+        if held is not None:
+            return jsonify({"error": (
+                f"fin already has an account named {mask_card_number(held['name'])}, "
+                f"of kind {held['type']}; nothing was added"
+            )}), 409
         return _crud_insert(
             conn,
             "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
-                data["name"],
-                data.get("short_name", data["name"]),
+                name,
+                data.get("short_name", name),
                 kind,
                 data.get("last_four"),
                 currency,
@@ -4090,10 +4103,12 @@ def _queue_card_groups(conn, on: bool) -> list[dict]:
     return list(cards.values())
 
 
-def _queue_list(conn, where: str, params: list, *, hide: bool) -> tuple[list, int]:
+def _queue_list(conn, where: str, params: list, *, hide: bool, limit: int = QUEUE_ROW_CAP,
+                after: tuple | None = None) -> tuple[list, int]:
     """The rows `where` picks, the biggest own part first as the Queue sorts
-    them, up to QUEUE_ROW_CAP, and how many it picks in all. `hide` leaves out
-    the merchants hidden from expense views, as the Queue's list of them does."""
+    them, up to `limit`, and how many it picks in all. `hide` leaves out
+    the merchants hidden from expense views, as the Queue's list of them does.
+    `after` (a page's cursor, _queue_cursor) starts past that row."""
     if hide:
         where = f"{where} AND {_expense_visibility_filter('svc')}"
     joins = """FROM transactions t
@@ -4110,10 +4125,10 @@ def _queue_list(conn, where: str, params: list, *, hide: bool) -> tuple[list, in
                ty.name AS type, tp.name AS parent_type, {_PARTS_COLUMNS}
         {joins}
         JOIN row_parts rp ON rp.row_id = t.id
-        WHERE {where}
+        WHERE {where}{" AND (rp.own_minor, t.date, t.id) < (?, ?, ?)" if after else ""}
         ORDER BY rp.own_minor DESC, t.date DESC, t.id DESC
         LIMIT ?
-    """, [*params, QUEUE_ROW_CAP]).fetchall()
+    """, [*params, *(after or ()), limit]).fetchall()
     return rows, total
 
 
@@ -4164,43 +4179,23 @@ def _card_rows(rows: list, prefills: dict, prefill: dict) -> tuple[dict, list]:
     return shared, listed
 
 
-@app.route("/api/queue/cards")
-def api_queue_cards():
-    """The Queue's labelling work as its cards hold it, for chat to read: the
-    rows with no type in their merchant groups (each with Jev's guess, the
-    name and wording fin suggests, the prefilled book and why, and the
-    merchant fin holds by that name), the rows waiting under Check each row,
-    and the transfers waiting for a label. Each list holds at most
-    QUEUE_ROW_CAP rows and says when it is cut. Read from what is stored; it
-    never asks Jev and writes nothing."""
-    on = suggest.key() is not None
-    with get_db() as conn:
-        groups = _queue_card_groups(conn, on)
-        each, each_total = _queue_list(conn, _not_checked_rows(), [], hide=True)
-        waiting_where, waiting_params = _waiting_rows()
-        transfers, transfers_total = _queue_list(conn, waiting_where, waiting_params, hide=False)
-        waiting = _waiting_sides(conn)
-        # The merchant a name finds, ignoring case: the first by name, as the
-        # card takes it from the merchants list.
-        held = {}
-        for svc in conn.execute(
-            "SELECT svc.id, svc.name, svc.type_id, ty.name AS type, svc.book,"
-            " COALESCE(svc.review_each_time, 0) AS review_each_time"
-            " FROM services svc LEFT JOIN types ty ON ty.id = svc.type_id ORDER BY svc.name, svc.id"
-        ):
-            held.setdefault(svc["name"].lower(), {**dict(svc), "review_each_time": bool(svc["review_each_time"])})
-        proposes = book_type.proposed_books(conn)
-        # The groups up to the cap, the rows of each oldest first: the first
-        # names the merchant the card's save makes.
-        room, shown = QUEUE_ROW_CAP, []
-        for g in groups:
-            if room <= 0:
-                break
-            rows = sorted(g["rows"], key=lambda r: (r["date"] or "", r["id"]))
-            shown.append((g, rows, rows[:room]))
-            room -= len(rows[:room])
-        prefills = book_prefill.book_prefills(conn, [r["id"] for _, _, listed in shown for r in listed])
-
+def _queue_cards(conn, shown: list) -> list[dict]:
+    """The cards chat reads for `shown`, each (group, its rows oldest first,
+    the rows listed): its rows, Jev's guess, the name and wording fin
+    suggests (from the first row: it names the merchant the card's save
+    makes), the prefilled book and why, and the merchant fin holds by that
+    name."""
+    # The merchant a name finds, ignoring case: the first by name, as the
+    # card takes it from the merchants list.
+    held = {}
+    for svc in conn.execute(
+        "SELECT svc.id, svc.name, svc.type_id, ty.name AS type, svc.book,"
+        " COALESCE(svc.review_each_time, 0) AS review_each_time"
+        " FROM services svc LEFT JOIN types ty ON ty.id = svc.type_id ORDER BY svc.name, svc.id"
+    ):
+        held.setdefault(svc["name"].lower(), {**dict(svc), "review_each_time": bool(svc["review_each_time"])})
+    proposes = book_type.proposed_books(conn)
+    prefills = book_prefill.book_prefills(conn, [r["id"] for _, _, listed in shown for r in listed])
     cards = []
     for g, rows, listed in shown:
         name = name_wording.suggest_name(rows[0]["description"])
@@ -4217,15 +4212,58 @@ def api_queue_cards():
             "row_count": len(rows),
             "rows": card_rows,
         })
+    return cards
+
+
+def _check_each_row(r) -> dict:
+    """A row waiting under Check each row, as chat reads it: its merchant,
+    type and usual book beside the row's own."""
+    return {
+        **_queue_row(r), "merchant": r["service_name"], "service_id": r["service_id"],
+        "type": r["type"], "display_type": format_type_display(r["parent_type"], r["type"]),
+        "type_id": r["type_id"], "usual_book": r["service_book"] or r["book"],
+    }
+
+
+@app.route("/api/queue/cards")
+def api_queue_cards():
+    """The Queue's labelling work as its cards hold it, for chat to read: the
+    rows with no type in their merchant groups (each with Jev's guess, the
+    name and wording fin suggests, the prefilled book and why, and the
+    merchant fin holds by that name), the rows waiting under Check each row,
+    and the transfers waiting for a label. Each list holds at most
+    QUEUE_ROW_CAP rows and says when it is cut. Read from what is stored; it
+    never asks Jev and writes nothing.
+
+    With section (and limit, after), one pile a page at a time instead
+    (_queue_page): the bare read's one budget is filled by the biggest cards,
+    so a small card waits behind them (fin-redesign item 27)."""
+    if any(k in request.args for k in ("section", "limit", "after")):
+        return _queue_page()
+    on = suggest.key() is not None
+    with get_db() as conn:
+        groups = _queue_card_groups(conn, on)
+        each, each_total = _queue_list(conn, _not_checked_rows(), [], hide=True)
+        waiting_where, waiting_params = _waiting_rows()
+        transfers, transfers_total = _queue_list(conn, waiting_where, waiting_params, hide=False)
+        waiting = _waiting_sides(conn)
+        # The groups up to the cap, the rows of each oldest first: the first
+        # names the merchant the card's save makes.
+        room, shown = QUEUE_ROW_CAP, []
+        for g in groups:
+            if room <= 0:
+                break
+            rows = sorted(g["rows"], key=lambda r: (r["date"] or "", r["id"]))
+            shown.append((g, rows, rows[:room]))
+            room -= len(rows[:room])
+        cards = _queue_cards(conn, shown)
+
     untyped_total = sum(len(g["rows"]) for g in groups)
     lists = {
         "untyped": {"groups": cards, "total": untyped_total,
                     "shown": _shown_of(QUEUE_ROW_CAP - room, untyped_total)},
-        "check_each": {"rows": [{
-            **_queue_row(r), "merchant": r["service_name"], "service_id": r["service_id"],
-            "type": r["type"], "display_type": format_type_display(r["parent_type"], r["type"]),
-            "type_id": r["type_id"], "usual_book": r["service_book"] or r["book"],
-        } for r in each], "total": each_total, "shown": _shown_of(len(each), each_total)},
+        "check_each": {"rows": [_check_each_row(r) for r in each], "total": each_total,
+                       "shown": _shown_of(len(each), each_total)},
         "transfers": {
             "waiting": waiting["count"], "waiting_total": money.from_minor(waiting["net_minor"]),
             **_sides_payload("waiting", waiting),
@@ -4238,6 +4276,124 @@ def api_queue_cards():
         ("transfers", "transfers waiting"), ("untyped", "rows with no type"), ("check_each", "rows to check"),
     ) if lists[key]["shown"]]
     return jsonify({**lists, "cut": cut})
+
+
+# The Queue's piles, as chat pages them (fin-redesign item 27): the rows with
+# no type (untyped), split by Jev's guess as the Queue draws them (sure: the
+# sure card; pick: Pick a type; no_guess: No guess, every card with Jev off),
+# then Check each row and the transfers waiting. mcp_tools' queue tool names
+# the same list; a test holds the two together.
+QUEUE_SECTIONS = ("untyped", "sure", "pick", "no_guess", "check_each", "transfers")
+_QUEUE_PILE_ROUTE = {"sure": "prefill", "pick": "top3", "no_guess": "blank"}
+
+
+def _queue_key(r) -> tuple:
+    """Where a row stands in the Queue's order, the biggest own part first:
+    a card stands where its biggest row does."""
+    return (r["own_minor"], r["date"] or "", r["id"])
+
+
+def _queue_cursor(r) -> str:
+    return "{}:{}:{}".format(*_queue_key(r))
+
+
+def _queue_after(text: str) -> tuple:
+    own, day, row_id = text.split(":")
+    return (int(own), day, int(row_id))
+
+
+def _queue_page():
+    """One pile of the Queue, a page at a time, for chat to reach every card:
+    section (QUEUE_SECTIONS), limit (the rows a page holds, 1 to
+    QUEUE_ROW_CAP, QUEUE_ROW_CAP when not given) and after (the cursor the
+    page before gave). A page of cards ends at a card's end, so no card is
+    split across pages; a card over the limit comes alone with its first
+    rows, and its row_count says how many it holds. next is the cursor for
+    the page after, None on the last. The cursor is where the page's last
+    card or row stands in the Queue's order, so a card labelled whole between
+    pages moves no other card. A card stands where its biggest row does: one
+    that gains a bigger row can jump behind the cursor, and one whose biggest
+    row alone is labelled can come again, so chat pages again from the start
+    when the pile moved (the tool says so)."""
+    section = request.args.get("section")
+    if section is None:
+        return jsonify({"error": "limit and after go with a section"}), 400
+    if section not in QUEUE_SECTIONS:
+        return jsonify({"error": f"section must be one of {', '.join(QUEUE_SECTIONS)}"}), 400
+    try:
+        limit = int(request.args.get("limit", QUEUE_ROW_CAP))
+    except ValueError:
+        limit = 0
+    if not 1 <= limit <= QUEUE_ROW_CAP:
+        return jsonify({"error": f"limit is a number of rows from 1 to {QUEUE_ROW_CAP}"}), 400
+    after = None
+    if request.args.get("after") is not None:
+        try:
+            after = _queue_after(request.args["after"])
+        except ValueError:
+            return jsonify({"error": "after is not a cursor the queue gave"}), 400
+
+    with get_db() as conn:
+        if section in ("check_each", "transfers"):
+            where, params, hide = ((_not_checked_rows(), [], True) if section == "check_each"
+                                   else (*_waiting_rows(), False))
+            rows, total = _queue_list(conn, where, params, hide=hide, limit=limit + 1, after=after)
+            listed = rows[:limit]
+            shown = _check_each_row if section == "check_each" else _queue_row
+            return jsonify({
+                "section": section, "rows": [shown(r) for r in listed], "total": total,
+                "next": _queue_cursor(listed[-1]) if len(rows) > limit else None,
+            })
+
+        groups = _queue_card_groups(conn, suggest.key() is not None)
+        if section in _QUEUE_PILE_ROUTE:
+            groups = [g for g in groups if g["route"] == _QUEUE_PILE_ROUTE[section]]
+        # A card's first row in the list is its biggest (_queue_card_groups).
+        left = [g for g in groups if after is None or _queue_key(g["rows"][0]) < after]
+        page, used = [], 0
+        for g in left:
+            rows = sorted(g["rows"], key=lambda r: (r["date"] or "", r["id"]))
+            if page and used + len(rows) > limit:
+                break
+            page.append((g, rows, rows[:limit]))
+            used += len(rows[:limit])
+        cards = _queue_cards(conn, page)
+    return jsonify({
+        "section": section, "groups": cards, "cards": len(groups),
+        "total": sum(len(g["rows"]) for g in groups),
+        "next": _queue_cursor(page[-1][0]["rows"][0]) if len(page) < len(left) else None,
+    })
+
+
+@app.route("/api/queue/summary")
+def api_queue_summary():
+    """How much waits in each of the Queue's piles (QUEUE_SECTIONS), as
+    cards and rows, and whether Jev guesses at all (with Jev off every card
+    with no type is no_guess): counts only, for chat to see the whole Queue
+    before it pages a pile. A card under Check each row is a merchant's rows;
+    a transfer is its own card. Read from what is stored; it never asks Jev
+    and writes nothing."""
+    on = suggest.key() is not None
+    with get_db() as conn:
+        groups = _queue_card_groups(conn, on)
+        each = conn.execute(f"""
+            SELECT COUNT(*), COUNT(DISTINCT t.service_id) FROM transactions t
+            LEFT JOIN services svc ON t.service_id = svc.id
+            WHERE {_not_checked_rows()} AND {_expense_visibility_filter('svc')}
+        """).fetchone()
+        waiting_where, waiting_params = _waiting_rows()
+        _, transfers = _queue_list(conn, waiting_where, waiting_params, hide=False, limit=0)
+
+    def pile(gs):
+        return {"cards": len(gs), "rows": sum(len(g["rows"]) for g in gs)}
+
+    return jsonify({
+        "jev": on,
+        "untyped": pile(groups),
+        **{name: pile([g for g in groups if g["route"] == route]) for name, route in _QUEUE_PILE_ROUTE.items()},
+        "check_each": {"cards": each[1], "rows": each[0]},
+        "transfers": {"cards": transfers, "rows": transfers},
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -5360,20 +5516,25 @@ def api_rules():
 
 
 def _rows_labelled_by_rule(conn) -> dict[int, int]:
-    """How many rows each rule labels now: every row a later change may
-    reach (label_source: a field from fin or checked), counted against the
-    rule that wins for it, as a re-run would find it. Transfers and card
-    payments are not counted."""
-    counts: dict[int, int] = {}
+    """How many rows each rule labels now (_rows_by_rule)."""
+    return {rule_id: len(rows) for rule_id, rows in _rows_by_rule(conn).items()}
+
+
+def _rows_by_rule(conn) -> dict[int, list[int]]:
+    """The rows each rule labels now: every row a later change may reach
+    (label_source: a field from fin or checked), held against the rule that
+    wins for it, as a re-run would find it. Transfers and card payments are
+    not counted. The baseline snapshot (fin_snapshot.py) reads it too."""
+    rows: dict[int, list[int]] = {}
     for tx in conn.execute(
-        "SELECT description, amount_minor FROM transactions t "
+        "SELECT id, description, amount_minor FROM transactions t "
         "WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment') "
-        f"AND {label_source.any_reachable_sql('t')}"
+        f"AND {label_source.any_reachable_sql('t')} ORDER BY id"
     ):
         rule = first_rule(tx["description"] or "", conn, tx["amount_minor"])
         if rule is not None:
-            counts[rule["id"]] = counts.get(rule["id"], 0) + 1
-    return counts
+            rows.setdefault(rule["id"], []).append(tx["id"])
+    return rows
 
 
 @app.route("/api/rules", methods=["POST"])
@@ -5738,7 +5899,7 @@ def api_review_label(tx_id: int):
     Body: choice, and what the choice asks for (see /api/review):
         spending        type_id; book where the type proposes none
         gift            nothing: spending when given, income when received
-        own_account     account_id of a household bank account or card
+        own_account     account_id of a household bank account, card or untracked account
         company         account_id of a company
         loan_repayment  account_id of a loan
         income          income_kind_id
