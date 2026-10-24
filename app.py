@@ -5263,20 +5263,25 @@ def api_rules():
 
 
 def _rows_labelled_by_rule(conn) -> dict[int, int]:
-    """How many rows each rule labels now: every row a later change may
-    reach (label_source: a field from fin or checked), counted against the
-    rule that wins for it, as a re-run would find it. Transfers and card
-    payments are not counted."""
-    counts: dict[int, int] = {}
+    """How many rows each rule labels now (_rows_by_rule)."""
+    return {rule_id: len(rows) for rule_id, rows in _rows_by_rule(conn).items()}
+
+
+def _rows_by_rule(conn) -> dict[int, list[int]]:
+    """The rows each rule labels now: every row a later change may reach
+    (label_source: a field from fin or checked), held against the rule that
+    wins for it, as a re-run would find it. Transfers and card payments are
+    not counted. The baseline snapshot (fin_snapshot.py) reads it too."""
+    rows: dict[int, list[int]] = {}
     for tx in conn.execute(
-        "SELECT description, amount_minor FROM transactions t "
+        "SELECT id, description, amount_minor FROM transactions t "
         "WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment') "
-        f"AND {label_source.any_reachable_sql('t')}"
+        f"AND {label_source.any_reachable_sql('t')} ORDER BY id"
     ):
         rule = first_rule(tx["description"] or "", conn, tx["amount_minor"])
         if rule is not None:
-            counts[rule["id"]] = counts.get(rule["id"], 0) + 1
-    return counts
+            rows.setdefault(rule["id"], []).append(tx["id"])
+    return rows
 
 
 @app.route("/api/rules", methods=["POST"])
