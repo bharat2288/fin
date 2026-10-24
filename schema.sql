@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS merchant_rules (
     type_override_id INTEGER REFERENCES types(id),  -- type the rule sets in place of the merchant's
     min_amount_minor INTEGER,      -- if set, rule only matches when the row's amount_minor >= this
     max_amount_minor INTEGER,      -- if set, rule only matches when the row's amount_minor <= this
+    flow TEXT,                     -- what the rule says a row is (flow.RULE_FLOWS); NULL = it states no flow and labels only (ADR-009). An existing database gains it through convert_rule_flow.py
+    other_side_id INTEGER REFERENCES accounts(id),  -- the account it names as the row's other side, with its flow; NULL = none named
     FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
@@ -506,23 +508,23 @@ WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'merchant_rules', NEW.id, 'insert', NULL,
-        json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor));
+        json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor, 'flow', NEW.flow, 'other_side_id', NEW.other_side_id));
 END;
 CREATE TRIGGER IF NOT EXISTS history_merchant_rules_update AFTER UPDATE ON merchant_rules
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
-    AND json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor) IS NOT json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor)
+    AND json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor, 'flow', OLD.flow, 'other_side_id', OLD.other_side_id) IS NOT json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor, 'flow', NEW.flow, 'other_side_id', NEW.other_side_id)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'merchant_rules', NEW.id, 'update',
-        json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor),
-        json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor));
+        json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor, 'flow', OLD.flow, 'other_side_id', OLD.other_side_id),
+        json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor, 'flow', NEW.flow, 'other_side_id', NEW.other_side_id));
 END;
 CREATE TRIGGER IF NOT EXISTS history_merchant_rules_delete AFTER DELETE ON merchant_rules
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'merchant_rules', OLD.id, 'delete',
-        json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor), NULL);
+        json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor, 'flow', OLD.flow, 'other_side_id', OLD.other_side_id), NULL);
 END;
 CREATE TRIGGER IF NOT EXISTS history_accounts_insert AFTER INSERT ON accounts
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)

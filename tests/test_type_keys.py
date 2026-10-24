@@ -17,6 +17,7 @@ import sqlite3
 from pathlib import Path
 
 import book_type
+import convert_rule_flow
 import db
 import history
 import suggest
@@ -35,10 +36,14 @@ NEW_TABLES = {"type_keys", "type_settings", "type_slots", "seeded_once"}
 
 
 def book_before(tmp_path, monkeypatch) -> Path:
-    """The book main made, as a file fin is pointed at."""
+    """The book main made, as a file fin is pointed at: brought through the
+    conversion steps added since (rule-flow, fin-redesign 07), which add to
+    its shape and change no row, as the operator's book is before a start."""
     path = tmp_path / "before.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(BEFORE.read_text(encoding="utf-8"))
+    convert_rule_flow.STEP.apply(conn)
+    conn.commit()
     conn.close()
     monkeypatch.setattr(db, "DB_PATH", path)
     db.invalidate_rules_cache()

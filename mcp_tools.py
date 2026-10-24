@@ -146,6 +146,20 @@ _PAST_SAID = (
     "rows take it, unless they already said; then call again with past and the preview's token. "
     "A token from a preview that no longer holds is refused: look again."
 )
+# What a rule may say its rows are (ADR-009; fin-redesign 07).
+_RULE_FLOW = {
+    "flow": {"type": "string", "description": "What the rule's rows are: expense, income, refund, transfer, "
+                                              "payment or movement (never review). Left out, the rule labels "
+                                              "only and fin works the flow out."},
+    "other_side_id": {"type": "integer", "description": "With flow: the household account on the other side; "
+                                                        "required for a transfer (a bank, card or untracked "
+                                                        "account) and a movement (a loan, holding or company). "
+                                                        "Never a person."},
+}
+_RULE_FLOW_SAID = (
+    "A rule may state what its rows are (flow, other_side_id): it beats what fin works out, never a flow "
+    "the operator set by hand, and the preview lists every past row whose flow would change (flows). "
+)
 # The tools that answer with the preview.
 _PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})
 
@@ -444,23 +458,23 @@ _WRITES = [
     _w(
         "add_rule",
         "Add a merchant rule: rows whose description matches the pattern take the merchant "
-        "(service_id) and its book and type, or the rule's own overrides. " + _PAST_SAID,
+        "(service_id) and its book and type, or the rule's own overrides. " + _RULE_FLOW_SAID + _PAST_SAID,
         {"pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I, **_PAST},
+         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST},
         ("pattern", "service_id"),
         lambda a: ("POST", "/api/rules", _pick(a, "pattern", "service_id", "match_type",
                                               "book_override", "type_override_id", "priority",
-                                              *_PAST)),
+                                              *_RULE_FLOW, *_PAST)),
     ),
     _w(
         "change_rule",
-        "Change a merchant rule. " + _PAST_SAID,
+        "Change a merchant rule. " + _RULE_FLOW_SAID + "flow \"\" makes it state none again. " + _PAST_SAID,
         {"rule_id": _I, "pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I, **_PAST},
+         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST},
         ("rule_id",),
         lambda a: ("PUT", f"/api/rules/{int(a['rule_id'])}",
                    _pick(a, "pattern", "service_id", "match_type", "book_override",
-                         "type_override_id", "priority", *_PAST)),
+                         "type_override_id", "priority", *_RULE_FLOW, *_PAST)),
     ),
     _w(
         "delete_rule",

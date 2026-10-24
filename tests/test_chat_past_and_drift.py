@@ -534,7 +534,7 @@ def text_of(html) -> str:
 @needs_node
 def test_the_drift_drawer_reads_as_mocked_with_leave_them_and_apply():
     got = _node("\n".join([PRELUDE, _function("monthName"), _function("bandedTable"), _const("PREVIEW_FIELD"),
-                           _const("PREVIEW_TITLE"), _function("driftParts"), _function("previewParts"),
+                           _const("PREVIEW_TITLE"), _function("flowsLine"), _function("driftParts"), _function("previewParts"),
                            f"console.log(JSON.stringify(previewParts({json.dumps(DRIFT)})));"]))
     text = text_of(got["body"])
     assert got["title"] == "3 rows differ from their rule" and got["eyebrow"] == "Rules"

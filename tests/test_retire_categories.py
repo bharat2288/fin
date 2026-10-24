@@ -19,6 +19,7 @@ import convert_book_type
 import convert_minor_units
 import convert_label_source
 import convert_printed_statements
+import convert_rule_flow
 import db
 import history
 import retire_categories
@@ -278,8 +279,9 @@ def test_a_database_through_every_step_has_the_shape_of_a_new_one(old, tmp_path)
                 for t in tables
             },
             "foreign_keys": {
-                t: sorted(query(path, f"SELECT \"table\", \"from\", \"to\""
-                                      f" FROM pragma_foreign_key_list('{t}')"))
+                t: sorted(k for k in query(path, f"SELECT \"table\", \"from\", \"to\""
+                                                 f" FROM pragma_foreign_key_list('{t}')")
+                          if k[1] not in later.get(t, ()))
                 for t in tables
             },
             "indexes": sorted(query(
@@ -447,6 +449,7 @@ def test_the_app_serves_a_converted_database_by_book_and_type(old, started_on, m
     conversion.run_step(old, convert_change_history.STEP)
     conversion.run_step(old, convert_label_source.STEP)
     conversion.run_step(old, retire_single_mark.STEP)
+    conversion.run_step(old, convert_rule_flow.STEP)
     client = started_on(old)
 
     rows = {t["id"]: t for t in client.get("/api/transactions?per_page=50").get_json()["transactions"]}

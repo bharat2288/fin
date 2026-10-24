@@ -136,6 +136,20 @@ REDEMPTION_PREFIX, REDEMPTION_MARKER = "RTGSCR", "REDEMPTION"
 # The kinds of account a rule above may name as an other side.
 RULE_OTHER_SIDE_KINDS = ("loan", "holding", "company")
 
+# What a merchant rule may say a row is (ADR-009): any flow but review, which
+# is what a transfer is while nothing says. Each with the kinds of the
+# household's accounts its other side may be, and whether the rule must name
+# one. A person is never one: what is lent to or owed by a person is expected
+# back on the row (personal-ledger 23).
+RULE_FLOWS = {
+    "expense": ((), False),
+    "income": ((), False),
+    "refund": ((), False),
+    "transfer": ((*account_kind.STATEMENT_KINDS, "untracked"), True),
+    "payment": (account_kind.STATEMENT_KINDS, False),
+    MOVEMENT: (RULE_OTHER_SIDE_KINDS, True),
+}
+
 ACCOUNT_REF_RE = re.compile(r"\b\d{3}-\d{5,9}-\d\b")
 LOCAL_ALIAS_SPLIT_RE = re.compile(r"[\n,;]+")
 
@@ -352,10 +366,53 @@ def _rupee_receipt_rule(facts: dict, received: bool) -> str | None:
     return None
 
 
+def stated(rule) -> tuple[str, int | None] | None:
+    """The flow and other side a merchant rule states, or None: a rule that
+    states no flow labels only (ADR-009)."""
+    if rule is None or not rule.get("flow"):
+        return None
+    return rule["flow"], rule.get("other_side_id")
+
+
+def rule_facts(rule) -> dict:
+    """The facts classify_row reads of the rule that labels a row: the flow
+    and other side it states, if it states one."""
+    said = stated(rule)
+    return {} if said is None else {"rule_flow": said[0], "rule_other_side": said[1]}
+
+
 def classify_row(facts: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
-    """Return (flow, the account id of the row's other side or None)."""
+    """Return (flow, the account id of the row's other side or None).
+
+    Who says what a row is, in order (ADR-009): the operator, by hand (the
+    caller keeps a flow set by hand, and never asks); then the rule that
+    labels the row, where it states a flow (`rule_flow` and `rule_other_side`,
+    rule_facts); then the classifier, whose own rules include the account
+    numbers a description names (rule 4)."""
+    if facts.get("rule_flow"):
+        return facts["rule_flow"], facts.get("rule_other_side")
     flow = classify_flow(facts, ctx)
     return flow, (_named_other_side(facts, ctx) if flow == MOVEMENT else None)
+
+
+def worked_out_again(held, service_id, type_id, rule, account: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
+    """The flow of a row already in the book (`held`: its description,
+    amount_minor and flow_type), worked out again for the merchant and type
+    it now has, the rule that now labels it (or None) and the kind and owner
+    of the account it is on (`account`). A rule that states a flow says what
+    the row is. Otherwise flow is stable over time (the flow decision): the
+    review hold a rule no longer lifts holds a row as it is first imported,
+    and never puts back a row already out of review while it keeps a
+    merchant or a type; a row waiting stays waiting (ADR-009). The caller
+    keeps a flow set by hand."""
+    return classify_row({
+        "description": held["description"],
+        "amount_minor": held["amount_minor"],
+        "service_id": service_id,
+        "labelled": held["flow_type"] != REVIEW and bool(service_id or type_id),
+        **account,
+        **rule_facts(rule),
+    }, ctx)
 
 
 def classify_flow(facts: dict, ctx: ClassifierContext) -> str:

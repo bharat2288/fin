@@ -320,7 +320,8 @@ def test_the_converted_laptop_book_keeps_the_change_history(tmp_path):
     try:
         assert history.has_shape(conn)
         assert "change-history" not in conversion.not_applied(conn)
-        assert conversion.CHAIN[-1][0] == "retire-single-mark"
+        assert conversion.CHAIN[-1][0] == "rule-flow"
+        assert "rule-flow" not in conversion.not_applied(conn)
         assert "expect-back" not in conversion.not_applied(conn)
         assert "label-source" not in conversion.not_applied(conn)
         assert "retire-single-mark" not in conversion.not_applied(conn)

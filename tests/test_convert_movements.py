@@ -111,7 +111,7 @@ def old_schema() -> str:
     step adds (conversion.added_after)."""
     later = conversion.added_after("movements").get("transactions", set())
     lines = history.without_history(db.SCHEMA_PATH.read_text()).splitlines()
-    kept = [line for line in lines if not line.strip().startswith("other_side_id ")
+    kept = [line for line in lines if not line.strip().startswith("other_side_id INTEGER REFERENCES accounts(id),  -- the account a movement")
             and line.strip().split(" ", 1)[0] not in later]
     assert len(kept) == len(lines) - 1 - len(later)
     return "\n".join(kept)

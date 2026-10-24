@@ -298,14 +298,18 @@ def _account_currency(conn, account_name: str, stated=None) -> str:
 def _label_for(conn, description: str, amount_minor: int) -> dict:
     """What the rules make of a row: the result of match_merchant. With each
     field's source (book_source, type_source): from the merchant or the rule
-    that gave it; none for a field left empty. The PayNow payee wordings are
-    ordinary rules now (type-relationships 05); a row the wording labelled
-    before keeps its wording source."""
+    that gave it; none for a field left empty. And `rule_facts`: the flow
+    and other side the rule states, as classify_row reads them (none when it
+    states none). The PayNow payee wordings are ordinary rules now
+    (type-relationships 05); a row the wording labelled before keeps its
+    wording source."""
     found = match_merchant(description, conn, amount_minor=amount_minor)
     rule = first_rule(description, conn, amount_minor) if found["service_id"] is not None else None
     book_source, type_source = label_source.rule_sources(rule) if rule else (None, None)
     found["book_source"] = label_source.given(found["book"], book_source or label_source.MERCHANT)
     found["type_source"] = label_source.given(found["type_id"], type_source or label_source.MERCHANT)
+    # The flow and other side the rule states, if it states one (ADR-009).
+    found["rule_facts"] = flow.rule_facts(rule)
     return found
 
 
@@ -449,38 +453,35 @@ def _account_facts(conn, tx_id) -> dict:
 
 def _classify_flow_for_tx(
     conn, description: str, amount_minor: int, *,
-    flow_ctx=None, tx_id=None, service_id=None, labelled: bool = False,
+    flow_ctx=None, tx_id=None, service_id=None, rule_facts: dict | None = None,
 ) -> tuple[str, int | None]:
-    """Classify a row using the shared flow model: (flow, its other side).
+    """Classify a row as it is imported, using the shared flow model: (flow,
+    its other side).
 
     tx_id says which account the row is on; service_id is the merchant the
-    rules gave it. A merchant or a type does not take a transfer off the
-    review list (a rule that states no flow labels only, ADR-009), except
-    `labelled`: a row already out of it that keeps a label (_reclassified)."""
+    rules gave it, and rule_facts the flow the rule states, if it states one
+    (it says what the row is, ADR-009). A merchant or a type does not take a
+    transfer off the review list: a rule that states no flow labels only."""
     if flow_ctx is None:
         flow_ctx = flow.build_context(conn)
     facts = {
         "description": description,
         "amount_minor": amount_minor,
         "service_id": service_id,
-        "labelled": labelled,
         **_account_facts(conn, tx_id),
+        **(rule_facts or {}),
     }
     return flow.classify_row(facts, flow_ctx)
 
 
-def _reclassified(conn, held, service_id, type_id, flow_ctx=None) -> tuple[str, int | None]:
+def _reclassified(conn, held, service_id, type_id) -> tuple[str, int | None]:
     """The flow of a row already in the book (`held`, with its flow_type),
-    worked out again for the merchant and type it now has. Flow is stable
-    over time (the flow decision): the review hold a rule no longer lifts
-    holds a row as it is first imported, and never puts back a row already
-    out of review while it keeps a merchant or a type. A row waiting stays
-    waiting: a rule that states no flow labels only (ADR-009)."""
-    return _classify_flow_for_tx(
-        conn, held["description"], held["amount_minor"], flow_ctx=flow_ctx, tx_id=held["id"],
-        service_id=service_id,
-        labelled=held["flow_type"] != flow.REVIEW and bool(service_id or type_id),
-    )
+    worked out again for the merchant and type it now has and the rule that
+    labels it now, read from the book (a teach may have just written it):
+    flow.worked_out_again. The caller keeps a flow set by hand."""
+    rule = db.pick_rule(db.load_rules(conn), held["description"] or "", held["amount_minor"])
+    return flow.worked_out_again(held, service_id, type_id, rule, _account_facts(conn, held["id"]),
+                                 flow.build_context(conn))
 
 
 def _checked_other_side(conn, value, flow_name) -> int | None:
@@ -495,6 +496,51 @@ def _checked_other_side(conn, value, flow_name) -> int | None:
     if not conn.execute("SELECT 1 FROM accounts WHERE id = ?", (value,)).fetchone():
         raise UnknownLabel(f"unknown other side: {value!r}")
     return value
+
+
+RULE_PERSON_REFUSED = (
+    "A person is never a rule's other side: what is lent to or owed by a person is "
+    "marked Expect some back… or Expect to pay back on the row."
+)
+
+
+def _checked_rule_flow(conn, flow_name, other_side) -> tuple[str | None, int | None]:
+    """The flow and other side a merchant rule may state (ADR-009), or
+    (None, None): a rule that states no flow labels only. The flow is one of
+    fin's, but review (flow.RULE_FLOWS); a transfer and a movement name their
+    other side, and the other side is one of the household's accounts of a
+    kind the flow allows (a person never is); a flow that names none takes
+    none. Raises UnknownLabel; nothing is written."""
+    if flow_name is None or flow_name == "":
+        if other_side is not None:
+            raise UnknownLabel("an other side goes with a flow: say what the rule's rows are")
+        return None, None
+    try:
+        flow.checked_flow(flow_name)
+    except flow.UnknownFlow as e:
+        raise UnknownLabel(str(e)) from None
+    if flow_name not in flow.RULE_FLOWS:
+        raise UnknownLabel("a rule cannot say a row waits for review: that is what a transfer is "
+                           "while nothing says what it was")
+    kinds, required = flow.RULE_FLOWS[flow_name]
+    if other_side is None:
+        if required:
+            raise UnknownLabel(f"a rule that says its rows are a {flow_name} names its other side "
+                               f"(other_side_id): one of the household's accounts of kind {' or '.join(kinds)}")
+        return flow_name, None
+    if isinstance(other_side, bool) or not isinstance(other_side, int):
+        raise UnknownLabel(f"unknown other side: {other_side!r}")
+    if not kinds:
+        raise UnknownLabel(f"a rule that says its rows are {flow_name} names no other side")
+    account = conn.execute("SELECT type, owner FROM accounts WHERE id = ?", (other_side,)).fetchone()
+    if account is None:
+        raise UnknownLabel(f"unknown other side: {other_side!r}")
+    if account["type"] == "person":
+        raise UnknownLabel(RULE_PERSON_REFUSED)
+    if account["type"] not in kinds or account["owner"] != account_kind.HOUSEHOLD:
+        raise UnknownLabel(f"a {flow_name}'s other side is one of the household's accounts of kind "
+                           + " or ".join(kinds))
+    return flow_name, other_side
 
 
 def _expense_visibility_filter(service_alias: str = "svc") -> str:
@@ -1961,38 +2007,22 @@ def _previewed_answer(conn, plan, answer: str | None, token, answer_key: str = "
     return None
 
 
-def _reflowed(conn, p, flow_ctx) -> dict:
-    """A rule's relabel, with the row's flow worked out again for its new
-    merchant (a flow set by hand keeps its flow and its other side), as
-    _reclassified reads a row already in the book."""
-    sets = dict(p.apply)
-    if p.held["flow_type_manual"]:
-        return sets
-    sets["flow_type"], sets["other_side_id"] = _reclassified(
-        conn, p.held, sets.get("service_id", p.held["service_id"]),
-        sets.get("type_id", p.held["type_id"]), flow_ctx,
-    )
-    return sets
-
-
 def _write_plan(conn, plan, answer: str | None) -> tuple[int, int]:
     """The plan the preview counted, as answered: apply writes each row's new
-    values (its sources as they were; a rule's rows with their flow worked
-    out again); only_new marks each kept field checked, values left. Nothing
-    else is written, so the preview's count is the rows Apply changes.
+    values (its sources as they were; a rule's rows with the flow and other
+    side the preview worked out, relabel_preview.flow_writes); only_new
+    marks each kept field checked, values left. Nothing else is written, so
+    the preview's count is the rows Apply changes.
     Returns (rows whose label changed, rows marked checked)."""
     relabelled = checked = 0
-    flow_ctx = None
     for p in plan.rows:
         if answer == relabel_preview.APPLY:
-            sets = p.apply
-            if p.reflow:
-                if flow_ctx is None:
-                    flow_ctx = flow.build_context(conn)
-                sets = _reflowed(conn, p, flow_ctx)
-            relabelled += _write_label(conn, p.held, sets)
+            relabelled += _write_label(conn, p.held, p.apply)
         elif answer == relabel_preview.ONLY_NEW:
             checked += _write_label(conn, p.held, p.only_new)
+    # A row that now names a loan, or no longer does, changes what was paid.
+    if answer == relabel_preview.APPLY and any(relabel_preview.moves_flow(p) for p in plan.rows):
+        loan_interest.derive(conn)
     return relabelled, checked
 
 
@@ -4677,13 +4707,15 @@ def api_import_upload():
 
                 # Classify flow_type post-parse, from the row's own wording,
                 # the account it is on and the merchant the rules gave it. A
-                # rule states no flow: a transfer it names still waits.
+                # rule that states a flow says what the row is; one that
+                # states none labels only: a transfer it names still waits.
                 tx.flow_type, other_side_id = flow.classify_row(
                     {
                         "description": tx.description,
                         "amount_minor": tx.amount_minor,
                         "service_id": svc_id,
                         **account_facts[account],
+                        **found["rule_facts"],
                     },
                     flow_ctx,
                 )
@@ -5142,6 +5174,7 @@ def api_import_confirm():
                             worked_out = _classify_flow_for_tx(
                                 conn, tx["description"], amount_val, tx_id=cur.lastrowid,
                                 service_id=tx.get("service_id"),
+                                rule_facts=_label_for(conn, tx["description"] or "", amount_val)["rule_facts"],
                             )
                             if worked_out[0] == flow.REVIEW and _chosen_in_preview(conn, tx, amount_val):
                                 worked_out = (_unheld(amount_val), None)
@@ -5524,13 +5557,15 @@ def _threshold_minor(data: dict, field: str) -> int | None:
 @app.route("/api/rules")
 def api_rules():
     """List all merchant rules with their service, and the book and type each
-    gives a row: its own override where it has one, else the merchant's."""
+    gives a row: its own override where it has one, else the merchant's; and
+    the flow and other side each states (none: it labels only, ADR-009)."""
     with get_db() as conn:
         rows = conn.execute("""
             SELECT mr.id, mr.pattern, mr.match_type, mr.confidence,
                    mr.priority, mr.min_amount_minor, mr.max_amount_minor,
                    mr.service_id,
                    mr.book_override, mr.type_override_id,
+                   mr.flow, mr.other_side_id, os.name as other_side_name,
                    s.name as service_name,
                    COALESCE(mr.book_override, s.book) as book,
                    COALESCE(mr.type_override_id, s.type_id) as type_id,
@@ -5538,6 +5573,7 @@ def api_rules():
                    tp.name as parent_type
              FROM merchant_rules mr
              JOIN services s ON mr.service_id = s.id
+             LEFT JOIN accounts os ON os.id = mr.other_side_id
              LEFT JOIN types ty ON COALESCE(mr.type_override_id, s.type_id) = ty.id
              LEFT JOIN types tp ON ty.parent_id = tp.id
             ORDER BY COALESCE(tp.name, ty.name), ty.name, mr.priority DESC, mr.pattern
@@ -5560,6 +5596,9 @@ def api_rules():
         "type_name": r["type_name"],
         "parent_type": r["parent_type"],
         "display_type": format_type_display(r["parent_type"], r["type_name"]),
+        "flow": r["flow"],
+        "other_side_id": r["other_side_id"],
+        "other_side_name": mask_card_number(r["other_side_name"]) if r["other_side_name"] else None,
         "rows_labelled": labelled.get(r["id"], 0),
     } for r in rows])
 
@@ -5589,7 +5628,11 @@ def _rows_by_rule(conn) -> dict[int, list[int]]:
 @app.route("/api/rules", methods=["POST"])
 def api_rules_create():
     """Add a new merchant rule. Requires service_id: book and type come from
-    the service unless the rule overrides them.
+    the service unless the rule overrides them. It may state what its rows
+    are, `flow` and `other_side_id` (_checked_rule_flow, ADR-009): its new
+    rows take them, and Apply gives them to its past rows but one whose flow
+    was set by hand; the preview lists every row whose flow or other side
+    would change (`flows`).
 
     A rule that would relabel past rows (the rows it would win, whose label
     would then change) goes through the preview (relabel_preview.rule_change):
@@ -5611,6 +5654,7 @@ def api_rules_create():
             type_override_id = _checked_type_id(conn, data.get("type_override_id"))
             min_minor = _threshold_minor(data, "min_amount")
             max_minor = _threshold_minor(data, "max_amount")
+            rule_flow, other_side = _checked_rule_flow(conn, data.get("flow"), data.get("other_side_id"))
             past = relabel_preview.checked_answer(data.get("past"))
         except (UnknownLabel, BadAmount, relabel_preview.Refused) as e:
             return jsonify({"error": str(e)}), 400
@@ -5623,6 +5667,8 @@ def api_rules_create():
             "priority": data.get("priority", 0),
             "min_amount_minor": min_minor,
             "max_amount_minor": max_minor,
+            "flow": rule_flow,
+            "other_side_id": other_side,
         }
         try:
             plan = relabel_preview.rule_change(conn, None, proposed)
@@ -5634,10 +5680,10 @@ def api_rules_create():
         try:
             new_id = conn.execute(
                 "INSERT INTO merchant_rules (pattern, service_id, book_override, type_override_id, "
-                "match_type, confidence, priority, min_amount_minor, max_amount_minor) "
-                "VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?, ?)",
+                "match_type, confidence, priority, min_amount_minor, max_amount_minor, flow, other_side_id) "
+                "VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?)",
                 (proposed["pattern"], proposed["service_id"], book_override, type_override_id,
-                 proposed["match_type"], proposed["priority"], min_minor, max_minor),
+                 proposed["match_type"], proposed["priority"], min_minor, max_minor, rule_flow, other_side),
             ).lastrowid
             recategorized, checked = _write_plan(conn, plan, past)
             conn.commit()
@@ -5654,6 +5700,7 @@ def api_rules_create():
 _RULE_EDIT_COLUMNS = {
     "pattern": "pattern", "service_id": "service_id", "book_override": "book_override",
     "type_override_id": "type_override_id", "match_type": "match_type", "priority": "priority",
+    "flow": "flow", "other_side_id": "other_side_id",
     **_THRESHOLD_COLUMNS,
 }
 
@@ -5675,8 +5722,10 @@ def api_rules_update(rule_id):
     `past: apply` relabels them (from fin takes the new winner's source,
     checked stays checked, a chosen field keeps its own); `past: only_new`
     saves the rule and marks their fields checked. `token` is refused once
-    the rules or those rows changed since the preview. Returns {success,
-    recategorized, checked}."""
+    the rules or those rows changed since the preview. A new `flow` or
+    `other_side_id` is checked with the other as the rule would then hold it
+    (_checked_rule_flow); a flow cleared clears its other side. Returns
+    {success, recategorized, checked}."""
     data = request.get_json(silent=True) or {}
     if "pattern" in data:
         pattern_error = _rule_pattern_error(data.get("pattern"))
@@ -5702,6 +5751,15 @@ def api_rules_update(rule_id):
         gone = _rule_gone(conn, rule_id)
         if gone is not None:
             return gone
+        try:
+            if "flow" in proposed or "other_side_id" in proposed:
+                held = conn.execute("SELECT flow, other_side_id FROM merchant_rules WHERE id = ?",
+                                    (rule_id,)).fetchone()
+                stated = proposed.get("flow", held["flow"]) or None
+                side = proposed.get("other_side_id", held["other_side_id"] if stated else None)
+                proposed["flow"], proposed["other_side_id"] = _checked_rule_flow(conn, stated, side)
+        except UnknownLabel as e:
+            return jsonify({"error": str(e)}), 400
         try:
             plan = relabel_preview.rule_change(conn, rule_id, proposed)
         except relabel_preview.Gone as e:

@@ -313,7 +313,9 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
     name, last, once the shape it reads is there; and rows with no book or
     type source columns read as needing the label-source step
     (convert_label_source.py), and rows still holding the one mark those two
-    replaced as needing its retirement (retire_single_mark.py). Each is read
+    replaced as needing its retirement (retire_single_mark.py), and rules
+    that cannot state a flow as needing the rule-flow step
+    (convert_rule_flow.py). Each is read
     from the book's shape, never from what its rows hold, but expect-back's,
     which reads its record first: nothing the operator does afterwards reads
     as a conversion still to run."""
@@ -338,6 +340,7 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
         or _expect_back_pending(conn)
         or not {"book_source", "type_source"} <= tx_cols
         or label_source.RETIRED_MARK in tx_cols
+        or not {"flow", "other_side_id"} <= rule_cols
     )
 
 
@@ -506,11 +509,16 @@ def invalidate_rules_cache() -> None:
 def load_rules(conn: sqlite3.Connection) -> list[dict]:
     """Every rule in match order, read now (not the cache): priority, then
     the longest pattern, then the oldest rule. Each with its merchant's
-    default book and type and its Check each row flag."""
+    default book and type and its Check each row flag, and the flow and
+    other side it states (flow.stated)."""
+    # A book the conversion steps before rule-flow read has no flow on its
+    # rules yet: each states none (convert_rule_flow.py).
+    stating = {"flow", "other_side_id"} <= {r[1] for r in conn.execute("PRAGMA table_info(merchant_rules)")}
     rows = conn.execute(
         "SELECT mr.id, mr.pattern, mr.match_type, "
         "       mr.priority, mr.min_amount_minor, mr.max_amount_minor, "
         "       mr.service_id, mr.book_override, mr.type_override_id, "
+        + ("mr.flow, mr.other_side_id, " if stating else "NULL AS flow, NULL AS other_side_id, ") +
         "       s.book, s.type_id, s.review_each_time "
         "FROM merchant_rules mr "
         "JOIN services s ON mr.service_id = s.id"
