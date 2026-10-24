@@ -203,12 +203,23 @@ def _register_builtins():
     from parse_citi_pdf import detect_citi_pdf, parse_citi_pdf
     register("Citi PDF", ".pdf", detect_fn=detect_citi_pdf, parse_fn=parse_citi_pdf)
 
+    # The DBS car-loan summary: what is owed, no rows. Ahead of the DBS
+    # fallback, which would read it as a statement with nothing in it.
+    from parse_dbs_loan import detect_dbs_auto_loan_pdf, parse_dbs_auto_loan_pdf
+    register("DBS Auto Loan PDF", ".pdf", detect_fn=detect_dbs_auto_loan_pdf, parse_fn=parse_dbs_auto_loan_pdf)
+
     from parse_dbs import parse_statement as parse_dbs_pdf
     register("DBS PDF", ".pdf", detect_fn=None, parse_fn=parse_dbs_pdf)  # fallback
 
     # CSV parsers — Citi has a detector, DBS CSV is the fallback
     from parse_citi_csv import detect_citi_csv, parse_citi_csv
     register("Citi CSV", ".csv", detect_fn=detect_citi_csv, parse_fn=parse_citi_csv)
+
+    # Independent Reserve's account activity: read, and refused, since the
+    # holding takes no statement rows (parse_independent_reserve.py).
+    from parse_independent_reserve import detect_independent_reserve_csv, parse_independent_reserve_csv
+    register("Independent Reserve CSV", ".csv", detect_fn=detect_independent_reserve_csv,
+             parse_fn=parse_independent_reserve_csv)
 
     from parse_dbs_csv import parse_csv as parse_dbs_csv
     register("DBS CSV", ".csv", detect_fn=None, parse_fn=parse_dbs_csv)  # fallback

@@ -389,6 +389,45 @@ class AnchorRefused(Exception):
     its account and date."""
 
 
+def _loan_figure(conn, stmt) -> dict:
+    """What a loan statement (parse_dbs_loan.py) will write, as the preview
+    shows it and the confirm writes it: what is owed on its day, as a
+    statement's figure on the loan account of its name, made a loan by the
+    confirm when there is none. No row. `held` is whether that figure is held
+    already (the confirm then writes nothing). Refused (ValueError), with
+    nothing read from the file, when an account of that name is no loan, is
+    kept in another currency, or holds a different figure for that day."""
+    account = conn.execute(
+        "SELECT id, type FROM accounts WHERE name = ?", (stmt.account,)
+    ).fetchone()
+    if account is not None and account["type"] != loan_interest.LOAN:
+        raise ValueError(
+            f"{mask_card_number(stmt.account)} is a {account['type']} account; a loan "
+            "statement's figure goes on a loan. Nothing was read from this file."
+        )
+    _account_currency(conn, stmt.account, stmt.currency)
+    on_day = None if account is None else conn.execute(
+        "SELECT amount FROM anchors WHERE account_id = ? AND date = ?",
+        (account["id"], stmt.statement_date),
+    ).fetchone()
+    if on_day is not None and on_day["amount"] != -stmt.owed_minor:
+        raise ValueError(
+            f"{mask_card_number(stmt.account)} already has a figure of "
+            f"{anchors.format_amount(-on_day['amount'], stmt.currency)} for {stmt.statement_date}; "
+            f"this statement states {anchors.format_amount(stmt.owed_minor, stmt.currency)}. "
+            "A different amount for the same date is refused; nothing was read from this file."
+        )
+    return {
+        "account": stmt.account,
+        "kind": loan_interest.LOAN,
+        "date": stmt.statement_date,
+        "owed_minor": stmt.owed_minor,
+        "currency": stmt.currency,
+        "new_account": account is None,
+        "held": on_day is not None,
+    }
+
+
 def _kind_from_account_name(account_name: str) -> str:
     """The kind an import gives an account it has to create, from its name."""
     name = account_name.lower()
@@ -4393,12 +4432,14 @@ PREVIEW_NOT_OPEN = "This preview is no longer open. Upload the statement again."
 PREVIEW_MISMATCH = "The import does not match its preview; nothing was imported. Upload the statement again."
 
 
-def _stored_preview(groups: list[dict], statements: list | None = None) -> str:
+def _stored_preview(groups: list[dict], statements: list | None = None, figures: list | None = None) -> str:
     """The facts of an upload's preview, as the response gives them, for its
     batch_imports row: per group (in order) its account, currency and tie
     lines, and per row (in order) its facts. With `statements`, what each
     statement in the files came to (_statement_results), which the confirm
-    carries into its summary and Past imports shows."""
+    carries into its summary and Past imports shows. With `figures`, the loan
+    figures its loan statements state (_loan_figure), which the confirm
+    writes as they are."""
     preview = {
         "groups": [
             {
@@ -4412,6 +4453,8 @@ def _stored_preview(groups: list[dict], statements: list | None = None) -> str:
     }
     if statements is not None:
         preview["statements"] = statements
+    if figures:
+        preview["figures"] = figures
     # Serialised as the response is, so what is stored is what was shown.
     return app.json.dumps(preview)
 
@@ -4458,6 +4501,18 @@ def _confirmed_groups(conn, import_id, sent_groups) -> list[dict]:
     return out
 
 
+def _confirmed_figures(conn, import_id) -> list[dict]:
+    """The loan figures a confirm writes: the open preview's, as the upload
+    read them. Call after _confirmed_groups has found the preview open."""
+    held = conn.execute(
+        "SELECT result_json FROM batch_imports WHERE id = ?", (import_id,)
+    ).fetchone()
+    figures = json.loads(held["result_json"]).get("figures") or []
+    if not isinstance(figures, list) or not all(isinstance(f, dict) for f in figures):
+        raise PreviewRefused(PREVIEW_NOT_OPEN, 409)
+    return figures
+
+
 @app.route("/api/import/upload", methods=["POST"])
 def api_import_upload():
     """Accept statement files, parse, label with book and type, return preview.
@@ -4472,6 +4527,9 @@ def api_import_upload():
     One that does not is refused: none of its rows is in the preview, and its
     entry in `errors` carries the same line under `tie`, with the difference.
     A source with no balance is not checked. No row is skipped by default.
+    A loan statement (the DBS car-loan summary) has no rows: what it states
+    is owed goes in `figures` (_loan_figure), and the confirm writes it on
+    the loan as a statement's figure.
     Refused (403) from the chat's side (the upload command) while the
     "Claude may write" switch is off; the operator's own import still works.
     """
@@ -4486,6 +4544,7 @@ def api_import_upload():
         return jsonify({"error": "No files uploaded"}), 400
 
     all_groups = {}  # account_name -> list of transaction dicts
+    figures = []  # what each loan statement states is owed (_loan_figure)
     errors = []
     filenames = []
 
@@ -4504,6 +4563,7 @@ def api_import_upload():
 
         # Detect and parse each file via parser registry
         from parsers import auto_detect_and_parse, handle_vantage_split
+        from parse_dbs_loan import LoanStatement
         parsed_statements = []
         for save_path, filename in saved_paths:
             try:
@@ -4514,6 +4574,13 @@ def api_import_upload():
             # The one check of rows against the statement's own balances. A
             # statement that does not tie goes no further.
             for stmt in stmts:
+                if isinstance(stmt, LoanStatement):
+                    # A loan statement has no rows: its figure is all of it.
+                    try:
+                        figures.append(_loan_figure(conn, stmt))
+                    except ValueError as e:
+                        errors.append({"file": filename, "error": str(e)})
+                    continue
                 try:
                     # A statement in a currency its account is not kept in
                     # goes no further either.
@@ -4689,10 +4756,10 @@ def api_import_upload():
             "VALUES (?, ?, 'preview', ?, ?, ?)",
             (
                 json.dumps(filenames),
-                json.dumps(list(all_groups.keys())),
+                json.dumps(list(all_groups.keys()) + [f["account"] for f in figures]),
                 total,
                 typed,
-                _stored_preview(groups, results),
+                _stored_preview(groups, results, figures),
             ),
         )
         conn.commit()
@@ -4718,6 +4785,7 @@ def api_import_upload():
     return jsonify({
         "import_id": import_id,
         "groups": groups,
+        "figures": figures,
         "stats": {
             "total": total,
             "typed": typed,
@@ -4803,6 +4871,13 @@ def api_import_confirm():
     statement anchor; the same balance already held changes nothing, and a
     different one for that account and date refuses the import (409).
 
+    The preview's `figures` (a loan statement's, _loan_figure) are written as
+    the upload read them, whatever the request sends: each as a statement's
+    figure on its loan account (made, of kind loan, when there is none), what
+    is owed stored negative. The same figure again changes nothing; a
+    different one for that day, or an account of that name that is no loan,
+    refuses the import (409).
+
     All or nothing: every write of one confirm is one transaction, and any
     failure rolls all of it back.
     """
@@ -4822,6 +4897,7 @@ def api_import_confirm():
         # brings only its choices.
         try:
             groups = _confirmed_groups(conn, import_id, data.get("groups"))
+            figures = _confirmed_figures(conn, import_id)
         except PreviewRefused as e:
             message, status = e.args
             return jsonify({"error": message}), status
@@ -4877,6 +4953,7 @@ def api_import_confirm():
     accounts_created = []
     rules_skipped_generic = 0
     anchors_written = 0
+    figures_written = 0
     rows_refiled = 0
 
     with get_db() as conn:
@@ -5069,6 +5146,40 @@ def api_import_confirm():
                         ) from None
                     anchors_written += 1 if written else 0
 
+            # What each loan statement states is owed: the loan's figure, as
+            # a statement's, dated its day. No row and no statement record.
+            from ingest import ensure_named_account
+            figure_days: dict = {}
+            for figure in figures:
+                loan_id = ensure_named_account(
+                    conn, figure["account"], loan_interest.LOAN, figure["currency"]
+                )
+                kind = conn.execute("SELECT type FROM accounts WHERE id = ?", (loan_id,)).fetchone()["type"]
+                if kind != loan_interest.LOAN:
+                    raise AnchorRefused(
+                        f"{mask_card_number(figure['account'])} is a {kind} account; a loan "
+                        "statement's figure goes on a loan. Nothing was imported."
+                    )
+                try:
+                    _, written = anchors.record(
+                        conn, loan_id, figure["date"], -figure["owed_minor"], anchors.STATEMENT,
+                        f"import {import_id}",
+                    )
+                except anchors.AnchorConflict as e:
+                    raise AnchorRefused(
+                        f"{mask_card_number(figure['account'])} already has a figure of "
+                        f"{anchors.format_amount(-e.existing['amount'], figure['currency'])} for "
+                        f"{e.existing['date']}; this statement states "
+                        f"{anchors.format_amount(figure['owed_minor'], figure['currency'])}. "
+                        "A different amount for the same date is refused; nothing was imported."
+                    ) from None
+                figures_written += 1 if written else 0
+                if written:
+                    figure_days.setdefault(loan_id, (figure["account"], figure["currency"], set()))[2].add(
+                        figure["date"])
+                if figure["account"] not in accounts_created:
+                    accounts_created.append(figure["account"])
+
             # Create new services submitted from the preview
             # Each entry: {name, book, type_id, description} — description becomes the merchant rule
             services_created = 0
@@ -5139,6 +5250,21 @@ def api_import_confirm():
             pairing.match_pairs(conn)
             # Rows that name a loan change what was paid between its figures.
             loan_interest.derive(conn)
+            # A figure this import wrote that fell by more than the instalments
+            # naming the loan paid would be negative interest: the instalments
+            # are not yet filed as its repayments.
+            for loan_id, (name, currency, days) in figure_days.items():
+                for period in loan_interest.periods(conn, loan_id):
+                    if period["negative"] and (period["from"] in days or period["to"] in days):
+                        raise AnchorRefused(
+                            f"{mask_card_number(name)} fell by "
+                            f"{anchors.format_amount(period['fell_minor'], currency)} between "
+                            f"{loan_interest.day_shown(period['from'])} and "
+                            f"{loan_interest.day_shown(period['to'])}, more than the "
+                            f"{anchors.format_amount(period['paid_minor'], currency)} of instalments "
+                            "naming it: label the instalments as repayments of the loan first. "
+                            "Nothing was imported."
+                        )
             # Refunds this import brought in link to their purchases, in this change.
             refund_links.link_on_import(conn)
 
@@ -5153,6 +5279,8 @@ def api_import_confirm():
                 "anchors_written": anchors_written,
                 "rows_refiled": rows_refiled,
             }
+            if figures:
+                result_summary["figures_written"] = figures_written
             # The statements' results the upload kept stay with the import.
             held = conn.execute(
                 "SELECT result_json FROM batch_imports WHERE id = ?", (import_id,)
@@ -5180,6 +5308,7 @@ def api_import_confirm():
                 "accounts": accounts_created,
                 "rules_skipped_generic": rules_skipped_generic,
                 "anchors_written": anchors_written,
+                "figures_written": figures_written,
                 "rows_refiled": rows_refiled,
             })
 

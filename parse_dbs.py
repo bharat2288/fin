@@ -618,10 +618,26 @@ def parse_statement(pdf_path: str) -> ParsedStatement | list[ParsedStatement]:
 
     stmt_type = _detect_statement_type(first_page)
 
+    # A read that finds nothing it knows is refused, never handed on as an
+    # empty statement: a file this reader takes by default (a loan's
+    # "Statement of Account", another bank's card) would otherwise import as
+    # a card or an account with nothing on it, and say nothing.
     if stmt_type == "credit_card":
-        return by_card(parse_cc_statement(pdf_path))
+        statement = parse_cc_statement(pdf_path)
+        if not statement.card_sections and not statement.transactions:
+            raise ValueError(
+                f"{path.name}: not a DBS card statement fin can read: no card was found in it; "
+                "nothing was read."
+            )
+        return by_card(statement)
     elif stmt_type == "bank":
-        return parse_bank_statement(pdf_path)
+        statement = parse_bank_statement(pdf_path)
+        if not statement.accounts and not statement.transactions:
+            raise ValueError(
+                f"{path.name}: not a DBS account statement fin can read: no account was found in it; "
+                "nothing was read."
+            )
+        return statement
     else:
         raise ValueError(f"Could not detect statement type from: {path.name}")
 

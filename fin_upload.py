@@ -143,16 +143,19 @@ def import_one(path: Path, send: Sender, dry_run: bool = False) -> tuple[bool, s
         return False, f"{path.name}: refused: {_error_of(status, preview)}"
     errors = preview.get("errors") or []
     groups = preview.get("groups") or []
+    # A loan statement has no rows: what it states is owed is the loan's figure.
+    figures = preview.get("figures") or []
     if errors:
         said = "; ".join(e.get("error", "refused") for e in errors)
         return False, f"{path.name}: refused, nothing imported: {said}"
-    if not groups:
+    if not groups and not figures:
         return False, f"{path.name}: refused: fin found no rows in it"
-    summary = ", ".join(
+    summary = ", ".join([
         f"{g.get('account')}: {g.get('total', len(g.get('transactions', [])))} rows "
         f"({'ties' if g.get('tie') == 'ties' else 'not checked'})"
         for g in groups
-    )
+    ] + [f"{f.get('account')}: figure for {f.get('date')}{' (already held)' if f.get('held') else ''}"
+         for f in figures])
     if dry_run:
         return True, f"{path.name}: would import {summary}"
     confirm = {
@@ -166,9 +169,11 @@ def import_one(path: Path, send: Sender, dry_run: bool = False) -> tuple[bool, s
     status, done = send("/api/import/confirm", json.dumps(confirm).encode("utf-8"), "application/json")
     if status != 200 or not isinstance(done, dict) or not done.get("success"):
         return False, f"{path.name}: refused at confirm, nothing imported: {_error_of(status, done)}"
+    written = done.get("figures_written", 0)
+    and_figures = f" and {written} {'figure' if written == 1 else 'figures'}" if figures else ""
     return True, (
         f"{path.name}: imported {done.get('transactions_saved', 0)} new rows "
-        f"({done.get('duplicates_skipped', 0)} already there) into {summary}"
+        f"({done.get('duplicates_skipped', 0)} already there){and_figures} into {summary}"
     )
 
 
