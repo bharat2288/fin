@@ -364,11 +364,11 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     facts: {date, description, amount_minor} and, where the caller knows them:
       account_kind, account_owner — the account the row is on;
       service_id — the merchant a rule gave the row;
-      labelled — the reading the conversions that have run made of a row: a
-        merchant or a type from a rule took a transfer off the review list.
-        They keep it, so a book they converted still reads as converted. No
-        writer passes it since fin-redesign 06: a rule that states no flow
-        labels only, and a transfer it names still waits (ADR-009).
+      labelled — a row already out of the review list that keeps a merchant
+        or a type: it is not put back (flow is stable over time), and the
+        conversions that have run read a row so. An import never passes it:
+        a rule that states no flow labels only, and a transfer it names
+        waits (ADR-009, fin-redesign 06).
     Without these the rules that need them do not apply. The amount is in
     whole minor units; only its sign is read.
     """
@@ -414,7 +414,8 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
         return "transfer"
 
     # 4b. A transfer on a household bank account that nothing above knows
-    #     waits for the operator, whatever merchant a rule gave it.
+    #     waits for the operator, whatever merchant a rule gave it; a row
+    #     already out of review that keeps a label stays out.
     if _on_household_bank(facts) and not facts.get("labelled") and _has_transfer_shape(description):
         return REVIEW
 

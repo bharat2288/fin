@@ -449,22 +449,38 @@ def _account_facts(conn, tx_id) -> dict:
 
 def _classify_flow_for_tx(
     conn, description: str, amount_minor: int, *,
-    flow_ctx=None, tx_id=None, service_id=None,
+    flow_ctx=None, tx_id=None, service_id=None, labelled: bool = False,
 ) -> tuple[str, int | None]:
     """Classify a row using the shared flow model: (flow, its other side).
 
     tx_id says which account the row is on; service_id is the merchant the
     rules gave it. A merchant or a type does not take a transfer off the
-    review list: a rule that states no flow labels only (ADR-009)."""
+    review list (a rule that states no flow labels only, ADR-009), except
+    `labelled`: a row already out of it that keeps a label (_reclassified)."""
     if flow_ctx is None:
         flow_ctx = flow.build_context(conn)
     facts = {
         "description": description,
         "amount_minor": amount_minor,
         "service_id": service_id,
+        "labelled": labelled,
         **_account_facts(conn, tx_id),
     }
     return flow.classify_row(facts, flow_ctx)
+
+
+def _reclassified(conn, held, service_id, type_id, flow_ctx=None) -> tuple[str, int | None]:
+    """The flow of a row already in the book (`held`, with its flow_type),
+    worked out again for the merchant and type it now has. Flow is stable
+    over time (the flow decision): the review hold a rule no longer lifts
+    holds a row as it is first imported, and never puts back a row already
+    out of review while it keeps a merchant or a type. A row waiting stays
+    waiting: a rule that states no flow labels only (ADR-009)."""
+    return _classify_flow_for_tx(
+        conn, held["description"], held["amount_minor"], flow_ctx=flow_ctx, tx_id=held["id"],
+        service_id=service_id,
+        labelled=held["flow_type"] != flow.REVIEW and bool(service_id or type_id),
+    )
 
 
 def _checked_other_side(conn, value, flow_name) -> int | None:
@@ -1947,15 +1963,14 @@ def _previewed_answer(conn, plan, answer: str | None, token, answer_key: str = "
 
 def _reflowed(conn, p, flow_ctx) -> dict:
     """A rule's relabel, with the row's flow worked out again for its new
-    merchant (a flow set by hand keeps its flow and its other side). The
-    rule states no flow, so a transfer it names still waits on the review
-    list (ADR-009)."""
+    merchant (a flow set by hand keeps its flow and its other side), as
+    _reclassified reads a row already in the book."""
     sets = dict(p.apply)
     if p.held["flow_type_manual"]:
         return sets
-    sets["flow_type"], sets["other_side_id"] = _classify_flow_for_tx(
-        conn, p.held["description"], p.held["amount_minor"], flow_ctx=flow_ctx,
-        tx_id=p.held["id"], service_id=sets.get("service_id", p.held["service_id"]),
+    sets["flow_type"], sets["other_side_id"] = _reclassified(
+        conn, p.held, sets.get("service_id", p.held["service_id"]),
+        sets.get("type_id", p.held["type_id"]), flow_ctx,
     )
     return sets
 
@@ -3453,8 +3468,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         # Step 3: Update the target transaction with explicit provenance.
         # flow_type override is independent of the label (ADR v2):
         #   - if caller supplies flow_type, set it + mark flow_type_manual=1
-        #   - otherwise leave a hand-set flow alone and re-derive the rest:
-        #     a teach states no flow, so a transfer it names still waits
+        #   - otherwise leave a hand-set flow alone and re-derive the rest,
+        #     as for a row already in the book (_reclassified)
         tx_row = conn.execute(
             f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
         ).fetchone()
@@ -3467,10 +3482,7 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
                 (*label, flow_type, tx_id),
             )
         elif tx_row and not tx_row["flow_type_manual"]:
-            flow_type, other_side = _classify_flow_for_tx(
-                conn, tx_row["description"], tx_row["amount_minor"],
-                tx_id=tx_id, service_id=service_id,
-            )
+            flow_type, other_side = _reclassified(conn, tx_row, service_id, type_id)
             conn.execute(
                 f"{written}, flow_type = ?, other_side_id = ? WHERE id = ?",
                 (*label, flow_type, other_side, tx_id),

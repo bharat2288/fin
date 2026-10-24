@@ -6,7 +6,8 @@ FAST payment a rule named became spending. A rule that states no flow labels
 only: the row keeps its merchant link and still waits. Every path that works a
 row's flow out is checked here (import preview and confirm, a rule added,
 edited or re-run, a teach, a plan), and so are the rows the hold never held,
-which keep the flow they have today.
+which keep the flow they have today. Flow is stable over time: a row a rule
+took off the list before keeps its flow whatever rule work reaches it later.
 
 Rows reach the book through fin's routes, as the operator's do. Every name and
 figure is invented.
@@ -113,6 +114,46 @@ def test_the_import_of_a_held_row_is_one_change_and_undo_takes_it_back(client, l
 
 
 # --- a rule added, re-run or edited ----------------------------------------------------
+# Flow is stable over time: a row a rule took off the review list before this
+# change keeps its flow whatever later rule work reaches it. The hold applies
+# as a row is first imported.
+
+TUTOR_LATER = "PAYNOW TO SAMPLE TUTOR REF 5521"
+
+
+@pytest.fixture
+def lifted(client, ledger) -> dict:
+    """A PayNow a rule took off the review list before this change, as the
+    book holds it: spending, named Sample Tutor (Education). And Sample Coach,
+    another merchant later rule work can give it."""
+    tutor = make_merchant(client, "Sample Tutor", "Education")
+    rule_id = add_rule(client, "SAMPLE TUTOR", tutor)
+    bring_in(client, BANK, [(9, TUTOR, 640.00)])
+    lifted_as_before(TUTOR)
+    assert held(client, TUTOR) == ("expense", "Sample Tutor", False)
+    return {"rule": rule_id, "tutor": tutor, "coach": make_merchant(client, "Sample Coach", "Education")}
+
+
+def a_new_row_waits(client, merchant: str) -> None:
+    """A row imported after the rule work: held, named by the rule."""
+    bring_in(client, BANK, [(23, TUTOR_LATER, 640.00)])
+    assert held(client, TUTOR_LATER) == ("review", merchant, False)
+
+
+def test_a_rule_added_over_a_lifted_row_keeps_its_flow_and_a_new_row_waits(client, lifted):
+    add_rule(client, "SAMPLE TUTOR REF", lifted["coach"], past="apply")
+    assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
+
+    assert held(client, TUTOR) == ("expense", "Sample Coach", False)
+    a_new_row_waits(client, "Sample Coach")
+
+
+def test_a_rule_edit_over_a_lifted_row_keeps_its_flow_and_a_new_row_waits(client, lifted):
+    resp = client.put(f"/api/rules/{lifted['rule']}", json={"service_id": lifted["coach"], "past": "apply"})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert held(client, TUTOR) == ("expense", "Sample Coach", False)
+    a_new_row_waits(client, "Sample Coach")
 
 
 def test_a_rule_added_over_a_waiting_row_names_it_and_leaves_it_waiting(client, ledger):
@@ -124,19 +165,6 @@ def test_a_rule_added_over_a_waiting_row_names_it_and_leaves_it_waiting(client, 
 
     assert held(client, BUYBACK) == ("review", "Sample Holdco", False)
     assert waiting_count(client) == 1
-
-
-def test_a_rule_edit_that_reaches_a_row_an_old_rule_lifted_puts_it_back_in_review(client, ledger):
-    tutor = make_merchant(client, "Sample Tutor", "Education")
-    rule_id = add_rule(client, "SAMPLE TUTOR", tutor)
-    bring_in(client, BANK, [(9, TUTOR, 640.00)])
-    lifted_as_before(TUTOR)
-    coach = make_merchant(client, "Sample Coach", "Education")
-
-    resp = client.put(f"/api/rules/{rule_id}", json={"service_id": coach, "past": "apply"})
-
-    assert resp.status_code == 200, resp.get_json()
-    assert held(client, TUTOR) == ("review", "Sample Coach", False)
 
 
 def test_a_rule_edit_leaves_a_flow_set_by_hand(client, ledger):
@@ -155,6 +183,17 @@ def test_a_rule_edit_leaves_a_flow_set_by_hand(client, ledger):
 
 
 # --- a teach and a plan ---------------------------------------------------------------
+
+
+def test_a_teach_over_a_lifted_row_keeps_its_flow_and_a_new_row_waits(client, lifted):
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": row(client, TUTOR)["id"], "service_id": lifted["coach"], "pattern": "SAMPLE TUTOR REF",
+        "type_id": spending_type(client, "Education"), "book": "Household", "past_rows": "apply",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    assert held(client, TUTOR) == ("expense", "Sample Coach", False)
+    a_new_row_waits(client, "Sample Coach")
 
 
 def test_a_teach_that_states_no_flow_names_a_waiting_row_and_leaves_it_waiting(client, ledger):
@@ -181,15 +220,28 @@ def test_a_teach_that_states_a_flow_takes_the_row_off_the_list(client, ledger):
     assert held(client, BUYBACK) == ("expense", "Sample Holdco", True)
 
 
+def apply_plan(client, items) -> None:
+    token = client.post("/api/plans/preview", json={"items": items}).get_json()["token"]
+    resp = client.post("/api/plans/apply", json={"items": items, "token": token})
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_a_plan_over_a_lifted_row_keeps_its_flow_and_a_new_row_waits(client, lifted):
+    apply_plan(client, [{"tx_ids": [row(client, TUTOR)["id"]], "service_id": lifted["coach"],
+                         "pattern": "SAMPLE TUTOR REF", "type_id": spending_type(client, "Education"),
+                         "book": "Household"}])
+
+    assert held(client, TUTOR) == ("expense", "Sample Coach", False)
+    a_new_row_waits(client, "Sample Coach")
+
+
 def test_a_plan_that_names_a_waiting_row_leaves_it_waiting(client, ledger):
     bring_in(client, BANK, [(14, BUYBACK, BUYBACK_SGD)])
-    items = [{"tx_ids": [row(client, BUYBACK)["id"]], "service_name": "Sample Holdco", "pattern": "SAMPLE HOLDCO",
-              "type_id": spending_type(client, "Shopping"), "book": "Household"}]
-    token = client.post("/api/plans/preview", json={"items": items}).get_json()["token"]
 
-    resp = client.post("/api/plans/apply", json={"items": items, "token": token})
+    apply_plan(client, [{"tx_ids": [row(client, BUYBACK)["id"]], "service_name": "Sample Holdco",
+                         "pattern": "SAMPLE HOLDCO", "type_id": spending_type(client, "Shopping"),
+                         "book": "Household"}])
 
-    assert resp.status_code == 200, resp.get_json()
     assert held(client, BUYBACK) == ("review", "Sample Holdco", False)
 
 
