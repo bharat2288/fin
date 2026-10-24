@@ -72,16 +72,20 @@ INVARIANTS = {
     "4 expected back and waiting": ("expect_back",),
     "5 Queue counts and rule rows": ("queue", "rules"),
     "kept: merchants, accounts, figures, types, history": ("merchants", "accounts", "figures", "types",
-                                                            "type_slots", "history"),
+                                                            "type_slots", "history", "table_rows"),
 }
+
+# Change history and import batches grow with every write, the migration's own included.
+UNCOUNTED_TABLES = ("change_", "batch_imports", "sqlite_")
 
 ROW_FIELDS = {
     "date": "date", "account_id": "account_id", "description": "description",
     "amount_minor": "amount_minor", "currency": "currency",
+    "amount_foreign": "amount_foreign", "currency_foreign": "currency_foreign", "notes": "notes",
     "flow": "flow_type", "flow_manual": "flow_type_manual", "other_side_id": "other_side_id",
     "book": "book", "type_id": "type_id", "type": "display_type",
     "own_minor": "own_minor", "expected_minor": "expected_minor",
-    "placed_minor": "placed_minor", "waiting_minor": "waiting_minor",
+    "placed_minor": "placed_minor",
     "book_source": "book_source", "type_source": "type_source",
     "service_id": "service_id", "is_one_off": "is_one_off", "not_checked": "not_checked",
 }
@@ -367,6 +371,15 @@ def diff(a: dict, b: dict, *, added_ok: bool = False) -> tuple[bool, dict[str, l
         for s in sections:
             if s == "rows" and added_ok:
                 _walk(a["rows"], {k: v for k, v in b["rows"].items() if k in a["rows"]}, "rows", found)
+            elif s == "table_rows":
+                # Every table the before book has keeps its row count, so a
+                # table no screen shows still counts; a table the migration
+                # adds is expected. An import adds rows everywhere.
+                if not added_ok:
+                    was, now = a["meta"]["table_rows"], b["meta"]["table_rows"]
+                    for t in sorted(was):
+                        if not t.startswith(UNCOUNTED_TABLES) and was[t] != now.get(t):
+                            found.append((f"meta.table_rows.{t}", was[t], now.get(t)))
             elif s == "history":
                 # An entry the migration adds is expected; an earlier one must
                 # show as it did.

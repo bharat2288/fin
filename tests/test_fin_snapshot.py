@@ -149,3 +149,33 @@ def test_check_reference_says_same_or_different_for_each_value(book, tmp_path, c
     said = capsys.readouterr().out
     assert "different spending_by_month.Household.2026-05.Dining: baseline 121.00 | snapshot 120.00" in said
     assert "same      spending_by_month.Household.2026-04.Groceries" in said
+
+
+def test_a_rows_foreign_amount_and_note_are_part_of_the_row(book, conn):
+    before = snap(book["path"])
+    conn.execute("UPDATE transactions SET amount_foreign = 12.34, currency_foreign = 'USD', notes = 'x' "
+                 "WHERE id = ?", (book["dinner"],))
+    conn.commit()
+    after = snap(book["path"])
+
+    ok, result = fin_snapshot.diff(before, after)
+
+    assert not ok
+    dinner = str(book["dinner"])
+    assert sorted(found(result, "1 rows")) == [f"rows.{dinner}.amount_foreign", f"rows.{dinner}.currency_foreign",
+                                               f"rows.{dinner}.notes"]
+
+
+def test_a_table_no_screen_shows_still_counts_and_change_history_and_new_tables_do_not(book, conn):
+    before = snap(book["path"])
+    conn.execute("INSERT INTO dismissal (row_id, kind) VALUES (?, 'payback')", (book["untyped"],))
+    conn.execute("CREATE TABLE party_link_example (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    after = snap(book["path"])
+    after["meta"]["table_rows"]["change_entries"] = before["meta"]["table_rows"].get("change_entries", 0) + 1
+
+    ok, result = fin_snapshot.diff(before, after)
+
+    kept = "kept: merchants, accounts, figures, types, history"
+    assert "meta.table_rows.dismissal" in found(result, kept)
+    assert not any("party_link_example" in p or ".change_" in p for p in found(result, kept))
