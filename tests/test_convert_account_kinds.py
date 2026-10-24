@@ -17,6 +17,7 @@ import app as fin_app
 import book_type
 import conversion
 import convert_change_history
+import convert_flow_rules
 import convert_account_kinds
 import db
 import history
@@ -367,6 +368,7 @@ def test_the_app_serves_a_converted_database_and_takes_a_figure(old, started_on)
 
     # And the change history, the last step of the chain.
     conversion.run_step(old, convert_change_history.STEP)
+    conversion.run_step(old, convert_flow_rules.STEP)
     client = started_on(old)
 
     listed = {a["name"]: a for a in client.get("/api/accounts").get_json()}
@@ -397,6 +399,7 @@ def test_the_bank_accounts_with_no_statement_take_a_figure_on_a_converted_databa
     convert(old)
     # And the change history, the last step of the chain.
     conversion.run_step(old, convert_change_history.STEP)
+    conversion.run_step(old, convert_flow_rules.STEP)
     client = started_on(old)
     listed = {a["name"]: a for a in client.get("/api/accounts").get_json()}
     figures = {

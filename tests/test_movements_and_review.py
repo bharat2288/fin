@@ -311,7 +311,8 @@ def test_rows_on_review_are_held_out_of_household_spending(client, waiting):
     assert total_of(listed(client)) == 77080.75  # every row is still in the ledger
 
 
-def test_a_transfer_a_merchant_rule_knows_is_spending_not_review(client, ledger):
+def test_a_transfer_a_merchant_rule_knows_is_named_and_still_waits(client, ledger):
+    """A rule that states no flow labels only (fin-redesign 06, ADR-009)."""
     svc = client.post("/api/services", json={
         "name": "Sample Landlord", "book": "Household", "type_id": spending_type(client, "Rent"),
     }).get_json()["id"]
@@ -323,13 +324,15 @@ def test_a_transfer_a_merchant_rule_knows_is_spending_not_review(client, ledger)
     ])
 
     assert what_it_is(row(client, "PAYNOW TO SAMPLE LANDLORD REF 1200")) == (
-        "expense", None, "Household", "Rent",
+        "review", None, "Household", "Rent",
     )
     assert what_it_is(row(client, "PAYNOW TO SINGAPORE LIFE REF 1201")) == (
-        "expense", None, "Household", "Insurance",
+        "review", None, "Household", "Insurance",
     )
-    assert review_list(client) == []
-    assert household_spend(client) == 4510.40
+    assert [tx["description"] for tx in review_list(client)] == [
+        "PAYNOW TO SAMPLE LANDLORD REF 1200", "PAYNOW TO SINGAPORE LIFE REF 1201",
+    ]
+    assert household_spend(client) == 0
 
 
 def test_a_card_purchase_with_no_type_is_spending_as_before(client, ledger):
@@ -391,10 +394,15 @@ RULED = [
 
 @pytest.fixture
 def loan_merchants(client, ledger) -> dict:
-    """The two loan merchants as the ledger knows them, each with a rule."""
-    for name, pattern in (("UOB Home Loan", "SAMPLE HOME LOAN"), ("Car Loan", "SAMPLE CAR LOAN")):
+    """The two loan merchants as the ledger knows them, each with a rule that
+    says its rows repay the loan (as the flow-rules step makes theirs,
+    fin-redesign 08)."""
+    for name, pattern, loan in (("UOB Home Loan", "SAMPLE HOME LOAN", "UOB home loan"),
+                                ("Car Loan", "SAMPLE CAR LOAN", "DBS auto loan")):
         svc = client.post("/api/services", json={"name": name}).get_json()["id"]
-        assert client.post("/api/rules", json={"pattern": pattern, "service_id": svc}).status_code == 200
+        assert client.post("/api/rules", json={
+            "pattern": pattern, "service_id": svc, "flow": "movement", "other_side_id": ledger[loan],
+        }).status_code == 200
     return ledger
 
 
@@ -615,7 +623,8 @@ def test_the_drift_count_keeps_the_other_side_the_rules_gave(client, loan_mercha
     assert listed(client, sort="date", sort_dir="asc") == before
 
 
-def test_a_new_rule_takes_a_waiting_row_off_the_review_list(client, waiting):
+def test_a_new_rule_names_a_waiting_row_and_leaves_it_on_the_review_list(client, waiting):
+    """A rule that states no flow labels only (fin-redesign 06, ADR-009)."""
     svc = client.post("/api/services", json={
         "name": "Sample Payee", "book": "Household", "type_id": spending_type(client, "Home"),
     }).get_json()["id"]
@@ -623,8 +632,9 @@ def test_a_new_rule_takes_a_waiting_row_off_the_review_list(client, waiting):
 
     assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
-    assert what_it_is(row(client, TRANSFERS[2][1])) == ("expense", None, "Household", "Home")
-    assert [tx["description"] for tx in review_list(client)] == [TRANSFERS[0][1], TRANSFERS[1][1]]
+    assert what_it_is(row(client, TRANSFERS[2][1])) == ("review", None, "Household", "Home")
+    assert row(client, TRANSFERS[2][1])["service_name"] == "Sample Payee"
+    assert [tx["description"] for tx in review_list(client)] == [tx[1] for tx in TRANSFERS]
 
 
 def test_a_waiting_row_given_a_type_in_the_preview_is_saved_as_spending(client, ledger):

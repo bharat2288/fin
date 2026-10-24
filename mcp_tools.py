@@ -162,6 +162,24 @@ _PAST_SAID = (
     "rows take it, unless they already said; then call again with past and the preview's token. "
     "A token from a preview that no longer holds is refused: look again."
 )
+# What a rule may say its rows are (ADR-009; fin-redesign 07).
+_RULE_FLOW = {
+    "flow": {"type": "string", "description": "What the rule's rows are: expense, income, refund, transfer, "
+                                              "payment or movement (never review). Left out, the rule labels "
+                                              "only and fin works the flow out."},
+    "other_side_id": {"type": "integer", "description": "With flow: the household account on the other side; "
+                                                        "required for a transfer (a bank, card or untracked "
+                                                        "account) and a movement (a loan, holding or company). "
+                                                        "Never a person or an archived account. A flow changed "
+                                                        "without it keeps the held one only where the new flow "
+                                                        "allows it."},
+}
+_RULE_FLOW_SAID = (
+    "A rule may state what its rows are (flow, other_side_id): it beats what fin works out, never a flow "
+    "the operator set by hand, and the preview lists every past row whose flow would change (flows). "
+    "Only a flow fin worked out under the rules before the change moves (not one Only new rows left); a row "
+    "a record of expect back rests on keeps its flow where a hand label would be refused (flows_kept, with why). "
+)
 # The tools that answer with the preview.
 _PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})
 
@@ -504,23 +522,23 @@ _WRITES = [
     _w(
         "add_rule",
         "Add a merchant rule: rows whose description matches the pattern take the merchant "
-        "(service_id) and its book and type, or the rule's own overrides. " + _PAST_SAID,
+        "(service_id) and its book and type, or the rule's own overrides. " + _RULE_FLOW_SAID + _PAST_SAID,
         {"pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I, **_PAST},
+         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST},
         ("pattern", "service_id"),
         lambda a: ("POST", "/api/rules", _pick(a, "pattern", "service_id", "match_type",
                                               "book_override", "type_override_id", "priority",
-                                              *_PAST)),
+                                              *_RULE_FLOW, *_PAST)),
     ),
     _w(
         "change_rule",
-        "Change a merchant rule. " + _PAST_SAID,
+        "Change a merchant rule. " + _RULE_FLOW_SAID + "flow \"\" makes it state none again. " + _PAST_SAID,
         {"rule_id": _I, "pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I, **_PAST},
+         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST},
         ("rule_id",),
         lambda a: ("PUT", f"/api/rules/{int(a['rule_id'])}",
                    _pick(a, "pattern", "service_id", "match_type", "book_override",
-                         "type_override_id", "priority", *_PAST)),
+                         "type_override_id", "priority", *_RULE_FLOW, *_PAST)),
     ),
     _w(
         "delete_rule",
@@ -758,8 +776,9 @@ _PLANS = [
         "batch: the answer gives, per merchant, the rows that would be labelled (a row's was is the "
         "label it holds now, which the batch overwrites: tell the operator), the rows of "
         "another merchant a wording would reach (overlaps: ask whether they move too, past_rows), "
-        "any refusal by merchant, the batch's merchants and rows labelled, the rows only checked "
-        "(rows_checked), and a token (none while "
+        "every row whose flow or other side it would move, a row labelled for itself among them "
+        "(flows: tell the operator), any refusal by merchant, the batch's merchants and rows labelled, "
+        "the rows only checked (rows_checked), and a token (none while "
         "anything is refused). Show the operator those numbers; call plan_apply only on their yes.",
         _schema({"items": _PLAN_ITEMS}, ("items",)),
         False,

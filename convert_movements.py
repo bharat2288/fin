@@ -8,7 +8,8 @@ Gives an existing database what the ledger's flows need:
     - a PayNow receipt from Moom becomes a movement naming Moom;
     - a receipt the bank describes as salary, and a receipt from Kalesh,
       becomes income;
-    - a loan instalment becomes a movement naming its loan;
+    - a loan instalment becomes a movement naming its loan (until
+      fin-redesign 08, which made that the loan merchant's rule);
     - a receipt from Independent Reserve becomes a movement naming the
       crypto holding;
     - an unlabelled transfer on a household bank account that counts as
@@ -24,6 +25,7 @@ behind a backup, in one transaction, and a second run changes nothing.
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 import sys
 from collections import Counter
@@ -31,6 +33,7 @@ from pathlib import Path
 
 import book_type
 import conversion
+import db
 import flow
 
 # As schema.sql declares the column.
@@ -59,7 +62,13 @@ def planned(conn: sqlite3.Connection) -> list[tuple[int, str, str, int | None]]:
     Empty when every row already carries what the rules give it.
     """
     conn.row_factory = sqlite3.Row
+    # The household's own names, which the classifier listed when this step
+    # was written, are rules since fin-redesign 08 (db.OWN_ACCOUNT_RULES): the
+    # step reads them as it always has, so a row the wording alone made a
+    # move between own accounts is still told apart from one a ledger rule
+    # reclassifies. A loan merchant's instalment it no longer knows by name.
     ctx = flow.build_context(conn)
+    ctx = dataclasses.replace(ctx, own_aliases=(*ctx.own_aliases, *db.OWN_ACCOUNT_RULES_PATTERNS))
     other_side = "t.other_side_id" if has_shape(conn) else "NULL"
     # The classifier reads the sign of a row's whole minor units. This step
     # runs after the two money steps, so the integer is what a row carries;

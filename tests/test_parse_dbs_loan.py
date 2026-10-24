@@ -73,9 +73,9 @@ def test_a_car_loan_summary_is_read_as_what_is_owed_on_its_day_and_no_rows(read)
 
 
 def test_the_summary_names_the_loan_account_fin_keeps_for_the_car_loan():
-    import flow
+    import db
 
-    assert parse_dbs_loan.ACCOUNT == dict(flow.LOAN_MERCHANTS)["Car Loan"]
+    assert parse_dbs_loan.ACCOUNT == dict(db.LOAN_MERCHANTS)["Car Loan"]
 
 
 def test_a_total_that_disagrees_with_its_loan_line_is_refused(read):

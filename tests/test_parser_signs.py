@@ -5,13 +5,15 @@ parsers used to mark every ambiguous line as a withdrawal, mis-signing
 deposits (Independent Reserve remittances, interest credits, incoming PayNow).
 """
 
-from flow import OWN_ALIAS_SEED, ClassifierContext, classify_flow
+from flow import ClassifierContext, classify_flow
 from parse_dbs import _direction_from_balance
 
 
 def _ctx():
+    # An own-account name, as an account's short name gives the classifier one
+    # (the names it once listed are rules since fin-redesign 08).
     return ClassifierContext(
-        own_aliases=OWN_ALIAS_SEED,
+        own_aliases=("INDEPENDENT RESERVE",),
         owned_bank_refs=("438-59169-9", "072-560530-0"),
     )
 

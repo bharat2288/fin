@@ -4393,7 +4393,8 @@ async function viewLists(tab) {
             const type = x.type_override_id || x.type_name ? esc(x.type_override_id ? r.typeById.get(x.type_override_id)?.display_name || r.typeById.get(x.type_override_id)?.name : x.display_type || x.type_name) : '';
             const range = x.min_amount !== null || x.max_amount !== null
                 ? `only ${x.min_amount !== null ? esc(money(toMinor(x.min_amount), 'SGD')) : 'any amount'} to ${x.max_amount !== null ? esc(money(toMinor(x.max_amount), 'SGD')) : 'any amount'}` : '';
-            return [book, type, range].filter(Boolean).join(' · ') + (x.book_override || x.type_override_id ? ' ' + tag('yours', 'overrides') : '');
+            const states = x.flow ? `${RULE_FLOWS.find(f => f[0] === x.flow)?.[1] || x.flow}${x.other_side_name ? ' · ' + x.other_side_name : ''}` : '';
+            return [book, type, range, esc(states)].filter(Boolean).join(' · ') + (x.book_override || x.type_override_id || x.flow ? ' ' + tag('yours', 'overrides') : '');
         };
         const RULE_SORT = { pattern: { label: 'Pattern', kind: 'text', of: x => x.pattern }, match: { label: 'Match', kind: 'text', of: x => MATCH_WORDS[x.match_type] || x.match_type },
             merchant: { label: 'Merchant', kind: 'text', of: x => x.service_name }, sets: { label: 'Sets', kind: 'text', of: x => plainText(sets(x)) },
@@ -4726,6 +4727,7 @@ function previewParts(p) {
     const ruleLines = kind !== 'rule' ? '' : [
         p.unheld ? `<p class="sub">${plural(p.unheld, 'row')} with no merchant yet would become ${movesTo}.</p>` : '',
         p.subject.verb === 'delete' && p.labelled ? `<p class="sub">${plural(p.labelled, 'row')} ${p.labelled === 1 ? 'is' : 'are'} labelled by this rule.</p>` : '',
+        flowsLine(p),
     ].join('');
     const span = m => m.first === m.last ? monthName(m.first, { short: true }) : `${monthName(m.first, { short: true })} – ${monthName(m.last, { short: true })}`;
     const facts = p.money && p.months ? `<div class="prev-facts">
@@ -4748,10 +4750,25 @@ function previewParts(p) {
 function driftParts(p) {
     const one = p.count === 1;
     const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b></td></tr>`);
-    const body = `<p class="sub">Rows labelled by a rule or a merchant whose label is not what the rules give now. Rows you checked or chose are not counted.</p>
+    const body = `<p class="sub">Rows labelled by a rule or a merchant whose label is not what the rules give now. Rows you checked or chose are not counted.</p>${flowsLine(p)}
         <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>`;
     const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'row')}</button>`;
     return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
+}
+/** The rows whose flow Apply changes (every one is in p.flows), by what they
+ *  are now and after: "2 spending → a movement · the loan". */
+function flowsLine(p) {
+    const pairs = {};
+    (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}`; pairs[k] = (pairs[k] || 0) + 1; });
+    const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
+    const kept = keptWords(p);
+    return (said ? `<p class="sub">What the rows are: ${said}.</p>` : '')
+        + (kept ? `<p class="sub">Kept as they are: ${esc(kept)}</p>` : '');
+}
+/** The rows whose flow is kept, a record of expect back resting on each, in
+ *  plain words: each, and why. The drawer and a saved rule's toast say them. */
+function keptWords(p) {
+    return (p.flows_kept || []).map(k => `${k.description} stays ${k.now}: ${k.why}`).join(' ');
 }
 /** Ask the preview: 'apply', 'only_new', or null when it is closed. */
 function askPreview(p, parts = previewParts(p)) {
@@ -4784,11 +4801,13 @@ function previewedWords(r, done) {
     return `${done}. Only new rows take it; the ${plural(a.count, 'past row')} keep theirs, marked checked.`;
 }
 /** A previewed write's end: false when the drawer was closed, or the write
- *  refused (said in a toast); else its toast, with Undo. */
+ *  refused (said in a toast); else its toast, with Undo, naming the rows whose
+ *  flow it kept (a rule saved with no other row to ask about names them only here). */
 function previewedDone(r, done) {
     if (r.cancelled) return false;
     if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return false; }
-    toast(previewedWords(r, done), { undo: r.change });
+    const said = previewedWords(r, done), kept = keptWords(r.data || {});
+    toast(kept ? `${said.replace(/\.$/, '')}. Kept as they are: ${kept}` : said, { undo: r.change });
     refreshFrame();
     return true;
 }
@@ -5056,6 +5075,9 @@ ACT['merchant-delete'] = async el => {
     if (r) { closeSheet(); rerender(); }
 };
 
+// What a rule may say its rows are (ADR-009): left at the first, fin works it out.
+const RULE_FLOWS = [['', 'What fin works out'], ['expense', 'spending'], ['income', 'income'], ['refund', 'a refund'],
+    ['transfer', 'a move between own accounts'], ['payment', 'a card payment'], ['movement', 'a movement (a loan, holding or company)']];
 ACT.rule = async el => {
     const [r, services] = await Promise.all([refs(), servicesList()]);
     const x = el.dataset.id ? ACT.__rules.get(Number(el.dataset.id)) : null;
@@ -5065,6 +5087,8 @@ ACT.rule = async el => {
         <label class="field"><span>Merchant</span><select id="rl-svc"><option value="">Choose</option>${services.map(s => `<option value="${s.id}"${s.id === x?.service_id ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
         <div class="fields two"><label class="field"><span>Book, in place of the merchant’s</span><select id="rl-book">${bookOptions(r.books, x?.book_override, 'The merchant’s')}</select></label>
             <label class="field"><span>Type, in place of the merchant’s</span><select id="rl-type">${typeOptions(r.types, x?.type_override_id, { blank: 'The merchant’s' })}</select></label></div>
+        <div class="fields two"><label class="field"><span>What its rows are</span><select id="rl-flow">${RULE_FLOWS.map(([v, w]) => `<option value="${v}"${(x?.flow || '') === v ? ' selected' : ''}>${esc(w)}</option>`).join('')}</select></label>
+            <label class="field"><span>Other side</span><select id="rl-side"><option value="">None</option>${r.accounts.filter(a => a.id === x?.other_side_id || (a.owner === 'Household' && a.type !== 'person' && a.status !== 'archived')).map(a => `<option value="${a.id}"${a.id === x?.other_side_id ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label></div>
         <div class="fields two"><label class="field"><span>Only from (S$)</span><input type="text" inputmode="decimal" id="rl-min" value="${x?.min_amount ?? ''}"></label>
             <label class="field"><span>Only up to (S$)</span><input type="text" inputmode="decimal" id="rl-max" value="${x?.max_amount ?? ''}"></label></div></div>
         ${x ? `<p class="small muted">It labels ${plural(x.rows_labelled ?? 0, 'row')} now.</p>` : ''}
@@ -5075,7 +5099,8 @@ ACT['rule-save'] = async el => {
     const v = id => $('#' + id).value.trim();
     if (!v('rl-svc')) { toast('Choose the merchant', { bad: true }); return; }
     const body = { pattern: v('rl-pattern'), match_type: v('rl-match'), service_id: Number(v('rl-svc')), book_override: v('rl-book') || null,
-        type_override_id: v('rl-type') ? Number(v('rl-type')) : null, min_amount: v('rl-min') || null, max_amount: v('rl-max') || null };
+        type_override_id: v('rl-type') ? Number(v('rl-type')) : null, min_amount: v('rl-min') || null, max_amount: v('rl-max') || null,
+        flow: v('rl-flow') || null, other_side_id: v('rl-flow') && v('rl-side') ? Number(v('rl-side')) : null };
     const r = await sendPreviewed(el.dataset.id ? 'PUT' : 'POST', el.dataset.id ? `/api/rules/${el.dataset.id}` : '/api/rules', body);
     if (previewedDone(r, el.dataset.id ? 'Rule saved' : 'Rule added')) { closeSheet(); rerender(); }
 };
@@ -5304,7 +5329,7 @@ function importPreviewHTML(p) {
         <div class="table-shell" style="margin-top:10px"><table class="t rows acct-rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Money in</th><th class="r">Money out</th></tr></thead><tbody>
         ${g.transactions.map(t => {
             const minor = toMinor(t.amount_sgd, g.currency);
-            return `<tr><td class="num row-date">${esc(day(t.date, { year: false }))}</td><td class="row-desc">${esc(t.description)}</td><td class="row-label">${t.type_name ? esc(t.type_name) : t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.flow_type !== 'expense' ? `<span class="muted">${esc(t.flow_type)}</span>` : tag('nofig', 'no type')}</td>
+            return `<tr><td class="num row-date">${esc(day(t.date, { year: false }))}</td><td class="row-desc">${esc(t.description)}</td><td class="row-label">${t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.type_name ? esc(t.type_name) : t.flow_type !== 'expense' ? `<span class="muted">${esc(t.flow_type)}</span>` : tag('nofig', 'no type')}</td>
             <td class="r num row-in">${minor < 0 ? esc(money(-minor, g.currency)) : ''}</td><td class="r num row-out">${minor >= 0 ? esc(money(minor, g.currency)) : ''}</td></tr>`;
         }).join('')}</tbody></table></div></details>`).join('');
     return `<div class="results">${card('ties', tag('ties', 'Ties'), ties.reduce((a, g) => a + g.statements.length, 0), tiesBody)}${card('off', tag('off', 'Off by'), refused.length, refusedBody)}${card('notchecked', tag('notchecked', 'Not checked'), unchecked.length, uncheckedBody)}</div>

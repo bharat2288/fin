@@ -5,7 +5,6 @@ post-parse; backfill calls it over historical rows. Never called twice on
 the same row.
 """
 
-import os
 import re
 from dataclasses import dataclass, field
 
@@ -43,25 +42,12 @@ def checked_flow(value) -> str:
     return value
 
 
-# Seed aliases for own-counterparty detection. Substring-matched against
-# uppercased description. Augmented by account short_names + masked account
-# refs at classifier context construction time.
-OWN_ALIAS_SEED = (
-    "SURI BHARAT",
-    "MILI KALE",
-    "KALESH INC",
-    # Extended Kale family — classified as transfer, not income/expense
-    "SHALINI KALE",
-    "MAYA KALE",
-    "RAHUL KALE",
-    # Shortened PayNow variants (bordered with space/colon to avoid false positives)
-    "To: RK ",
-    "From: RK ",
-    "TO: RK ",
-    "FROM: RK ",
-    # Own crypto-exchange account — remittances to/from it are own-account moves
-    "INDEPENDENT RESERVE",
-)
+# Own-counterparty detection reads the household's own bank and card
+# accounts (their short names and masked numbers) at classifier context
+# construction time. The names that were listed here, and the ones the host
+# added by FIN_OWN_ALIAS_OVERRIDES, are rules now, each stating its rows are a
+# transfer (db.OWN_ACCOUNT_RULES, fin-redesign 08); a person's name is never
+# one (RUL-010).
 
 REFUND_KEYWORDS = ("CASH REBATE", "REBATE", "REFUND", "REVERSAL")
 PAYLAH_TOPUP_MARKERS = ("TOP-UP TO PAYLAH", "TOP UP TO PAYLAH")
@@ -100,9 +86,8 @@ COMPANIES_PAYING_INCOME = ("KALESH",)
 # naming the company. (wording, the company's account name)
 COMPANIES_PAYING_BACK = (("MOOM", "Moom"),)
 PAYING_BACK_RAIL = "PAYNOW"
-# A row of this merchant is a loan instalment: a movement naming the loan.
-# (the merchant's name, the loan's account name)
-LOAN_MERCHANTS = (("UOB Home Loan", "UOB home loan"), ("Car Loan", "DBS auto loan"))
+# A loan instalment is a movement naming the loan: the loan merchant's rule
+# says so (db.LOAN_MERCHANTS, fin-redesign 08).
 # Receipts on a household rupee account (HDFC) that are not income. Each is
 # a default; the operator can overturn any row. Matched against the
 # description uppercased with every space taken out (_compact), on money
@@ -136,14 +121,21 @@ REDEMPTION_PREFIX, REDEMPTION_MARKER = "RTGSCR", "REDEMPTION"
 # The kinds of account a rule above may name as an other side.
 RULE_OTHER_SIDE_KINDS = ("loan", "holding", "company")
 
+# What a merchant rule may say a row is (ADR-009): any flow but review, which
+# is what a transfer is while nothing says. Each with the kinds of the
+# household's accounts its other side may be, and whether the rule must name
+# one. A person is never one: what is lent to or owed by a person is expected
+# back on the row (personal-ledger 23).
+RULE_FLOWS = {
+    "expense": ((), False),
+    "income": ((), False),
+    "refund": ((), False),
+    "transfer": ((*account_kind.STATEMENT_KINDS, "untracked"), True),
+    "payment": (account_kind.STATEMENT_KINDS, False),
+    MOVEMENT: (RULE_OTHER_SIDE_KINDS, True),
+}
+
 ACCOUNT_REF_RE = re.compile(r"\b\d{3}-\d{5,9}-\d\b")
-LOCAL_ALIAS_SPLIT_RE = re.compile(r"[\n,;]+")
-
-
-def _load_local_own_aliases() -> tuple[str, ...]:
-    """Load private own-counterparty aliases from the local environment."""
-    raw = os.environ.get("FIN_OWN_ALIAS_OVERRIDES", "")
-    return tuple(alias.strip() for alias in LOCAL_ALIAS_SPLIT_RE.split(raw) if alias.strip())
 
 
 @dataclass
@@ -155,8 +147,6 @@ class ClassifierContext:
     owned_bank_refs: tuple[str, ...] = field(default_factory=tuple)
     # Household accounts a rule may name as an other side: {account name: id}.
     other_sides: dict = field(default_factory=dict)
-    # Loan merchants: {the merchant's service id: the loan's account id}.
-    loan_merchants: dict = field(default_factory=dict)
 
 
 def _extract_bank_refs(text: str | None) -> tuple[str, ...]:
@@ -168,7 +158,7 @@ def _extract_bank_refs(text: str | None) -> tuple[str, ...]:
 
 def build_context(conn) -> ClassifierContext:
     """Build context from the live accounts master."""
-    aliases: list[str] = [*OWN_ALIAS_SEED, *_load_local_own_aliases()]
+    aliases: list[str] = []
     linked: list[str] = []
     bank_refs: set[str] = set(CURATED_INTERNAL_BANK_REFS)
 
@@ -201,20 +191,11 @@ def build_context(conn) -> ClassifierContext:
             (account_kind.HOUSEHOLD, *RULE_OTHER_SIDE_KINDS),
         ).fetchall()
     }
-    loan_merchants = {}
-    for merchant, loan in LOAN_MERCHANTS:
-        service = conn.execute(
-            "SELECT id FROM services WHERE UPPER(name) = ?", (merchant.upper(),)
-        ).fetchone()
-        if service and loan in other_sides:
-            loan_merchants[service["id"]] = other_sides[loan]
-
     return ClassifierContext(
         own_aliases=tuple(aliases),
         linked_cc_patterns=tuple(linked),
         owned_bank_refs=tuple(sorted(bank_refs)),
         other_sides=other_sides,
-        loan_merchants=loan_merchants,
     )
 
 
@@ -294,11 +275,9 @@ def _has_transfer_shape(description: str) -> bool:
 
 
 def _named_other_side(facts: dict, ctx: ClassifierContext) -> int | None:
-    """The account a rule names as a row's other side: the loan of a loan
-    merchant, or for money received on a household bank account the holding
-    it was sold from or the company paying the household back."""
-    if facts.get("service_id") in ctx.loan_merchants:
-        return ctx.loan_merchants[facts["service_id"]]
+    """The account a rule names as a row's other side: for money received on
+    a household bank account, the holding it was sold from or the company
+    paying the household back."""
     if not _on_household_bank(facts):
         return None
     up = (facts.get("description", "") or "").upper()
@@ -313,13 +292,16 @@ def _named_other_side(facts: dict, ctx: ClassifierContext) -> int | None:
     return None
 
 
+def _names_capital_sale_source(description: str) -> bool:
+    up = description.upper()
+    return any(wording in up for wording, _ in CAPITAL_SALE_SOURCES)
+
+
 def _ledger_rule(facts: dict, ctx: ClassifierContext, received: bool) -> str | None:
     """The flow the ledger's own rules give a row, or None when none knows it:
-    a loan instalment is a movement; on a household bank account, pay and a
-    company's monthly payments are income, and a capital sale or a company
-    paying the household back is a movement."""
-    if facts.get("service_id") in ctx.loan_merchants:
-        return MOVEMENT
+    on a household bank account, pay and a company's monthly payments are
+    income, and a capital sale or a company paying the household back is a
+    movement."""
     if not (received and _on_household_bank(facts)):
         return None
     up = (facts.get("description", "") or "").upper()
@@ -352,10 +334,81 @@ def _rupee_receipt_rule(facts: dict, received: bool) -> str | None:
     return None
 
 
+def stated(rule) -> tuple[str, int | None] | None:
+    """The flow and other side a merchant rule states, or None: a rule that
+    states no flow labels only (ADR-009)."""
+    if rule is None or not rule.get("flow"):
+        return None
+    return rule["flow"], rule.get("other_side_id")
+
+
+def merchant_stated(rules, service_id) -> tuple[str, int | None] | None:
+    """The merchant's stated flow: the flow and other side every one of its
+    `rules` states (stated), where it has rules, each states one, they agree
+    and none is limited by amount (a rule for money out says nothing of
+    money in); else None. A loan merchant's rules say its rows repay the
+    loan (db.LOAN_MERCHANTS), so a wording taught onto it states that too,
+    and a row labelled with it for that row only takes it (app._teach), as
+    a row of a loan merchant did when the list was code."""
+    said = set()
+    for rule in rules:
+        if rule["service_id"] != service_id:
+            continue
+        if rule.get("min_amount_minor") is not None or rule.get("max_amount_minor") is not None:
+            return None
+        one = stated(rule)
+        if one is None:
+            return None
+        said.add(one)
+    return said.pop() if len(said) == 1 else None
+
+
+def rule_facts(rule) -> dict:
+    """The facts classify_row reads of the rule that labels a row: the flow
+    and other side it states, if it states one."""
+    said = stated(rule)
+    return {} if said is None else {"rule_flow": said[0], "rule_other_side": said[1]}
+
+
+def _names_own_account(facts: dict) -> bool:
+    side = facts.get("rule_other_side")
+    return side is not None and side == facts.get("account_id")
+
+
 def classify_row(facts: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
-    """Return (flow, the account id of the row's other side or None)."""
+    """Return (flow, the account id of the row's other side or None).
+
+    Who says what a row is, in order (ADR-009): the operator, by hand (the
+    caller keeps a flow set by hand, and never asks); then the rule that
+    labels the row, where it states a flow (`rule_flow` and `rule_other_side`,
+    rule_facts); then the classifier, whose own rules include the account
+    numbers a description names (rule 4). A rule whose other side is the
+    account the row is on (`account_id`) does not say what that row is: no
+    row moves money to its own account, so the next say does."""
+    if facts.get("rule_flow") and not _names_own_account(facts):
+        return facts["rule_flow"], facts.get("rule_other_side")
     flow = classify_flow(facts, ctx)
     return flow, (_named_other_side(facts, ctx) if flow == MOVEMENT else None)
+
+
+def worked_out_again(held, service_id, type_id, rule, account: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
+    """The flow of a row already in the book (`held`: its description,
+    amount_minor and flow_type), worked out again for the merchant and type
+    it now has, the rule that now labels it (or None) and the kind and owner
+    of the account it is on (`account`). A rule that states a flow says what
+    the row is. Otherwise flow is stable over time (the flow decision): the
+    review hold a rule no longer lifts holds a row as it is first imported,
+    and never puts back a row already out of review while it keeps a
+    merchant or a type; a row waiting stays waiting (ADR-009). The caller
+    keeps a flow set by hand."""
+    return classify_row({
+        "description": held["description"],
+        "amount_minor": held["amount_minor"],
+        "service_id": service_id,
+        "labelled": held["flow_type"] != REVIEW and bool(service_id or type_id),
+        **account,
+        **rule_facts(rule),
+    }, ctx)
 
 
 def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
@@ -363,8 +416,11 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
 
     facts: {date, description, amount_minor} and, where the caller knows them:
       account_kind, account_owner — the account the row is on;
-      service_id — the merchant a rule gave the row;
-      labelled — whether a rule or the payee wording gave it a merchant or a type.
+      labelled — a row already out of the review list that keeps a merchant
+        or a type: it is not put back (flow is stable over time), and the
+        conversions that have run read a row so. An import never passes it:
+        a rule that states no flow labels only, and a transfer it names
+        waits (ADR-009, fin-redesign 06).
     Without these the rules that need them do not apply. The amount is in
     whole minor units; only its sign is read.
     """
@@ -388,8 +444,7 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     if amount < 0 and _looks_like_refund(description):
         return "refund"
 
-    # 2b. The ledger's own rules. Before the own-alias rule: two of the
-    #     sources they know are aliases.
+    # 2b. The ledger's own rules, before the own-alias rule.
     known = _ledger_rule(facts, ctx, received=amount < 0)
     if known:
         return known
@@ -405,12 +460,21 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     if _matches_own_alias(description, ctx.own_aliases):
         return "transfer"
 
+    # 3b. Money in from a capital-sale source that rule 2b did not make a sale
+    #     (the book holds no such holding, or the row is not on a household
+    #     bank account) comes from the household's own account there, as it
+    #     did while the source was an own-account name: its rule is for money
+    #     out (db.OWN_ACCOUNT_RULES).
+    if amount < 0 and _names_capital_sale_source(description):
+        return "transfer"
+
     # 4. Narrow reviewed transfer rails that are not merchant spend.
     if _matches_known_transfer_rail(description, ctx.owned_bank_refs):
         return "transfer"
 
-    # 4b. A transfer on a household bank account that nothing above knows and
-    #     no merchant rule labelled waits for the operator.
+    # 4b. A transfer on a household bank account that nothing above knows
+    #     waits for the operator, whatever merchant a rule gave it; a row
+    #     already out of review that keeps a label stays out.
     if _on_household_bank(facts) and not facts.get("labelled") and _has_transfer_shape(description):
         return REVIEW
 
