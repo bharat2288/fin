@@ -200,6 +200,27 @@ def test_two_summaries_work_the_interest_out_from_the_instalment_paid_between(cl
     assert period["interest_minor"] == INSTALMENT - (APRIL_OWED - MAY_OWED)
 
 
+
+def test_a_figure_that_falls_with_no_instalment_naming_the_loan_is_refused(client, conn, summary):
+    # The instalments are still filed as spending, not as repayments of the
+    # loan: the fall would be worked out as negative interest. Refused, and
+    # nothing of this import is written.
+    loan_id = make_account(client, LOAN, "loan")
+    summary("30 Apr 2026", "52,340.00")
+    assert confirm(client, upload(client, "2026-04.pdf")).status_code == 200
+    summary("31 May 2026", "51,500.00")
+
+    resp = confirm(client, upload(client, "2026-05.pdf"))
+
+    assert resp.status_code == 409
+    assert resp.get_json()["error"] == (
+        "DBS auto loan fell by S$ 840.00 between 30 Apr 2026 and 31 May 2026, more than the S$ 0.00 "
+        "of instalments naming it: label the instalments as repayments of the loan first. "
+        "Nothing was imported."
+    )
+    assert [a["date"] for a in anchors_of(client) if a["account_id"] == loan_id] == ["2026-04-30"]
+    assert loan_interest.periods(conn, loan_id) == []
+
 # --- the upload command ----------------------------------------------------------
 
 

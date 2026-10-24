@@ -5149,6 +5149,7 @@ def api_import_confirm():
             # What each loan statement states is owed: the loan's figure, as
             # a statement's, dated its day. No row and no statement record.
             from ingest import ensure_named_account
+            figure_days: dict = {}
             for figure in figures:
                 loan_id = ensure_named_account(
                     conn, figure["account"], loan_interest.LOAN, figure["currency"]
@@ -5173,7 +5174,11 @@ def api_import_confirm():
                         "A different amount for the same date is refused; nothing was imported."
                     ) from None
                 figures_written += 1 if written else 0
-                accounts_created.append(figure["account"])
+                if written:
+                    figure_days.setdefault(loan_id, (figure["account"], figure["currency"], set()))[2].add(
+                        figure["date"])
+                if figure["account"] not in accounts_created:
+                    accounts_created.append(figure["account"])
 
             # Create new services submitted from the preview
             # Each entry: {name, book, type_id, description} — description becomes the merchant rule
@@ -5245,6 +5250,21 @@ def api_import_confirm():
             pairing.match_pairs(conn)
             # Rows that name a loan change what was paid between its figures.
             loan_interest.derive(conn)
+            # A figure this import wrote that fell by more than the instalments
+            # naming the loan paid would be negative interest: the instalments
+            # are not yet filed as its repayments.
+            for loan_id, (name, currency, days) in figure_days.items():
+                for period in loan_interest.periods(conn, loan_id):
+                    if period["negative"] and (period["from"] in days or period["to"] in days):
+                        raise AnchorRefused(
+                            f"{mask_card_number(name)} fell by "
+                            f"{anchors.format_amount(period['fell_minor'], currency)} between "
+                            f"{loan_interest.day_shown(period['from'])} and "
+                            f"{loan_interest.day_shown(period['to'])}, more than the "
+                            f"{anchors.format_amount(period['paid_minor'], currency)} of instalments "
+                            "naming it: label the instalments as repayments of the loan first. "
+                            "Nothing was imported."
+                        )
             # Refunds this import brought in link to their purchases, in this change.
             refund_links.link_on_import(conn)
 

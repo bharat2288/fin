@@ -121,7 +121,7 @@ def _wanted(conn: sqlite3.Connection, loan_id: int) -> list[tuple]:
     for period in periods(conn, loan_id):
         description = (
             f"Loan interest, worked out from your figures of "
-            f"{_day(period['from'])} and {_day(period['to'])}"
+            f"{day_shown(period['from'])} and {day_shown(period['to'])}"
         )
         for part in period["months"]:
             if part["interest_minor"]:
@@ -249,7 +249,7 @@ def month_figures(conn: sqlite3.Connection, month: str) -> dict:
     }
 
 
-def _day(iso: str) -> str:
+def day_shown(iso: str) -> str:
     """A day as the operator reads it: "30 Jun 2026"."""
     d = date.fromisoformat(iso)
     return f"{d.day} {d:%b} {d.year}"
@@ -279,7 +279,7 @@ def sentence(period: dict, currency: str | None) -> str:
         f"Interest {shown(period['interest_minor'])} is counted as spending "
         f"{'in' if len(months) == 1 else 'across'} {_month_names(period)}."
     )
-    text = f"Since your last figure ({_day(period['from'])}): {paid} {moved} {spending}"
+    text = f"Since your last figure ({day_shown(period['from'])}): {paid} {moved} {spending}"
     if period["negative"]:
         text += (
             " The loan fell by more than was paid, so the interest comes out negative;"
@@ -305,7 +305,7 @@ def worked_out(conn: sqlite3.Connection, loan_id: int, on: str, currency: str | 
         parts.append(sentence(ending, currency))
     if following is not None:
         parts.append(
-            f"The period from this figure to your next ({_day(following['to'])}) was worked "
+            f"The period from this figure to your next ({day_shown(following['to'])}) was worked "
             f"out again: interest {anchors.format_amount(following['interest_minor'], currency)}."
         )
     return ending, (" ".join(parts) or None)

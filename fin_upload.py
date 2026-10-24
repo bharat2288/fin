@@ -154,7 +154,8 @@ def import_one(path: Path, send: Sender, dry_run: bool = False) -> tuple[bool, s
         f"{g.get('account')}: {g.get('total', len(g.get('transactions', [])))} rows "
         f"({'ties' if g.get('tie') == 'ties' else 'not checked'})"
         for g in groups
-    ] + [f"{f.get('account')}: figure for {f.get('date')}" for f in figures])
+    ] + [f"{f.get('account')}: figure for {f.get('date')}{' (already held)' if f.get('held') else ''}"
+         for f in figures])
     if dry_run:
         return True, f"{path.name}: would import {summary}"
     confirm = {
