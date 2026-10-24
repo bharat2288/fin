@@ -189,13 +189,16 @@ def _write(conn: sqlite3.Connection, refund: dict, purchase: dict, source: str) 
     return link(conn, link_id)
 
 
-def link_refunds(conn: sqlite3.Connection) -> list[dict]:
+def link_refunds(conn: sqlite3.Connection, only: set[int] | frozenset | None = None) -> list[dict]:
     """Link every refund that has exactly one purchase that fits, in the
-    caller's open change; returns the links made, in the order made."""
+    caller's open change; returns the links made, in the order made. With
+    `only`, just those rows (the rows a label just said were refunds), in
+    the same order and passes, so the order they were named in never
+    matters."""
     _begin(conn)
     purchases = _purchases(conn)
     dismissed = _dismissed(conn)
-    refunds = _unlinked_refunds(conn)
+    refunds = [r for r in _unlinked_refunds(conn) if only is None or r["id"] in only]
     made: list[dict] = []
     while True:
         linked = []
@@ -209,6 +212,28 @@ def link_refunds(conn: sqlite3.Connection) -> list[dict]:
         if not linked:
             return made
         refunds = [r for r in refunds if r["id"] not in linked]
+
+
+def drop(conn: sqlite3.Connection, refund_row_id: int) -> int:
+    """A row that stops being a refund leaves its purchase: its link goes,
+    with the set-offs the link placed (source `refund`). No dismissal is
+    written: the pair was not turned down, the row stopped being a refund.
+    Refused (expect_back.Refused) while the purchase's expectation is let
+    go, and (Refused, in Unlink's words) while the refund is To pay back;
+    the caller's change is then rolled back. Returns the links dropped."""
+    _begin(conn)
+    links = conn.execute("SELECT id, purchase_row_id FROM refund_link WHERE refund_row_id = ? ORDER BY id",
+                         (refund_row_id,)).fetchall()
+    if links:
+        _refused_while_to_pay_back(conn, refund_row_id)
+    for found in links:
+        for (set_off_id,) in conn.execute(
+                "SELECT so.id FROM set_off so JOIN expectation e ON e.id = so.expectation_id "
+                "WHERE so.payment_row_id = ? AND e.row_id = ? AND so.source = ? ORDER BY so.id",
+                (refund_row_id, found["purchase_row_id"], REFUND_SOURCE)).fetchall():
+            expect_back.delete_set_off(conn, set_off_id)
+        conn.execute("DELETE FROM refund_link WHERE id = ?", (found["id"],))
+    return len(links)
 
 
 def link_on_import(conn: sqlite3.Connection) -> list[dict]:
@@ -364,6 +389,15 @@ def pay_back(conn: sqlite3.Connection, link_id: int) -> int:
                                           ask["amount_minor"], names=names)
 
 
+def _refused_while_to_pay_back(conn: sqlite3.Connection, refund_row_id: int) -> None:
+    """A linked refund marked To pay back keeps its link until the mark is
+    undone: Unlink and a label taking the row out of refund refuse alike."""
+    found = conn.execute("SELECT t.description FROM expectation e JOIN transactions t ON t.id = e.row_id "
+                         "WHERE e.row_id = ?", (refund_row_id,)).fetchone()
+    if found is not None:
+        raise Refused(f"{found[0]} is to pay back since; undo the mark on it first")
+
+
 def unlink(conn: sqlite3.Connection, link_id: int) -> dict:
     """Unlink a refund from its purchase: the link goes with the set-offs it
     placed (source `refund`), and a `refund_link` dismissal for the pair is
@@ -372,8 +406,7 @@ def unlink(conn: sqlite3.Connection, link_id: int) -> dict:
     purchase's expectation is let go since (expect_back's words)."""
     _begin(conn)
     held = _held_link(conn, link_id)
-    if conn.execute("SELECT 1 FROM expectation WHERE row_id = ?", (held["refund_row_id"],)).fetchone():
-        raise Refused(f"{held['description']} is to pay back since; undo the mark on it first")
+    _refused_while_to_pay_back(conn, held["refund_row_id"])
     placed = [r[0] for r in conn.execute(
         "SELECT so.id FROM set_off so JOIN expectation e ON e.id = so.expectation_id "
         "WHERE so.payment_row_id = ? AND e.row_id = ? AND so.source = ? ORDER BY so.id",

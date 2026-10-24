@@ -37,6 +37,12 @@ Rulings this module carries:
   routes the app's drawers call, and expected_back reads the open list and an item's page;
   Claude does what the app does, one change each, stamped as the chat's, under the switch.
   A let-go must name mine or a gift: there is no default.
+- Paybacks over chat (fin-redesign 12; RUL-016, no per-person shares): paybacks
+  reads the Queue's payback suggestions as the Money in lane shows them;
+  mark_expect_back given a book or type_id labels the row in the same change
+  as the mark (set_label's route, carrying the mark); set_off_payments sets
+  several payments off against one expectation, all or none, as one change,
+  under MANY_ROWS like any write.
 - The Queue (chat-queue-read 02): queue reads the Queue's labelling work
   card by card, as the operator sees it, and one pile a page at a time from
   a cursor when asked (fin-redesign item 27); queue_summary counts every
@@ -58,6 +64,16 @@ Rulings this module carries:
   account of any declared kind over the app's Add an account, so the
   statements imported after find it with its right kind. The route refuses a
   name fin already holds.
+- The chat's relabel reach (fin redesign ticket 11): label_review, on any
+  row, also says a refund (keeping its type), a card payment, or a move into
+  or out of a holding (review.MORE_CHOICES); a person stays no movement's
+  other side. With tx_ids it labels many rows as one change, behind a
+  preview: a call naming more than one row writes nothing and answers with
+  the preview and its token, and writes only when sent back with a token
+  that still holds. The token is not the operator's count: over MANY_ROWS
+  rows changed (the preview's changes, refund links too) the call takes
+  expected_count as any write, the number the preview shows. create_merchant adds a
+  merchant over the app's own route, which refuses a name fin holds.
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
 the client the chat gate verified, labelled as folio labels it: `chat:<sub>`,
@@ -389,10 +405,39 @@ _READS = [
         False,
         lambda a: _expected_back_request(a),
     ),
+    Tool(
+        "paybacks",
+        "The Queue's payback suggestions, as its Money in lane shows them: each money-in row "
+        "waiting for its label with something left to place (payment: id, description, date, "
+        "amount_minor, left_minor, currency), newest first, and the open expected-back items it "
+        "could be paying back (suggestions: expectation_id, title, date, open_minor, and the "
+        "reasons in words: who is named on it, how many days after, the amount against what is "
+        "open). An item whose names do not match the sender is never suggested; equal amounts "
+        "are offered alone, else every fit, oldest first. waiting_offers: money in left waiting "
+        "for its row, with the rows that have come in since. Amounts are in minor units of the "
+        "row's currency. This only reads: set_off places one payment, set_off_payments several "
+        "against one item, not_a_payback sets one aside.",
+        _schema(),
+        False,
+        _get("/api/queue/paybacks"),
+    ),
 ]
 
 
 # --- writes ------------------------------------------------------------------
+
+_MARK = ("direction", "all", "amount", "names", "new_names", "note")
+
+
+def _mark_request(a: dict) -> tuple[str, str, dict | None]:
+    """A mark on its own goes to the mark route; with a book or type it goes
+    to the row's own route, carrying the mark, so both are one change."""
+    tx_id = int(a["tx_id"])
+    label = _pick(a, "book", "type_id")
+    if not label:
+        return "POST", f"/api/transactions/{tx_id}/expectation", _pick(a, *_MARK)
+    return "PUT", f"/api/transactions/{tx_id}", {**label, "expectation": _pick(a, *_MARK)}
+
 
 def _w(name, description, properties, required, request):
     properties = {**properties, "expected_count": _EXPECTED}
@@ -423,14 +468,29 @@ _WRITES = [
         "label_review",
         "Say what a row was: a transfer waiting for review, or any row (the app's \"Change "
         "what this was…\" uses it too), whose flow, other side, book and type it rewrites. choice: spending (type_id; book where the "
-        "type proposes none), gift, own_account (account_id), company (account_id), "
-        "loan_repayment (account_id of a loan), income (income_kind_id). A person is no "
+        "type proposes none), gift, own_account (account_id of a bank account, card or untracked "
+        "account), company (account_id), "
+        "loan_repayment (account_id of a loan), income (income_kind_id), refund (it keeps the row's "
+        "book and type, or takes type_id; it links to its purchase when exactly one fits, and a "
+        "row with no type to keep then takes the purchase's), "
+        "card_payment (paying a card's bill or a payment reversed: no book or type), holding "
+        "(account_id of a holding: money that bought, or came back from, something owned). A row "
+        "that stops being a refund drops its refund link. A person is no "
         "movement's other side: money lent to or owed to a person is mark_expect_back on the row "
-        "(direction back on money out, pay on money in), named for them.",
-        {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I, "income_kind_id": _I},
+        "(direction back on money out, pay on money in), named for them. Many rows: tx_ids, more "
+        "rows the same label says the same of, in one change. A call naming more than one row "
+        "writes nothing and answers with a preview (each row as it was and would be, and a token): "
+        "show the operator, and on their yes call again with the same arguments and the token. A "
+        "token from a preview that no longer holds (a row changed since) is refused: preview "
+        "again. The preview's changes count every row the change writes (refund links too); over "
+        + str(MANY_ROWS) + " it also takes expected_count, the preview's expected_count.",
+        {"tx_id": _I, "choice": _S, "type_id": _I, "book": _S, "account_id": _I, "income_kind_id": _I,
+         "tx_ids": {"type": "array", "items": _I, "maxItems": 99,
+                    "description": "More rows labelled the same way, in the same change."},
+         "token": {"type": "string", "description": "The preview's token, sent back on the operator's yes."}},
         ("tx_id", "choice"),
         lambda a: ("POST", f"/api/review/{int(a['tx_id'])}/label",
-                   _pick(a, "choice", "type_id", "book", "account_id", "income_kind_id")),
+                   _pick(a, "choice", "type_id", "book", "account_id", "income_kind_id", "tx_ids", "token")),
     ),
     _w(
         "enter_figure",
@@ -527,6 +587,17 @@ _WRITES = [
                    {**_account_body(a), **_pick(a, "currency", "owner", "last_four")}),
     ),
     _w(
+        "create_merchant",
+        "Add a merchant, with the book and type its rows take (type_id from the types tool; a type "
+        "with no book takes the book the type proposes, and one that proposes none needs a book). "
+        "It labels no row: add_rule gives it a wording, and plan_preview and plan_apply attach a "
+        "card's rows. Refused when fin already holds a merchant of that name, in any case: read "
+        "merchants first.",
+        {"name": _S, "book": _S, "type_id": _I},
+        ("name",),
+        lambda a: ("POST", "/api/services", _pick(a, "name", "book", "type_id")),
+    ),
+    _w(
         "pair_transfers",
         "Pair moves between household accounts (same amount, opposite sign, within three "
         "days). Never changes a row set by hand.",
@@ -556,13 +627,15 @@ _WRITES = [
         "currency, e.g. \"200.00\") for a part; names: person account ids; new_names: names "
         "of people not yet in fin (found or made); note. The part expected back stops being "
         "spending at once. Marking a row that is already marked edits its mark; undo_mark "
-        "removes it (this is not the undo tool).",
+        "removes it (this is not the undo tool). book and/or type_id (from the types tool) label "
+        "the row in the same change, as set_label does (each marked chosen): a group order with "
+        "no type yet is labelled and marked at once, and a mark the label makes impossible (a "
+        "company's book) writes neither.",
         {"tx_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]}, "all": _B,
          "amount": _S, "names": {"type": "array", "items": _I},
-         "new_names": {"type": "array", "items": _S}, "note": _S},
+         "new_names": {"type": "array", "items": _S}, "note": _S, "book": _S, "type_id": _I},
         ("tx_id", "direction"),
-        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/expectation",
-                   _pick(a, "direction", "all", "amount", "names", "new_names", "note")),
+        lambda a: _mark_request(a),
     ),
     _w(
         "undo_mark",
@@ -591,6 +664,23 @@ _WRITES = [
         ("tx_id",),
         lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/set-offs",
                    {"placements": a.get("placements", []), **_pick(a, "waiting")}),
+    ),
+    _w(
+        "set_off_payments",
+        "Set several payments off against one expectation in one call (a group order the people "
+        "paid back one by one): payments, each {tx_id, amount} with amount text in whole units of "
+        "that payment's currency. All or none, as one change that one undo takes back; a refusal "
+        "names the payment it stopped on and writes nothing. Each payment is set off as set_off "
+        "would set it off against this one item (what is left of it stays its own to label, and "
+        "the sender's wording is learnt). The paybacks read gives the payments and what each has "
+        "left (left_minor).",
+        {"expectation_id": _I,
+         "payments": {"type": "array", "minItems": 1, "items": {
+             "type": "object", "properties": {"tx_id": _I, "amount": _S},
+             "required": ["tx_id", "amount"], "additionalProperties": False}}},
+        ("expectation_id", "payments"),
+        lambda a: ("POST", f"/api/expectations/{int(a['expectation_id'])}/set-offs",
+                   {"payments": a.get("payments", [])}),
     ),
     _w(
         "unlink_set_off",
@@ -745,6 +835,7 @@ TITLES = {
     "history": "Read the change history",
     "change": "Read one change, before and after",
     "expected_back": "Read what is expected back",
+    "paybacks": "Read the payback suggestions",
     "set_label": "Change a row's book or type",
     "set_note": "Change a row's note",
     "label_review": "Say what a row was",
@@ -758,12 +849,14 @@ TITLES = {
     "merge_merchants": "Merge two merchants",
     "add_company_or_person": "Add a company or a person",
     "create_account": "Add an account",
+    "create_merchant": "Add a merchant",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",
     "set_rate": "Enter an exchange rate",
     "mark_expect_back": "Mark money as expected back",
     "undo_mark": "Remove an expected-back mark",
     "set_off": "Set a payment off against what is expected back",
+    "set_off_payments": "Set several payments off against one expectation",
     "unlink_set_off": "Unlink a set-off",
     "let_go": "Let an expected-back amount go",
     "undo_let_go": "Undo a let-go",
