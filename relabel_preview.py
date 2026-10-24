@@ -73,7 +73,8 @@ _OVERRIDE_OF = {"book": "book_override", "type_id": "type_override_id"}
 # then what the classifier reads of the account the row is on.
 _HELD = ("t.id, t.date, t.description, t.amount_minor, t.book, t.type_id, t.service_id, "
          "t.book_source, t.type_source, t.flow_type, t.flow_type_manual, t.other_side_id, "
-         "COALESCE(a.currency, 'SGD') AS currency, a.type AS account_kind, a.owner AS account_owner")
+         "COALESCE(a.currency, 'SGD') AS currency, a.id AS account_id, a.type AS account_kind, "
+         "a.owner AS account_owner")
 _FROM = ("transactions t LEFT JOIN statements st ON st.id = t.statement_id "
          "LEFT JOIN accounts a ON a.id = st.account_id")
 
@@ -596,9 +597,10 @@ def _held_rows(conn, ids: list[int]) -> list[sqlite3.Row]:
 
 
 def held_account(held) -> dict:
-    """The kind and owner of the account a held row is on, as the classifier
+    """The account a held row is on, its kind and owner, as the classifier
     reads them (none for a row on no account)."""
-    return ({"account_kind": held["account_kind"], "account_owner": held["account_owner"]}
+    return ({"account_id": held["account_id"], "account_kind": held["account_kind"],
+             "account_owner": held["account_owner"]}
             if held["account_kind"] is not None else {})
 
 
@@ -649,13 +651,16 @@ def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: 
     return writes, None
 
 
-def taught_rules(rules: list[dict], words, match_type: str) -> list[dict]:
+def taught_rules(rules: list[dict], words, match_type: str,
+                 said: tuple[str, int | None] | None = None) -> list[dict]:
     """The rules as a teach of `words` leaves them, in match order, for which
     rule wins a row: a wording fin holds a rule for keeps that rule (a teach
     changes its merchant and overrides, never its match or the flow it
-    states); one it holds none for gains a rule that states no flow."""
+    states); one it holds none for gains a rule that states the merchant's
+    stated flow (`said`, flow.merchant_stated), or none."""
     held = {r["pattern"].upper() for r in rules}
-    added = [{**_NEW_RULE, "pattern": w, "match_type": match_type}
+    flow_name, other_side = said or (None, None)
+    added = [{**_NEW_RULE, "pattern": w, "match_type": match_type, "flow": flow_name, "other_side_id": other_side}
              for w in dict.fromkeys(words) if w.upper() not in held]
     return sorted(rules + added, key=db.match_order)
 

@@ -442,14 +442,14 @@ def _kind_from_account_name(account_name: str) -> str:
 
 
 def _account_facts(conn, tx_id) -> dict:
-    """The kind and owner of the account a row is on, as the classifier reads them."""
+    """The account a row is on, its kind and owner, as the classifier reads them."""
     row = conn.execute(
-        "SELECT a.type, a.owner FROM transactions t "
+        "SELECT a.id, a.type, a.owner FROM transactions t "
         "JOIN statements s ON t.statement_id = s.id "
         "JOIN accounts a ON s.account_id = a.id WHERE t.id = ?",
         (tx_id,),
     ).fetchone()
-    return {"account_kind": row["type"], "account_owner": row["owner"]} if row else {}
+    return {"account_id": row["id"], "account_kind": row["type"], "account_owner": row["owner"]} if row else {}
 
 
 def _classify_flow_for_tx(
@@ -644,8 +644,11 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 # ---------------------------------------------------------------------------
 
 _WRITE_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
-# Reads sent as POST for their body (a list of row ids): no entry, no lock.
-_READ_ONLY_POSTS = {"api_book_prefill"}
+# POSTs that write nothing to the book: no entry, no lock. A read sent as POST
+# for its body (a list of row ids), and "back up now", which copies the book
+# and writes its status to a file beside it, as the nightly run does (it holds
+# neither): an entry open while it copies would be in the copy.
+_READ_ONLY_POSTS = {"api_book_prefill", "api_backups_run"}
 
 # What each writing route did, in words, for the history's list.
 _CHANGE_SUMMARIES = {
@@ -3527,7 +3530,11 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         # gives it, and a teach that would move any asks first
         # (_teach_flows): they are written only on past_rows apply.
         rules_before = db.load_rules(conn)
-        taught_rules = (rules_before, relabel_preview.taught_rules(rules_before, taught_words, match_type))
+        # The merchant's stated flow (flow.merchant_stated): a rule the teach
+        # adds states it, and a row labelled for itself takes it (step 3).
+        merchant_said = flow.merchant_stated(rules_before, service_id) if svc else None
+        taught_rules = (rules_before, relabel_preview.taught_rules(rules_before, taught_words, match_type,
+                                                                   merchant_said))
         taught = label_source.rule_sources(_taught_overrides(apply_scope, book, type_id, merchant_book))
         fill_flows, fill_kept = _teach_flows(conn, service_id, tx_id, taught_words, match_type,
                                              book, type_id, taught, taught_rules)
@@ -3593,7 +3600,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         # Step 2: Create a merchant rule for each wording, the pattern's
         # first (none for a PayNow/transfer taught without one).
         # A rule override carries the type, and the book only where it
-        # is not the merchant's.
+        # is not the merchant's. A new rule states the merchant's stated
+        # flow and other side, where its rules agree on one.
         rule_ids = []
         backfilled_ids = []
         overrides = _taught_overrides(apply_scope, book, type_id, merchant_book)
@@ -3610,9 +3618,10 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             if not rule_exists:
                 conn.execute(
                     "INSERT INTO merchant_rules (pattern, service_id, book_override, "
-                    "type_override_id, match_type, confidence) "
-                    "VALUES (?, ?, ?, ?, ?, 'confirmed')",
-                    (wording, service_id, override_book, override_type_id, match_type),
+                    "type_override_id, match_type, confidence, flow, other_side_id) "
+                    "VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?)",
+                    (wording, service_id, override_book, override_type_id, match_type,
+                     *(merchant_said or (None, None))),
                 )
                 rule_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             else:
@@ -3640,9 +3649,11 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         #   - if caller supplies flow_type, set it + mark flow_type_manual=1
         #   - otherwise work the flow out again as a rule's Apply does
         #     (relabel_preview.flow_writes, with the rule that labelled the
-        #     row before the teach and the one that labels it now): never a
-        #     flow set by hand or one fin did not work out, and kept where a
-        #     hand label would refuse the move, a record resting on the row
+        #     row before the teach and the one that labels it now, or, for a
+        #     row labelled for itself, the merchant's stated flow where it has
+        #     one): never a flow set by hand or one fin did not work out, and
+        #     kept where a hand label would refuse the move, a record resting
+        #     on the row
         tx_row = conn.execute(
             f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
         ).fetchone()
@@ -3657,9 +3668,12 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             )
         elif tx_row:
             description, amount = tx_row["description"] or "", tx_row["amount_minor"]
+            now = db.pick_rule(db.load_rules(conn), description, amount)
+            if not taught_words and merchant_said is not None:
+                now = {"flow": merchant_said[0], "other_side_id": merchant_said[1]}
             flows, keeps = relabel_preview.flow_writes(
                 conn, target_held, {"service_id": service_id, "type_id": type_id, "book": book},
-                db.pick_rule(rules_before, description, amount), db.pick_rule(db.load_rules(conn), description, amount),
+                db.pick_rule(rules_before, description, amount), now,
                 flow.build_context(conn), _account_facts(conn, tx_id))
             if keeps is not None:
                 kept.append(keeps)
@@ -4845,10 +4859,11 @@ def api_import_upload():
                 # the one confirm will create for it.
                 if account not in account_facts:
                     held = conn.execute(
-                        "SELECT type, owner FROM accounts WHERE id = ?",
+                        "SELECT id, type, owner FROM accounts WHERE id = ?",
                         (find_account(conn, account),),
                     ).fetchone()
                     account_facts[account] = {
+                        "account_id": held["id"] if held else None,
                         "account_kind": held["type"] if held else _kind_from_account_name(account),
                         "account_owner": held["owner"] if held else account_kind.DEFAULT_OWNER,
                     }
@@ -5916,10 +5931,11 @@ def api_rules_update(rule_id):
                     side = proposed["other_side_id"]
                 else:
                     side = _held_side_kept(conn, stated, held["other_side_id"])
-                # What the rule already states is kept unchecked: a seeded
-                # own-account rule states a transfer and names no other side
-                # (db.OWN_ACCOUNT_RULES), and the screen sends it with every edit.
-                if (stated, side) == (held["flow"], held["other_side_id"]):
+                # One held state is kept unchecked, as held: a transfer that
+                # names no other side, as a seeded own-account rule states it
+                # (db.OWN_ACCOUNT_RULES); the screen sends it with every edit.
+                # Anything else sent is checked, a side held already too.
+                if (stated, side) == (held["flow"], held["other_side_id"]) == ("transfer", None):
                     proposed["flow"], proposed["other_side_id"] = stated, side
                 else:
                     proposed["flow"], proposed["other_side_id"] = _checked_rule_flow(conn, stated, side)

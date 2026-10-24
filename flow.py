@@ -292,6 +292,11 @@ def _named_other_side(facts: dict, ctx: ClassifierContext) -> int | None:
     return None
 
 
+def _names_capital_sale_source(description: str) -> bool:
+    up = description.upper()
+    return any(wording in up for wording, _ in CAPITAL_SALE_SOURCES)
+
+
 def _ledger_rule(facts: dict, ctx: ClassifierContext, received: bool) -> str | None:
     """The flow the ledger's own rules give a row, or None when none knows it:
     on a household bank account, pay and a company's monthly payments are
@@ -337,11 +342,37 @@ def stated(rule) -> tuple[str, int | None] | None:
     return rule["flow"], rule.get("other_side_id")
 
 
+def merchant_stated(rules, service_id) -> tuple[str, int | None] | None:
+    """The merchant's stated flow: the flow and other side every one of its
+    `rules` states (stated), where it has rules, each states one, they agree
+    and none is limited by amount (a rule for money out says nothing of
+    money in); else None. A loan merchant's rules say its rows repay the
+    loan (db.LOAN_MERCHANTS), so a wording taught onto it states that too,
+    and a row labelled with it for that row only takes it (app._teach), as
+    a row of a loan merchant did when the list was code."""
+    said = set()
+    for rule in rules:
+        if rule["service_id"] != service_id:
+            continue
+        if rule.get("min_amount_minor") is not None or rule.get("max_amount_minor") is not None:
+            return None
+        one = stated(rule)
+        if one is None:
+            return None
+        said.add(one)
+    return said.pop() if len(said) == 1 else None
+
+
 def rule_facts(rule) -> dict:
     """The facts classify_row reads of the rule that labels a row: the flow
     and other side it states, if it states one."""
     said = stated(rule)
     return {} if said is None else {"rule_flow": said[0], "rule_other_side": said[1]}
+
+
+def _names_own_account(facts: dict) -> bool:
+    side = facts.get("rule_other_side")
+    return side is not None and side == facts.get("account_id")
 
 
 def classify_row(facts: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
@@ -351,8 +382,10 @@ def classify_row(facts: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
     caller keeps a flow set by hand, and never asks); then the rule that
     labels the row, where it states a flow (`rule_flow` and `rule_other_side`,
     rule_facts); then the classifier, whose own rules include the account
-    numbers a description names (rule 4)."""
-    if facts.get("rule_flow"):
+    numbers a description names (rule 4). A rule whose other side is the
+    account the row is on (`account_id`) does not say what that row is: no
+    row moves money to its own account, so the next say does."""
+    if facts.get("rule_flow") and not _names_own_account(facts):
         return facts["rule_flow"], facts.get("rule_other_side")
     flow = classify_flow(facts, ctx)
     return flow, (_named_other_side(facts, ctx) if flow == MOVEMENT else None)
@@ -425,6 +458,14 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
 
     # 3. Own-counterparty movement (non-CC)
     if _matches_own_alias(description, ctx.own_aliases):
+        return "transfer"
+
+    # 3b. Money in from a capital-sale source that rule 2b did not make a sale
+    #     (the book holds no such holding, or the row is not on a household
+    #     bank account) comes from the household's own account there, as it
+    #     did while the source was an own-account name: its rule is for money
+    #     out (db.OWN_ACCOUNT_RULES).
+    if amount < 0 and _names_capital_sale_source(description):
         return "transfer"
 
     # 4. Narrow reviewed transfer rails that are not merchant spend.

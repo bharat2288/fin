@@ -151,7 +151,7 @@ def test_a_book_from_before_starts_only_once_the_flow_rules_step_has_run(tmp_pat
     was = {r[0]: r for r in before["merchant_rules"]}
     now = {r[0]: r for r in after["merchant_rules"]}
     assert sorted(now[i][1] for i in set(now) - set(was)) == sorted(db.OWN_ACCOUNT_RULES_PATTERNS)
-    # Of the rules there before, only the spending payees' changed: each states spending now.
+    # Of the rules there before, only the spending payees' changed: each states spending now, for money out.
     assert sorted(was[i][1] for i in was if was[i] != now[i]) == sorted(db.SPENDING_PAYEES)
     assert conversion.run_step(path, convert_flow_rules.STEP)["status"] == "already-applied"
     assert every_row(path) == after
@@ -217,9 +217,6 @@ NAMED = {
     # not seeded as spending).
     "PAYNOW TO SINGAPORE LIFE REF 0913": ("expense", "review"),
     "INWARD PAYNOW FROM MANULIFE REF 0914": ("income", "review"),
-    # A rule that states spending says so of money back from its merchant too
-    # (ADR-009: a rule before the classifier's refund wording).
-    "FATELICIOUS SAMPLE OUTLET REFUND": ("refund", "expense"),
     # The company's own rule is for money out; money in naming it is the
     # company's income on the household's bank (the classifier's own rule),
     # and elsewhere money in, as any receipt.
@@ -343,3 +340,236 @@ def test_a_seeded_own_account_rule_can_be_edited_as_the_rules_screen_sends_it(cl
     # Saying it again with no other side, on a rule that stated none, is refused.
     other = rules(client)["NETFLIX"]
     assert client.put(f"/api/rules/{other['id']}", json={"flow": "transfer", "other_side_id": None}).status_code == 400
+
+
+# --- review fixes ------------------------------------------------------------------------
+# The merchant's stated flow: the flow and other side every one of a
+# merchant's rules states, where it has rules, each states one, they agree and
+# none is limited by amount. A loan merchant's rules say its rows repay the
+# loan (the seed), so a wording taught onto it, or a row labelled with it,
+# repays the loan as the row of a loan merchant did when the list was code.
+
+INSTALMENT = "FAST PAYMENT SAMPLE HP AGREEMENT 0921"
+
+
+@pytest.fixture
+def car_loan(client) -> dict:
+    """A household bank, the car loan and its merchant, whose one rule says
+    its rows repay the loan, and an instalment no rule knows, waiting."""
+    from test_movements_and_review import spending_type
+    bank = make_account(client, BANK, "bank", last_four="0002")
+    loan = make_account(client, "Sample auto loan", "loan")
+    svc = client.post("/api/services", json={
+        "name": "Car Loan (Hire Purchase)", "book": "Household", "type_id": spending_type(client, "Transport"),
+    }).get_json()["id"]
+    assert client.post("/api/rules", json={"pattern": "SAMPLE CAR LOAN", "service_id": svc, "flow": "movement",
+                                           "other_side_id": loan}).status_code == 200
+    bring_in(client, BANK, [(9, INSTALMENT, 1850.00)])
+    assert what(client, INSTALMENT) == ("review", None)
+    return {"bank": bank, "loan": loan, "svc": svc, "tx": row(client, INSTALMENT)["id"]}
+
+
+def test_a_wording_taught_onto_a_loan_merchant_repays_the_loan(client, car_loan):
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": car_loan["tx"], "service_id": car_loan["svc"], "pattern": "SAMPLE HP AGREEMENT",
+        "match_type": "contains", "apply_scope": "service_default",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    assert what(client, INSTALMENT) == ("movement", "Sample auto loan")
+    taught = rules(client)["SAMPLE HP AGREEMENT"]
+    assert (taught["flow"], taught["other_side_id"]) == ("movement", car_loan["loan"])
+    # The next instalment is the loan's at import, by the taught rule.
+    bring_in(client, BANK, [(10, "FAST PAYMENT SAMPLE HP AGREEMENT 1021", 1850.00)])
+    assert what(client, "FAST PAYMENT SAMPLE HP AGREEMENT 1021") == ("movement", "Sample auto loan")
+
+
+def test_a_row_labelled_with_a_loan_merchant_for_itself_repays_the_loan(client, car_loan):
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": car_loan["tx"], "service_id": car_loan["svc"], "apply_scope": "transaction",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    assert what(client, INSTALMENT) == ("movement", "Sample auto loan")
+    assert row(client, INSTALMENT)["flow_type_manual"] == 0
+    assert "SAMPLE HP AGREEMENT" not in rules(client)
+
+
+def test_a_row_set_by_hand_keeps_its_flow_when_labelled_with_a_loan_merchant(client, car_loan):
+    from test_movements_and_review import spending_type
+    assert client.post(f"/api/review/{car_loan['tx']}/label", json={
+        "choice": "spending", "type_id": spending_type(client, "Transport")}).status_code == 200
+
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": car_loan["tx"], "service_id": car_loan["svc"], "apply_scope": "transaction",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    assert what(client, INSTALMENT) == ("expense", None)
+
+
+def test_a_merchant_whose_rules_disagree_states_no_flow_for_a_new_wording(client, car_loan):
+    assert client.post("/api/rules", json={"pattern": "SAMPLE CAR FEE", "service_id": car_loan["svc"]}).status_code == 200
+
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": car_loan["tx"], "service_id": car_loan["svc"], "pattern": "SAMPLE HP AGREEMENT",
+        "match_type": "contains", "apply_scope": "service_default",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    assert rules(client)["SAMPLE HP AGREEMENT"]["flow"] is None
+    assert what(client, INSTALMENT) == ("review", None)
+
+
+def test_the_seed_finds_a_loan_merchant_whose_name_goes_on_after_the_listed_one(tmp_path, monkeypatch):
+    path = book_from_before(tmp_path, monkeypatch)
+    conn = sqlite3.connect(str(path))
+    loans = dict(conn.execute("SELECT name, id FROM accounts WHERE type = 'loan'").fetchall())
+    named = {}
+    for name, pattern in (("Car Loan (Hire Purchase)", "SAMPLE HP HPR"), ("UOB Home Loan Repayment", "SAMPLE MORTGAGE"),
+                          ("Car Loans Elsewhere", "SAMPLE NOT A LOAN"), ("Car Loan", "SAMPLE CAR LOAN")):
+        svc = conn.execute("INSERT INTO services (name) VALUES (?)", (name,)).lastrowid
+        named[pattern] = conn.execute("INSERT INTO merchant_rules (pattern, service_id, match_type) VALUES (?, ?, 'contains')",
+                                      (pattern, svc)).lastrowid
+    conn.commit()
+    conn.close()
+
+    conversion.run_step(path, convert_flow_rules.STEP)
+
+    conn = sqlite3.connect(str(path))
+    said = {p: tuple(conn.execute("SELECT flow, other_side_id FROM merchant_rules WHERE id = ?", (i,)).fetchone())
+            for p, i in named.items()}
+    conn.close()
+    assert said == {
+        "SAMPLE HP HPR": ("movement", loans["DBS auto loan"]),
+        "SAMPLE MORTGAGE": ("movement", loans["UOB home loan"]),
+        "SAMPLE NOT A LOAN": (None, None),
+        "SAMPLE CAR LOAN": ("movement", loans["DBS auto loan"]),
+    }
+
+
+def test_the_flow_rules_step_records_nothing_into_an_entry_the_book_left_open(tmp_path, monkeypatch):
+    import history
+    path = book_from_before(tmp_path, monkeypatch)
+    conn = sqlite3.connect(str(path))
+    entry = history.open_entry(conn, history.VIA_APP, history.APP_ACTOR)
+    conn.close()
+
+    assert conversion.run_step(path, convert_flow_rules.STEP)["status"] == "applied"
+
+    conn = sqlite3.connect(str(path))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM change_rows WHERE entry_id = ?", (entry,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM change_entries WHERE open = 1").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_an_edit_that_keeps_an_archived_other_side_is_refused(client):
+    loan = make_account(client, "Sample old loan", "loan")
+    svc = client.post("/api/services", json={"name": "Sample Lender"}).get_json()["id"]
+    rule_id = client.post("/api/rules", json={"pattern": "SAMPLE LENDER", "service_id": svc, "flow": "movement",
+                                              "other_side_id": loan}).get_json()["id"]
+    # A book written before an account a rule names could not be archived.
+    conn = db.get_connection()
+    conn.execute("UPDATE accounts SET status = 'archived' WHERE id = ?", (loan,))
+    conn.commit()
+    conn.close()
+
+    resp = client.put(f"/api/rules/{rule_id}", json={
+        "pattern": "SAMPLE LENDER 2", "service_id": svc, "match_type": "contains",
+        "flow": "movement", "other_side_id": loan, "past": "only_new",
+    })
+
+    assert resp.status_code == 400
+    assert "archived" in resp.get_json()["error"]
+    assert "SAMPLE LENDER" in rules(client)
+
+
+def test_the_seed_states_its_flow_on_the_operators_rule_of_its_name_and_never_seeds_a_duplicate(
+        tmp_path, monkeypatch, capsys):
+    path = book_from_before(tmp_path, monkeypatch)
+    conn = sqlite3.connect(str(path))
+    for pattern, flow_name, least in (("Mili Kale", None, None), ("suri bharat", "expense", None),
+                                      ("Kalesh Inc", None, None), ("independent reserve", None, 1)):
+        svc = conn.execute("INSERT INTO services (name) VALUES (?)", (f"Sample {pattern}",)).lastrowid
+        conn.execute("INSERT INTO merchant_rules (pattern, service_id, match_type, flow, min_amount_minor)"
+                     " VALUES (?, ?, 'contains', ?, ?)", (pattern, svc, flow_name, least))
+    conn.commit()
+    conn.close()
+
+    assert convert_flow_rules.main([str(path)]) == 0
+
+    conn = sqlite3.connect(str(path))
+    held = {p: (f, m) for p, f, m in conn.execute(
+        "SELECT pattern, flow, min_amount_minor FROM merchant_rules"
+        " WHERE UPPER(pattern) IN ('MILI KALE', 'SURI BHARAT', 'KALESH INC', 'INDEPENDENT RESERVE')")}
+    conn.close()
+    assert held == {
+        "Mili Kale": ("transfer", None),          # stated on the operator's rule
+        "suri bharat": ("expense", None),         # it states its own: left
+        "Kalesh Inc": (None, None),               # for money in too: a transfer would take the company's income
+        "independent reserve": ("transfer", 1),   # for money out, as the seed is
+    }
+    # The printout names the seeded names it left as the operator has them.
+    left = " ".join(line for line in capsys.readouterr().out.splitlines() if line.startswith("left "))
+    assert "SURI BHARAT" in left and "KALESH INC" in left
+    assert "MILI KALE" not in left and "INDEPENDENT RESERVE" not in left
+
+
+def test_money_in_from_the_crypto_exchange_is_a_transfer_where_no_holding_takes_it(client, bank):
+    bring_in(client, BANK, [(11, "INWARD CREDIT INDEPENDENT RESERVE SG REF 0922", -4200.00)])
+
+    assert what(client, "INWARD CREDIT INDEPENDENT RESERVE SG REF 0922") == ("transfer", None)
+
+
+def test_a_rule_naming_a_rows_own_account_as_its_other_side_does_not_say_what_that_row_is(client, bank):
+    card = make_account(client, CARD, "card", last_four="0001")
+    svc = client.post("/api/services", json={"name": "Sample Own Move"}).get_json()["id"]
+    bring_in(client, BANK, [(12, "PAYNOW TO SAMPLE OWN MOVE REF 0923", 300.00)])
+    bring_in(client, CARD, [(12, "SAMPLE OWN MOVE CARD CREDIT", -300.00)], "credit_card")
+    body = {"pattern": "SAMPLE OWN MOVE", "service_id": svc, "flow": "transfer", "other_side_id": bank}
+
+    preview = client.post("/api/rules", json=body).get_json()["preview"]
+    assert [(f["description"], f["after"]) for f in preview.get("flows", [])] == [
+        ("SAMPLE OWN MOVE CARD CREDIT", f"a transfer · {BANK}")]
+    assert client.post("/api/rules", json={**body, "past": "apply", "token": preview["token"]}).status_code == 200
+
+    assert what(client, "PAYNOW TO SAMPLE OWN MOVE REF 0923") == ("review", None)
+    assert what(client, "SAMPLE OWN MOVE CARD CREDIT") == ("transfer", BANK)
+    # And at import: the row on the account the rule names falls through to the classifier.
+    bring_in(client, BANK, [(13, "PAYNOW TO SAMPLE OWN MOVE REF 1023", 300.00)])
+    assert what(client, "PAYNOW TO SAMPLE OWN MOVE REF 1023") == ("review", None)
+
+
+def test_a_row_labelled_for_itself_keeps_a_transfer_an_older_list_gave_it(client, bank):
+    from test_movements_and_review import spending_type
+    description = "INWARD PAYNOW FROM SAMPLE KIN REF 0924"
+    bring_in(client, BANK, [(14, description, -500.00)])
+    tx_id = row(client, description)["id"]
+    # As the own-alias list on main stored it: a transfer fin gave, not by hand.
+    conn = db.get_connection()
+    conn.execute("UPDATE transactions SET flow_type = 'transfer', flow_type_manual = 0 WHERE id = ?", (tx_id,))
+    conn.commit()
+    conn.close()
+
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": tx_id, "service_name": "Sample kin gifts", "type_id": spending_type(client, "Transport"),
+        "book": "Household", "apply_scope": "transaction",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    assert what(client, description) == ("transfer", None)
+    assert row(client, description)["service_name"] == "Sample kin gifts"
+
+
+def test_a_spending_payees_rule_is_for_money_out_so_its_refund_is_no_spending(client):
+    held = rules(client)
+    assert {p: held[p]["min_amount"] for p in db.SPENDING_PAYEES} == dict.fromkeys(db.SPENDING_PAYEES, 0.01)
+    make_account(client, CARD, "card", last_four="0001")
+
+    bring_in(client, CARD, [(15, "FATELICIOUS SAMPLE OUTLET", 48.00),
+                            (16, "FATELICIOUS SAMPLE OUTLET REFUND", -48.00)], "credit_card")
+
+    assert what(client, "FATELICIOUS SAMPLE OUTLET") == ("expense", None)
+    assert what(client, "FATELICIOUS SAMPLE OUTLET REFUND") == ("refund", None)

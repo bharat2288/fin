@@ -266,9 +266,10 @@ DEFAULT_RULES_SEED = "default-rules"
 # is never one (RUL-010): Maya, Shalini and Rahul Kale, and the "RK" short
 # forms, the list held from June 2026, are not the household. Money in naming
 # Kalesh Inc is the company's income, and money in naming Independent Reserve
-# is a sale from the crypto holding: the classifier's own rules for receipts
-# on the household's bank (flow.COMPANIES_PAYING_INCOME,
-# flow.CAPITAL_SALE_SOURCES), so those two rules are for money out.
+# is a sale from the crypto holding, or where the book holds no such holding
+# a move from the household's own account there: the classifier's own rules
+# for receipts (flow.COMPANIES_PAYING_INCOME, flow.CAPITAL_SALE_SOURCES), so
+# those two rules are for money out.
 OWN_ACCOUNT_RULES = [
     ("SURI BHARAT", False),
     ("MILI KALE", False),
@@ -281,14 +282,19 @@ OWN_ACCOUNT_RULES_PATTERNS = tuple(pattern for pattern, _ in OWN_ACCOUNT_RULES)
 MONEY_OUT = 1
 # The loan merchants: each rule of the merchant states that its rows repay
 # the loan, a movement naming it, where the book holds both. Until 08 the
-# classifier did this by the merchant's exact name. (merchant, loan account)
+# classifier did this by the merchant's exact name; the seed also finds a
+# merchant whose name goes on after it ("Car Loan (Hire Purchase)",
+# loan_merchants). A wording taught onto the merchant, or a row labelled
+# with it, takes what its rules state (flow.merchant_stated).
+# (merchant, loan account)
 LOAN_MERCHANTS = (("UOB Home Loan", "UOB home loan"), ("Car Loan", "DBS auto loan"))
 # Default rules for bills the household only ever pays, often by PayNow or
-# FAST: stated as spending, so a payment to one is spending as it was before
-# a rule stopped lifting the review hold (fin-redesign 06). Left out, waiting
+# FAST: stated as spending, for money out only (MONEY_OUT), so a payment to
+# one is spending as it was before a rule stopped lifting the review hold
+# (fin-redesign 06) and its money back is no spending. Left out, waiting
 # for the operator: a payee that also pays the household money (MANULIFE, AIA,
 # PRUDENTIAL, GREAT EASTERN, SINGAPORE LIFE, SICC, the tax and CPF payees),
-# since a rule that states spending says it of money back too; TESLA MOTORS,
+# whose money in is no refund either; TESLA MOTORS,
 # whose rule took a car's downpayment as spending; and SITOH SIEW KIM, a
 # person's name.
 SPENDING_PAYEES = (
@@ -412,8 +418,11 @@ def flow_rules_seeded(conn: sqlite3.Connection) -> bool:
 def seed_flow_rules(conn: sqlite3.Connection) -> int:
     """Seed the flow lists as rules, once, and mark the book: the own-account
     rules (each on the merchant named from its pattern, made with no book or
-    type when there is none, unless a rule with its pattern is already
-    there), the loan merchants' rules, and the spending payees' default rules,
+    type when there is none; where a rule of its pattern, in any case, is
+    already there, the seed's flow is stated on it where it states none and
+    is for the same money, else it is left as it is: _seed_rule), the loan
+    merchants' rules (loan_merchants), and the spending payees' default
+    rules, each for money out only (a payee's money back is no spending),
     where each still states no flow. Changes no row. The number of rules
     added; no commit. A new book's first start and the flow-rules conversion
     step both seed through this."""
@@ -422,26 +431,36 @@ def seed_flow_rules(conn: sqlite3.Connection) -> int:
         added += _seed_rule(conn, pattern, "contains", None, None,
                             flow="transfer", min_amount_minor=MONEY_OUT if money_out else None)
     for merchant, loan in LOAN_MERCHANTS:
-        service = conn.execute("SELECT id FROM services WHERE UPPER(name) = ?", (merchant.upper(),)).fetchone()
         # As the classifier named the loan: the older of two of the name.
         account = conn.execute(
             "SELECT id FROM accounts WHERE name = ? AND type = 'loan' AND owner = ? ORDER BY id LIMIT 1",
             (loan, account_kind.HOUSEHOLD),
         ).fetchone()
-        if service and account:
+        for service_id in loan_merchants(conn, merchant) if account else ():
             conn.execute(
                 "UPDATE merchant_rules SET flow = 'movement', other_side_id = ?"
                 " WHERE service_id = ? AND flow IS NULL",
-                (account[0], service[0]),
+                (account[0], service_id),
             )
     for pattern in SPENDING_PAYEES:
         conn.execute(
-            "UPDATE merchant_rules SET flow = 'expense' WHERE pattern = ? AND match_type = 'contains'"
-            " AND flow IS NULL AND other_side_id IS NULL",
-            (pattern,),
+            "UPDATE merchant_rules SET flow = 'expense', min_amount_minor = COALESCE(min_amount_minor, ?)"
+            " WHERE UPPER(pattern) = ? AND match_type = 'contains' AND flow IS NULL AND other_side_id IS NULL"
+            " AND COALESCE(min_amount_minor, ?) >= ?",
+            (MONEY_OUT, pattern.upper(), MONEY_OUT, MONEY_OUT),
         )
     conn.execute("INSERT INTO seeded_once (seed) VALUES (?)", (FLOW_RULES_SEED,))
     return added
+
+
+def loan_merchants(conn: sqlite3.Connection, merchant: str) -> list[int]:
+    """The merchants a loan merchant's name (LOAN_MERCHANTS) finds: one named
+    so, or whose name goes on after it past a space or a bracket ("Car Loan
+    (Hire Purchase)"), in any case. Never one whose name only begins with
+    its letters ("Car Loans")."""
+    name = merchant.upper()
+    return [service_id for service_id, held in conn.execute("SELECT id, name FROM services ORDER BY id")
+            if (held or "").upper() == name or (held or "").upper().startswith((name + " ", name + "("))]
 
 
 def _expect_back_pending(conn: sqlite3.Connection) -> bool:
@@ -578,12 +597,26 @@ def init_db() -> None:
 def _seed_rule(conn: sqlite3.Connection, pattern: str, match_type: str,
                book: str | None, type_id: int | None, *,
                flow: str | None = None, min_amount_minor: int | None = None) -> int:
-    """A seed rule, unless one with its pattern is already there: on the
-    merchant named from the pattern ("GRAB" → "Grab"), made with this book and
-    type when there is none, stating `flow` when one is given, and for money
-    of at least `min_amount_minor` only when that is. 1 when the rule was
-    added, else 0; no commit."""
-    if conn.execute("SELECT id FROM merchant_rules WHERE pattern = ?", (pattern,)).fetchone():
+    """A seed rule, unless one with its pattern, in any case, is already
+    there: on the merchant named from the pattern ("GRAB" → "Grab"), made with
+    this book and type when there is none, stating `flow` when one is given,
+    and for money of at least `min_amount_minor` only when that is. 1 when
+    the rule was added, else 0; no commit.
+
+    A rule of the pattern already there is never seeded again. Where it
+    states no flow and is for the same money (any, or money out where the
+    seed is for money out), the seed's flow is stated on it; one that states
+    a flow, or is for other money, is the operator's, left as it is (the
+    flow-rules step names it)."""
+    held = conn.execute(
+        "SELECT id, flow, min_amount_minor FROM merchant_rules WHERE UPPER(pattern) = ?", (pattern.upper(),)
+    ).fetchall()
+    if held:
+        if flow is not None:
+            for rule_id, stated, least in held:
+                same_money = min_amount_minor is None or (least is not None and least >= min_amount_minor)
+                if stated is None and same_money:
+                    conn.execute("UPDATE merchant_rules SET flow = ? WHERE id = ? AND flow IS NULL", (flow, rule_id))
         return 0
     svc_name = pattern.title()
     svc = conn.execute(

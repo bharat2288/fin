@@ -8,13 +8,17 @@ at its first start; this step gives them to a book from before, through the
 same seeding (db.seed_flow_rules) and its marker (db.FLOW_RULES_SEED):
 
 - each own-account name becomes a rule stating its rows are a transfer
-  (db.OWN_ACCOUNT_RULES), unless a rule with its pattern is already there;
+  (db.OWN_ACCOUNT_RULES); where the operator has a rule of the name, in any
+  case, none is added: the transfer is stated on it where it states no flow
+  and is for the same money, and otherwise it is left and named;
   Maya, Shalini and Rahul Kale and the "RK" short forms are not the
   household (RUL-010) and are not among them;
-- each rule of a loan merchant, where the book holds the merchant and its
-  loan, states that its rows repay the loan (db.LOAN_MERCHANTS);
+- each rule of a loan merchant (the name, or the name going on past a space
+  or a bracket: db.loan_merchants), where the book holds the merchant and
+  its loan, states that its rows repay the loan (db.LOAN_MERCHANTS);
 - the default rules of six bills the household only pays state that their
-  rows are spending (db.SPENDING_PAYEES), where each states no flow yet.
+  rows are spending, for money out (db.SPENDING_PAYEES), where each states
+  no flow yet.
 
 No row changes: a rule says what a new row is, and is applied to past rows
 only when the operator applies it. It runs after rule-flow
@@ -61,6 +65,16 @@ def _measure(conn: sqlite3.Connection) -> dict:
     }
 
 
+def _gained_a_flow(held: tuple, now: tuple) -> bool:
+    """Whether a rule (pattern, merchant, match, priority, book, type, least,
+    most, flow, other side) changed only by gaining a flow where it stated
+    none, and, for a spending payee's, money out only where it had no least
+    amount. Nothing else about a rule moves."""
+    if held[-2:] != (None, None) or now[:-4] != held[:-4] or now[-3] != held[-3]:
+        return False
+    return now[-4] == held[-4] or (held[-4] is None and now[-4] == db.MONEY_OUT and now[-2] == "expense")
+
+
 def _invariant(before: dict, after: dict) -> list[str]:
     problems = []
     for table, count in before["rows"].items():
@@ -74,8 +88,9 @@ def _invariant(before: dict, after: dict) -> list[str]:
         problems.append("a merchant changed")
     for rule_id, held in before["rules"].items():
         now = after["rules"].get(rule_id)
-        # Only a rule that stated no flow may gain one; nothing else about it moves.
-        if now is None or now[:-2] != held[:-2] or (held[-2:] != now[-2:] and held[-2:] != (None, None)):
+        if now is None:
+            problems.append(f"rule {rule_id} changed")
+        elif now != held and not _gained_a_flow(held, now):
             problems.append(f"rule {rule_id} changed")
     added = set(after["rules"]) - set(before["rules"])
     if any(after["rules"][rule_id][-2] is None for rule_id in added):
@@ -85,6 +100,15 @@ def _invariant(before: dict, after: dict) -> list[str]:
 
 STEP = conversion.Step(name=NAME, apply=_apply, is_applied=db.flow_rules_seeded,
                        invariant=_invariant, measure=_measure)
+
+
+def _left(rules) -> list[str]:
+    """The own-account names (db.OWN_ACCOUNT_RULES, the seed's own words)
+    whose rule the book holds but which does not state the transfer: the
+    operator's rule of the name, left as it is (db._seed_rule)."""
+    held = [(r[0].upper(), r[-2]) for r in rules]
+    return [pattern for pattern in db.OWN_ACCOUNT_RULES_PATTERNS
+            if any(p == pattern for p, _ in held) and not any(p == pattern and f == "transfer" for p, f in held)]
 
 
 def main(argv: list[str]) -> int:
@@ -110,6 +134,11 @@ def main(argv: list[str]) -> int:
         print(f"backup: {report['backup']}")
         print(f"rules before: {before['rows']['merchant_rules']}, after: {after['rows']['merchant_rules']}")
         print(f"rules that state a flow: {stating} more")
+        loans = [r for i, r in after["rules"].items() if r[-2] == "movement" and before["rules"].get(i, r)[-2] is None]
+        print(f"loan merchants found: {len({r[1] for r in loans})}, their rules stating the loan: {len(loans)}")
+        for pattern in _left(after["rules"].values()):
+            print(f"left as the operator has it: {pattern} (its own rule of the name states another flow, "
+                  "or none for other money)")
         print("no row was changed: the rules say what new rows are")
     return 0
 
