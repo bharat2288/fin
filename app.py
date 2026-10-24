@@ -560,8 +560,11 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 # ---------------------------------------------------------------------------
 
 _WRITE_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
-# Reads sent as POST for their body (a list of row ids): no entry, no lock.
-_READ_ONLY_POSTS = {"api_book_prefill"}
+# POSTs that write nothing to the book: no entry, no lock. A read sent as POST
+# for its body (a list of row ids), and "back up now", which copies the book
+# and writes its status to a file beside it, as the nightly run does (it holds
+# neither): an entry open while it copies would be in the copy.
+_READ_ONLY_POSTS = {"api_book_prefill", "api_backups_run"}
 
 # What each writing route did, in words, for the history's list.
 _CHANGE_SUMMARIES = {
@@ -4982,6 +4985,10 @@ def api_import_confirm():
                     rows_of[ref].append(minor_of[id(tx)])
             for line, amounts in zip(lines, rows_of):
                 anchors.checked_date(line.get("closing_date"))
+                # The opening day is stored as the period's start
+                # (statement_period.py): checked as the closing day is.
+                if line.get("opening_date") is not None:
+                    anchors.checked_date(line["opening_date"])
                 tie.checked(line.get("opening_minor"), line.get("closing_minor"), amounts)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -5427,8 +5434,9 @@ def api_statements_coverage():
     """Return 6-month coverage matrix: active accounts × recent months.
 
     Shows which accounts have statements imported for each month,
-    and which are missing. A statement marks every month its period reaches
-    into (statement_period.py): one covering July and August marks both.
+    and which are missing. A statement marks the month it closes in and every
+    month its period contains whole (statement_period.held_months): one
+    covering July and August marks both.
     """
     months_count = int(request.args.get("months", 6))
 
@@ -5462,12 +5470,18 @@ def api_statements_coverage():
             "JOIN accounts a ON s.account_id = a.id "
             "WHERE (a.status = 'active' OR a.status IS NULL) "
             "  AND a.type IN (?, ?) "
-            # A period ends on or after its statement_date, so a statement
-            # dated before the first month shown reaches none of them.
+            # A statement holds no month after the one it closes in, so one
+            # dated before the first month shown holds none of them.
             "  AND s.statement_date >= ? "
             "ORDER BY s.statement_date",
             (*account_kind.STATEMENT_KINDS, min_month),
         ).fetchall()
+        held_of = [
+            statement_period.held_months(
+                conn, stmt["account_id"], stmt["statement_date"], stmt["period_start"], stmt["printed"]
+            )
+            for stmt in statements
+        ]
 
     # Build matrix: {account_id: {month: {imported, date, filename}}}
     matrix = {}
@@ -5476,13 +5490,13 @@ def api_statements_coverage():
         for m in months:
             matrix[acct["id"]][m] = {"imported": False}
 
-    for stmt in statements:
+    for stmt, held in zip(statements, held_of):
         acct_id = stmt["account_id"]
-        for stmt_month in statement_period.months(stmt["statement_date"], stmt["period_start"], stmt["printed"]):
+        for stmt_month in held:
             if acct_id not in matrix or stmt_month not in matrix[acct_id]:
                 continue
             # A month shows the statement dated in it, as before periods; a
-            # month none is dated in shows the first whose period reaches it.
+            # month none is dated in shows the first whose period holds it.
             if stmt_month == stmt["statement_date"][:7] or not matrix[acct_id][stmt_month]["imported"]:
                 matrix[acct_id][stmt_month] = {
                     "imported": True,

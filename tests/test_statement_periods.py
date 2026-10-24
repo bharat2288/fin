@@ -168,7 +168,10 @@ def test_a_printed_statement_that_states_no_opening_day_starts_after_the_one_bef
 
     held = conn.execute("SELECT period_start FROM statements WHERE statement_date = ?", (last_of(1),))
 
-    assert held.fetchone()[0] == first_of(1)
+    # Read, not stored: it follows the statement before it, whenever that is
+    # imported or undone.
+    assert held.fetchone()[0] is None
+    assert read_start(conn, last_of(1)) == first_of(1)
 
 
 def test_derived_loan_interest_records_start_the_day_after_the_figure_before(client, conn):
@@ -282,18 +285,35 @@ STATEMENTS = "SELECT id, account_id, statement_date, filename, imported_at, prin
 
 
 def test_case_11_every_existing_statement_gets_its_period_start(old):
+    """Stored where it is known on its own; a printed statement's is read
+    from the closing before it (statement_period.start), as fin reads it."""
+    import statement_period
+
     convert(old)
 
     assert query(old, "SELECT id, period_start FROM statements ORDER BY id") == [
+        (1, None), (2, None), (3, None), (4, None), (5, None),  # printed: read, not stored
+        (6, "2026-09-01"),  # a month record: the 1st of its month, wherever it is dated
+        (7, "2026-07-01"),
+        (8, "2026-08-01"),
+        (9, "2026-07-01"),  # derived interest: the day after the loan's figure before
+    ]
+    conn = sqlite3.connect(str(old))
+    try:
+        read = [(sid, statement_period.start(conn, *row)) for sid, *row in conn.execute(
+            "SELECT id, account_id, statement_date, period_start, printed FROM statements ORDER BY id")]
+    finally:
+        conn.close()
+    assert read == [
         (1, "2026-03-01"),  # the first printed statement: the 1st of its month
         (2, "2026-03-15"),  # the day after the previous closing
         (3, "2026-04-15"),
         (4, "2026-08-01"),  # after a gap the previous closing cannot be told: the 1st
         (5, "2026-08-15"),
-        (6, "2026-09-01"),  # a month record: the 1st of its month, wherever it is dated
+        (6, "2026-09-01"),
         (7, "2026-07-01"),
         (8, "2026-08-01"),
-        (9, "2026-07-01"),  # derived interest: the day after the loan's figure before
+        (9, "2026-07-01"),
     ]
 
 
@@ -381,8 +401,8 @@ def test_the_command(old, capsys, tmp_path):
     assert convert_statement_periods.main([str(old)]) == 0
     out = capsys.readouterr().out
     assert "step statement-periods: applied" in out
-    assert "from the previous closing: 3; month records from the 1st: 3; printed, from the 1st: 2; " \
-           "loan interest from the figure before: 1" in out
+    assert "month records from the 1st: 3; loan interest from the figure before: 1; " \
+           "printed, read from the previous closing: 3; printed, read from the 1st: 2" in out
     assert convert_statement_periods.main([str(old)]) == 0
     assert "already-applied" in capsys.readouterr().out
     assert convert_statement_periods.main([]) == 2
@@ -401,3 +421,164 @@ def test_a_changed_row_fails_the_steps_invariant(old):
 
     problems = convert_statement_periods.STEP.invariant(measured, moved)
     assert problems and "transaction rows changed" in problems[0]
+
+
+# --- review of PR 30 ----------------------------------------------------------
+
+
+def day_of(n: int, day: int) -> str:
+    y, m = month_back(n)
+    return f"{y:04d}-{m:02d}-{day:02d}"
+
+
+def confirmed(client):
+    """Upload and confirm the next stand-in statement; the confirm's response."""
+    resp = client.post("/api/import/upload", data={"files": (io.BytesIO(b"stand-in"), "sample.csv")},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    preview = resp.get_json()
+    return client.post("/api/import/confirm", json={
+        "import_id": preview["import_id"],
+        "groups": [{"account": g["account"], "transactions": g["transactions"], "statements": g["statements"]}
+                   for g in preview["groups"]],
+    })
+
+
+def printed_run(stand_in, client, closings) -> None:
+    """Printed statements of the card, one upload each: (closing day, opening
+    day or None). Each prints one row on its closing day; the balances run on."""
+    owed = 0
+    for closing, opening in closings:
+        stand_in([(closing, "SAMPLE GROCER", 1_000)], opening_minor=owed, closing_minor=owed - 1_000,
+                 opening_date=opening, closing_date=closing)
+        imported(client)
+        owed -= 1_000
+
+
+def card_id(conn) -> int:
+    return conn.execute("SELECT id FROM accounts WHERE name = ?", (CARD,)).fetchone()[0]
+
+
+def read_start(conn, closing: str) -> str:
+    """The first day fin reads for the card's statement closing on `closing`."""
+    import statement_period
+
+    row = conn.execute("SELECT account_id, statement_date, period_start, printed FROM statements"
+                       " WHERE account_id = ? AND statement_date = ?", (card_id(conn), closing)).fetchone()
+    return statement_period.start(conn, *row)
+
+
+def held_and_missing(client, conn) -> tuple[list[str], list[str]]:
+    """The months 5 to 1 back the coverage view marks imported, and those
+    missing_months reports."""
+    shown = [key(n) for n in range(5, 0, -1)]
+    coverage = client.get("/api/statements/coverage?months=6").get_json()
+    row = coverage["matrix"][str(card_id(conn))]
+    return [m for m in shown if row[m]["imported"]], missing.missing_months(conn, [card_id(conn)], shown, date.today())
+
+
+def test_one_statement_missing_from_a_16th_to_15th_cycle_is_reported(stand_in, client, conn):
+    """Probe 1: a period reaching into a month does not hold it; the 15th of
+    three months back never imported is missing, as it was before periods."""
+    printed_run(stand_in, client, [(day_of(n, 15), day_of(n + 1, 16)) for n in (5, 4, 2, 1)])
+
+    held, gaps = held_and_missing(client, conn)
+
+    assert held == [key(5), key(4), key(2), key(1)]
+    assert gaps == [key(3)]
+
+
+def test_one_statement_missing_is_reported_when_the_parser_states_no_opening_day(stand_in, client, conn):
+    """Probe 2: a card closing on the 15th with no opening day, the statement
+    of three months back imported and then undone."""
+    printed_run(stand_in, client, [(day_of(n, 15), None) for n in (5, 4, 3, 2, 1)])
+    entry = conn.execute(
+        "SELECT entry_id FROM change_rows WHERE tbl = 'statements' AND op = 'insert'"
+        " AND json_extract(after, '$.statement_date') = ?", (day_of(3, 15),)
+    ).fetchone()[0]
+
+    assert client.post(f"/api/history/{entry}/undo").status_code == 200
+
+    held, gaps = held_and_missing(client, conn)
+    assert held == [key(5), key(4), key(2), key(1)]
+    assert gaps == [key(3)]
+    # Its neighbour reads its start again: no statement closes near enough
+    # before it to tell, so from the 1st.
+    assert read_start(conn, day_of(2, 15)) == day_of(2, 1)
+
+
+def test_one_statement_missing_from_a_cycle_closing_on_the_1st_is_reported(stand_in, client, conn):
+    printed_run(stand_in, client, [(day_of(n, 1), day_of(n + 1, 2)) for n in (5, 4, 2, 1)])
+
+    held, gaps = held_and_missing(client, conn)
+
+    assert held == [key(5), key(4), key(2), key(1)]
+    assert gaps == [key(3)]
+
+
+def test_a_start_read_from_the_closing_before_does_not_depend_on_import_order(stand_in, client, conn):
+    """Probe 3: the later statement imported first still starts the day after
+    the earlier one's closing, as the conversion tells it."""
+    printed_run(stand_in, client, [(day_of(2, 15), None), (day_of(3, 15), None)])
+
+    assert read_start(conn, day_of(2, 15)) == day_of(3, 16)
+    assert read_start(conn, day_of(3, 15)) == day_of(3, 1)
+    assert conn.execute("SELECT COUNT(*) FROM statements WHERE period_start IS NOT NULL").fetchone()[0] == 0
+
+
+def test_a_start_reads_the_previous_statement_balance_as_the_balance_sheet_does(stand_in, client, conn):
+    """The previous statement closed on the later of the previous printed
+    closing and the previous statement balance (balance_sheet.ROW_DAY): a row
+    the statement printed from before it counts on the day its period starts."""
+    import balance_sheet
+
+    printed_run(stand_in, client, [(day_of(4, 14), None)])
+    conn.execute("INSERT INTO anchors (account_id, date, amount, source) VALUES (?, ?, -1000, 'statement')",
+                 (card_id(conn), day_of(3, 14)))
+    conn.commit()
+    stand_in([(day_of(3, 10), "SAMPLE CAFE", 1_000)], opening_minor=-1_000, closing_minor=-2_000,
+             closing_date=day_of(2, 14))
+    imported(client)
+
+    counted = conn.execute(f"SELECT {balance_sheet.ROW_DAY} FROM transactions t"
+                           " JOIN statements s ON s.id = t.statement_id WHERE t.date = ?", (day_of(3, 10),))
+    assert read_start(conn, day_of(2, 14)) == day_of(3, 15) == counted.fetchone()[0]
+
+
+@pytest.mark.parametrize("opening", ["2026-02-30", "2025-7-1", "31/07/2026"])
+def test_an_opening_day_that_is_not_a_real_day_refuses_the_import(stand_in, client, conn, opening):
+    """As a closing day that is not one does: nothing is written, and the
+    coverage view still answers."""
+    stand_in([(last_of(2)[:8] + "12", "SAMPLE CAFE", 2_000)],
+             opening_minor=0, closing_minor=-2_000, opening_date=opening, closing_date=last_of(2))
+
+    resp = confirmed(client)
+
+    assert resp.status_code == 400
+    assert "YYYY-MM-DD" in resp.get_json()["error"]
+    assert conn.execute("SELECT COUNT(*) FROM statements").fetchone()[0] == 0
+    assert client.get("/api/statements/coverage?months=6").status_code == 200
+
+
+def test_a_conversion_records_nothing_into_an_entry_the_book_left_open(old, monkeypatch):
+    """A book copied while a request held its entry open keeps it open. The
+    conversion is no change of the operator's: none of its writes is in an
+    entry once fin starts, so no Undo takes the starts back."""
+    import app as fin_app
+
+    conn = sqlite3.connect(str(old))
+    history.open_entry(conn, history.VIA_APP, history.APP_ACTOR)
+    conn.close()
+
+    convert(old)
+    monkeypatch.setattr(db, "DB_PATH", old)
+    db.invalidate_rules_cache()
+    db.init_db()
+    fin_app.app.config["TESTING"] = True
+    with fin_app.app.test_client() as client:
+        for shown in client.get("/api/history?limit=500").get_json()["entries"]:
+            client.post(f"/api/history/{shown['id']}/undo")
+
+    assert query(old, "SELECT COUNT(*) FROM change_rows WHERE tbl = 'statements'") == [(0,)]
+    assert query(old, "SELECT COUNT(*) FROM statements WHERE printed = 0 AND period_start IS NULL") == [(0,)]
+    db.invalidate_rules_cache()

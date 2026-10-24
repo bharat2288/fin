@@ -3,26 +3,28 @@
 Gives an existing database the first day each statement covers beside its
 closing day: statements gain `period_start`, in the shape schema.sql declares,
 and the statements history triggers are put in place with it. Every existing
-record is given its start; what kind of record it is decides how
-(statement_period.py):
+record is given the start known on its own; what kind of record it is decides
+how (statement_period.py):
 
-- a statement as printed (printed = 1, written by the import of a statement
-  that states its balances): the day after the account's previous printed
-  closing day, when that is in its closing month or the month before;
-  otherwise (the account's first, or one after a gap) it cannot be told, and
-  it starts on the 1st of its closing month;
+- a calendar-month record (printed = 0: rows from a source that states no
+  balance, filed by their own month): the 1st of its month, whatever day it
+  is dated;
 - derived loan interest (loan_interest.DERIVED_STATEMENT on a loan): the day
   after the loan's figure before its closing day, the period it was worked out
   over; the 1st of its month when there is none;
-- any other record is a calendar-month record (printed = 0: rows from a source
-  that states no balance, filed by their own month): the 1st of its month,
-  whatever day it is dated.
+- a statement as printed (printed = 1, written by the import of a statement
+  that states its balances): none is stored. No import before this step kept
+  the opening day its parser read, so its start is read, whenever it is asked
+  for, from the closing before it (statement_period.start), exactly as for a
+  statement imported from now on that states no opening day. The command
+  reports how those read.
 
 No transaction row, no other column of a statement and no total changes; the
 step's invariant reads every row before and after. It runs only through the
 conversion runner (conversion.run_step), so it sits behind a backup, in one
 transaction, and a second run changes nothing: it is applied once the column
-is there.
+is there. Like every step it records no change entry: the runner closes one
+the book was left holding open before it runs, so no Undo takes a start back.
 
     python convert_statement_periods.py <path to database>
 """
@@ -50,11 +52,11 @@ _COLUMN_SQL = f"{COLUMN} TEXT"
 ADDS_COLUMNS = {"statements": (COLUMN,)}
 
 # How a record's start was told, in the order the command reports them.
-FROM_PREVIOUS = "from the previous closing"
 MONTH_RECORD = "month records from the 1st"
-PRINTED_FIRST = "printed, from the 1st"
 LOAN_FIGURE = "loan interest from the figure before"
-HOW = (FROM_PREVIOUS, MONTH_RECORD, PRINTED_FIRST, LOAN_FIGURE)
+FROM_PREVIOUS = "printed, read from the previous closing"
+PRINTED_FIRST = "printed, read from the 1st"
+HOW = (MONTH_RECORD, LOAN_FIGURE, FROM_PREVIOUS, PRINTED_FIRST)
 
 _TRIGGER_NAME = re.compile(r"CREATE TRIGGER IF NOT EXISTS (history_statements_(?:insert|update|delete)) ")
 
@@ -64,9 +66,11 @@ def has_shape(conn: sqlite3.Connection) -> bool:
     return COLUMN in {r[1] for r in conn.execute("PRAGMA table_info(statements)")}
 
 
-def planned(conn: sqlite3.Connection) -> list[tuple[str, str, int]]:
-    """(start, how it was told, statement id) for every statement record,
-    read from the records themselves and never from a start already held."""
+def planned(conn: sqlite3.Connection) -> list[tuple[str | None, str, int]]:
+    """(start to store, how it was told, statement id) for every statement
+    record, read from the records themselves and never from a start already
+    held. A printed statement's start to store is None: it is read, not
+    stored (statement_period.start)."""
     records = conn.execute(
         "SELECT s.id, s.account_id, s.statement_date, s.printed, s.filename, a.type"
         " FROM statements s LEFT JOIN accounts a ON a.id = s.account_id"
@@ -76,9 +80,8 @@ def planned(conn: sqlite3.Connection) -> list[tuple[str, str, int]]:
     for sid, account_id, closing, printed, filename, kind in records:
         first = statement_period.first_of_month(closing)
         if printed:
-            before = statement_period.previous_closing(conn, account_id, closing)
-            out.append((statement_period.day_after(before), FROM_PREVIOUS, sid) if before
-                       else (first, PRINTED_FIRST, sid))
+            told_from = statement_period.previous_closing(conn, account_id, closing)
+            out.append((None, FROM_PREVIOUS if told_from else PRINTED_FIRST, sid))
         elif filename == loan_interest.DERIVED_STATEMENT and kind == loan_interest.LOAN:
             before = conn.execute(
                 "SELECT MAX(date) FROM anchors WHERE account_id = ? AND date < ?", (account_id, closing)
@@ -104,7 +107,7 @@ def _apply(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     conn.executemany(
         f"UPDATE statements SET {COLUMN} = ? WHERE id = ? AND {COLUMN} IS NULL",
-        [(start, sid) for start, _, sid in planned(conn)],
+        [(start, sid) for start, _, sid in planned(conn) if start is not None],
     )
 
 
@@ -123,8 +126,10 @@ def _measure(conn: sqlite3.Connection) -> dict:
         "statements": _digest(
             conn, "SELECT id, account_id, statement_date, filename, imported_at, printed FROM statements ORDER BY id"
         ),
+        # A printed statement's start is read, not stored: every other
+        # record stores its own.
         "without_start": conn.execute(
-            f"SELECT COUNT(*) FROM statements WHERE {COLUMN} IS NULL"
+            f"SELECT COUNT(*) FROM statements WHERE printed = 0 AND {COLUMN} IS NULL"
         ).fetchone()[0] if has_shape(conn) else None,
     }
 
@@ -136,7 +141,7 @@ def _invariant(before: dict, after: dict) -> list[str]:
     if before["statements"] != after["statements"]:
         problems.append("statement records changed beyond their period start")
     if after["without_start"]:
-        problems.append(f"{after['without_start']} statement records have no period start")
+        problems.append(f"{after['without_start']} month or loan-interest records have no period start")
     return problems
 
 

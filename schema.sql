@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS statements (
     filename TEXT,                  -- original PDF filename
     imported_at TEXT DEFAULT (datetime('now')),
     printed INTEGER NOT NULL DEFAULT 0,  -- 1 = one statement as printed: statement_date is its closing day and it holds the rows it printed; 0 = a calendar-month record (statement_date the 1st) of rows from a source that states no balance. An existing database gains it through convert_printed_statements.py
-    period_start TEXT,              -- YYYY-MM-DD, the first day the statement covers (statement_period.py): a printed statement's opening day, so it covers period_start to statement_date; a calendar-month record's 1st, so it covers its month. NULL reads as the 1st of statement_date's month. An existing database gains it through convert_statement_periods.py
+    period_start TEXT,              -- YYYY-MM-DD, the first day the statement covers, where it is known on its own (statement_period.py): a printed statement's opening day as its parser read it, so it covers period_start to statement_date; a calendar-month record's 1st, so it covers its month. NULL on a printed statement is read from the closing before it (statement_period.start); on any other record, as the 1st of its month. An existing database gains it through convert_statement_periods.py
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     UNIQUE(account_id, statement_date)
 );

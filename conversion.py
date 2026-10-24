@@ -12,6 +12,10 @@ how an amount is stored). The runner makes each step cheap to get wrong:
 4. it is safe to run twice: a step that is already applied is not run again
    and no second backup is written.
 
+A conversion is not a change of the operator's: no step's writes are recorded
+in the change history (history.py), so none is there to undo. The backup is
+the conversion's undo.
+
 The runner takes the database path from its caller. It never opens a database
 by a relative name and has no default path.
 """
@@ -27,6 +31,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
+import history
 import money
 
 # Tables whose row counts are recorded. A frozen list: table names in the
@@ -158,8 +163,12 @@ def recorded(conn: sqlite3.Connection, step_name: str) -> bool:
 
 
 def _has_steps_table(conn: sqlite3.Connection) -> bool:
+    return _has_table(conn, "conversion_steps")
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
     return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversion_steps'"
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
     ).fetchone() is not None
 
 
@@ -418,6 +427,14 @@ def run_step(
                     f"backup copy {target.name} differs in size from the database "
                     f"({copy_size} bytes against {source_size}); the bad copy was removed"
                 )
+
+            # A change entry the book was left holding open (a crash, or a copy
+            # taken while a request held one) would take the step's writes as
+            # an operator's change, there to undo. A conversion is none: it is
+            # in no entry, and its backup is its undo. Closed as a start
+            # closes it (db.init_db), after the backup, in the transaction.
+            if _has_table(conn, "change_entries"):
+                history.close_left_open(conn)
 
             before = step.measure(conn)
 

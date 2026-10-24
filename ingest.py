@@ -133,11 +133,14 @@ def ensure_statement(
     record that sits on the day a printed statement needs is moved to a free
     day of its month, keeping its rows, so the two never share a record.
 
-    A new record stores the first day it covers (statement_period.py): a
-    printed statement's `period_start` (the opening day its parser read), or
-    when it gives none the day after the account's previous printed closing;
-    a month record's 1st. A printed record already held that has none is
-    given it.
+    A new record stores the first day it covers where that is known on its
+    own (statement_period.py): a printed statement's `period_start`, the
+    opening day its parser read; a month record's 1st. A printed statement
+    whose parser read none stores none: its start is read from the closing
+    before it whenever it is asked for (statement_period.start), so a
+    statement imported, undone or deleted beside it later never leaves it
+    stale. A printed record already held that has none is given the opening
+    day when this import reads one.
     """
     if not printed:
         month = statement_date[:7]
@@ -156,7 +159,7 @@ def ensure_statement(
         cur = conn.execute(
             "INSERT INTO statements (account_id, statement_date, filename, printed, period_start)"
             " VALUES (?, ?, ?, 0, ?)",
-            (account_id, on, filename, f"{month}-01"),
+            (account_id, on, filename, statement_period.first_of_month(statement_date)),
         )
         return (cur.lastrowid, True)
 
@@ -164,12 +167,12 @@ def ensure_statement(
         "SELECT id, printed FROM statements WHERE account_id = ? AND statement_date = ?",
         (account_id, statement_date),
     ).fetchone()
-    start = period_start or statement_period.printed_start(conn, account_id, statement_date)
     if existing and existing[1]:
-        conn.execute(
-            "UPDATE statements SET period_start = ? WHERE id = ? AND period_start IS NULL",
-            (start, existing[0]),
-        )
+        if period_start:
+            conn.execute(
+                "UPDATE statements SET period_start = ? WHERE id = ? AND period_start IS NULL",
+                (period_start, existing[0]),
+            )
         return (existing[0], False)
     if existing:
         conn.execute(
@@ -179,6 +182,6 @@ def ensure_statement(
     cur = conn.execute(
         "INSERT INTO statements (account_id, statement_date, filename, printed, period_start)"
         " VALUES (?, ?, ?, 1, ?)",
-        (account_id, statement_date, filename, start),
+        (account_id, statement_date, filename, period_start or None),
     )
     return (cur.lastrowid, True)
