@@ -5269,6 +5269,9 @@ function importPreviewHTML(p) {
     const refused = p.errors.filter(e => e.tie);
     const unread = p.errors.filter(e => !e.tie);
     const rows = p.groups.reduce((a, g) => a + g.transactions.length, 0);
+    // A loan statement has no rows: what it states is owed is the loan's figure.
+    const figures = p.figures || [];
+    const newFigures = figures.filter(f => !f.held).length;
     const count = (list, test) => list.filter(test).length;
     const card = (kind, pill, n, body) => `<section class="card result result--${kind}"><div class="result__head">${pill}<span class="result__n">${n}</span></div>${body}</section>`;
     const stmtBlock = (account, sub, sum) => `<div class="result-stmt"><div class="result-stmt__name">${esc(account)}</div><div class="small muted">${sub}</div>${sum}</div>`;
@@ -5292,6 +5295,10 @@ function importPreviewHTML(p) {
             in: inn.reduce((a, t) => a - toMinor(t.amount_sgd, g.currency), 0), inCount: inn.length,
         }, g.currency));
     }).join('') || noneYet;
+    const figuresHTML = figures.length ? card('figure', tag('aside', 'Loan figure'), figures.length, figures.map(f => stmtBlock(f.account,
+        `loan statement ${esc(day(f.date))}: no rows${f.new_account ? '; the loan account is made' : ''}`,
+        `<table class="sum small"><tbody><tr><td class="op"></td><td>owed${f.held ? ' <span class="muted">(already held)</span>' : ''}</td><td class="r">${esc(money(f.owed_minor, f.currency))}</td></tr></tbody></table>`)).join('')) : '';
+    const offered = [rows ? plural(rows, 'row') : '', newFigures ? plural(newFigures, 'figure') : ''].filter(Boolean).join(' and ');
     const groupsHTML = p.groups.filter(g => g.transactions.length).map(g => `<details class="card import-group"><summary><b>${esc(g.account)}</b> · ${plural(g.transactions.length, 'row')} · ${g.typed} with a type, ${g.untyped} without</summary>
         <div class="table-shell" style="margin-top:10px"><table class="t rows acct-rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Money in</th><th class="r">Money out</th></tr></thead><tbody>
         ${g.transactions.map(t => {
@@ -5300,9 +5307,10 @@ function importPreviewHTML(p) {
             <td class="r num row-in">${minor < 0 ? esc(money(-minor, g.currency)) : ''}</td><td class="r num row-out">${minor >= 0 ? esc(money(minor, g.currency)) : ''}</td></tr>`;
         }).join('')}</tbody></table></div></details>`).join('');
     return `<div class="results">${card('ties', tag('ties', 'Ties'), ties.reduce((a, g) => a + g.statements.length, 0), tiesBody)}${card('off', tag('off', 'Off by'), refused.length, refusedBody)}${card('notchecked', tag('notchecked', 'Not checked'), unchecked.length, uncheckedBody)}</div>
+        ${figuresHTML}
         ${unread.length ? `<div class="notice bad import-unread">${icon('warning-circle')}<span>${unread.map(e => `${esc(e.file)}: ${esc(e.error)}`).join('<br>')}</span></div>` : ''}
-        ${rows ? `<section class="card import-bar"><p>${plural(rows, 'row')} ready. A refused statement stays in the queue until a file that ties is imported.</p>
-            <div class="row"><button class="btn" data-act="import-clear">Start again</button><button class="btn primary" data-act="import-confirm">Import ${plural(rows, 'row')}</button></div></section>${groupsHTML}`
+        ${offered ? `<section class="card import-bar"><p>${offered} ready. A refused statement stays in the queue until a file that ties is imported.</p>
+            <div class="row"><button class="btn" data-act="import-clear">Start again</button><button class="btn primary" data-act="import-confirm">Import ${offered}</button></div></section>${groupsHTML}`
             : `<section class="card import-bar"><p>Nothing to import.</p><div class="row"><button class="btn" data-act="import-clear">Start again</button></div></section>`}`;
 }
 /** The choices a confirm may carry for one previewed row (app.py
@@ -5325,7 +5333,8 @@ ACT['import-confirm'] = async el => {
     });
     if (!r.ok) { el.disabled = false; toast(r.data.error || 'Nothing was imported', { bad: true }); return; }
     importState.preview = null;
-    importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}. It is one change in Changes, with Undo.`;
+    const figuresDone = r.data.figures_written ? ` and ${plural(r.data.figures_written, 'figure')}` : '';
+    importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}${figuresDone}. It is one change in Changes, with Undo.`;
     toast('Imported', { undo: r.change });
     rerender();
 };
