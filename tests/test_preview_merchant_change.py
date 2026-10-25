@@ -674,7 +674,7 @@ SAMPLE = {
 
 
 def preview_html(sample) -> dict:
-    return _node("\n".join([PRELUDE, _function("monthName"), _function("bandedTable"), _const("PREVIEW_FIELD"), _function("previewParts"),
+    return _node("\n".join([PRELUDE, _function("monthName"), _function("bandedTable"), _const("PREVIEW_FIELD"), _function("keptWords"), _function("flowsLine"), _function("previewParts"),
                             f"console.log(JSON.stringify(previewParts({json.dumps(sample)})));"]))
 
 

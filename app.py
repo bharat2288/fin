@@ -3577,9 +3577,12 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             name = conn.execute("SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()[0] \
                 if svc else service_name
             # Its rows are the merchant's to be: shown as moving to it, as a
-            # taught wording's rows are (relabel_preview._example).
+            # taught wording's rows are (relabel_preview._example), and the
+            # wording taught is its change, as a taught wording's is
+            # (relabel_preview.taking): the drawer is titled by it.
             plan = relabel_preview.Plan(subject={"kind": "merchant", "id": service_id, "name": name},
-                                        change={}, called=name, moves_to=name)
+                                        change={}, called=name, moves_to=name,
+                                        wording=" · ".join(taught_words))
         if plan is not None:
             # Where the teach asks anyway, the merchant's own rows still
             # waiting for a type that it labels itself in the same change,

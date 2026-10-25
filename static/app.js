@@ -1214,7 +1214,7 @@ ACT['home-guess-yes'] = async el => {
     const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
     if (r.cancelled) return;
     if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return; }
-    toast(previewedWords(r, 'Labelled'), { undo: r.change });
+    toast(resolvedWords(r, 'Labelled'), { undo: r.change });
     refreshFrame();
     rerender();
 };
@@ -3005,7 +3005,7 @@ async function saveResolve(body, group = [], { quiet = false, check = null, onSc
         if (!quiet) toast(error, { bad: true });
         return { ok: false, resolved: false, changes: [], labelled: 0, labelledIds: [], error };
     }
-    if (!quiet) { toast(previewedWords(r, 'Saved'), { undo: r.change }); refreshFrame(); }
+    if (!quiet) { toast(resolvedWords(r, 'Saved'), { undo: r.change }); refreshFrame(); }
     const changes = r.change ? [r.change] : [];
     // The group's other rows the rule did not reach (a merchant text too plain
     // for a rule, or rows whose text the pattern misses) are labelled one by one.
@@ -4558,12 +4558,13 @@ function filingsHTML(slots, types, income) {
 }
 /** The drawer's parts for a slot move's preview. The type names come from the picker: an income kind too. */
 function slotParts(p, from, to) {
-    const asked = p.past_known
+    let asked = p.past_known
         ? `<p class="q">${plural(p.count, 'past row')} fin filed as ${esc(p.subject.name)}</p>
             <p class="sub">Move them to ${esc(to)} too, or only new rows go there.</p>
             <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }],
                 rows: p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(from)} → <b>${esc(to)}</b></td></tr>`) })}</div>`
         : `<p class="sub">fin cannot tell which past rows it filed as ${esc(p.subject.name)}, so only new rows go under ${esc(to)}. Past rows keep their type.</p>`;
+    asked += flowsLine(p);
     const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span>${p.past_known
         ? `<button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`
         : '<button type="button" class="btn primary" data-act="preview-answer" data-past="only_new">Only new rows</button>'}`;
@@ -4714,11 +4715,15 @@ function previewParts(p) {
     const fieldLines = p.change.filter(c => c.label || c.from !== c.to);
     const words = fieldLines.map(c => (c.label ? [c.label.toLowerCase(), c.label] : (PREVIEW_FIELD[c.field] || [c.field, c.field])));
     const only = fieldLines.length === 1 ? fieldLines[0] : null;
+    // A teach whose only question is its rows' flows changes no field of
+    // the merchant: it is asked as applying the merchant to those rows.
     const title = kind === 'rule' ? `${PREVIEW_TITLE[p.subject.verb] || 'Save the rule'} ${esc(name)}?`
         : kind === 'merge' ? `Merge ${esc(name)} into ${esc(p.subject.into.name)}?`
+        : !fieldLines.length ? `Apply ${esc(name)} to these rows?`
         : only && only.field === 'wording' ? `Teach ${esc(name)} the wording ${esc(only.to)}?`
         : only ? `Change ${esc(name)}’s ${words[0][0]} to ${esc(only.to)}?` : `Change ${esc(name)}’s ${words.map(w => w[0]).join(' and ')}?`;
-    const eyebrow = kind === 'rule' ? 'Rule' : kind === 'merge' ? 'Merge' : `${esc(name)} · ${words.map(w => w[0]).join(' and ')}`;
+    const eyebrow = kind === 'rule' ? 'Rule' : kind === 'merge' ? 'Merge'
+        : fieldLines.length ? `${esc(name)} · ${words.map(w => w[0]).join(' and ')}` : esc(name);
     const line = (label, from, to) => `<li>${label}: ${[from != null ? `<s>${esc(from)}</s>` : '', to != null ? `<b>${esc(to)}</b>` : ''].filter(Boolean).join(' → ')}</li>`;
     const lines = [kind === 'merge' ? line('Merchant', name, p.subject.into.name) : '', ...fieldLines.map((c, i) => line(words[i][1], c.from, c.to))].join('');
     // Where the rows would move: a rule's merchant, or the merchant taught.
@@ -4727,7 +4732,6 @@ function previewParts(p) {
     const ruleLines = kind !== 'rule' ? '' : [
         p.unheld ? `<p class="sub">${plural(p.unheld, 'row')} with no merchant yet would become ${movesTo}.</p>` : '',
         p.subject.verb === 'delete' && p.labelled ? `<p class="sub">${plural(p.labelled, 'row')} ${p.labelled === 1 ? 'is' : 'are'} labelled by this rule.</p>` : '',
-        flowsLine(p),
     ].join('');
     const span = m => m.first === m.last ? monthName(m.first, { short: true }) : `${monthName(m.first, { short: true })} – ${monthName(m.last, { short: true })}`;
     const facts = p.money && p.months ? `<div class="prev-facts">
@@ -4736,9 +4740,10 @@ function previewParts(p) {
     const leftOut = (p.left_out || []).length ? `<p class="sub">Not in the S$ figure: ${p.left_out.map(x => `${esc(money(x.amount_minor, x.currency))} in ${esc(monthName(x.month, { short: true }))} (${esc(x.reason)})`).join('; ')}.</p>` : '';
     const kept = [p.checked ? `Of them, <b>${p.checked} you checked</b>.` : '', p.chosen ? `<b>${p.chosen} you chose</b> stay as they are.` : ''].filter(Boolean).join(' ');
     const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b>${x.source === 'checked' ? ' <span class="prev-mark">checked</span>' : ''}</td></tr>`);
-    const body = `<ul class="diff">${lines}</ul>
+    // The rows whose flow Apply moves or keeps, on every preview that carries them.
+    const body = `${lines ? `<ul class="diff">${lines}</ul>` : ''}
         <p class="q">This changes ${plural(p.count, 'past row')}</p>
-        ${warns}${facts}${leftOut}${ruleLines}${kept ? `<p class="sub">${kept}</p>` : ''}
+        ${warns}${facts}${leftOut}${ruleLines}${flowsLine(p)}${kept ? `<p class="sub">${kept}</p>` : ''}
         <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>
         ${kind === 'rule' || p.subject.id == null ? '' : `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>`}`;
     const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`;
@@ -4799,6 +4804,16 @@ function previewedWords(r, done) {
     if (!a || !a.count) return done;
     if (a.past === 'apply') return `${done}, and ${plural(a.count, 'past row')} changed. One change in Changes, with Undo.`;
     return `${done}. Only new rows take it; the ${plural(a.count, 'past row')} keep theirs, marked checked.`;
+}
+/** A teach's (resolve's) toast: what it did (previewedWords), then the row
+ *  taught's own flow where it moved (the answer's flows) and the rows whose
+ *  flow it kept (flows_kept), as the drawer says them. */
+function resolvedWords(r, done) {
+    const said = previewedWords(r, done);
+    const moved = (r.data?.flows || []).map(f => `What the row is: ${f.now} → ${f.after}.`).join(' ');
+    const kept = keptWords(r.data || {});
+    if (!moved && !kept) return said;
+    return [`${said.replace(/\.$/, '')}.`, moved, kept ? `Kept as they are: ${kept}` : ''].filter(Boolean).join(' ');
 }
 /** A previewed write's end: false when the drawer was closed, or the write
  *  refused (said in a toast); else its toast, with Undo, naming the rows whose
