@@ -32,8 +32,10 @@ all read it from here:
   latest one the statements cover and no payment since makes the bill missed,
   however long ago (case 18). When no covered due day is unpaid but a later
   one is late, the bill is awaiting statement: due is the latest late due day,
-  and waiting_on the month of the first statement it waits for (the first day
-  not covered for the oldest late due day since its last payment). A due day
+  waiting_due the oldest late due day since its last payment that the
+  statements do not cover, and waiting_on the month of the first statement it
+  waits for (the first day not covered for waiting_due). Other states leave
+  both empty. A due day
   before the account's first statement is neither: fin holds nothing for it. A bill with no paying account, or one paid
   from an account fin holds no statements for (not a bank or card, or none
   imported yet), is judged against today alone, as before: judged_by says
@@ -260,10 +262,10 @@ def _days(day: str, n: int) -> str:
 
 
 def state(bill: dict, on: date, spans: list[tuple[str, str]] | None) -> dict:
-    """The missed-bill rule (module doc): {state, due, waiting_on}. `spans`
+    """The missed-bill rule (module doc): {state, due, waiting_due, waiting_on}. `spans`
     are the paying account's statement periods, or None when the bill is
     judged against today alone."""
-    out = {"state": "on_track", "due": None, "waiting_on": None}
+    out = {"state": "on_track", "due": None, "waiting_due": None, "waiting_on": None}
     if bill.get("status") == "paused":
         return {**out, "state": "paused"}
     if bill.get("status") != "active":
@@ -292,9 +294,10 @@ def state(bill: dict, on: date, spans: list[tuple[str, str]] | None) -> dict:
         gap = statement_period.first_gap(spans, _days(due, -EARLY_DAYS), _days(due, GRACE_DAYS))
         if gap is None:
             return {**out, "state": "missed", "due": due}
-        # The latest late due day is the one shown; the statement waited for
-        # is the first one missing, for the oldest late due day not covered.
-        awaiting = {"state": "awaiting_statement", "due": awaiting["due"] if awaiting else due, "waiting_on": gap[:7]}
+        # due stays the latest late due day; the one waited on is the oldest
+        # late due day not covered, with the first statement missing for it.
+        awaiting = {"state": "awaiting_statement", "due": awaiting["due"] if awaiting else due,
+                    "waiting_due": due, "waiting_on": gap[:7]}
     return awaiting or out
 
 
@@ -444,6 +447,7 @@ def brief(bill: dict) -> dict:
         "status": bill.get("status"),
         "state": bill["state"],
         "due": bill["due"],
+        "waiting_due": bill["waiting_due"],
         "waiting_on": bill["waiting_on"],
         "judged_by": bill["judged_by"],
         "last_paid": bill.get("tx_last_paid") or bill.get("last_paid"),

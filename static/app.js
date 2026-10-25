@@ -4140,10 +4140,10 @@ function billMissedTag(s, missed) {
 function billAwaitingTag(s) {
     return tag('aside', 'awaiting statement', { title: billWaitsOn(s) });
 }
-/** What an awaiting bill waits for, in words: the statement of the first month
- *  its payment could show in that fin does not hold yet (the server's waiting_on). */
+/** What an awaiting bill waits for, in words: the oldest due day not checked yet
+ *  (the server's waiting_due) and the statement that would show it (waiting_on). */
 function billWaitsOn(s, { named = true } = {}) {
-    return `Due ${day(s.due)}; waiting on ${named ? `${s.account_name || 'its account'}’s` : 'its'} ${s.waiting_on ? monthName(s.waiting_on) + ' ' : ''}statement`;
+    return `${day(s.waiting_due || s.due)} not checked yet; waiting on ${named ? `${s.account_name || 'its account'}’s` : 'its'} ${s.waiting_on ? monthName(s.waiting_on) + ' ' : ''}statement`;
 }
 /** A bill held in another currency than the account that pays it. */
 function billCurrencyTag(s) {

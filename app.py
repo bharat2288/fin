@@ -6409,8 +6409,8 @@ def api_bills():
         "rule": (f"A due day is paid by a payment seen from {bills.EARLY_DAYS} days before it, and late "
                  f"{bills.GRACE_DAYS} days after. A bill is missed when a late due day its paying account's "
                  "statements cover (those days) has no payment since, however long ago; when only later due days "
-                 "are late and not yet covered it is awaiting_statement, and waiting_on names the month of the "
-                 "statement it waits for. A bill paid from no account, or from one fin holds no statements for, "
+                 "are late and not yet covered it is awaiting_statement: waiting_due is the oldest such due day "
+                 "and waiting_on the month of the statement that would show it. A bill paid from no account, or from one fin holds no statements for, "
                  "is judged against today alone (judged_by: today)."),
     })
 

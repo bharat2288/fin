@@ -594,9 +594,10 @@ def test_review_10_a_bill_waiting_on_a_gap_names_the_statement(client, conn):
     statement(conn, bank, "2026-08-31", "2026-08-01")
     gym = bill(client, "Sample Gym", amount=360, frequency="half-yearly", account_id=bank, renewal_date="2026-01-12")
 
-    assert shown(client, gym)["waiting_on"] == "2026-07"
+    got = shown(client, gym)
+    assert (got["waiting_due"], got["waiting_on"]) == ("2026-07-12", "2026-07")
     chat = next(b for b in mcp_tools.call("bills", {}, actor=ACTOR)["result"]["bills"] if b["id"] == gym)
-    assert chat["waiting_on"] == "2026-07"
+    assert (chat["waiting_due"], chat["waiting_on"]) == ("2026-07-12", "2026-07")
 
 
 def test_review_10_a_bill_waiting_past_the_statements_names_the_next(client, covered_to_31_aug):
@@ -632,3 +633,22 @@ def test_review_10_a_bill_months_past_the_statements_waits_on_the_first_missing_
 
     got = shown(client, notes)
     assert (got["state"], got["due"], got["waiting_on"]) == ("awaiting_statement", "2026-10-17", "2026-04")
+    # The due day it waits on is the oldest unchecked one, which April's statement would show.
+    assert got["waiting_due"] == "2026-04-17"
+
+
+def test_review_v3_only_an_awaiting_bill_names_a_due_day_it_waits_on(client, covered_to_31_aug):
+    # Due 5 Sep and 5 Oct are both late; 5 Sep's days run past 31 Aug, so it is the oldest unchecked.
+    ledger = shown(client, covered_to_31_aug["ledger"])
+    assert (ledger["due"], ledger["waiting_due"], ledger["waiting_on"]) == ("2026-10-05", "2026-09-05", "2026-09")
+    assert shown(client, covered_to_31_aug["rent"])["waiting_due"] is None   # missed: due says the day
+
+
+@needs_node
+def test_review_v3_the_awaiting_note_names_the_due_day_it_waits_on():
+    bill_ = {"due": "2026-10-17", "waiting_due": "2026-04-17", "waiting_on": "2026-04", "account_name": "Sample Bank 1002"}
+    code = "\n".join([SHEET_PRELUDE, (STATIC / "app.js").read_text(encoding="utf-8"),
+                      f"const b = {json.dumps(bill_)};",
+                      "console.log(JSON.stringify([billWaitsOn(b, { named: false }), billWaitsOn(b)]));"])
+    assert _node(code) == ["17 Apr 2026 not checked yet; waiting on its April 2026 statement",
+                           "17 Apr 2026 not checked yet; waiting on Sample Bank 1002\u2019s April 2026 statement"]
