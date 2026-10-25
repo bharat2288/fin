@@ -15,6 +15,8 @@ number (spec case 12).
 
 from __future__ import annotations
 
+import account_kind
+
 # (name, description). A new role is a new value here.
 ROLES = (
     ("merchant", "a shop or service the household buys from"),
@@ -30,9 +32,14 @@ ROLES = (
 )
 ROLE_NAMES = tuple(name for name, _ in ROLES)
 
-# The account kinds (account_kind.KINDS) that may name a party. A bank
-# account or a card is the household's own place, never a party's.
-ACCOUNT_KINDS = ("loan", "holding", "company", "person", "untracked")
+# The account kinds that may name a party: every kind (account_kind.KINDS)
+# but those whose rows come from imported statements. A bank account or a
+# card is the household's own place, never a party's.
+ACCOUNT_KINDS = tuple(k for k in account_kind.KIND_NAMES if k not in account_kind.STATEMENT_KINDS)
+
+# What Changes calls a link and its undoing.
+JOINED = "Joined an account to a party"
+LEFT = "Took an account off its party"
 
 
 class Refused(ValueError):

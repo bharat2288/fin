@@ -655,7 +655,8 @@ _READ_ONLY_POSTS = {"api_book_prefill", "api_backups_run"}
 _CHANGE_SUMMARIES = {
     "api_accounts_create": "Added an account",
     "api_accounts_update": "Changed an account",
-    "api_accounts_party": "Joined an account to a party",
+    # Named by the route: joined to a party, or taken off one (party.JOINED, party.LEFT).
+    "api_accounts_party": "Changed an account's party",
     "api_accounts_delete": "Deleted an account",
     "api_anchors_create": "Entered a figure",
     "api_anchors_replace": "Corrected a figure",
@@ -1464,12 +1465,15 @@ def _party_kind_refusal(conn, acct_id: int, data: dict) -> str | None:
 @app.route("/api/accounts/<int:acct_id>/party", methods=["PUT"])
 def api_accounts_party(acct_id):
     """Join a person, company, loan, holding or untracked account to a party:
-    a merchant (party.py). Body: {service_id}; null or left out takes the
-    account off its party. Two accounts may name one party, each keeping its
-    own balance (RUL-011). One change, undone whole; a refusal writes
-    nothing."""
-    data = request.get_json(silent=True) or {}
-    service_id = data.get("service_id")
+    a merchant (party.py). Body: a JSON object carrying service_id, a
+    merchant's id, or null to take the account off its party; any other body
+    is refused. Two accounts may name one party, each keeping its own balance
+    (RUL-011). One change, undone whole; a refusal writes nothing."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "service_id" not in data:
+        return jsonify({"error": "send service_id: a merchant's id, or null to take the account off its party; "
+                                 "nothing was changed"}), 400
+    service_id = data["service_id"]
     if service_id is not None and (not isinstance(service_id, int) or isinstance(service_id, bool)):
         return jsonify({"error": "service_id must be a merchant's id, or null to take the account off its party"}), 400
     with get_db() as conn:
@@ -1483,6 +1487,7 @@ def api_accounts_party(acct_id):
             if conn.execute("SELECT 1 FROM services WHERE id = ?", (service_id,)).fetchone() is None:
                 return jsonify({"error": f"no merchant {service_id} in fin; nothing was changed"}), 400
         conn.execute("UPDATE accounts SET party_id = ? WHERE id = ?", (service_id, acct_id))
+        _name_change(conn, party.JOINED if service_id is not None else party.LEFT)
         conn.commit()
     return jsonify({"success": True, "party_id": service_id})
 

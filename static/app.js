@@ -5576,6 +5576,11 @@ function changeWords(first, ctx, { rows = 1, subject = null } = {}) {
     const what = c.table === 'merchant_rules' ? `${noun} “${name}”` : c.table === 'rates' ? `${noun} ${name} for ${esc(day((a.date || b.date || '')))}` : `${noun} ${name}`;
     if (c.op === 'insert') return `added ${what}`;
     if (c.op === 'delete') return `deleted ${what}`;
+    // An account joined to a party, or taken off one (fin-redesign 09).
+    if (c.table === 'accounts' && changedFields(c).join() === 'party_id') {
+        return isEmpty(a.party_id) ? `took ${what} off the party ${valueText('accounts', 'party_id', b.party_id, ctx)}`
+            : `joined ${what} to the party ${valueText('accounts', 'party_id', a.party_id, ctx)}`;
+    }
     if (c.table !== 'rates' && b.name && a.name && b.name !== a.name) return `renamed ${noun} ${esc(b.name)} to ${esc(a.name)}`;
     return `changed ${what}`;
 }

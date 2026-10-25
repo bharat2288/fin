@@ -631,6 +631,7 @@ _WRITES = [
         "and no figure.",
         {"account_id": _I, "service_id": _I},
         ("account_id",),
+        # service_id left out is sent as null, said: the route refuses a body without it.
         lambda a: ("PUT", f"/api/accounts/{int(a['account_id'])}/party",
                    {"service_id": a.get("service_id")}),
     ),

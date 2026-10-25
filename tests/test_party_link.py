@@ -32,6 +32,7 @@ import convert_party_link
 import db
 import fin_snapshot
 import history
+import account_kind
 import mcp_tools
 import party
 from test_balance_sheet import bring_in, make_account
@@ -80,9 +81,9 @@ def merchants() -> dict:
 
 
 @pytest.fixture
-def people(client):
-    """Two person accounts, a company account, a bank, a merchant that pays
-    the company's people, and a party for the two people to join."""
+def placed(client):
+    """Two person accounts, a company account, a bank, a loan, and a
+    merchant that pays the company's people."""
     ids = {
         "a": make_account(client, "Sample Friend A", "person"),
         "b": make_account(client, "Sample Friend B", "person"),
@@ -93,6 +94,13 @@ def people(client):
     made = call("create_merchant", name="Sample Co Health")
     assert made["ok"], made
     ids["co_merchant"] = made["result"]["id"]
+    return ids
+
+
+@pytest.fixture
+def people(placed):
+    """And a party for the two people to join."""
+    ids = dict(placed)
     made = call("create_merchant", name="Sample Friends")
     assert made["ok"], made
     ids["friends"] = made["result"]["id"]
@@ -112,7 +120,9 @@ def test_the_roles_are_declared_once_with_what_each_means():
 
 def test_the_kinds_that_take_a_party_are_the_five_the_spec_names():
     assert party.ACCOUNT_KINDS == ("loan", "holding", "company", "person", "untracked")
-    assert not {"bank", "card"} & set(party.ACCOUNT_KINDS)
+    # Read from the kinds' one home: every kind whose rows are not imported statements.
+    assert party.ACCOUNT_KINDS == tuple(
+        k for k in account_kind.KIND_NAMES if k not in account_kind.STATEMENT_KINDS)
 
 
 def test_the_chat_offers_exactly_the_declared_roles():
@@ -212,7 +222,24 @@ def test_without_a_merchant_the_account_leaves_its_party(people, conn):
 
     assert answer["ok"], answer
     assert accounts()["Sample Co"]["party_id"] is None
+    assert entries()[0]["summary"] == "Took an account off its party"
     one_change_that_undoes_exactly(conn, answer, before, count)
+
+
+@pytest.mark.parametrize("body", [{}, {"merchant": 1}, [1], "1", None])
+def test_a_party_body_without_service_id_is_refused_and_writes_nothing(people, client, conn, body):
+    """Only a JSON object carrying service_id says what to do; null takes the
+    account off its party. Anything else is refused, even for a joined account."""
+    assert call("link_party", account_id=people["co"], service_id=people["co_merchant"])["ok"]
+    before, count = state(conn), len(entries())
+
+    resp = (client.put(f"/api/accounts/{people['co']}/party", data="not json", content_type="text/plain")
+            if body is None else client.put(f"/api/accounts/{people['co']}/party", json=body))
+
+    assert resp.status_code == 400, resp.get_json()
+    assert "service_id" in resp.get_json()["error"]
+    assert (state(conn), len(entries())) == (before, count)
+    assert accounts()["Sample Co"]["party_id"] == people["co_merchant"]
 
 
 @pytest.mark.parametrize("account, merchant, status, error", [
@@ -285,7 +312,7 @@ def test_undoing_the_party_merchant_after_a_link_is_refused(people, conn):
 
 
 @pytest.fixture
-def lent(client, people):
+def lent(client, placed):
     """A dinner paid for a friend, S$1,240 expected back, S$380 paid back:
     S$860 open."""
     bring_in(client, BANK, [
@@ -294,7 +321,7 @@ def lent(client, people):
     ], closing_date="2026-08-31")
     rows = {r["amount_minor"]: r["id"] for r in client.get(
         "/api/transactions", query_string={"per_page": 50}).get_json()["transactions"]}
-    marked = call("mark_expect_back", tx_id=rows[124_000], direction="back", all=True, names=[people["a"]])
+    marked = call("mark_expect_back", tx_id=rows[124_000], direction="back", all=True, names=[placed["a"]])
     assert marked["ok"], marked
     [item] = call("expected_back", direction="back")["result"]["items"]
     paid = call("set_off", tx_id=rows[-38_000], placements=[{"expectation_id": item["id"], "amount": "380.00"}])
@@ -302,24 +329,36 @@ def lent(client, people):
     return item["id"]
 
 
-def test_case_12_the_party_links_move_no_number(people, lent, client, temp_db):
-    assert call("change_merchant", service_id=people["friends"], role="person")["ok"]
+def test_case_12_the_party_links_move_no_number(placed, lent, client, temp_db):
+    """What the operator does on the book: a party for the two people (there
+    is no merchant for them yet), the two person accounts joined to it and the
+    company joined to its merchant. Every figure stays; what the snapshot keeps
+    moves by the new party merchant and by the entries that added the three
+    accounts, whose undo now waits on the later links."""
     page = client.get(f"/api/expectations/{lent}").get_json()
     held = page["expectation"]
     assert (held["amount_minor"], held["open_minor"]) == (124_000, 86_000)
+    added = {e["id"]: e for e in entries()}
     before = json.loads(json.dumps(fin_snapshot.snap(temp_db), sort_keys=True))
 
-    for account, merchant in (("a", "friends"), ("b", "friends"), ("co", "co_merchant")):
-        assert call("link_party", account_id=people[account], service_id=people[merchant])["ok"]
+    made = call("create_merchant", name="Sample Friends", role="person")
+    assert made["ok"], made
+    friends = made["result"]["id"]
+    for account, merchant in (("a", friends), ("b", friends), ("co", placed["co_merchant"])):
+        assert call("link_party", account_id=placed[account], service_id=merchant)["ok"]
 
     after = json.loads(json.dumps(fin_snapshot.snap(temp_db), sort_keys=True))
     passed, result = fin_snapshot.diff(before, after)
-    moved = {name: found for name, found in result.items() if found}
-    # The five invariants hold; what is kept differs only by the three links'
-    # own change entries.
-    assert set(moved) <= {"kept: merchants, accounts, figures, types, history"}, moved
-    assert all(path.startswith("history") for path, _was, _now in moved.get(
-        "kept: merchants, accounts, figures, types, history", [])), moved
+    kept = "kept: merchants, accounts, figures, types, history"
+    assert {name for name, found in result.items() if found} == {kept}, result
+    # The entries that added the three accounts (make_account, in fin itself).
+    made_accounts = sorted(i for i, e in added.items() if e["summary"] == "Added an account")[:3]
+    assert sorted(path for path, _was, _now in result[kept]) == sorted(
+        [f"merchants.{friends}", "meta.table_rows.services"] + [f"history.{i}" for i in made_accounts])
+    assert dict((p, (w, n)) for p, w, n in result[kept])["meta.table_rows.services"] == (
+        before["meta"]["table_rows"]["services"], before["meta"]["table_rows"]["services"] + 1)
+    for i in made_accounts:
+        assert client.get(f"/api/history/{i}").get_json()["blocked_by"]["summary"] == "Joined an account to a party"
     assert client.get(f"/api/expectations/{lent}").get_json() == page
     assert call("expected_back", expectation_id=lent)["result"] == page
 
@@ -517,3 +556,25 @@ def test_a_link_reads_in_changes_as_the_party_by_name():
     ])
     assert _node(code) == ["party", "Sample Friends", "Sample Cousins, since removed", "", "no party", "role",
                            "no role"]
+
+
+@needs_node
+def test_a_link_and_an_unlink_title_their_change_in_words():
+    """The Changes list titles a party change by what it did, not as
+    "changed the account"."""
+    code = "\n".join([
+        PRELUDE, "const day = s => s; const money = v => String(v);",
+        _const("SKIP_FIELDS"), _const("FIELD_WORDS"), _const("EMPTY_WORDS"), _const("FLOW_WORDS"),
+        _function("isEmpty"), _function("changedFields"), _function("valueText"), _function("rowName"),
+        _function("accountOf"), _function("changeWords"),
+        "const ctx = {r: {accountById: new Map(), typeById: new Map()}, services: [{id: 7, name: 'Sample Co Health'}],"
+        " gone: new Map()};",
+        "const row = p => ({id: 3, name: 'Sample Co', type: 'company', party_id: p});",
+        "const change = (b, a) => ({table: 'accounts', op: 'update', row_id: 3, before: row(b), after: row(a)});",
+        "console.log(JSON.stringify([changeWords(change(null, 7), ctx), changeWords(change(7, null), ctx),"
+        " changeWords({table: 'accounts', op: 'update', row_id: 3, before: {name: 'Sample Co', status: 'active'},"
+        " after: {name: 'Sample Co', status: 'archived'}}, ctx)]));",
+    ])
+    assert _node(code) == ["joined the account Sample Co to the party Sample Co Health",
+                           "took the account Sample Co off the party Sample Co Health",
+                           "changed the account Sample Co"]
