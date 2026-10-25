@@ -378,7 +378,9 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
     that cannot state a flow as needing the rule-flow step
     (convert_rule_flow.py), and a book whose flow lists were never seeded as
     rules as needing the flow-rules step (convert_flow_rules.py), read from
-    its marker (FLOW_RULES_SEED). Each is read
+    its marker (FLOW_RULES_SEED), and merchants that cannot say a role or
+    accounts that cannot name a party as needing the party-link step
+    (convert_party_link.py). Each is read
     from the book's shape, never from what its rows hold, but expect-back's,
     which reads its record first, and flow-rules', its marker: nothing the
     operator does afterwards reads as a conversion still to run."""
@@ -405,6 +407,8 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
         or label_source.RETIRED_MARK in tx_cols
         or not {"flow", "other_side_id"} <= rule_cols
         or not flow_rules_seeded(conn)
+        or "role" not in {r[1] for r in conn.execute("PRAGMA table_info(services)")}
+        or "party_id" not in {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
     )
 
 

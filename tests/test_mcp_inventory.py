@@ -49,6 +49,8 @@ GOLDEN: list[str] = [
     "create_account",
     # fin redesign ticket 11: a merchant made over the app's own route
     "create_merchant",
+    # fin-redesign 09: an account joined to a party (a merchant), one change
+    "link_party",
     "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off",

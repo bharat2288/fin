@@ -5457,11 +5457,13 @@ const SKIP_FIELDS = new Set(['id', 'created_at', 'book_source', 'type_source', '
 const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'kind', is_one_off: 'one-off', notes: 'note',
     amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'check each row',
     exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement', covers: 'covers', not_for: 'not for',
-    usual_book: 'usual book', check_each_row: 'Check each row by default', default_one_off: 'one-off by default' };
+    usual_book: 'usual book', check_each_row: 'Check each row by default', default_one_off: 'one-off by default',
+    party_id: 'party', role: 'role' };
 // What fin files through each slot, as the server says it (book_type.SLOTS).
 const SLOT_FILES = { loan_interest: 'loan interest', gift_given: 'gifts given', gift_received: 'gifts received' };
 // An empty old or new value said plainly, never as bad news (C4.2).
-const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty' };
+const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty',
+    party_id: 'no party', role: 'no role' };
 const FLOW_WORDS = { expense: 'money out', income: 'money in', refund: 'a refund', review: 'waiting for a label', transfer: 'a move between own accounts' };
 function isEmpty(v) { return v === null || v === undefined || v === ''; }
 function changedFields(c) {
@@ -5473,7 +5475,8 @@ function valueText(table, field, value, ctx, cur = 'SGD') {
     if (isEmpty(value)) return '';
     if (field === 'type_id' || field === 'type_override_id') return esc(ctx.r.typeById.get(value)?.display_name || 'a type no longer listed');
     if (field === 'other_side_id' || field === 'account_id') return esc(ctx.r.accountById.get(value)?.name || 'an account no longer listed');
-    if (field === 'service_id') {
+    // An account's party is a merchant (fin-redesign 09), named as one.
+    if (field === 'service_id' || field === 'party_id') {
         const gone = ctx.gone?.get(value);
         return esc(ctx.services.find(s => s.id === value)?.name || (gone ? `${gone}, since removed` : 'a merchant no longer listed'));
     }

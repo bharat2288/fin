@@ -40,6 +40,7 @@ import money
 import month_check
 import name_wording
 import pairing
+import party
 import rates
 import review
 import screens
@@ -654,6 +655,7 @@ _READ_ONLY_POSTS = {"api_book_prefill", "api_backups_run"}
 _CHANGE_SUMMARIES = {
     "api_accounts_create": "Added an account",
     "api_accounts_update": "Changed an account",
+    "api_accounts_party": "Joined an account to a party",
     "api_accounts_delete": "Deleted an account",
     "api_anchors_create": "Entered a figure",
     "api_anchors_replace": "Corrected a figure",
@@ -1345,10 +1347,13 @@ def api_accounts():
     anchor the account rests on, or null when it has no figure;
     `takes_a_figure` is whether the enter-a-figure dialog offers it for a new
     figure; `supplied_figures` is how many figures were typed for it, each of
-    which the dialog can correct or delete."""
+    which the dialog can correct or delete; `party_id` and `party` are the
+    merchant it is joined to as its party (party.py), or null."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, name, short_name, type, last_four, currency, status, owner FROM accounts ORDER BY name"
+            "SELECT a.id, a.name, a.short_name, a.type, a.last_four, a.currency, a.status, a.owner,"
+            " a.party_id, s.name AS party FROM accounts a LEFT JOIN services s ON s.id = a.party_id"
+            " ORDER BY a.name"
         ).fetchall()
         statement_counts = dict(conn.execute(
             "SELECT account_id, COUNT(*) FROM statements GROUP BY account_id"
@@ -1437,11 +1442,49 @@ def api_accounts_update(acct_id):
     except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
         return jsonify({"error": str(e)}), 400
     with get_db() as conn:
-        why = _ruled_account_refusal(conn, acct_id, data or {})
+        why = _ruled_account_refusal(conn, acct_id, data or {}) or _party_kind_refusal(conn, acct_id, data or {})
     if why:
         return jsonify({"error": why}), 400
     return _crud_update("accounts", acct_id, data,
                         ["name", "short_name", "type", "last_four", "currency", "status", "owner"])
+
+
+def _party_kind_refusal(conn, acct_id: int, data: dict) -> str | None:
+    """Why an account update would leave an account joined to a party in a
+    kind that takes none (party.ACCOUNT_KINDS), or None."""
+    if "type" not in data:
+        return None
+    held = conn.execute("SELECT party_id FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+    if held is None or held["party_id"] is None:
+        return None
+    why = party.kind_refusal(data["type"])
+    return f"{why}; take this account off its party first. Nothing was changed" if why else None
+
+
+@app.route("/api/accounts/<int:acct_id>/party", methods=["PUT"])
+def api_accounts_party(acct_id):
+    """Join a person, company, loan, holding or untracked account to a party:
+    a merchant (party.py). Body: {service_id}; null or left out takes the
+    account off its party. Two accounts may name one party, each keeping its
+    own balance (RUL-011). One change, undone whole; a refusal writes
+    nothing."""
+    data = request.get_json(silent=True) or {}
+    service_id = data.get("service_id")
+    if service_id is not None and (not isinstance(service_id, int) or isinstance(service_id, bool)):
+        return jsonify({"error": "service_id must be a merchant's id, or null to take the account off its party"}), 400
+    with get_db() as conn:
+        held = conn.execute("SELECT type, party_id FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+        if held is None:
+            return jsonify({"error": "This account is no longer in fin; nothing was changed"}), 404
+        if service_id is not None:
+            why = party.kind_refusal(held["type"])
+            if why:
+                return jsonify({"error": f"{why}. Nothing was changed"}), 400
+            if conn.execute("SELECT 1 FROM services WHERE id = ?", (service_id,)).fetchone() is None:
+                return jsonify({"error": f"no merchant {service_id} in fin; nothing was changed"}), 400
+        conn.execute("UPDATE accounts SET party_id = ? WHERE id = ?", (service_id, acct_id))
+        conn.commit()
+    return jsonify({"success": True, "party_id": service_id})
 
 
 def _ruled_account_refusal(conn, acct_id: int, data: dict) -> str | None:
@@ -2035,11 +2078,21 @@ def _merchants(conn, svc_id: int | None = None) -> list[dict]:
             {"pattern": rr["pattern"], "match_type": rr["match_type"]}
         )
 
+    # The accounts joined to each merchant as their party (party.py).
+    joined: dict[int, list[dict]] = {}
+    for a in conn.execute(
+        "SELECT id, name, type, party_id FROM accounts WHERE party_id IS NOT NULL"
+        + (" AND party_id = ?" if svc_id is not None else "") + " ORDER BY name, id",
+        (svc_id,) if svc_id is not None else (),
+    ):
+        joined.setdefault(a["party_id"], []).append({"id": a["id"], "name": a["name"], "type": a["type"]})
+
     result = []
     for r in rows:
         d = dict(r)
         d["display_type"] = format_type_display(d["parent_type"], d["type_name"])
         d["rules"] = rules_by_svc.get(d["id"], [])
+        d["party_accounts"] = joined.get(d["id"], [])
         result.append(d)
     return result
 
@@ -2116,14 +2169,15 @@ def api_services_create():
         try:
             type_id = _checked_type_id(conn, data.get("type_id"))
             book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
-        except (UnknownLabel, BookNeeded) as e:
+            role = party.checked_role(data.get("role"))
+        except (UnknownLabel, BookNeeded, party.Refused) as e:
             return jsonify({"error": str(e)}), 400
         # Left unsaid, Check each row is the type's (type-relationships 02).
         each_row = data["review_each_time"] if "review_each_time" in data else _new_checks_each_row(conn, type_id)
         return _crud_insert(
             conn,
             "INSERT INTO services (name, book, type_id, notes, exclude_from_expense_views, "
-            "review_each_time) VALUES (?, ?, ?, ?, ?, ?)",
+            "review_each_time, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 name,
                 book,
@@ -2131,6 +2185,7 @@ def api_services_create():
                 data.get("notes"),
                 data.get("exclude_from_expense_views", 0),
                 1 if each_row else 0,
+                role,
             ),
             "service",
             post_commit=invalidate_rules_cache,
@@ -2284,14 +2339,20 @@ def api_services_update(svc_id):
     sources; `past: only_new` writes the merchant and marks each kept field
     of those rows checked. `token` (the preview's) is refused once the
     merchant, its rules or its rows have changed since. A rename, a note, or
-    a change that reaches no row saves as it is. Returns {success,
-    recategorized, checked}."""
+    a change that reaches no row saves as it is. `role` is the part it plays
+    as a party (party.ROLES; null or "" says none), and moves no row.
+    Returns {success, recategorized, checked}."""
     data = request.get_json()
     with get_db() as conn:
+        try:
+            if isinstance(data, dict) and "role" in data:
+                data = {**data, "role": party.checked_role(data["role"])}
+        except party.Refused as e:
+            return jsonify({"error": str(e)}), 400
         sets, params = _build_update_sets(
             data,
             ["name", "book", "type_id", "notes", "is_one_off", "exclude_from_expense_views",
-             "review_each_time"],
+             "review_each_time", "role"],
         )
         if not sets:
             return jsonify({"error": "Nothing to update"}), 400
@@ -2454,6 +2515,11 @@ def api_services_merge(svc_id):
             "UPDATE subscriptions SET service_id = ? WHERE service_id = ?",
             (target_id, svc_id),
         ).rowcount
+        # The accounts joined to the source as their party join the target.
+        party_count = conn.execute(
+            "UPDATE accounts SET party_id = ? WHERE party_id = ?",
+            (target_id, svc_id),
+        ).rowcount
 
         # Delete the now-orphaned source service
         conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
@@ -2468,6 +2534,7 @@ def api_services_merge(svc_id):
             "transactions": txn_count,
             "rules": rule_count,
             "subscriptions": sub_count,
+            "accounts": party_count,
             "relabelled": relabelled,
         },
     })
@@ -2485,6 +2552,15 @@ def api_services_delete(svc_id):
         ).fetchone()[0]
         if refs > 0 or sub_refs > 0:
             return jsonify({"error": f"Service has {refs} transactions and {sub_refs} subscriptions"}), 400
+        joined = [r["name"] for r in conn.execute(
+            "SELECT name FROM accounts WHERE party_id = ? ORDER BY name, id", (svc_id,))]
+        if joined:
+            names = joined[0] if len(joined) == 1 else f"{', '.join(joined[:-1])} and {joined[-1]}"
+            return jsonify({"error": (
+                f"{names} {'is' if len(joined) == 1 else 'are'} joined to this merchant as "
+                f"{'its' if len(joined) == 1 else 'their'} party; take "
+                f"{'it' if len(joined) == 1 else 'them'} off first. Nothing was changed"
+            )}), 400
         conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
         conn.commit()
     return jsonify({"success": True})

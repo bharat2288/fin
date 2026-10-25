@@ -344,7 +344,8 @@ def test_the_converted_laptop_book_keeps_the_change_history(tmp_path):
     try:
         assert history.has_shape(conn)
         assert "change-history" not in conversion.not_applied(conn)
-        assert conversion.CHAIN[-1][0] == "flow-rules"
+        assert conversion.CHAIN[-1][0] == "party-link"
+        assert "party-link" not in conversion.not_applied(conn)
         assert "flow-rules" not in conversion.not_applied(conn)
         assert "rule-flow" not in conversion.not_applied(conn)
         assert "expect-back" not in conversion.not_applied(conn)

@@ -75,6 +75,8 @@ CHAIN = (
     ("rule-flow", "convert_rule_flow"),
     # fin-redesign 08: the hard-coded flow lists become rules, seeded once.
     ("flow-rules", "convert_flow_rules"),
+    # fin-redesign 09: a merchant may say a role, an account name its party.
+    ("party-link", "convert_party_link"),
 )
 
 _STEP_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")

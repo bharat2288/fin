@@ -57,7 +57,7 @@ Rulings this module carries:
   it and is recorded as asked first.
 - No tool imports a statement, changes or deletes an imported row, changes
   or deletes an account (adding one is create_account, or
-  add_company_or_person), sends merchants to the type-suggestion service,
+  add_company_or_person; joining one to a party is link_party), sends merchants to the type-suggestion service,
   runs a conversion or touches subscriptions.
   Statements reach the hosted fin through the upload command (fin_upload.py).
 - Accounts (fin redesign, design evaluation §4): create_account adds an
@@ -74,6 +74,13 @@ Rulings this module carries:
   rows changed (the preview's changes, refund links too) the call takes
   expected_count as any write, the number the preview shows. create_merchant adds a
   merchant over the app's own route, which refuses a name fin holds.
+- Parties (fin-redesign 09; a link, not a new home): a merchant is the party.
+  create_merchant and change_merchant give it a role (party.ROLES), and
+  link_party joins a person, company, loan, holding or untracked account to
+  it, or takes one off, over the app's own route: one change each, undone
+  whole. Two person accounts may join one party and stay two accounts
+  (RUL-011). This is the one change to an existing account a tool makes; it
+  moves no row and no figure.
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
 the client the chat gate verified, labelled as folio labels it: `chat:<sub>`,
@@ -92,6 +99,7 @@ import account_kind
 import chat_writes
 import db
 import history
+import party
 
 MANY_ROWS = 20
 
@@ -180,6 +188,15 @@ _RULE_FLOW_SAID = (
     "Only a flow fin worked out under the rules before the change moves (not one Only new rows left); a row "
     "a record of expect back rests on keeps its flow where a hand label would be refused (flows_kept, with why). "
 )
+# A merchant's role as a party (party.py); "" says none.
+_ROLE = {
+    "role": {
+        "type": "string", "enum": ["", *party.ROLE_NAMES],
+        "description": "The part the merchant plays as a party, one of: "
+                       + "; ".join(f"{name} ({said})" for name, said in party.ROLES)
+                       + ". \"\" says none. It moves no row.",
+    },
+}
 # The tools that answer with the preview.
 _PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})
 
@@ -314,8 +331,9 @@ _READS = [
     ),
     Tool(
         "accounts",
-        "Every account: kind, owner, currency, last four digits only, latest anchor, and "
-        "whether it takes a typed figure.",
+        "Every account: kind, owner, currency, last four digits only, latest anchor, "
+        "whether it takes a typed figure, and the party (party_id, party: a merchant) a person, "
+        "company, loan, holding or untracked account is joined to.",
         _schema(),
         False,
         _get("/api/accounts"),
@@ -329,7 +347,8 @@ _READS = [
     ),
     Tool(
         "merchants",
-        "Every merchant with its default book and type, and its row and rule counts.",
+        "Every merchant with its default book and type, its row and rule counts, its role as a "
+        "party (null: none said), and the accounts joined to it as their party (party_accounts).",
         _schema(),
         False,
         _get("/api/services"),
@@ -550,14 +569,14 @@ _WRITES = [
     _w(
         "change_merchant",
         "Change a merchant: its name, default book and type, note, one-off, hidden from "
-        "spending views, or review each time. A new book or type reaches its past rows that "
-        "take the default (never one the operator chose). " + _PAST_SAID,
+        "spending views, review each time, or its role as a party. A new book or type reaches "
+        "its past rows that take the default (never one the operator chose). " + _PAST_SAID,
         {"service_id": _I, "name": _S, "book": _S, "type_id": _I, "notes": _S, "is_one_off": _B,
-         "exclude_from_expense_views": _B, "review_each_time": _B, **_PAST},
+         "exclude_from_expense_views": _B, "review_each_time": _B, **_ROLE, **_PAST},
         ("service_id",),
         lambda a: ("PUT", f"/api/services/{int(a['service_id'])}",
                    _pick(a, "name", "book", "type_id", "notes", "is_one_off",
-                         "exclude_from_expense_views", "review_each_time", *_PAST)),
+                         "exclude_from_expense_views", "review_each_time", "role", *_PAST)),
     ),
     _w(
         "merge_merchants",
@@ -596,10 +615,24 @@ _WRITES = [
         "with no book takes the book the type proposes, and one that proposes none needs a book). "
         "It labels no row: add_rule gives it a wording, and plan_preview and plan_apply attach a "
         "card's rows. Refused when fin already holds a merchant of that name, in any case: read "
-        "merchants first.",
-        {"name": _S, "book": _S, "type_id": _I},
+        "merchants first. role: the part it plays as a party (a party for people, say, made to "
+        "join their person accounts with link_party).",
+        {"name": _S, "book": _S, "type_id": _I, **_ROLE},
         ("name",),
-        lambda a: ("POST", "/api/services", _pick(a, "name", "book", "type_id")),
+        lambda a: ("POST", "/api/services", _pick(a, "name", "book", "type_id", "role")),
+    ),
+    _w(
+        "link_party",
+        "Join an account to a party: a merchant (service_id from merchants), so a person's "
+        "accounts, or a company and the merchant its money arrives under, are known as one. "
+        "Only a person, company, loan, holding or untracked account joins one; two accounts "
+        "joined to one party stay two accounts with their own balances (they are linked, not "
+        "merged). Without service_id the account leaves its party. One change; it moves no row "
+        "and no figure.",
+        {"account_id": _I, "service_id": _I},
+        ("account_id",),
+        lambda a: ("PUT", f"/api/accounts/{int(a['account_id'])}/party",
+                   {"service_id": a.get("service_id")}),
     ),
     _w(
         "pair_transfers",
@@ -855,6 +888,7 @@ TITLES = {
     "add_company_or_person": "Add a company or a person",
     "create_account": "Add an account",
     "create_merchant": "Add a merchant",
+    "link_party": "Join an account to a party",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",
     "set_rate": "Enter an exchange rate",

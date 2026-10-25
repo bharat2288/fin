@@ -18,6 +18,7 @@ from pathlib import Path
 
 import book_type
 import convert_flow_rules
+import convert_party_link
 import convert_rule_flow
 import db
 import history
@@ -40,14 +41,15 @@ NEW_TABLES = {"type_keys", "type_settings", "type_slots"}
 
 def book_before(tmp_path, monkeypatch) -> Path:
     """The book main made, as a file fin is pointed at: brought through the
-    conversion steps added since (rule-flow, fin-redesign 07; flow-rules, 08),
-    which add to its shape and its rules and change no row, as the operator's
-    book is before a start."""
+    conversion steps added since (rule-flow, fin-redesign 07; flow-rules, 08;
+    party-link, 09), which add to its shape and its rules and change no row,
+    as the operator's book is before a start."""
     path = tmp_path / "before.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(BEFORE.read_text(encoding="utf-8"))
     convert_rule_flow.STEP.apply(conn)
     convert_flow_rules.STEP.apply(conn)
+    convert_party_link.STEP.apply(conn)
     conn.commit()
     conn.close()
     monkeypatch.setattr(db, "DB_PATH", path)
