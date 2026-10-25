@@ -1955,11 +1955,19 @@ def _taken_flows(conn, plan, service_id: int | None, tx_id: int, rules: tuple) -
     taught is not one of them: its flow is the teach's own (_teach, step 3)."""
     merchant = service_id if service_id is not None else _MERCHANT_TO_BE
     for p in plan.rows:
-        if p.held["id"] == tx_id:
-            continue
         label = {k: p.apply[k] for k in ("book", "type_id") if k in p.apply}
+        if p.held["id"] == tx_id:
+            # Its label as step 3 leaves it, so its example says so: none
+            # where the flow step 3 gives it is no one's spending.
+            writes, _ = _fill_flow(conn, p.held, {"service_id": merchant, **label}, *rules)
+            fitted = label_source.fitted(p.held, {**p.apply, **writes})
+            p.apply = {k: v for k, v in fitted.items() if k not in writes}
+            continue
         writes, keeps = _fill_flow(conn, p.held, {"service_id": merchant, **label}, *rules)
-        p.apply.update(writes)
+        # Each answer's write fitted to the flow it leaves the row
+        # (label_source.fitted): Apply's with the flow it moves.
+        p.apply = label_source.fitted(p.held, {**p.apply, **writes})
+        p.only_new = label_source.fitted(p.held, p.only_new)
         if keeps is not None:
             plan.kept.append(keeps)
     plan.token = relabel_preview._stamp(plan.token, relabel_preview._stamp_flows(plan))
@@ -3602,8 +3610,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
                         sets = {"service_id": service_id, **sets}
                         if held["id"] in fills:
                             continue
-                        if held["id"] in fill_flows or (
-                                svc and held["service_id"] == service_id and _would_change(held, sets)):
+                        if held["id"] in fill_flows or (svc and held["service_id"] == service_id
+                                                        and _would_change(held, label_source.fitted(held, sets))):
                             fills[held["id"]] = sets
                 plan = relabel_preview.with_fills(conn, plan, fills, fill_flows, fill_kept)
             refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
@@ -3685,7 +3693,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             # own (_teach_fills), with the flows it listed on apply.
             for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id, taught):
                 flows = flows_written.get(held["id"], {})
-                if _write_label(conn, held, {"service_id": service_id, **sets, **flows}):
+                # Fitted to the flow it leaves the row (label_source.fitted).
+                if _write_label(conn, held, label_source.fitted(held, {"service_id": service_id, **sets, **flows})):
                     backfilled_ids.append(held["id"])
                     moved_flow = moved_flow or any(held[k] != v for k, v in flows.items())
         rule_id = rule_ids[0] if rule_ids else None
@@ -3704,16 +3713,13 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         tx_row = conn.execute(
             f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
         ).fetchone()
-        label = (book, type_id, service_id,
-                 *_resolved_sources(tx_row, apply_scope, book, type_id, merchant_book))
-        written = "UPDATE transactions SET book = ?, type_id = ?, service_id = ?, book_source = ?, type_source = ?"
+        label = dict(zip(("book", "type_id", "service_id", "book_source", "type_source"),
+                         (book, type_id, service_id,
+                          *_resolved_sources(tx_row, apply_scope, book, type_id, merchant_book))))
         kept = [*fill_kept, *(taken_plan.kept if taken_plan is not None else ())]
         moved_lines = []
         if flow_type is not None:
-            conn.execute(
-                f"{written}, flow_type = ?, flow_type_manual = 1 WHERE id = ?",
-                (*label, flow_type, tx_id),
-            )
+            sets = {**label, "flow_type": flow_type, "flow_type_manual": 1}
         elif tx_row:
             description, amount = tx_row["description"] or "", tx_row["amount_minor"]
             now = db.pick_rule(db.load_rules(conn), description, amount)
@@ -3728,14 +3734,21 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             # Out of refund, the row leaves its purchase, as _write_label's rows do.
             if target_held["flow_type"] == "refund" and flows.get("flow_type", "refund") != "refund":
                 refund_links.drop(conn, tx_id)
-            sets = ", ".join(f"{column} = ?" for column in flows)
-            conn.execute(f"{written}{', ' + sets if sets else ''} WHERE id = ?", (*label, *flows.values(), tx_id))
+            sets = {**label, **flows}
             moved_flow = moved_flow or bool(flows)
             # The answer names the row's flow change: none moves unsaid.
             if flows:
                 moved_lines.append((target_held, flows))
         else:
-            conn.execute(f"{written} WHERE id = ?", (*label, tx_id))
+            sets = label
+        # The label goes only on a spending or refund row: the row taught
+        # keeps its merchant whatever its flow, and a flow the teach moves
+        # out of spending empties its book and type (label_source.fitted).
+        if tx_row:
+            sets = label_source.fitted(tx_row, sets)
+        if sets:
+            conn.execute(f"UPDATE transactions SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
+                         (*sets.values(), tx_id))
         # A row that now names a loan, or no longer does, changes what was paid.
         if moved_flow:
             loan_interest.derive(conn)
@@ -3877,8 +3890,14 @@ def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None"]:
             _teach(conn, {"tx_id": tx, "service_id": service_id, "apply_scope": "transaction", **label},
                    record_choice=False)
     if item.get("check_each_row") is True:
-        lines = [{"tx_id": tx, **label} for tx in tx_ids if conn.execute(
-            "SELECT service_id FROM transactions WHERE id = ?", (tx,)).fetchone()[0] == service_id]
+        # Checked with their book where they are spending or refunds: a row
+        # the teach moved out of spending carries no label to check.
+        lines = []
+        for tx in tx_ids:
+            svc_now, flow_now = conn.execute(
+                "SELECT service_id, flow_type FROM transactions WHERE id = ?", (tx,)).fetchone()
+            if svc_now == service_id and flow.carries_label(flow_now):
+                lines.append({"tx_id": tx, **label})
         for line in lines:
             why = _relabel_refusal(conn, line["tx_id"], line["book"])
             if why:
@@ -3950,7 +3969,9 @@ def _run_plan(conn, items: list[dict]) -> dict:
             if c["row_id"] not in was:
                 was[c["row_id"]] = None if before.get("type_id") is None else {
                     k: before.get(k) for k in ("service_id", "book", "type_id", "book_source", "type_source")}
-                flows[c["row_id"]] = {"id": c["row_id"], **{k: before.get(k) for k in _FLOW_COLUMNS}}
+                # With its label: the line says what a move out of spending empties.
+                flows[c["row_id"]] = {"id": c["row_id"],
+                                      **{k: before.get(k) for k in (*_FLOW_COLUMNS, "book", "type_id")}}
             if c["op"] == "update":
                 flows[c["row_id"]]["writes"] = {k: after.get(k) for k in _FLOW_COLUMNS}
             if after.get("service_id") == service_id:
@@ -4954,6 +4975,11 @@ def api_import_upload():
                     },
                     flow_ctx,
                 )
+                # A row that is no one's spending comes in with its merchant
+                # and no book or type (label_source.fitted).
+                book_given = found["book"]
+                if not flow.carries_label(tx.flow_type):
+                    book_given = type_id = None
 
                 entry = {
                     "date": tx.date,
@@ -4961,7 +4987,7 @@ def api_import_upload():
                     "amount_sgd": money.from_minor(tx.amount_minor, currencies[account]),
                     "amount_foreign": tx.amount_foreign,
                     "currency_foreign": tx.currency_foreign,
-                    "book": found["book"],
+                    "book": book_given,
                     "type_id": type_id,
                     "type_name": type_names.get(type_id) if type_id else None,
                     "service_id": svc_id,
@@ -4974,9 +5000,7 @@ def api_import_upload():
                     "account": account,
                     # A row that waits is waiting, whatever type a rule gave it.
                     "status": flow.REVIEW if tx.flow_type == flow.REVIEW else "typed" if type_id else (
-                        tx.flow_type
-                        if tx.flow_type in ("transfer", "payment", flow.MOVEMENT)
-                        else "untyped"
+                        "untyped" if flow.carries_label(tx.flow_type) else tx.flow_type
                     ),
                     # Every row is imported: nothing is skipped by default.
                     "_skip": False,
@@ -5378,6 +5402,11 @@ def api_import_confirm():
                         tx_flow = tx.get("flow_type")
                         if tx_flow == flow.REVIEW and _chosen_in_preview(conn, tx, amount_val):
                             tx_flow = _unheld(amount_val)
+                        # Book and type only on a spending or refund row
+                        # (label_source.fitted): a row of any other flow
+                        # keeps its merchant and comes in with neither.
+                        if tx_flow is not None and not flow.carries_label(tx_flow):
+                            tx = {**tx, "book": None, "type_id": None}
                         book_source, type_source = _imported_sources(conn, tx, amount_val)
                         cur = conn.execute(
                             "INSERT INTO transactions "
@@ -5413,8 +5442,11 @@ def api_import_confirm():
                             )
                             if worked_out[0] == flow.REVIEW and _chosen_in_preview(conn, tx, amount_val):
                                 worked_out = (_unheld(amount_val), None)
+                            # Fitted to the flow it is given, as above.
+                            emptied = "" if flow.carries_label(worked_out[0]) else (
+                                ", book = NULL, type_id = NULL, book_source = NULL, type_source = NULL")
                             conn.execute(
-                                "UPDATE transactions SET flow_type = ?, other_side_id = ? WHERE id = ?",
+                                f"UPDATE transactions SET flow_type = ?, other_side_id = ?{emptied} WHERE id = ?",
                                 (*worked_out, cur.lastrowid),
                             )
                         total_saved += 1

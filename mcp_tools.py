@@ -179,6 +179,8 @@ _RULE_FLOW_SAID = (
     "the operator set by hand, and the preview lists every past row whose flow would change (flows). "
     "Only a flow fin worked out under the rules before the change moves (not one Only new rows left); a row "
     "a record of expect back rests on keeps its flow where a hand label would be refused (flows_kept, with why). "
+    "Book and type go only on spending and refund rows: a row moved to any other flow loses both in the same "
+    "change (each flows line's label_cleared says what it loses). "
 )
 # The tools that answer with the preview.
 _PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})

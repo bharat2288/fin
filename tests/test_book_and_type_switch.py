@@ -1244,4 +1244,7 @@ def test_resolve_and_the_drift_apply_keep_a_flow_set_by_hand(client, conn, state
     # today: not what fin works out, so kept too (ADR-009, fin-redesign 07).
     assert shown(client, tx)["flow_type"] == "refund"
     assert shown(client, derived)["flow_type"] == "income"
-    assert label(client, derived) == ("Household", "Dining", "service_default")
+    # Income is no one's spending: the drift gives it its merchant and no
+    # book or type (fin-redesign 05).
+    assert shown(client, derived)["service_id"] == cafe
+    assert (shown(client, derived)["type_id"], shown(client, derived)["book_source"]) == (None, None)

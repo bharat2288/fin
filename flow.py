@@ -31,6 +31,18 @@ REVIEW = "review"
 NAMES_OTHER_SIDE = ("movement", "transfer", "payment")
 
 
+# The flows whose rows carry a book and a type (fin-redesign 05): spending,
+# and spending that came back. No other row is anyone's spending, so no
+# writer gives it either (label_source.fitted); a row with no flow reads as
+# spending, as every reader's COALESCE reads it.
+LABELLED = ("expense", "refund")
+
+
+def carries_label(flow_name) -> bool:
+    """Whether a row of this flow carries a book and a type."""
+    return (flow_name or "expense") in LABELLED
+
+
 class UnknownFlow(ValueError):
     """A writer was handed a flow that is not in the declared list."""
 

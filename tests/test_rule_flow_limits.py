@@ -531,7 +531,7 @@ def test_a_teach_that_would_move_a_backfilled_rows_flow_asks_first_and_writes_no
     assert row(client, instalment(7))["type_id"] == spending_type(client, "Transport")
 
 
-def test_a_teach_answered_only_new_rows_labels_the_backfilled_row_and_leaves_its_flow(client, ruled):
+def test_a_teach_answered_only_new_rows_leaves_the_backfilled_movement_unlabelled_and_its_flow(client, ruled):
     preview = client.post("/api/transactions/resolve", json=ruled["teach"]).get_json()["preview"]
 
     resp = client.post("/api/transactions/resolve",
@@ -539,7 +539,8 @@ def test_a_teach_answered_only_new_rows_labels_the_backfilled_row_and_leaves_its
 
     assert resp.status_code == 200, resp.get_json()
     assert what(client, instalment(7)) == ("movement", LOAN, False)
-    assert row(client, instalment(7))["type_id"] == spending_type(client, "Transport")
+    # Only new rows leaves the movement as it is: its merchant, no type (fin-redesign 05).
+    assert row(client, instalment(7))["type_id"] is None
 
 
 def test_a_teach_that_moves_a_flow_works_out_the_loans_interest_again(client, ruled):

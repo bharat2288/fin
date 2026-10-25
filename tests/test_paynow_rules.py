@@ -204,8 +204,13 @@ def test_case_21_a_new_paynow_row_with_a_wording_is_labelled_by_its_rule(client,
     bring_in(client, BANK, [(4, "PAYNOW TO LIMITLESS WELLNESS REF 31", 120.00)])
 
     tx = row(client, "PAYNOW TO LIMITLESS WELLNESS REF 31")
-    assert (tx["service_name"], tx["book"], tx["display_type"]) == ("Limitless Wellness", "Household", "Fitness")
-    assert (tx["book_source"], tx["type_source"]) == ("merchant", "merchant")
+    # A PayNow transfer waits for review (fin-redesign 06), named by its rule;
+    # while it waits it is no one's spending, so it carries the merchant and
+    # no book or type (fin-redesign 05). The label is the merchant's.
+    assert (tx["flow_type"], tx["service_name"], tx["display_type"]) == ("review", "Limitless Wellness", "")
+    assert (tx["type_id"], tx["book_source"], tx["type_source"]) == (None, None, None)
+    merchant = {s["name"]: s for s in client.get("/api/services").get_json()}["Limitless Wellness"]
+    assert (merchant["book"], merchant["display_type"]) == ("Household", "Fitness")
 
 
 def test_case_21_with_its_rule_deleted_a_wording_no_longer_types_a_row(client, ledger):

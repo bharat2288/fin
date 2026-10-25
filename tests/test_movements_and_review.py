@@ -323,11 +323,13 @@ def test_a_transfer_a_merchant_rule_knows_is_named_and_still_waits(client, ledge
         (2, "PAYNOW TO SINGAPORE LIFE REF 1201", 310.40),   # the payee wording gives a type
     ])
 
+    # Named, and no one's spending while it waits: no book or type (fin-redesign 05).
     assert what_it_is(row(client, "PAYNOW TO SAMPLE LANDLORD REF 1200")) == (
-        "review", None, "Household", "Rent",
+        "review", None, "Household", "",
     )
+    assert row(client, "PAYNOW TO SAMPLE LANDLORD REF 1200")["service_name"] == "Sample Landlord"
     assert what_it_is(row(client, "PAYNOW TO SINGAPORE LIFE REF 1201")) == (
-        "review", None, "Household", "Insurance",
+        "review", None, "Household", "",
     )
     assert [tx["description"] for tx in review_list(client)] == [
         "PAYNOW TO SAMPLE LANDLORD REF 1200", "PAYNOW TO SINGAPORE LIFE REF 1201",
@@ -632,7 +634,8 @@ def test_a_new_rule_names_a_waiting_row_and_leaves_it_on_the_review_list(client,
 
     assert client.post("/api/rules/drift", json={"past": "apply"}).status_code == 200
 
-    assert what_it_is(row(client, TRANSFERS[2][1])) == ("review", None, "Household", "Home")
+    # Named, and no one's spending while it waits: no book or type (fin-redesign 05).
+    assert what_it_is(row(client, TRANSFERS[2][1])) == ("review", None, "Household", "")
     assert row(client, TRANSFERS[2][1])["service_name"] == "Sample Payee"
     assert [tx["description"] for tx in review_list(client)] == [tx[1] for tx in TRANSFERS]
 

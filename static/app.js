@@ -2891,7 +2891,10 @@ ACT['ww-pick'] = el => {
     // or Check each row (fin-surfaces 13), shown with that scope only.
     const teaches = untyped && choice.name === 'spending';
     if (choice.asks === 'type') {
-        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types, row.type_id)}</select></label>
+        // A waiting row carries its merchant and no type (fin-redesign 05):
+        // the merchant's type is the one offered first.
+        const offered = row.type_id ?? (step.services || []).find(s => s.id === row.service_id)?.type_id;
+        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types, offered)}</select></label>
             <label class="field"><span id="cw-book-l">Book</span><select id="cw-book">${bookOptions(r.books, null, untyped ? 'As the merchant or type says' : 'As the type says')}</select></label>
             ${teaches ? `<label class="field" id="cw-set-f"><span>New rows from it</span><select id="cw-set">
                 <option value="same">Every row the same</option><option value="each"${merchantChecksEach(step.merchant, step.services) ? ' selected' : ''}>Check each row</option></select></label>` : ''}`;
@@ -4754,11 +4757,12 @@ function driftParts(p) {
     return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
 }
 /** The rows whose flow Apply changes (every one is in p.flows), by what they
- *  are now and after: "2 spending → a movement · the loan"; then each row
- *  it keeps, in its own sentence. */
+ *  are now and after: "2 spending → a movement · the loan", and where the
+ *  move empties their book and type (label_cleared), "with no book or
+ *  type"; then each row it keeps, in its own sentence. */
 function flowsLine(p) {
     const pairs = {};
-    (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}`; pairs[k] = (pairs[k] || 0) + 1; });
+    (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}${f.label_cleared ? ', with no book or type' : ''}`; pairs[k] = (pairs[k] || 0) + 1; });
     const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
     return (said ? `<p class="sub">What the rows are: ${said}.</p>` : '')
         + keptWords(p).map(k => `<p class="sub">${esc(k)}</p>`).join('');

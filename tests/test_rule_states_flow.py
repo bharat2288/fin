@@ -109,11 +109,14 @@ def test_case_16_a_new_instalment_arrives_as_a_movement_against_the_loan(client,
 
     imported = upload(client, BANK, [(9, instalment(8), 1850.00)])
     shown = imported["groups"][0]["transactions"][0]
-    assert (shown["flow_type"], shown["other_side_id"], shown["status"]) == ("movement", car["loan"], "typed")
+    # A movement is no one's spending: its merchant, no book or type (fin-redesign 05).
+    assert (shown["flow_type"], shown["other_side_id"], shown["status"]) == ("movement", car["loan"], "movement")
+    assert (shown["service_id"], shown["book"], shown["type_id"]) == (car["finance"], None, None)
     assert confirm(client, imported).status_code == 200
 
     assert what(client, instalment(8)) == ("movement", LOAN, False)
     assert row(client, instalment(8))["service_name"] == "Sample Motor Finance"
+    assert (row(client, instalment(8))["type_id"], row(client, instalment(8))["book_source"]) == (None, None)
 
 
 def test_only_new_rows_keeps_the_past_flows_and_a_new_row_takes_the_rule(client, car):

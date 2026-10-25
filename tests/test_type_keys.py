@@ -273,7 +273,11 @@ def test_a_paynow_wording_still_types_a_row_after_its_type_is_renamed(client, le
     bring_in(client, BANK, [(4, "PAYNOW TO LIMITLESS WELLNESS REF 31", 120.00)])
 
     tx = row(client, "PAYNOW TO LIMITLESS WELLNESS REF 31")
-    assert (tx["book"], tx["display_type"]) == ("Household", "Sport")
+    # Waiting for review, it carries its merchant and no type (fin-redesign
+    # 05); the merchant the wording names is typed under the renamed type.
+    assert (tx["flow_type"], tx["service_name"]) == ("review", "Limitless Wellness")
+    merchant = {s["name"]: s for s in client.get("/api/services").get_json()}["Limitless Wellness"]
+    assert (merchant["book"], merchant["display_type"]) == ("Household", "Sport")
 
 
 # --- the sweep: code reads a declared type by its key, through book_type ---------
