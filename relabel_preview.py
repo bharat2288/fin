@@ -105,10 +105,21 @@ class Planned:
 @dataclass
 class Kept:
     """A row whose flow Apply would move but keeps: a record of expect back
-    rests on it (flow_writes)."""
+    rests on it, or its book or type was chosen (flow_writes)."""
     held: sqlite3.Row
     would: dict                        # the flow and other side it would have had
-    why: str                           # the record, in a hand label's refusal's words
+    why: str                           # the record, in a hand label's refusal's words; or the choice
+    said: str | None = None            # the clause after "because", where it is not because(why)
+
+
+# Why a row whose book or type the operator chose keeps its flow (ADR-008):
+# {the fields chosen: (why, the drawer's clause)}.
+_CHOSEN_WHY = {
+    ("book", "type_id"): ("You chose this row's book and type; say what it is by hand to move it.",
+                          "you chose its book and type"),
+    ("type_id",): ("You chose this row's type; say what it is by hand to move it.", "you chose its type"),
+    ("book",): ("You chose this row's book; say what it is by hand to move it.", "you chose its book"),
+}
 
 
 @dataclass
@@ -629,7 +640,7 @@ def fins_own(held, before, account: dict, ctx: flow.ClassifierContext) -> bool:
 
 
 def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: flow.ClassifierContext,
-                account: dict | None = None) -> tuple[dict, Kept | None]:
+                account: dict | None = None, keep_chosen: bool = True) -> tuple[dict, Kept | None]:
     """The flow and other side Apply writes to a row already in the book
     besides its new label (`sets`), where they change: what
     flow.worked_out_again gives for the merchant and type the row would have
@@ -642,8 +653,12 @@ def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: 
     change, `before`); nor a move a hand label would refuse the row, a
     record resting on it (expect_back.label_refusal, with the flow, book and
     other side's kind the row would have): that row is kept, in the
-    refusal's own words. `account` is the kind and owner of the account the
-    row is on (held_account, by default)."""
+    refusal's own words. Nor the flow of a row whose book or type the
+    operator chose (ADR-008: a chosen label says the row is spending, as a
+    flow set by hand says what it is, ADR-009): kept too, saying so, unless
+    the write is the operator's own on that row (`keep_chosen` False: the
+    row a teach is taught for). `account` is the kind and owner of the
+    account the row is on (held_account, by default)."""
     if held["flow_type_manual"]:
         return {}, None
     if account is None:
@@ -653,6 +668,10 @@ def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: 
     writes = {k: v for k, v in zip(("flow_type", "other_side_id"), worked_out) if held[k] != v}
     if not writes or not fins_own(held, before, account, ctx):
         return {}, None
+    chosen = tuple(f for f, column in label_source.FIELDS.items() if held[column] == label_source.CHOSEN)
+    if keep_chosen and chosen:
+        why, said = _CHOSEN_WHY[chosen]
+        return {}, Kept(held, writes, why, said)
     flow_name, other_side = worked_out
     other_kind = (conn.execute("SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone()
                   or [None])[0] if other_side is not None else None
@@ -1201,6 +1220,17 @@ def moves_flow(planned: Planned) -> bool:
     return "flow_type" in planned.apply or "other_side_id" in planned.apply
 
 
+def leaves_spending(planned: Planned) -> bool:
+    """Whether Apply moves a spending or refund row to a flow that carries no
+    label, emptying its book or type (label_source.fitted): what "leaving
+    spending" counts. A row of another flow that loses a label it held (an
+    older book's income moved to a movement) is not leaving spending."""
+    held_flow = planned.held["flow_type"]
+    return (flow.carries_label(held_flow)
+            and not flow.carries_label(planned.apply.get("flow_type", held_flow))
+            and label_source.clears(planned.held, planned.apply))
+
+
 def _said_flow(names: dict[int, str], flow_name, other_side) -> str:
     """A row's flow and other side in words ("a movement · the loan")."""
     word = FLOW_WORDS.get(flow_name or "expense", flow_name)
@@ -1296,7 +1326,7 @@ def kept_lines(conn: sqlite3.Connection, kept: list[Kept]) -> list[dict]:
     for k in kept:
         moved = _moved(names, k.held, k.would)
         entries.append((k.held["id"], {"now": moved["now"], "would": moved["after"], "why": k.why,
-                                       "because": because(k.why)}))
+                                       "because": k.said or because(k.why)}))
     return _flow_lines(conn, entries)
 
 
@@ -1369,13 +1399,14 @@ def asked(plan: Plan, answer_key: str = "past") -> str:
     moving = sum(1 for p in plan.rows if moves_flow(p))
     if moving:
         said += f", {moving} of them in what {'it is' if moving == 1 else 'they are'} (their flow; listed in flows)"
-    leaving = sum(1 for p in plan.rows if moves_flow(p) and label_source.clears(p.held, p.apply))
+    leaving = sum(1 for p in plan.rows if leaves_spending(p))
     if leaving:
         said += (f", {leaving} of them leaving spending, so {'its' if leaving == 1 else 'their'} book and type "
                  "are emptied (label_cleared in flows)")
     if plan.kept:
         said += (f"; {len(plan.kept)} row{' keeps its' if len(plan.kept) == 1 else 's keep their'} flow, "
-                 "a record of expect back resting on it (listed in flows_kept)")
+                 "a record of expect back resting on it or its book or type chosen by hand "
+                 "(listed in flows_kept, each with why)")
     return (f"Nothing was saved yet: {said}. "
             f"Say whether they change too ({answer_key}: {APPLY}) or only new rows take it "
             f"({answer_key}: {ONLY_NEW}).")

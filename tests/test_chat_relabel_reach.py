@@ -222,9 +222,13 @@ def test_a_refund_to_pay_back_is_not_taken_out_of_refund_until_the_mark_is_undon
     assert (state(conn), len(entries())) == (before, count)
 
 
-def test_a_refund_with_no_type_of_its_own_takes_its_purchases_book_and_type_when_linked(trip, conn):
+def test_a_refund_with_no_type_or_merchant_of_its_own_takes_its_purchases_book_and_type_when_linked(trip, conn):
     assert call("label_review", tx_id=trip.credit, choice="card_payment")["ok"]
     assert (held(conn, trip.credit)["book"], held(conn, trip.credit)["type_id"]) == (None, None)
+    # A credit no merchant holds: one its merchant holds takes the
+    # merchant's label instead (case 20, test_book_type_only_on_spending).
+    conn.execute("UPDATE transactions SET service_id = NULL WHERE id = ?", (trip.credit,))
+    conn.commit()
 
     answer = call("label_review", tx_id=trip.credit, choice="refund")
 

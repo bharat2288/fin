@@ -21,7 +21,7 @@ import pytest
 import db
 from test_client_seams import needs_node
 from test_movements_and_review import (  # noqa: F401 (ledger is a fixture)
-    BANK, bring_in, ledger, make_account, row, spending_type, upload,
+    BANK, CARD, bring_in, ledger, make_account, row, spending_type, upload,
 )
 from test_preview_rules_and_merges import _function, _node
 from test_rule_flow_every_path import (  # noqa: F401 (finance, fees and instalment are fixtures)
@@ -395,3 +395,214 @@ def test_a_taught_rows_own_example_says_it_keeps_no_label_where_the_teach_makes_
     for n in (1021, 1022):
         assert what(client, agreement(n)) == ("movement", LOAN, FINANCE)
         assert label_of(agreement(n)) == (None, None, None, None)
+
+
+# --- review of fin-redesign 05 ------------------------------------------------------------------
+
+
+AIR = "SAMPLE AIR CREDIT 991"
+
+
+def test_case_20_a_credit_that_came_in_as_income_relabelled_a_refund_takes_its_merchants_label(client, ledger):
+    resp = client.post("/api/services", json={"name": "Sample Air", "book": "Household",
+                                              "type_id": spending_type(client, "Travel")})
+    assert resp.status_code == 200, resp.get_json()
+    add_rule(client, "SAMPLE AIR", resp.get_json()["id"])
+    bring_in(client, CARD, [(3, AIR, -948.00)], kind="card")
+    assert stored(AIR)["flow_type"] == "income" and label_of(AIR) == (None, None, None, None)
+
+    said = client.post(f"/api/review/{stored(AIR)['id']}/label", json={"choice": "refund"})
+
+    assert said.status_code == 200, said.get_json()
+    assert stored(AIR)["flow_type"] == "refund"
+    # Keeping Travel (case 20): the merchant's label, the operator's choice.
+    assert label_of(AIR) == ("Household", spending_type(client, "Travel"), "chosen", "chosen")
+    assert client.get("/api/queue/summary").get_json()["untyped"] == {"cards": 0, "rows": 0}
+
+
+def chosen_by_hand(client, description: str, type_name: str, book: str = "Household") -> int:
+    """The row's book and type set by hand (the row sheet, chat's set_label): each chosen."""
+    tx = stored(description)["id"]
+    resp = client.put(f"/api/transactions/{tx}", json={"type_id": spending_type(client, type_name), "book": book})
+    assert resp.status_code == 200, resp.get_json()
+    assert label_of(description)[2:] == ("chosen", "chosen")
+    return tx
+
+
+def test_adr_008_a_rule_never_moves_the_flow_of_a_row_whose_type_was_chosen(client, car):
+    kept_id = chosen_by_hand(client, states.instalment(6), "Home")
+    before = stored(states.instalment(6))
+
+    asked = client.put(f"/api/rules/{car['rule']}", json=as_movement(car))
+
+    assert asked.status_code == 409, asked.get_json()
+    preview = asked.get_json()["preview"]
+    assert [f["id"] for f in preview["flows"]] == [stored(states.instalment(7))["id"]]
+    assert [(k["id"], k["now"], k["would"], k["because"]) for k in preview["flows_kept"]] == [
+        (kept_id, "spending", f"a movement · {states.LOAN}", "you chose its book and type")]
+    assert "1 row keeps its flow" in asked.get_json()["error"]
+    resp = client.put(f"/api/rules/{car['rule']}",
+                      json={**as_movement(car), "past": "apply", "token": preview["token"]})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert stored(states.instalment(6)) == before
+    assert label_of(states.instalment(6)) == ("Household", spending_type(client, "Home"), "chosen", "chosen")
+    assert stored(states.instalment(7))["flow_type"] == "movement"
+
+
+def test_adr_008_a_choice_made_after_the_preview_makes_its_answer_stale(client, car):
+    preview = client.put(f"/api/rules/{car['rule']}", json=as_movement(car)).get_json()["preview"]
+    chosen_by_hand(client, states.instalment(6), "Home")
+    before = every_row(client)
+
+    resp = client.put(f"/api/rules/{car['rule']}",
+                      json={**as_movement(car), "past": "apply", "token": preview["token"]})
+
+    assert resp.status_code == 409 and resp.get_json()["stale"]
+    assert every_row(client) == before
+
+
+def test_adr_008_a_plans_backfill_never_moves_the_flow_of_a_row_whose_book_was_chosen(client, finance):
+    bring_in(client, BANK, [(3, agreement(1021), 1850.00), (4, agreement(1022), 1850.00)])
+    taught, other = stored(agreement(1021))["id"], stored(agreement(1022))["id"]
+    resp = client.put(f"/api/transactions/{other}", json={"book": "Moom"})
+    assert resp.status_code == 200, resp.get_json()
+    assert label_of(agreement(1022))[0::2] == ("Moom", "chosen")
+    items = [{"tx_ids": [taught], "service_id": finance["svc"], "pattern": "SAMPLE HP AGREEMENT",
+              "past_rows": "apply"}]
+
+    shown = call("plan_preview", items=items)
+
+    assert shown["ok"], shown
+    [item] = shown["result"]["items"]
+    assert [f["id"] for f in item["flows"]] == [taught]
+    applied = call("plan_apply", items=items, token=shown["result"]["token"])
+    assert applied["ok"], applied
+    assert what(client, agreement(1021)) == ("movement", LOAN, FINANCE)
+    # The row whose book the operator chose stays spending, in that book, with the merchant's type.
+    assert what(client, agreement(1022)) == ("expense", None, FINANCE)
+    assert label_of(agreement(1022)) == ("Moom", spending_type(client, "Transport"), "chosen", "merchant")
+
+
+def test_adr_008_a_plan_whose_wording_takes_another_merchants_rows_leaves_one_whose_type_was_chosen(
+        client, fees):
+    chosen_by_hand(client, agreement(1022), "Home")
+    before = stored(agreement(1022))
+    items = [{"tx_ids": [fees["teach"]["tx_id"]], "service_id": fees["svc"], "pattern": "SAMPLE HP AGREEMENT",
+              "past_rows": "apply"}]
+
+    shown = call("plan_preview", items=items)
+
+    assert shown["ok"], shown
+    applied = call("plan_apply", items=items, token=shown["result"]["token"])
+    assert applied["ok"], applied
+    assert what(client, agreement(1021)) == ("movement", LOAN, FINANCE)
+    assert stored(agreement(1022)) == before
+
+
+def test_a_review_row_from_a_company_merchant_is_the_companys_money(client, health):
+    import expect_back
+    bring_in(client, BANK, [(5, "PAYNOW TRANSFER SAMPLE HEALTH CO", -300.00)])
+    held = stored("PAYNOW TRANSFER SAMPLE HEALTH CO")
+    assert (held["flow_type"], held["service_id"], held["book"]) == ("review", health["svc"], None)
+
+    conn = db.get_connection()
+    try:
+        why = expect_back.refusal_to_mark(conn, held["id"], "pay")
+    finally:
+        conn.close()
+
+    assert why is not None and "this row is the company's" in why
+    assert client.get("/api/queue/paybacks").get_json()["paybacks"] == []
+
+
+def test_a_salary_credit_from_a_company_merchant_is_the_companys_money(client, health):
+    import expect_back
+    bring_in(client, BANK, [(25, f"{SALARY} AUG", -14125.00)])
+    held = stored(f"{SALARY} AUG")
+    assert (held["flow_type"], held["book"]) == ("income", None)
+
+    conn = db.get_connection()
+    try:
+        why = expect_back.refusal_to_mark(conn, held["id"], "pay")
+    finally:
+        conn.close()
+
+    assert why is not None and "this row is the company's" in why
+
+
+def test_a_type_sent_for_a_waiting_money_in_row_at_confirm_leaves_it_waiting(client, ledger):
+    preview = upload(client, BANK, [(4, "PAYNOW TRANSFER FROM SAMPLE PERSON", -50.00)])
+    shown = preview["groups"][0]["transactions"][0]
+    assert shown["flow_type"] == "review"
+    shown["type_id"] = spending_type(client, "Travel")
+
+    resp = client.post("/api/import/confirm", json={"import_id": preview["import_id"], "groups": preview["groups"]})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert stored("PAYNOW TRANSFER FROM SAMPLE PERSON")["flow_type"] == "review"
+    assert label_of("PAYNOW TRANSFER FROM SAMPLE PERSON") == (None, None, None, None)
+
+
+def test_a_teach_on_an_income_row_answers_with_what_it_stored(client, ledger):
+    bring_in(client, BANK, [(6, "SAMPLE DIVIDEND CO 42", -77.00)])
+    held = stored("SAMPLE DIVIDEND CO 42")
+    assert held["flow_type"] == "income"
+
+    resp = client.post("/api/transactions/resolve", json={
+        "tx_id": held["id"], "service_name": "Sample Dividend", "type_id": spending_type(client, "Travel"),
+        "apply_scope": "transaction"})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert (resp.get_json()["book"], resp.get_json()["type_id"]) == (None, None)
+    assert label_of("SAMPLE DIVIDEND CO 42") == (None, None, None, None)
+
+
+def test_a_waiting_row_paired_into_a_card_payment_keeps_no_book_or_type(client, ledger):
+    bring_in(client, BANK, [(10, "PAYNOW TRANSFER TO SAMPLE PAYEE", 420.00)])
+    # As a book before this change holds a waiting row: with a label.
+    conn = db.get_connection()
+    conn.execute("UPDATE transactions SET book = 'Household', type_id = ?, book_source = 'merchant',"
+                 " type_source = 'merchant' WHERE description = ?",
+                 (spending_type(client, "Travel"), "PAYNOW TRANSFER TO SAMPLE PAYEE"))
+    conn.commit()
+    conn.close()
+    assert stored("PAYNOW TRANSFER TO SAMPLE PAYEE")["flow_type"] == "review"
+
+    bring_in(client, CARD, [(11, "PAYMENT - ATM/INTERNET SAMPLE 0001", -420.00)], kind="card")
+
+    paired = stored("PAYNOW TRANSFER TO SAMPLE PAYEE")
+    assert paired["flow_type"] == "payment" and paired["other_side_id"] is not None
+    assert label_of("PAYNOW TRANSFER TO SAMPLE PAYEE") == (None, None, None, None)
+
+
+def test_the_question_counts_only_rows_leaving_spending_as_leaving_it(client, car):
+    # An older book's income row the rule matches, holding a label.
+    bring_in(client, BANK, [(9, states.instalment(9), -1850.00)])
+    conn = db.get_connection()
+    conn.execute("UPDATE transactions SET flow_type = 'income', book = 'Household', type_id = ?"
+                 " WHERE description = ?", (spending_type(client, "Transport"), states.instalment(9)))
+    conn.commit()
+    conn.close()
+
+    asked = client.put(f"/api/rules/{car['rule']}", json=as_movement(car))
+
+    assert asked.status_code == 409, asked.get_json()
+    flows = {f["id"]: f for f in asked.get_json()["preview"]["flows"]}
+    assert stored(states.instalment(9))["id"] in flows
+    assert "2 of them leaving spending" in asked.get_json()["error"]
+
+
+@needs_node
+def test_this_was_offers_the_merchants_type_first_on_a_waiting_row_only():
+    code = "\n".join([
+        _function("offeredType"),
+        "const services = [{ id: 7, type_id: 21 }];",
+        "console.log(JSON.stringify([",
+        "  offeredType({ flow_type: 'review', service_id: 7, type_id: null }, services),",
+        "  offeredType({ flow_type: 'review', service_id: 7, type_id: 30 }, services),",
+        "  offeredType({ flow_type: 'refund', service_id: 7, type_id: null }, services),",
+        "  offeredType({ flow_type: 'expense', service_id: 7, type_id: null }, services),",
+        "  offeredType({ flow_type: 'review', service_id: null, type_id: null }, services)]));",
+    ])
+    assert _node(code) == [21, 30, None, None, None]

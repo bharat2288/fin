@@ -1959,7 +1959,7 @@ def _taken_flows(conn, plan, service_id: int | None, tx_id: int, rules: tuple) -
         if p.held["id"] == tx_id:
             # Its label as step 3 leaves it, so its example says so: none
             # where the flow step 3 gives it is no one's spending.
-            writes, _ = _fill_flow(conn, p.held, {"service_id": merchant, **label}, *rules)
+            writes, _ = _fill_flow(conn, p.held, {"service_id": merchant, **label}, *rules, keep_chosen=False)
             fitted = label_source.fitted(p.held, {**p.apply, **writes})
             p.apply = {k: v for k, v in fitted.items() if k not in writes}
             continue
@@ -1973,20 +1973,22 @@ def _taken_flows(conn, plan, service_id: int | None, tx_id: int, rules: tuple) -
     plan.token = relabel_preview._stamp(plan.token, relabel_preview._stamp_flows(plan))
 
 
-def _fill_flow(conn, held, sets: dict, before_rules: list[dict], after_rules: list[dict]) -> tuple[dict, object]:
+def _fill_flow(conn, held, sets: dict, before_rules: list[dict], after_rules: list[dict],
+               keep_chosen: bool = True) -> tuple[dict, object]:
     """The flow and other side a teach's backfill would write to a row besides
     its label (`sets`), where a rule that states a flow labels it, before the
     teach or after, and the row kept or None: what a rule's Apply writes
     (relabel_preview.flow_writes: never a flow set by hand, one fin did not
     work out, or a move a hand label would refuse, a record resting on the
-    row)."""
+    row; nor, but for the row taught (`keep_chosen` False), the flow of a
+    row whose book or type was chosen)."""
     description, amount = held["description"] or "", held["amount_minor"]
     before = db.pick_rule(before_rules, description, amount)
     after = db.pick_rule(after_rules, description, amount)
     if not (flow.stated(before) or flow.stated(after)):
         return {}, None
     return relabel_preview.flow_writes(conn, held, sets, before, after, flow.build_context(conn),
-                                       _account_facts(conn, held["id"]))
+                                       _account_facts(conn, held["id"]), keep_chosen=keep_chosen)
 
 
 def _source(held, column: str) -> str | None:
@@ -3709,7 +3711,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         #     row labelled for itself, the merchant's stated flow where it has
         #     one): never a flow set by hand or one fin did not work out, and
         #     kept where a hand label would refuse the move, a record resting
-        #     on the row
+        #     on the row (a chosen label does not keep it: teaching this row
+        #     is the operator's own write on it)
         tx_row = conn.execute(
             f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,),
         ).fetchone()
@@ -3728,7 +3731,8 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             flows, keeps = relabel_preview.flow_writes(
                 conn, target_held, {"service_id": service_id, "type_id": type_id, "book": book},
                 db.pick_rule(rules_before, description, amount), now,
-                flow.build_context(conn), _account_facts(conn, tx_id))
+                flow.build_context(conn), _account_facts(conn, tx_id),
+                keep_chosen=False)            # the row taught: the operator's own write
             if keeps is not None:
                 kept.append(keeps)
             # Out of refund, the row leaves its purchase, as _write_label's rows do.
@@ -3760,13 +3764,16 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
                 conn, tx_id, type_id, data.get("suggestion_visible") is True,
             )
 
+        # The row's book and type as stored: none on a row that is no one's
+        # spending, whatever the teach was sent (label_source.fitted).
+        stored = conn.execute("SELECT book, type_id FROM transactions WHERE id = ?", (tx_id,)).fetchone()
         return {
             "success": True,
             "service_id": service_id,
             "rule_id": rule_id,
             "rule_ids": rule_ids,
-            "book": book,
-            "type_id": type_id,
+            "book": stored["book"] if stored else book,
+            "type_id": stored["type_id"] if stored else type_id,
             "backfilled": backfilled,
             "backfilled_ids": backfilled_ids,
             "flows": relabel_preview.moved_lines(conn, moved_lines),
@@ -5126,9 +5133,12 @@ def _chosen_in_preview(conn, tx: dict, amount_minor: int) -> bool:
     """Whether the operator gave a waiting row a type or a merchant in the
     preview: one the rules do not give it. That labels it, and it no longer
     waits. The rules' own merchant and type do not: a rule that states no
-    flow labels only (ADR-009)."""
+    flow labels only (ADR-009). A type on money in is none it can keep (it
+    would be income, which carries no type, fin-redesign 05): it lifts
+    nothing, and the confirm drops it."""
     found = _label_for(conn, tx["description"] or "", amount_minor)
-    return any(tx.get(field) and tx.get(field) != found[field] for field in ("type_id", "service_id"))
+    fields = ("service_id",) if amount_minor < 0 else ("type_id", "service_id")
+    return any(tx.get(field) and tx.get(field) != found[field] for field in fields)
 
 
 def _unheld(amount_minor: int) -> str:
@@ -6291,7 +6301,7 @@ def _label_row(conn, choice, data: dict, tx_id: int) -> dict:
     Raises _NoSuchRow, or a refusal (UnknownLabel, BookNeeded,
     review.LabelRefused, expect_back.Refused) with nothing to keep."""
     tx = conn.execute(
-        "SELECT t.id, t.amount_minor, t.flow_type, t.book, t.type_id, s.account_id FROM transactions t "
+        "SELECT t.id, t.amount_minor, t.flow_type, t.book, t.type_id, t.service_id, s.account_id FROM transactions t "
         "JOIN statements s ON t.statement_id = s.id WHERE t.id = ?",
         (tx_id,),
     ).fetchone()
@@ -6317,15 +6327,22 @@ def _label_row(conn, choice, data: dict, tx_id: int) -> dict:
     elif choice.name == "refund":
         # A refund keeps the row's book and type (spending that came back
         # counts against what it was), or takes the type given. An income
-        # kind is no spending type: the refund keeps none.
+        # kind is no spending type: the refund keeps none, and takes its
+        # merchant's book and type instead (case 20, keeping Travel: a
+        # credit that came in as income carries no label of its own).
         given = _checked_type_id(conn, data.get("type_id"))
+        spending = lambda type_ref: type_ref is not None and conn.execute(
+            "SELECT 1 FROM types WHERE id = ? AND kind = ?", (type_ref, book_type.SPENDING)).fetchone() is not None
+        merchant = conn.execute("SELECT book, type_id FROM services WHERE id = ?",
+                                (tx["service_id"],)).fetchone() if tx["service_id"] is not None else None
         if given is not None:
             type_id = given
             book = _book_or_proposed(conn, _checked_book(data.get("book")), given)
+        elif not spending(tx["type_id"]) and merchant is not None and spending(merchant["type_id"]):
+            type_id = merchant["type_id"]
+            book = _checked_book(data.get("book")) or merchant["book"] or book_type.DEFAULT_BOOK
         else:
-            type_id = tx["type_id"] if tx["type_id"] is not None and conn.execute(
-                "SELECT 1 FROM types WHERE id = ? AND kind = ?", (tx["type_id"], book_type.SPENDING)
-            ).fetchone() else None
+            type_id = tx["type_id"] if spending(tx["type_id"]) else None
             given_book = _checked_book(data.get("book"))
             book = given_book or tx["book"]
             if type_id is None:
@@ -6436,8 +6453,9 @@ def api_review_label(tx_id: int):
         refund          nothing: it keeps its book and type; or type_id (and
                         book where the type proposes none). It links to its
                         purchase when exactly one fits (refund_links, oldest
-                        first); with no type to keep, the purchase's book
-                        and type, not marked chosen
+                        first). With no spending type to keep, its merchant's
+                        book and type, chosen (case 20); with no merchant's
+                        either, the purchase's, not marked chosen
         card_payment    nothing: no other side, no book, no type
         holding         account_id of a holding
 

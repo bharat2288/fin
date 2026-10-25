@@ -46,14 +46,17 @@ NOT_A_PAYBACK = "payback"
 
 # The money-in rows the lane looks at: waiting for their label, with what each
 # has left to place (its own part), not set aside as Not a payback. The
-# eligibility columns are read so expect_back's one rule decides each row.
-_PAYMENTS = """
+# eligibility columns are read so expect_back's one rule decides each row,
+# the book as it reads it (expect_back.BOOK_SQL: the merchant's where the row
+# has none).
+_PAYMENTS = f"""
     SELECT t.id, t.date, t.description, t.amount_minor, t.flow_type, t.other_side_id,
-           COALESCE(t.book, ?) AS book, s.account_id, a.name AS account_name, a.owner,
+           {expect_back.BOOK_SQL} AS book, s.account_id, a.name AS account_name, a.owner,
            COALESCE(a.currency, 'SGD') AS currency, o.type AS other_kind, rp.own_minor
     FROM transactions t
     JOIN statements s ON s.id = t.statement_id
     JOIN accounts a ON a.id = s.account_id
+    LEFT JOIN services sv ON sv.id = t.service_id
     LEFT JOIN accounts o ON o.id = t.other_side_id
     JOIN row_parts rp ON rp.row_id = t.id
     WHERE t.amount_minor < 0 AND t.flow_type = 'review' AND rp.own_minor != 0
@@ -183,13 +186,14 @@ _WAITING = f"""
     LEFT JOIN accounts pn ON pn.id = w.person_id
     LEFT JOIN (
         SELECT t.id, t.date, t.description, t.amount_minor, t.flow_type, t.other_side_id,
-               COALESCE(t.book, ?) AS book, a.name AS account_name, a.owner, o.type AS other_kind,
+               {expect_back.BOOK_SQL} AS book, a.name AS account_name, a.owner, o.type AS other_kind,
                COALESCE(a.currency, 'SGD') AS currency,
                t.amount_minor - ABS(rp.placed_minor) AS room_minor,
                COALESCE(t.created_at, s.imported_at) AS came_in
         FROM transactions t
         JOIN statements s ON s.id = t.statement_id
         JOIN accounts a ON a.id = s.account_id
+        LEFT JOIN services sv ON sv.id = t.service_id
         JOIN row_parts rp ON rp.row_id = t.id
         LEFT JOIN accounts o ON o.id = t.other_side_id
         WHERE t.amount_minor > 0
