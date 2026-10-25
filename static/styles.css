@@ -465,6 +465,10 @@ textarea { min-height: 80px; padding-block: var(--space-2); resize: vertical; }
 ::placeholder { color: var(--text-muted); opacity: 1; }
 .fields { display: grid; gap: 12px; }
 .fields.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+/* A loan's hire-purchase terms on its account sheet: a titled group under the account's own fields. */
+.hp-terms { border: 0; border-top: 1px solid var(--border-subtle); margin: var(--space-2) 0 0; padding: var(--space-3) 0 0; min-width: 0; }
+.hp-terms legend { padding: 0 8px 0 0; font-weight: var(--font-semibold); color: var(--text-primary); }
+.hp-terms .hint { margin: 0; }
 .check { display: flex; align-items: center; gap: 10px; min-height: 40px; cursor: pointer; font-size: var(--t-ui); }
 .check input, input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-primary); width: 18px; height: 18px; flex: none; margin: 0; }
 /* the switch: folio's ds-toggle, camel when on */

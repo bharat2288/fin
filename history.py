@@ -48,6 +48,10 @@ TRACKED = (
     "type_settings",
     # fin's own filings: the type each slot files under (type-relationships 03).
     "type_slots",
+    # A loan's hire-purchase terms (fin-redesign 14; loan_terms.py). A book
+    # from before them reads as needing the change-history step again, which
+    # makes the table and its triggers, as it did the expect-back records.
+    "loan_terms",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was

@@ -35,6 +35,7 @@ import flow
 import history
 import label_source
 import loan_interest
+import loan_terms
 import mcp_tools
 import money
 import month_check
@@ -401,7 +402,12 @@ def _loan_figure(conn, stmt) -> dict:
     confirm when there is none. No row. `held` is whether that figure is held
     already (the confirm then writes nothing). Refused (ValueError), with
     nothing read from the file, when an account of that name is no loan, is
-    kept in another currency, or holds a different figure for that day."""
+    kept in another currency, or holds a different figure for that day.
+
+    A loan with hire-purchase terms (loan_terms.py) reads the statement's
+    figure as the total of its remaining instalments: what is owed is the
+    principal, that total less the interest not yet earned, and the figure
+    carries both (printed_minor, unearned_minor, instalments_left)."""
     account = conn.execute(
         "SELECT id, type FROM accounts WHERE name = ?", (stmt.account,)
     ).fetchone()
@@ -411,25 +417,29 @@ def _loan_figure(conn, stmt) -> dict:
             "statement's figure goes on a loan. Nothing was read from this file."
         )
     _account_currency(conn, stmt.account, stmt.currency)
+    terms = None if account is None else loan_terms.held(conn, account["id"])
+    worked = {} if terms is None else loan_terms.principal_owed(terms, stmt.owed_minor, stmt.statement_date)
+    owed = worked.get("owed_minor", stmt.owed_minor)
     on_day = None if account is None else conn.execute(
         "SELECT amount FROM anchors WHERE account_id = ? AND date = ?",
         (account["id"], stmt.statement_date),
     ).fetchone()
-    if on_day is not None and on_day["amount"] != -stmt.owed_minor:
+    if on_day is not None and on_day["amount"] != -owed:
         raise ValueError(
             f"{mask_card_number(stmt.account)} already has a figure of "
             f"{anchors.format_amount(-on_day['amount'], stmt.currency)} for {stmt.statement_date}; "
-            f"this statement states {anchors.format_amount(stmt.owed_minor, stmt.currency)}. "
+            f"this statement {'comes to' if terms else 'states'} {anchors.format_amount(owed, stmt.currency)}. "
             "A different amount for the same date is refused; nothing was read from this file."
         )
     return {
         "account": stmt.account,
         "kind": loan_interest.LOAN,
         "date": stmt.statement_date,
-        "owed_minor": stmt.owed_minor,
+        "owed_minor": owed,
         "currency": stmt.currency,
         "new_account": account is None,
         "held": on_day is not None,
+        **worked,
     }
 
 
@@ -1345,8 +1355,10 @@ def api_accounts():
     anchor the account rests on, or null when it has no figure;
     `takes_a_figure` is whether the enter-a-figure dialog offers it for a new
     figure; `supplied_figures` is how many figures were typed for it, each of
-    which the dialog can correct or delete."""
+    which the dialog can correct or delete; `terms` is a loan's hire-purchase
+    terms (loan_terms.shown), or null."""
     with get_db() as conn:
+        terms = loan_terms.all_held(conn)
         rows = conn.execute(
             "SELECT id, name, short_name, type, last_four, currency, status, owner FROM accounts ORDER BY name"
         ).fetchall()
@@ -1376,6 +1388,7 @@ def api_accounts():
         # Figures typed for it, which can be corrected or deleted even once
         # the account no longer takes a new one.
         d["supplied_figures"] = supplied_counts.get(d["id"], 0)
+        d["terms"] = loan_terms.shown(terms.get(d["id"]))
         result.append(d)
     return jsonify(result)
 
@@ -1384,7 +1397,9 @@ def api_accounts():
 def api_accounts_create():
     """Create a new account. A name fin already holds, in any case and with
     spaces either side, is refused: an import and a rule find an account by
-    its name, so a second one under it would split what lands there."""
+    its name, so a second one under it would split what lands there. A loan
+    may be made with its hire-purchase terms (`terms`, loan_terms.checked), in
+    the same change."""
     data = request.get_json()
     if not data or not data.get("name"):
         return jsonify({"error": "Account name is required"}), 400
@@ -1393,7 +1408,8 @@ def api_accounts_create():
         kind = account_kind.checked_kind(data.get("type", account_kind.DEFAULT_KIND))
         owner = account_kind.checked_owner(data.get("owner", account_kind.DEFAULT_OWNER))
         currency = _checked_currency(data.get("currency", "SGD"))
-    except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
+        terms = _account_terms(str(data["name"]).strip(), kind, currency, data.get("terms"))
+    except (account_kind.UnknownAccountValue, CurrencyRefused, loan_terms.TermsRefused) as e:
         return jsonify({"error": str(e)}), 400
 
     name = str(data["name"]).strip()
@@ -1407,6 +1423,15 @@ def api_accounts_create():
                 f"fin already has an account named {mask_card_number(held['name'])}, "
                 f"of kind {held['type']}; nothing was added"
             )}), 409
+        if terms is not None:
+            new_id = conn.execute(
+                "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (name, data.get("short_name", name), kind, data.get("last_four"), currency, owner),
+            ).lastrowid
+            loan_terms.write(conn, new_id, terms)
+            conn.commit()
+            return jsonify({"id": new_id, "success": True}), 200
         return _crud_insert(
             conn,
             "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
@@ -1423,10 +1448,29 @@ def api_accounts_create():
         )
 
 
+_ACCOUNT_FIELDS = ["name", "short_name", "type", "last_four", "currency", "status", "owner"]
+
+
+def _account_terms(name: str, kind: str, currency: str, value) -> dict | None:
+    """Hire-purchase terms as sent for an account (null: none), as stored.
+    Refused (loan_terms.TermsRefused) on an account that is no loan."""
+    if value is None:
+        return None
+    if kind != loan_terms.LOAN:
+        raise loan_terms.TermsRefused(
+            f"{mask_card_number(name)} is a {kind} account; hire-purchase terms go on a loan. "
+            "Nothing was saved."
+        )
+    return loan_terms.checked(value, currency)
+
+
 @app.route("/api/accounts/<int:acct_id>", methods=["PUT"])
 def api_accounts_update(acct_id):
-    """Update an account."""
+    """Update an account. `terms` sets a loan's hire-purchase terms, or null
+    takes them off (loan_terms.write), in the same change as the rest."""
     data = request.get_json()
+    if data and "terms" in data:
+        return _account_update_with_terms(acct_id, data)
     try:
         if data and "type" in data:
             account_kind.checked_kind(data["type"])
@@ -1438,10 +1482,53 @@ def api_accounts_update(acct_id):
         return jsonify({"error": str(e)}), 400
     with get_db() as conn:
         why = _ruled_account_refusal(conn, acct_id, data or {})
+    if not why and data and "type" in data and data["type"] != loan_terms.LOAN:
+        with get_db() as conn:
+            if loan_terms.held(conn, acct_id) is not None:
+                why = ("This loan holds hire-purchase terms; take them off before making it a "
+                       f"{data['type']} account. Nothing was saved.")
     if why:
         return jsonify({"error": why}), 400
-    return _crud_update("accounts", acct_id, data,
-                        ["name", "short_name", "type", "last_four", "currency", "status", "owner"])
+    return _crud_update("accounts", acct_id, data, _ACCOUNT_FIELDS)
+
+
+def _account_update_with_terms(acct_id: int, data: dict):
+    """An account update that carries `terms`: the account's fields and its
+    terms checked, then written together, or nothing."""
+    fields = {k: data[k] for k in _ACCOUNT_FIELDS if k in data}
+    try:
+        if "type" in fields:
+            account_kind.checked_kind(fields["type"])
+        if "owner" in fields:
+            account_kind.checked_owner(fields["owner"])
+        if "currency" in fields:
+            _checked_currency(fields["currency"])
+    except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
+        return jsonify({"error": str(e)}), 400
+    with get_db() as conn:
+        held = conn.execute("SELECT name, type, currency FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+        if held is None:
+            return jsonify({"error": "No such account"}), 404
+        account = {**dict(held), **fields}
+        try:
+            terms = _account_terms(account["name"], account["type"], account["currency"], data["terms"])
+        except loan_terms.TermsRefused as e:
+            return jsonify({"error": str(e)}), 400
+        why = _ruled_account_refusal(conn, acct_id, fields)
+        if why:
+            return jsonify({"error": why}), 400
+        try:
+            if fields:
+                conn.execute(
+                    f"UPDATE accounts SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+                    (*fields.values(), acct_id),
+                )
+            loan_terms.write(conn, acct_id, terms)
+        except loan_terms.TermsRefused as e:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 400
+        conn.commit()
+    return jsonify({"success": True})
 
 
 def _ruled_account_refusal(conn, acct_id: int, data: dict) -> str | None:
@@ -1590,6 +1677,8 @@ def api_accounts_delete(acct_id):
             return jsonify({"error": f"Cannot delete: the rules {', '.join(ruled[:-1])} and {ruled[-1]} name "
                                      "this account as their other side"}), 400
 
+        # A loan's terms go with it, in the same change.
+        conn.execute("DELETE FROM loan_terms WHERE account_id = ?", (acct_id,))
         conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
         conn.commit()
     return jsonify({"success": True})

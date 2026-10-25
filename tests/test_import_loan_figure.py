@@ -258,7 +258,7 @@ def preview_html(preview: dict) -> str:
         _function("esc"), _const("SIGNS"), _const("DIGITS"), "const formatters = {};",
         _function("digitsOf"), _function("groupFor"), _function("money"), _function("toMinor"),
         _const("MONTHS"), _function("day"), _function("plural"), _function("tag"),
-        _function("stmtSum"), _function("importPreviewHTML"),
+        _function("stmtSum"), _function("loanFigureSum"), _function("importPreviewHTML"),
         f"console.log(JSON.stringify(importPreviewHTML({json.dumps(preview)})));",
     ])
     out = subprocess.run([NODE, "-"], input=code, capture_output=True, text=True, timeout=30,

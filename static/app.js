@@ -5180,6 +5180,27 @@ ACT['rule-drift'] = async () => {
     rerender();
 };
 
+/** A loan's hire-purchase terms on its account sheet (loan_terms.py): all
+ *  blank is no terms. With them, its statement's total of remaining
+ *  instalments imports as principal owed. */
+function termsFieldsHTML(t) {
+    const units = minor => minor === undefined || minor === null ? '' : (minor / 100).toFixed(2);
+    const v = x => `value="${esc(x === undefined || x === null ? '' : String(x))}"`;
+    return `<fieldset class="fields hp-terms"><legend>Hire-purchase terms</legend>
+        <p class="hint">With these, a statement's remaining instalments import as principal owed (Rule of 78). Leave all blank for none.</p>
+        <label class="field"><span>Amount financed</span><input type="text" inputmode="decimal" id="ac-hp-financed" ${v(units(t?.financed_minor))}></label>
+        <label class="field"><span>Months</span><input type="text" inputmode="numeric" id="ac-hp-months" ${v(t?.months)}></label>
+        <label class="field"><span>Flat rate, % a year</span><input type="text" inputmode="decimal" id="ac-hp-rate" ${v(t?.flat_rate)}></label>
+        <label class="field"><span>First instalment</span><input type="date" id="ac-hp-first" ${v(t?.first_instalment)}></label>
+        ${t ? `<span class="hint">Instalment ${esc(units(t.instalment_minor))}; interest ${esc(units(t.interest_minor))} over the term.</span>` : ''}</fieldset>`;
+}
+/** The terms the sheet's fields say: null when all are blank. */
+function termsFromFields() {
+    const val = id => ($('#' + id)?.value || '').trim();
+    const got = { financed: val('ac-hp-financed').replace(/,/g, ''), months: val('ac-hp-months'), flat_rate: val('ac-hp-rate').replace(/%$/, ''), first_instalment: val('ac-hp-first') };
+    if (Object.values(got).every(x => !x)) return null;
+    return { ...got, months: /^\d+$/.test(got.months) ? Number(got.months) : got.months, method: 'rule-of-78' };
+}
 ACT['account-edit'] = async el => {
     const r = await refs();
     const a = el.dataset.id ? r.accountById.get(Number(el.dataset.id)) : null;
@@ -5193,6 +5214,7 @@ ACT['account-edit'] = async el => {
         <label class="field"><span>Currency</span><select id="ac-cur">${['SGD', 'INR', 'USD'].map(c => `<option>${c}</option>`).join('')}</select></label>`}
         <label class="field"><span>Last four digits</span><input type="text" inputmode="numeric" maxlength="4" id="ac-last4" value="${esc(a?.last_four || '')}"></label>
         ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}</div>
+        ${a && a.type === 'loan' ? termsFieldsHTML(a.terms) : ''}
         ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`,
     { eyebrow: a ? 'Account' : 'Accounts', foot: `<button class="btn primary" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>` });
     $$('#sheets [data-meaning]').forEach(sel => sel.addEventListener('change', () => {
@@ -5205,7 +5227,10 @@ ACT['account-save'] = async el => {
     if (!name) { toast('Give it a name', { bad: true }); return; }
     let r;
     if (el.dataset.id) {
-        r = await act('PUT', `/api/accounts/${el.dataset.id}`, { name, last_four: $('#ac-last4').value.trim() || null, status: $('#ac-archived').checked ? 'archived' : 'active' }, 'Account saved');
+        const body = { name, last_four: $('#ac-last4').value.trim() || null, status: $('#ac-archived').checked ? 'archived' : 'active' };
+        // A loan's terms go with the save, in the same change (terms the loan holds already change nothing).
+        if ($('#ac-hp-financed')) body.terms = termsFromFields();
+        r = await act('PUT', `/api/accounts/${el.dataset.id}`, body, 'Account saved');
     } else {
         r = await act('POST', '/api/accounts', { name, type: $('#ac-kind').value, owner: $('#ac-owner').value, currency: $('#ac-cur').value, last_four: $('#ac-last4').value.trim() || null }, 'Account added');
     }
@@ -5336,6 +5361,22 @@ function stmtSum(s, cur) {
         <tr><td class="op"></td><td>closing it states</td><td class="r">${known ? m(s.closing) : none}</td></tr>
         ${result}</tbody></table>`;
 }
+/** A loan statement's figure as a sum. With the loan's hire-purchase terms
+ *  the statement's figure is the total of its remaining instalments: less the
+ *  interest not yet earned (Rule of 78), it is the principal owed, which is
+ *  what the import writes (loan_terms.py). */
+function loanFigureSum(f) {
+    const m = v => esc(money(v, f.currency));
+    const held = f.held ? ' <span class="muted">(already held)</span>' : '';
+    if (f.printed_minor === undefined || f.printed_minor === null) {
+        return `<table class="sum small"><tbody><tr><td class="op"></td><td>owed${held}</td><td class="r">${m(f.owed_minor)}</td></tr></tbody></table>`;
+    }
+    const schedule = f.left_by_schedule !== f.instalments_left ? `; the terms' dates leave ${f.left_by_schedule}` : '';
+    return `<table class="sum small"><tbody>
+        <tr><td class="op"></td><td>remaining instalments, as printed</td><td class="r">${m(f.printed_minor)}</td></tr>
+        <tr><td class="op">−</td><td>interest not yet earned <span class="muted">(Rule of 78: ${f.instalments_left} of ${f.months} instalments left${schedule})</span></td><td class="r">${m(f.unearned_minor)}</td></tr>
+        <tr class="eq"><td class="op">=</td><td>principal owed${held}</td><td class="r">${m(f.owed_minor)}</td></tr></tbody></table>`;
+}
 function importPreviewHTML(p) {
     const ties = p.groups.filter(g => g.tie === 'ties');
     const unchecked = p.groups.filter(g => g.tie !== 'ties' && g.total);
@@ -5370,7 +5411,7 @@ function importPreviewHTML(p) {
     }).join('') || noneYet;
     const figuresHTML = figures.length ? card('figure', tag('aside', 'Loan figure'), figures.length, figures.map(f => stmtBlock(f.account,
         `loan statement ${esc(day(f.date))}: no rows${f.new_account ? '; the loan account is made' : ''}`,
-        `<table class="sum small"><tbody><tr><td class="op"></td><td>owed${f.held ? ' <span class="muted">(already held)</span>' : ''}</td><td class="r">${esc(money(f.owed_minor, f.currency))}</td></tr></tbody></table>`)).join('')) : '';
+        loanFigureSum(f))).join('')) : '';
     const offered = [rows ? plural(rows, 'row') : '', newFigures ? plural(newFigures, 'figure') : ''].filter(Boolean).join(' and ');
     const groupsHTML = p.groups.filter(g => g.transactions.length).map(g => `<details class="card import-group"><summary><b>${esc(g.account)}</b> · ${plural(g.transactions.length, 'row')} · ${g.typed} with a type, ${g.untyped} without</summary>
         <div class="table-shell" style="margin-top:10px"><table class="t rows acct-rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Money in</th><th class="r">Money out</th></tr></thead><tbody>

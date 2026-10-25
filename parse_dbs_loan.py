@@ -11,9 +11,11 @@ It prints no rows, no instalment, no instalments left and no split of an
 instalment into principal and interest: the one fact is what is outstanding.
 That is the loan's figure (a statement's figure, dated the summary's day), and
 loan_interest.py works the interest out between two figures from the
-instalments the bank rows paid. The summary does not say whether what is
-outstanding is principal only or also interest not yet charged; fin takes it
-as what is owed.
+instalments the bank rows paid. What is outstanding is the total of the
+remaining instalments: it falls by a whole instalment each month, principal
+and interest not yet earned together. A loan holding its hire-purchase terms
+(loan_terms.py) has it turned into principal owed when it is imported; a loan
+without them takes it as printed.
 
 A summary is read only when it lists no account with rows: a consolidated
 statement that also carries a deposit account is the DBS bank reader's, as

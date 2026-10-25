@@ -13,6 +13,7 @@ invented.
 """
 
 import ast
+import re
 import sqlite3
 from pathlib import Path
 
@@ -40,14 +41,18 @@ NEW_TABLES = {"type_keys", "type_settings", "type_slots"}
 
 def book_before(tmp_path, monkeypatch) -> Path:
     """The book main made, as a file fin is pointed at: brought through the
-    conversion steps added since (rule-flow, fin-redesign 07; flow-rules, 08),
-    which add to its shape and its rules and change no row, as the operator's
-    book is before a start."""
+    conversion steps added since (rule-flow, fin-redesign 07; flow-rules, 08;
+    the change-history step again, 14, which on the operator's book makes only
+    the loan terms table and its triggers, as here), which add to its shape
+    and its rules and change no row, as the operator's book is before a start."""
     path = tmp_path / "before.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(BEFORE.read_text(encoding="utf-8"))
     convert_rule_flow.STEP.apply(conn)
     convert_flow_rules.STEP.apply(conn)
+    conn.execute(re.search(r"CREATE TABLE IF NOT EXISTS loan_terms \(.*?\n\);", db.SCHEMA_PATH.read_text(), re.S).group(0))
+    for trigger in history.table_triggers("loan_terms"):
+        conn.execute(trigger)
     conn.commit()
     conn.close()
     monkeypatch.setattr(db, "DB_PATH", path)

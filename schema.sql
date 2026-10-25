@@ -40,6 +40,21 @@ CREATE TABLE IF NOT EXISTS accounts (
     owner TEXT NOT NULL DEFAULT 'Household'  -- whose sheet it is on: Household, or a company (declared in account_kind.py)
 );
 
+-- Hire-purchase terms on a loan (loan_terms.py): what turns its statement's
+-- total of remaining instalments into principal owed when it is imported. At
+-- most one row per loan. A tracked table: an existing book gains it, empty,
+-- with its triggers, through the change-history step (convert_change_history.py)
+-- run again by convert_all.py; no existing row is converted.
+CREATE TABLE IF NOT EXISTS loan_terms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL UNIQUE REFERENCES accounts(id),
+    financed_minor INTEGER NOT NULL,  -- the amount financed, whole minor units of the loan's currency
+    interest_minor INTEGER NOT NULL,  -- the flat interest over the whole term
+    months INTEGER NOT NULL,          -- how many monthly instalments
+    first_instalment TEXT NOT NULL,   -- YYYY-MM-DD, the first instalment's due day
+    method TEXT NOT NULL              -- how the interest is spread over the instalments (declared in loan_terms.py)
+);
+
 -- An anchor: one account's balance on one date, from a statement or supplied
 -- by the operator. One per account and date. An existing database gains this
 -- table, and the owner column above, through convert_account_kinds.py.
@@ -878,6 +893,29 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_slots', OLD.id, 'delete',
         json_object('id', OLD.id, 'slot', OLD.slot, 'type_id', OLD.type_id), NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS history_loan_terms_insert AFTER INSERT ON loan_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'loan_terms', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'financed_minor', NEW.financed_minor, 'interest_minor', NEW.interest_minor, 'months', NEW.months, 'first_instalment', NEW.first_instalment, 'method', NEW.method));
+END;
+CREATE TRIGGER IF NOT EXISTS history_loan_terms_update AFTER UPDATE ON loan_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'account_id', OLD.account_id, 'financed_minor', OLD.financed_minor, 'interest_minor', OLD.interest_minor, 'months', OLD.months, 'first_instalment', OLD.first_instalment, 'method', OLD.method) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id, 'financed_minor', NEW.financed_minor, 'interest_minor', NEW.interest_minor, 'months', NEW.months, 'first_instalment', NEW.first_instalment, 'method', NEW.method)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'loan_terms', NEW.id, 'update',
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'financed_minor', OLD.financed_minor, 'interest_minor', OLD.interest_minor, 'months', OLD.months, 'first_instalment', OLD.first_instalment, 'method', OLD.method),
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'financed_minor', NEW.financed_minor, 'interest_minor', NEW.interest_minor, 'months', NEW.months, 'first_instalment', NEW.first_instalment, 'method', NEW.method));
+END;
+CREATE TRIGGER IF NOT EXISTS history_loan_terms_delete AFTER DELETE ON loan_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'loan_terms', OLD.id, 'delete',
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'financed_minor', OLD.financed_minor, 'interest_minor', OLD.interest_minor, 'months', OLD.months, 'first_instalment', OLD.first_instalment, 'method', OLD.method), NULL);
 END;
 -- history:end
 
