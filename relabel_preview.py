@@ -1210,15 +1210,40 @@ def flows_kept(conn: sqlite3.Connection, plan: Plan) -> list[dict]:
 
 
 def kept_lines(conn: sqlite3.Connection, kept: list[Kept]) -> list[dict]:
-    """Rows kept (flow_writes), as flows_kept names them."""
+    """Rows kept (flow_writes), as flows_kept names them: why in the
+    refusal's words, and `because`, the same facts as the drawer ends its
+    one sentence with (because())."""
     if not kept:
         return []
     names = _account_names(conn)
     entries = []
     for k in kept:
         moved = _moved(names, k.held, k.would)
-        entries.append((k.held["id"], {"now": moved["now"], "would": moved["after"], "why": k.why}))
+        entries.append((k.held["id"], {"now": moved["now"], "would": moved["after"], "why": k.why,
+                                       "because": because(k.why)}))
     return _flow_lines(conn, entries)
+
+
+def because(why: str) -> str:
+    """A kept row's refusal (flow_writes) as the clause a plain sentence ends
+    with after "because": the refusal's own facts, said of "it", and its fix
+    in brackets. "S$ 5 of this row is expected back; undo the mark first."
+    gives "S$ 5 of it is expected back (undo that mark to move it)"; a
+    refusal with no fix to split off is its facts alone."""
+    said = why.strip().rstrip(".")
+    fact, sep, fix = said.rpartition("; ")
+    if not sep:
+        fact, sep, fix = said.rpartition(". ")
+    if not sep:
+        fact, fix = said, ""
+    fact = fact.replace("This row", "it", 1) if fact.startswith("This row") else fact.replace("this row", "it")
+    first = fact.split(" ", 1)[0]
+    if first[:1].isupper() and first[1:].islower():
+        fact = fact[0].lower() + fact[1:]
+    fix = fix.removesuffix(" first").replace("undo the mark", "undo that mark")
+    if not fix:
+        return fact
+    return f"{fact} ({fix[0].lower()}{fix[1:]} to move it)"
 
 
 def summary(conn: sqlite3.Connection, plan: Plan) -> dict:

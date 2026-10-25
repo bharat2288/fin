@@ -4388,14 +4388,7 @@ async function viewLists(tab) {
         const [rules, drift] = await Promise.all([get('/api/rules'), get('/api/rules/drift').catch(() => ({ count: 0 }))]);
         const shown = rules.filter(x => !needle || `${x.pattern} ${x.service_name}`.toLowerCase().includes(needle));
         ACT.__rules = new Map(rules.map(x => [x.id, x]));
-        const sets = x => {
-            const book = esc(x.book_override || x.book || '');
-            const type = x.type_override_id || x.type_name ? esc(x.type_override_id ? r.typeById.get(x.type_override_id)?.display_name || r.typeById.get(x.type_override_id)?.name : x.display_type || x.type_name) : '';
-            const range = x.min_amount !== null || x.max_amount !== null
-                ? `only ${x.min_amount !== null ? esc(money(toMinor(x.min_amount), 'SGD')) : 'any amount'} to ${x.max_amount !== null ? esc(money(toMinor(x.max_amount), 'SGD')) : 'any amount'}` : '';
-            const states = x.flow ? `${RULE_FLOWS.find(f => f[0] === x.flow)?.[1] || x.flow}${x.other_side_name ? ' · ' + x.other_side_name : ''}` : '';
-            return [book, type, range, esc(states)].filter(Boolean).join(' · ') + (x.book_override || x.type_override_id || x.flow ? ' ' + tag('yours', 'overrides') : '');
-        };
+        const sets = x => ruleSets(x, r);
         const RULE_SORT = { pattern: { label: 'Pattern', kind: 'text', of: x => x.pattern }, match: { label: 'Match', kind: 'text', of: x => MATCH_WORDS[x.match_type] || x.match_type },
             merchant: { label: 'Merchant', kind: 'text', of: x => x.service_name }, sets: { label: 'Sets', kind: 'text', of: x => plainText(sets(x)) },
             rows: { label: 'Rows it labelled', kind: 'number', of: x => x.rows_labelled } };
@@ -4761,19 +4754,25 @@ function driftParts(p) {
     return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
 }
 /** The rows whose flow Apply changes (every one is in p.flows), by what they
- *  are now and after: "2 spending → a movement · the loan". */
+ *  are now and after: "2 spending → a movement · the loan"; then each row
+ *  it keeps, in its own sentence. */
 function flowsLine(p) {
     const pairs = {};
     (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}`; pairs[k] = (pairs[k] || 0) + 1; });
     const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
-    const kept = keptWords(p);
     return (said ? `<p class="sub">What the rows are: ${said}.</p>` : '')
-        + (kept ? `<p class="sub">Kept as they are: ${esc(kept)}</p>` : '');
+        + keptWords(p).map(k => `<p class="sub">${esc(k)}</p>`).join('');
 }
-/** The rows whose flow is kept, a record of expect back resting on each, in
- *  plain words: each, and why. The drawer and a saved rule's toast say them. */
+/** The rows whose flow is kept, a record of expect back resting on each:
+ *  each named by date, amount and wording, and why, in one plain sentence
+ *  ("6 Feb 2026 · S$ 68.28 · GIRO DEDUCTION AUTO stays spending, because
+ *  S$ 5 of it is expected back (undo that mark to move it)."). Only the
+ *  drawer says them; a toast counts them (flowCounts). */
 function keptWords(p) {
-    return (p.flows_kept || []).map(k => `${k.description} stays ${k.now}: ${k.why}`).join(' ');
+    return (p.flows_kept || []).map(k => {
+        const row = [day(k.date), money(k.amount_minor, k.currency), k.description].join(' · ');
+        return k.because ? `${row} stays ${k.now}, because ${k.because}.` : `${row} stays ${k.now}. ${k.why}`;
+    });
 }
 /** Ask the preview: 'apply', 'only_new', or null when it is closed. */
 function askPreview(p, parts = previewParts(p)) {
@@ -4796,7 +4795,8 @@ async function sendPreviewed(method, url, body, { key = 'past', parts = null } =
     const answer = await askPreview(r.data.preview, parts ? parts(r.data.preview) : undefined);
     if (!answer) return { ok: false, cancelled: true, status: 409, data: { error: 'Nothing was saved.' }, change: null };
     const answered = await send(method, url, { ...body, [key]: answer, token: r.data.preview.token });
-    return { ...answered, answered: { past: answer, count: r.data.preview.count } };
+    // The drawer's flows go with the answer: Apply writes exactly those, and the toast counts them.
+    return { ...answered, answered: { past: answer, count: r.data.preview.count, flows: r.data.preview.flows || [] } };
 }
 /** What a previewed write did, in words, for its toast. */
 function previewedWords(r, done) {
@@ -4805,24 +4805,43 @@ function previewedWords(r, done) {
     if (a.past === 'apply') return `${done}, and ${plural(a.count, 'past row')} changed. One change in Changes, with Undo.`;
     return `${done}. Only new rows take it; the ${plural(a.count, 'past row')} keep theirs, marked checked.`;
 }
-/** A teach's (resolve's) toast: what it did (previewedWords), then the row
- *  taught's own flow where it moved (the answer's flows) and the rows whose
- *  flow it kept (flows_kept), as the drawer says them. */
+/** What a write did to the rows' flows, in counts only (each row is the
+ *  drawer's): "7 rows are now a movement; 1 row kept as it is". `moved` the
+ *  flow lines it wrote, `kept` the rows whose flow it kept; '' when neither. */
+function flowCounts(moved, kept) {
+    const by = new Map();
+    moved.forEach(f => { const w = String(f.after).split(' · ')[0]; by.set(w, (by.get(w) || 0) + 1); });
+    const each = [...by].map(([w, n], i) => i ? `${n} ${w}` : `${plural(n, 'row')} ${n === 1 ? 'is' : 'are'} now ${w}`);
+    const now = each.length > 1 ? `${each.slice(0, -1).join(', ')} and ${each[each.length - 1]}` : (each[0] || '');
+    const still = kept.length ? `${plural(kept.length, 'row')} kept as ${kept.length === 1 ? 'it is' : 'they are'}` : '';
+    return [now, still].filter(Boolean).join('; ');
+}
+/** A previewed write's toast: what it did (previewedWords), or, where it
+ *  moved or kept a flow, that in counts (flowCounts): the drawer's flows on
+ *  Apply, with `own` (a teach's row taught), and the answer's flows_kept. */
+function doneWords(r, done, own = []) {
+    const a = r.answered || {};
+    const moved = [...own, ...(a.past === 'apply' ? a.flows || [] : [])];
+    const kept = r.data?.flows_kept || [];
+    if (!moved.length && !kept.length) return previewedWords(r, done);
+    const counted = `${sentence(flowCounts(moved, kept))}.`;
+    if (a.past === 'only_new') return `${previewedWords(r, done)} ${counted}`;
+    // Rows relabelled whose flow neither moved nor was kept are counted too.
+    if (a.past === 'apply' && a.count > moved.length + kept.length) return `${done}, and ${plural(a.count, 'past row')} changed. ${counted}`;
+    return `${done}. ${counted}`;
+}
+/** A teach's (resolve's) toast: doneWords, the row taught's own flow (the
+ *  answer's flows) counted with the rest. */
 function resolvedWords(r, done) {
-    const said = previewedWords(r, done);
-    const moved = (r.data?.flows || []).map(f => `What the row is: ${f.now} → ${f.after}.`).join(' ');
-    const kept = keptWords(r.data || {});
-    if (!moved && !kept) return said;
-    return [`${said.replace(/\.$/, '')}.`, moved, kept ? `Kept as they are: ${kept}` : ''].filter(Boolean).join(' ');
+    return doneWords(r, done, r.data?.flows || []);
 }
 /** A previewed write's end: false when the drawer was closed, or the write
- *  refused (said in a toast); else its toast, with Undo, naming the rows whose
- *  flow it kept (a rule saved with no other row to ask about names them only here). */
+ *  refused (said in a toast); else its toast, with Undo, counting the rows
+ *  whose flow it moved or kept (doneWords). */
 function previewedDone(r, done) {
     if (r.cancelled) return false;
     if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return false; }
-    const said = previewedWords(r, done), kept = keptWords(r.data || {});
-    toast(kept ? `${said.replace(/\.$/, '')}. Kept as they are: ${kept}` : said, { undo: r.change });
+    toast(doneWords(r, done), { undo: r.change });
     refreshFrame();
     return true;
 }
@@ -5090,9 +5109,21 @@ ACT['merchant-delete'] = async el => {
     if (r) { closeSheet(); rerender(); }
 };
 
+/** A rule's Sets cell in Lists › Rules: book, type, amount range and the
+ *  flow it states, with the overrides tag. */
+function ruleSets(x, r) {
+    const book = esc(x.book_override || x.book || '');
+    const type = x.type_override_id || x.type_name ? esc(x.type_override_id ? r.typeById.get(x.type_override_id)?.display_name || r.typeById.get(x.type_override_id)?.name : x.display_type || x.type_name) : '';
+    const range = x.min_amount !== null || x.max_amount !== null
+        ? `only ${x.min_amount !== null ? esc(money(toMinor(x.min_amount), 'SGD')) : 'any amount'} to ${x.max_amount !== null ? esc(money(toMinor(x.max_amount), 'SGD')) : 'any amount'}` : '';
+    const states = x.flow ? `${RULE_FLOWS.find(f => f[0] === x.flow)?.[1] || x.flow}${x.other_side_name ? ' · ' + x.other_side_name : ''}` : '';
+    // A flow alone overrides nothing: the tag is for the rule's own book or type.
+    return [book, type, range, esc(states)].filter(Boolean).join(' · ') + (x.book_override || x.type_override_id ? ' ' + tag('yours', 'overrides') : '');
+}
 // What a rule may say its rows are (ADR-009): left at the first, fin works it out.
+// Short words, as the preview lines say them (relabel_preview.FLOW_WORDS); the picker's hint says the two that need it.
 const RULE_FLOWS = [['', 'What fin works out'], ['expense', 'spending'], ['income', 'income'], ['refund', 'a refund'],
-    ['transfer', 'a move between own accounts'], ['payment', 'a card payment'], ['movement', 'a movement (a loan, holding or company)']];
+    ['transfer', 'a transfer'], ['payment', 'a card payment'], ['movement', 'a movement']];
 ACT.rule = async el => {
     const [r, services] = await Promise.all([refs(), servicesList()]);
     const x = el.dataset.id ? ACT.__rules.get(Number(el.dataset.id)) : null;
@@ -5104,6 +5135,7 @@ ACT.rule = async el => {
             <label class="field"><span>Type, in place of the merchant’s</span><select id="rl-type">${typeOptions(r.types, x?.type_override_id, { blank: 'The merchant’s' })}</select></label></div>
         <div class="fields two"><label class="field"><span>What its rows are</span><select id="rl-flow">${RULE_FLOWS.map(([v, w]) => `<option value="${v}"${(x?.flow || '') === v ? ' selected' : ''}>${esc(w)}</option>`).join('')}</select></label>
             <label class="field"><span>Other side</span><select id="rl-side"><option value="">None</option>${r.accounts.filter(a => a.id === x?.other_side_id || (a.owner === 'Household' && a.type !== 'person' && a.status !== 'archived')).map(a => `<option value="${a.id}"${a.id === x?.other_side_id ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label></div>
+        <p class="hint">A movement’s other side is a loan, holding or company.</p>
         <div class="fields two"><label class="field"><span>Only from (S$)</span><input type="text" inputmode="decimal" id="rl-min" value="${x?.min_amount ?? ''}"></label>
             <label class="field"><span>Only up to (S$)</span><input type="text" inputmode="decimal" id="rl-max" value="${x?.max_amount ?? ''}"></label></div></div>
         ${x ? `<p class="small muted">It labels ${plural(x.rows_labelled ?? 0, 'row')} now.</p>` : ''}

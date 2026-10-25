@@ -1889,9 +1889,11 @@ def _teach_fills(conn, service_id: int | None, tx_id: int, pattern: str, match_t
     and a checked one stays checked; a row with no field to reach is left out
     and keeps its merchant too (fin-surfaces 54). The backfill writes these
     rows, and a preview counts the merchant's among them, so the two read
-    the same list. Their flows are _teach_flows'."""
+    the same list. Their flows are _teach_flows'. Never the row taught
+    (`tx_id`), with or without a merchant: step 3 writes it, so a count of
+    these rows is of the others ("2 other rows took the same label")."""
     fill_where = (
-        "(service_id IS NULL OR (service_id = ? AND type_id IS NULL AND id != ?)) "
+        "(service_id IS NULL OR (service_id = ? AND type_id IS NULL)) AND id != ? "
         f"AND {_build_match_condition(match_type)}"
     )
     given = {"book": (book, taught[0]), "type_id": (type_id, taught[1])}

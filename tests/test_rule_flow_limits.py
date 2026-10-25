@@ -183,12 +183,16 @@ def test_a_rule_whose_only_reach_is_a_kept_row_asks_nothing_and_names_it(client,
 def test_the_rules_drawer_names_each_row_kept_and_why():
     code = "\n".join([
         "const esc = s => String(s);",
-        _function("keptWords"), _function("flowsLine"),
+        "const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];",
+        "const SIGNS = { SGD: 'S$' }; const digitsOf = cur => 2; const formatters = {};",
+        _function("groupFor"), _function("money"), _function("day"), _function("keptWords"), _function("flowsLine"),
         "console.log(JSON.stringify(flowsLine({ flows: [], flows_kept: [",
-        "  { description: 'HP SAMPLE 06', now: 'spending', why: 'S$ 500 of this row is expected back; undo the mark first.' }] })));",
+        "  { date: '2026-06-05', amount_minor: 185000, currency: 'SGD', description: 'HP SAMPLE 06', now: 'spending',",
+        "    why: 'S$ 500 of this row is expected back; undo the mark first.',",
+        "    because: 'S$ 500 of it is expected back (undo that mark to move it)' }] })));",
     ])
-    assert _node(code) == ("<p class=\"sub\">Kept as they are: HP SAMPLE 06 stays spending: "
-                           "S$ 500 of this row is expected back; undo the mark first.</p>")
+    assert _node(code) == ("<p class=\"sub\">5 Jun 2026 · S$ 1,850.00 · HP SAMPLE 06 stays spending, "
+                           "because S$ 500 of it is expected back (undo that mark to move it).</p>")
 
 
 # --- only a flow fin worked out is worked out again -------------------------------------
@@ -606,12 +610,12 @@ def test_a_rule_saved_with_rows_kept_says_so_in_its_toast():
         "const esc = s => String(s);",
         "function plural(n, one, many) { return `${n} ${n === 1 ? one : (many || one + 's')}`; }",
         "let said = null; const toast = (m, o) => { said = [m, o]; }; const refreshFrame = () => {};",
-        _function("keptWords"), _function("previewedWords"), _function("previewedDone"),
+        "function sentence(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }",
+        _function("flowCounts"), _function("previewedWords"), _function("doneWords"), _function("previewedDone"),
         "const done = previewedDone({ ok: true, change: 7, data: { recategorized: 0, flows_kept: [",
         "  { description: 'HP SAMPLE 06', now: 'spending', why: 'S$ 500 of this row is expected back; undo the mark first.' }] } },",
         "  'Rule added');",
         "console.log(JSON.stringify({ done, said }));",
     ])
-    assert _node(code) == {"done": True, "said": [
-        "Rule added. Kept as they are: HP SAMPLE 06 stays spending: "
-        "S$ 500 of this row is expected back; undo the mark first.", {"undo": 7}]}
+    # Counts only: the row and why are the drawer's (and the answer's flows_kept).
+    assert _node(code) == {"done": True, "said": ["Rule added. 1 row kept as it is.", {"undo": 7}]}

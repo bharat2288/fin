@@ -26,6 +26,8 @@ LOAN = "Sample auto loan"
 FINANCE = "Sample Auto Finance"
 FRIEND = "Sample Friend"
 EXPECTED = "S$ 500 of this row is expected back; undo the mark first."
+# The same record, as a kept row's drawer line says why (relabel_preview.Kept.because).
+BECAUSE = "S$ 500 of it is expected back (undo that mark to move it)"
 ACTOR = "chat:sample-subject"
 
 
@@ -128,6 +130,7 @@ def test_a_teachs_preview_names_a_backfilled_row_it_keeps_a_record_resting_on_it
     assert kept_of(preview["flows_kept"]) == [(third, "spending", f"a movement · {LOAN}", EXPECTED)]
     assert preview["flows_kept"][0]["date"] == "2026-08-05"
     assert preview["flows_kept"][0]["currency"] == "SGD"
+    assert (preview["flows_kept"][0]["amount_minor"], preview["flows_kept"][0]["because"]) == (185000, BECAUSE)
 
     resp = client.post("/api/transactions/resolve",
                        json={**teach, "past_rows": "apply", "token": preview["token"]})
@@ -136,6 +139,8 @@ def test_a_teachs_preview_names_a_backfilled_row_it_keeps_a_record_resting_on_it
     assert what(client, agreement(1022)) == ("movement", LOAN, FINANCE)
     assert what(client, agreement(1023)) == ("expense", None, FINANCE)
     assert kept_of(resp.get_json()["flows_kept"]) == [(third, "spending", f"a movement · {LOAN}", EXPECTED)]
+    assert resp.get_json()["flows_kept"][0]["because"] == BECAUSE
+    assert first not in resp.get_json()["backfilled_ids"]
 
 
 def test_a_row_labelled_for_itself_that_a_record_rests_on_keeps_its_flow_and_the_answer_says_why(
@@ -347,6 +352,9 @@ def test_a_rule_keeps_a_linked_refund_where_a_hand_label_would_be_refused_in_its
         assert preview["flows"] == []
         named = preview["flows_kept"]
     assert kept_of(named) == [(refund["id"], "a refund", "income", by_hand.get_json()["error"])]
+    # The refusal's own facts, as one clause the drawer's sentence ends with.
+    assert ";" not in named[0]["because"] and not named[0]["because"].endswith(".")
+    assert named[0]["because"].startswith("SAMPLE AIR REFUND 4471 is to pay back")
     assert link_of(client, refund["id"]) is not None
     assert row(client, "SAMPLE AIR REFUND 4471")["flow_type"] == "refund"
 
@@ -395,3 +403,22 @@ def test_a_plan_whose_flows_changed_since_its_preview_is_refused(client, instalm
 
     assert not applied["ok"]
     assert what(client, agreement(3001)) == ("expense", None, None)
+
+
+# --- a kept row's why, as the drawer says it -------------------------------------------------
+
+
+@pytest.mark.parametrize("why, said", [
+    (EXPECTED, BECAUSE),
+    ("S$ 60 of this row is to pay back; undo the mark first.", "S$ 60 of it is to pay back (undo that mark to move it)"),
+    ("S$ 180 of this row is set against HARBOUR GRILL; unlink it first.",
+     "S$ 180 of it is set against HARBOUR GRILL (unlink it to move it)"),
+    ("This row has S$ 20 waiting for its row and S$ 30 set against HARBOUR GRILL; unlink those first.",
+     "it has S$ 20 waiting for its row and S$ 30 set against HARBOUR GRILL (unlink those to move it)"),
+    ("SAMPLE AIR REFUND 4471 is to pay back since; undo the mark on it first",
+     "SAMPLE AIR REFUND 4471 is to pay back since (undo that mark on it to move it)"),
+    ("Nothing to undo here.", "nothing to undo here"),
+])
+def test_a_kept_rows_why_is_the_refusals_facts_in_one_plain_clause(why, said):
+    import relabel_preview
+    assert relabel_preview.because(why) == said

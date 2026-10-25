@@ -195,7 +195,8 @@ def test_resolve_as_a_rule_override_writes_the_rule_and_every_matching_row(
 
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
-    assert body["backfilled"] == 2
+    # The other matching row: the row taught is the teach's own, never a backfilled one.
+    assert (body["backfilled"], body["backfilled_ids"]) == (1, [also])
     made = rule_shown(client, body["rule_id"])
     assert (made["book_override"], made["type_override_id"]) == (
         "Moom", type_id(conn, "Stock purchases"),
