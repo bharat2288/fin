@@ -10,22 +10,39 @@ all read it from here:
 - **cadence**: frequency x periods as a unit and a count ("every 6 months");
   half-yearly and monthly x 6 are the same cadence. The sheet saves a cadence
   (`every`) and the bill keeps the pair it holds when the meaning is the same,
-  so saving never rewrites it (case 17). A frequency fin does not know is
-  refused, never read as monthly.
+  so saving never rewrites it (case 17). A frequency held from before is read
+  as its plain equivalent when there is one (annual is yearly); one fin cannot
+  read says so (state unknown_cadence, no monthly figure, no due day) and is
+  never read as monthly. A write naming a frequency fin does not know is
+  refused.
 - **monthly**: the bill spread over the months a cycle covers, in S$, a view
   computed at read time (S$19,500 every 6 months reads S$3,250 a month).
-- **state**: the missed-bill rule. The bill's last due day is its next renewal
-  less one cycle. It is on track when a payment is seen from EARLY_DAYS before
-  it, or while it is not yet GRACE_DAYS late. Otherwise it is missed only when
-  the paying account's statements cover every day a payment could have been
-  seen in (the due day less EARLY_DAYS to the due day plus GRACE_DAYS:
-  statement_period.periods, the one home of which days a statement covers);
-  until they do it reads awaiting statement (case 18). A bill with no paying
-  account, or one paid from an account fin holds no statements for, is read
-  against today alone, as before.
+- **due days**: the bill renews on its anchor ("Counts from", renewal_date)
+  and every cycle after it; a bill holding no anchor counts from its last
+  payment, a cycle on. Each renewal is worked out from the anchor, keeping its
+  day or the month's last when the month is shorter (29 Feb renews on 28 Feb,
+  the 31st on the 30th), so the day never drifts. No day before the anchor is
+  a due day.
+- **state**: the missed-bill rule. A due day is paid when a payment is seen
+  from EARLY_DAYS before it; it is late once GRACE_DAYS have passed. A late,
+  unpaid due day is missed when the paying account's statements cover every
+  day a payment for it could have been seen in (the due day less EARLY_DAYS to
+  the due day plus GRACE_DAYS: statement_period.periods, the one home of the
+  days a statement covers). The rule walks back from the latest due day: the
+  latest one the statements cover and no payment since makes the bill missed,
+  however long ago (case 18). When no covered due day is unpaid but a later
+  one is late, the bill is awaiting statement: due is the latest late due day,
+  and waiting_on the month of the first statement it waits for (the first day
+  not covered for the oldest late due day since its last payment). A due day
+  before the account's first statement is neither: fin holds nothing for it. A bill with no paying account, or one paid
+  from an account fin holds no statements for (not a bank or card, or none
+  imported yet), is judged against today alone, as before: judged_by says
+  which.
 - **currency**: a bill's currency is its paying account's. One that differs
   is flagged (currency_mismatch) and fixed by a previewed change
-  (currency_fix), never by a save that does not say so (case 19).
+  (currency_fix), never by a save (case 19).
+
+"Today" is the household's day, in Singapore.
 
 This module reads; app.py's routes write.
 """
@@ -44,6 +61,10 @@ import money
 import statement_period
 from scope import _TYPE_JOINS, book_expr
 
+# Singapore's offset, as the Independent Reserve parser reads it. Not imported from
+# there: that parser pulls in the PDF libraries, which the desk app must start without.
+SINGAPORE = datetime.timezone(datetime.timedelta(hours=8))
+
 # A bill is late when no payment is seen this many days after it was due.
 GRACE_DAYS = 7
 # A payment seen up to this many days before the due day pays it.
@@ -59,13 +80,21 @@ FREQUENCIES = {
     "half-yearly": ("month", 6),
     "yearly": ("month", 12),
 }
+# Frequencies held from before the list was declared, read as their plain
+# equivalent. Read only: a write names one of FREQUENCIES.
+ALIASES = {
+    "annual": "yearly", "annually": "yearly", "year": "yearly",
+    "semi-annual": "half-yearly", "semiannual": "half-yearly", "half yearly": "half-yearly",
+    "quarter": "quarterly", "month": "monthly", "week": "weekly", "fortnightly": "biweekly",
+}
 UNITS = ("week", "month")
 
-STATES = ("missed", "awaiting_statement", "on_track", "paused", "stopped")
+STATES = ("missed", "awaiting_statement", "on_track", "unknown_cadence", "paused", "stopped")
 
 
-def today() -> datetime.date:
-    return datetime.date.today()
+def today(now: datetime.datetime | None = None) -> datetime.date:
+    """The household's day: the date in Singapore now (or at `now`)."""
+    return (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(SINGAPORE).date()
 
 
 class BillRefused(ValueError):
@@ -75,17 +104,30 @@ class BillRefused(ValueError):
 # --- cadence ------------------------------------------------------------------
 
 
-def cadence(frequency: str | None, periods) -> dict:
+def known(frequency: str | None) -> str | None:
+    """The declared frequency a held one reads as, or None when fin cannot
+    read it."""
+    f = (frequency or "monthly").strip().lower()
+    f = ALIASES.get(f, f)
+    return f if f in FREQUENCIES else None
+
+
+def cadence(frequency: str | None, periods) -> dict | None:
     """A bill's cadence as {unit, count}: half-yearly x 1 and monthly x 6 are
-    both {month, 6}. An unknown frequency held from before reads as itself."""
-    unit, step = FREQUENCIES.get(frequency or "monthly", (None, 1))
-    count = step * (periods or 1)
-    return {"unit": unit or frequency, "count": count}
+    both {month, 6}. None when fin cannot read the frequency."""
+    f = known(frequency)
+    if f is None:
+        return None
+    unit, step = FREQUENCIES[f]
+    return {"unit": unit, "count": step * (periods or 1)}
 
 
 def every(frequency: str | None, periods) -> str:
-    """The cadence in words: "every month", "every 6 months", "every 2 weeks"."""
+    """The cadence in words: "every month", "every 6 months", "every 2 weeks";
+    "how often unknown (lunar)" for one fin cannot read."""
     c = cadence(frequency, periods)
+    if c is None:
+        return f"how often unknown ({frequency})"
     return f"every {c['unit']}" if c["count"] == 1 else f"every {c['count']} {c['unit']}s"
 
 
@@ -115,7 +157,7 @@ def checked_cadence(data: dict, frequency: str | None = None, periods=None) -> d
             raise BillRefused("a bill's cadence is a unit and a count; nothing was saved")
         unit, count = given.get("unit"), given.get("count")
         pair = held_as(unit, count)
-        if frequency in FREQUENCIES and cadence(frequency, periods) == {"unit": unit, "count": count}:
+        if cadence(frequency, periods) == {"unit": unit, "count": count}:
             pair = (frequency, periods or 1)
         out["frequency"], out["periods"] = pair
         return out
@@ -132,19 +174,23 @@ def checked_cadence(data: dict, frequency: str | None = None, periods=None) -> d
 
 
 def monthly_equivalent(amount: float, frequency: str, periods: int,
-                       currency: str = "SGD", fx_rate: float = 1.0) -> float:
-    """The billed amount spread over the months one cycle covers, in S$."""
+                       currency: str = "SGD", fx_rate: float = 1.0) -> float | None:
+    """The billed amount spread over the months one cycle covers, in S$; None
+    when fin cannot read the frequency."""
+    f = known(frequency)
+    if f is None:
+        return None
     periods = periods or 1
     amount_sgd = amount * fx_rate if currency == "USD" else amount
-    if frequency == "yearly":
+    if f == "yearly":
         return amount_sgd / (12 * periods)
-    elif frequency == "half-yearly":
+    elif f == "half-yearly":
         return amount_sgd / (6 * periods)
-    elif frequency == "quarterly":
+    elif f == "quarterly":
         return amount_sgd / (3 * periods)
-    elif frequency == "biweekly":
+    elif f == "biweekly":
         return amount_sgd * (52 / 2) / (12 * periods)  # ~2.17x per month
-    elif frequency == "weekly":
+    elif f == "weekly":
         return amount_sgd * 52 / (12 * periods)  # ~4.33x per month
     return amount_sgd / periods  # monthly
 
@@ -152,112 +198,129 @@ def monthly_equivalent(amount: float, frequency: str, periods: int,
 # --- renewals -----------------------------------------------------------------
 
 
+def occurrence(anchor: date, frequency: str, periods, k: int) -> date:
+    """The anchor moved on k cycles (back when k is negative). A month-based
+    cycle keeps the anchor's day, or the month's last when it is shorter."""
+    unit, step = FREQUENCIES[known(frequency)]
+    count = step * (periods or 1) * k
+    if unit == "week":
+        return anchor + timedelta(weeks=count)
+    y, m = divmod(anchor.year * 12 + anchor.month - 1 + count, 12)
+    return date(y, m + 1, min(anchor.day, calendar.monthrange(y, m + 1)[1]))
+
+
 def add_billing_period(d: date, frequency: str, periods: int) -> date:
-    """Add one billing period to a date."""
-    periods = periods or 1
-    if frequency == "yearly":
-        return d.replace(year=d.year + periods)
-    elif frequency == "half-yearly":
-        month = d.month + (6 * periods)
-        year = d.year + (month - 1) // 12
-        month = (month - 1) % 12 + 1
-        day = min(d.day, 28)
-        return d.replace(year=year, month=month, day=day)
-    elif frequency == "quarterly":
-        month = d.month + (3 * periods)
-        year = d.year + (month - 1) // 12
-        month = (month - 1) % 12 + 1
-        day = min(d.day, 28)
-        return d.replace(year=year, month=month, day=day)
-    elif frequency == "biweekly":
-        return d + timedelta(weeks=2 * periods)
-    elif frequency == "weekly":
-        return d + timedelta(weeks=1 * periods)
-    else:  # monthly
-        month = d.month + periods
-        year = d.year + (month - 1) // 12
-        month = (month - 1) % 12 + 1
-        day = min(d.day, 28)
-        return d.replace(year=year, month=month, day=day)
+    """One billing period after `d`."""
+    return occurrence(d, frequency, periods, 1)
+
+
+def cycle_before(renewal: str, frequency: str, periods: int) -> str:
+    """The renewal one cycle before `renewal`."""
+    return occurrence(date.fromisoformat(renewal), frequency, periods, -1).isoformat()
+
+
+def _anchor(renewal_date: str | None, last_paid: str | None) -> tuple[date, int] | None:
+    """Where a bill's renewals count from, and the first of them that is a
+    renewal: its anchor itself, or a cycle after its last payment when it
+    holds none."""
+    if renewal_date:
+        return date.fromisoformat(renewal_date), 0
+    if last_paid:
+        return date.fromisoformat(last_paid), 1
+    return None
+
+
+def _last_k(anchor: date, first: int, frequency: str, periods, on: date) -> int:
+    """The last renewal on or before `on` (first - 1 when none is)."""
+    k = first
+    while occurrence(anchor, frequency, periods, k) <= on:
+        k += 1
+    return k - 1
 
 
 def advance_renewal(current_renewal: str | None, last_paid: str | None,
                     frequency: str, periods: int, on: date | None = None) -> str | None:
-    """Anchor-based renewal: advance renewal_date forward by frequency until
-    it's in the future relative to today (not last_paid).
-
-    This prevents payment delays from skewing the renewal calendar.
-    If no renewal anchor exists, seed from last_paid + one cycle.
-    """
+    """The next renewal after `on` (today): from the anchor, renewal_date, so a
+    late payment never moves the calendar; with no anchor, a cycle on from the
+    last payment. None when there is neither, or fin cannot read the
+    frequency."""
     on = on or today()
-    if not current_renewal:
-        if not last_paid:
-            return None
-        renewal = add_billing_period(date.fromisoformat(last_paid), frequency, periods)
-    else:
-        renewal = date.fromisoformat(current_renewal)
-    while renewal <= on:
-        renewal = add_billing_period(renewal, frequency, periods)
-    return renewal.isoformat()
+    start = _anchor(current_renewal, last_paid)
+    if start is None or known(frequency) is None:
+        return None
+    anchor, first = start
+    return occurrence(anchor, frequency, periods, _last_k(anchor, first, frequency, periods, on) + 1).isoformat()
 
 
-def cycle_before(renewal: str, frequency: str, periods: int) -> str:
-    """The renewal one cycle before `renewal`: the day the bill was last due.
-    A month-based cycle keeps the day, or the month's last when it is shorter."""
-    d = date.fromisoformat(renewal)
-    unit, step = FREQUENCIES.get(frequency, ("month", 1))
-    count = step * (periods or 1)
-    if unit == "week":
-        return (d - timedelta(weeks=count)).isoformat()
-    months = d.year * 12 + d.month - 1 - count
-    y, m = divmod(months, 12)
-    return date(y, m + 1, min(d.day, calendar.monthrange(y, m + 1)[1])).isoformat()
-
-
-# --- the read -----------------------------------------------------------------
+# --- the rule -----------------------------------------------------------------
 
 
 def _days(day: str, n: int) -> str:
     return (date.fromisoformat(day) + timedelta(days=n)).isoformat()
 
 
-def state(bill: dict, on: date, spans: list[tuple[str, str]] | None) -> tuple[str, str | None]:
-    """The missed-bill rule: (state, the day it was last due). `spans` are the
-    paying account's statement periods, or None when it has no account fin
-    holds statements for."""
+def state(bill: dict, on: date, spans: list[tuple[str, str]] | None) -> dict:
+    """The missed-bill rule (module doc): {state, due, waiting_on}. `spans`
+    are the paying account's statement periods, or None when the bill is
+    judged against today alone."""
+    out = {"state": "on_track", "due": None, "waiting_on": None}
     if bill.get("status") == "paused":
-        return "paused", None
+        return {**out, "state": "paused"}
     if bill.get("status") != "active":
-        return "stopped", None
-    renewal = bill.get("computed_renewal")
-    if not renewal:
-        return "on_track", None
-    due = cycle_before(renewal, bill["frequency"], bill["periods"])
+        return {**out, "state": "stopped"}
+    frequency, periods = bill["frequency"], bill["periods"]
+    if known(frequency) is None:
+        return {**out, "state": "unknown_cadence"}
     seen = bill.get("tx_last_paid") or bill.get("last_paid")
-    if seen and seen >= _days(due, -EARLY_DAYS):
-        return "on_track", due
-    if (on - date.fromisoformat(due)).days < GRACE_DAYS:
-        return "on_track", due
-    if spans is not None and not statement_period.covers(spans, _days(due, -EARLY_DAYS), _days(due, GRACE_DAYS)):
-        return "awaiting_statement", due
-    return "missed", due
+    start = _anchor(bill.get("renewal_date"), seen)
+    if start is None:
+        return out
+    anchor, first = start
+    awaiting = None
+    earliest = spans[0][0] if spans else None   # spans, when given, hold one period at least
+    for k in range(_last_k(anchor, first, frequency, periods, on), first - 1, -1):
+        due = occurrence(anchor, frequency, periods, k).isoformat()
+        out["due"] = out["due"] or due
+        if seen and seen >= _days(due, -EARLY_DAYS):
+            break  # paid, and so is every renewal before it
+        if (on - date.fromisoformat(due)).days < GRACE_DAYS:
+            continue  # not late yet
+        if spans is None:
+            return {**out, "state": "missed", "due": due}
+        if _days(due, -EARLY_DAYS) < earliest:
+            break  # before the account's first statement: fin holds nothing to wait for
+        gap = statement_period.first_gap(spans, _days(due, -EARLY_DAYS), _days(due, GRACE_DAYS))
+        if gap is None:
+            return {**out, "state": "missed", "due": due}
+        # The latest late due day is the one shown; the statement waited for
+        # is the first one missing, for the oldest late due day not covered.
+        awaiting = {"state": "awaiting_statement", "due": awaiting["due"] if awaiting else due, "waiting_on": gap[:7]}
+    return awaiting or out
+
+
+# --- the read -----------------------------------------------------------------
+
+# The rows a bill matches: its wording, spending or a refund, in its
+# merchant's book. Over subscriptions s and transactions t.
+_MATCHED_ROWS = """
+    FROM subscriptions s
+    JOIN transactions t
+        ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
+    LEFT JOIN services svc ON s.service_id = svc.id
+    {joins}
+    WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
+      AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+      AND """ + book_expr("t") + " = " + book_expr("svc")
 
 
 def _matched(conn: sqlite3.Connection, cutoff_90d: str):
-    """Each bill's latest matching row and its monthly sums over 90 days. A
-    bill matches only rows in its merchant's book."""
+    """Each bill's latest matching row and its monthly sums over 90 days."""
     latest = conn.execute("""
         WITH matched AS (
             SELECT s.id as sub_id,
                    t.id as tx_id, t.date as tx_date, t.amount_minor,
                    ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY t.date DESC) as rn
-            FROM subscriptions s
-            JOIN transactions t
-                ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
-            LEFT JOIN services svc ON s.service_id = svc.id
-            WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
-              AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
-              AND """ + book_expr("t") + " = " + book_expr("svc") + """
+            """ + _MATCHED_ROWS.format(joins="") + """
         )
         SELECT sub_id, tx_id, tx_date, amount_minor
         FROM matched WHERE rn = 1
@@ -266,14 +329,8 @@ def _matched(conn: sqlite3.Connection, cutoff_90d: str):
         SELECT s.id as sub_id,
                SUBSTR(t.date, 1, 7) as ym,
                SUM(t.amount_minor) as month_total
-        FROM subscriptions s
-        JOIN transactions t
-            ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
-        LEFT JOIN services svc ON s.service_id = svc.id
-        WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
-          AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+        """ + _MATCHED_ROWS.format(joins="") + """
           AND t.date >= ?
-          AND """ + book_expr("t") + " = " + book_expr("svc") + """
         GROUP BY s.id, SUBSTR(t.date, 1, 7)
         ORDER BY s.id, ym DESC
     """, (cutoff_90d,)).fetchall()
@@ -342,7 +399,8 @@ def read(conn: sqlite3.Connection, fx_rate: float, on: date | None = None) -> li
                 d["is_variable"] = True
                 d["monthly_sgd"] = d["tx_avg_90d"]
         if not d["is_variable"]:
-            d["monthly_sgd"] = round(monthly_equivalent(amt, d["frequency"], d["periods"], cur, fx_rate), 2)
+            spread = monthly_equivalent(amt, d["frequency"], d["periods"], cur, fx_rate)
+            d["monthly_sgd"] = None if spread is None else round(spread, 2)
 
         d["display_type"] = book_type.display_name(d["type_name"], d["parent_type"]) if d["type_name"] else ""
         d["fx_rate"] = fx_rate
@@ -357,8 +415,9 @@ def read(conn: sqlite3.Connection, fx_rate: float, on: date | None = None) -> li
         if d.get("account_id") is not None and kind in account_kind.STATEMENT_KINDS:
             if d["account_id"] not in spans_of:
                 spans_of[d["account_id"]] = statement_period.periods(conn, d["account_id"])
-            spans = spans_of[d["account_id"]]
-        d["state"], d["due"] = state(d, on, spans)
+            spans = spans_of[d["account_id"]] or None
+        d.update(state(d, on, spans))
+        d["judged_by"] = "statements" if spans is not None else "today"
         d["covered_to"] = max(until for _, until in spans) if spans else None
         d["currency_mismatch"] = bool(d.get("account_currency")) and d["account_currency"] != cur
         result.append(d)
@@ -385,6 +444,8 @@ def brief(bill: dict) -> dict:
         "status": bill.get("status"),
         "state": bill["state"],
         "due": bill["due"],
+        "waiting_on": bill["waiting_on"],
+        "judged_by": bill["judged_by"],
         "last_paid": bill.get("tx_last_paid") or bill.get("last_paid"),
         "covered_to": bill["covered_to"],
         "next": bill["computed_renewal"] if bill.get("status") == "active" else None,
@@ -397,16 +458,20 @@ def counts(shown: list[dict]) -> dict:
 
 # --- the currency fix ----------------------------------------------------------
 
+_NOT_GIVEN = object()
 
-def currency_fix(conn: sqlite3.Connection, bill_id: int, fx_rate: float, amount=None) -> dict:
+
+def currency_fix(conn: sqlite3.Connection, bill_id: int, fx_rate: float, amount=_NOT_GIVEN) -> dict:
     """The previewed change that puts a flagged bill in its paying account's
-    currency: before and after, where the new amount comes from (basis), and a token
-    stamping the bill as the preview saw it. Without `amount` the new amount
-    is the last payment seen on an account in that currency, else the old
-    one at the held US$ rate, else the same figure. Refused (BillRefused)
-    when there is nothing to fix."""
+    currency: before and after, where the new amount comes from (basis), and a
+    token stamping the bill and the amount the preview proposed. The proposed
+    amount is the last payment the bill matches (its wording, spending, in its
+    merchant's book: the rows read gives it) on an account in that currency,
+    else the old one at the held US$ rate, else the same figure. `amount`,
+    when given, replaces it and must be a figure. Refused (BillRefused) when
+    there is nothing to fix."""
     held = conn.execute(
-        "SELECT s.id, s.amount, s.currency, s.account_id, s.match_pattern, a.currency AS account_currency, "
+        "SELECT s.id, s.amount, s.currency, s.account_id, a.currency AS account_currency, "
         "a.name AS account_name FROM subscriptions s LEFT JOIN accounts a ON a.id = s.account_id WHERE s.id = ?",
         (bill_id,),
     ).fetchone()
@@ -420,9 +485,22 @@ def currency_fix(conn: sqlite3.Connection, bill_id: int, fx_rate: float, amount=
         raise BillRefused("this bill is already in its paying account's currency; nothing was changed")
     if target not in money.MINOR_UNIT_DIGITS:
         raise BillRefused(f"fin keeps no figure in {target}; nothing was changed")
+    proposed, basis = held["amount"], {"kind": "kept"}
+    last = conn.execute(
+        "SELECT t.date, t.amount_minor "
+        + _MATCHED_ROWS.format(joins="JOIN statements st ON st.id = t.statement_id "
+                                     "JOIN accounts pa ON pa.id = st.account_id")
+        + " AND s.id = ? AND pa.currency = ? AND t.amount_minor > 0 ORDER BY t.date DESC, t.id DESC LIMIT 1",
+        (bill_id, target),
+    ).fetchone()
+    if last is not None:
+        proposed, basis = money.from_minor(last["amount_minor"], target), {"kind": "last_payment", "date": last["date"]}
+    elif current == "USD" and target == "SGD":
+        proposed, basis = round(held["amount"] * fx_rate, 2), {"kind": "rate", "rate": fx_rate}
     token = hashlib.sha256(repr(("bill-currency", held["id"], held["amount"], current, held["account_id"],
-                                 target)).encode()).hexdigest()[:16]
-    if amount is not None:
+                                 target, proposed)).encode()).hexdigest()[:16]
+    new = proposed
+    if amount is not _NOT_GIVEN:
         if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount <= 0:
             raise BillRefused("a bill's amount is a figure above nothing; nothing was changed")
         try:
@@ -430,21 +508,6 @@ def currency_fix(conn: sqlite3.Connection, bill_id: int, fx_rate: float, amount=
         except ValueError:
             raise BillRefused(f"{amount} is finer than {target}'s smallest unit; nothing was changed") from None
         new, basis = float(amount), {"kind": "given"}
-    else:
-        new, basis = held["amount"], {"kind": "kept"}
-        pattern = (held["match_pattern"] or "").upper()
-        last = conn.execute("""
-            SELECT t.date, t.amount_minor FROM transactions t
-            JOIN statements st ON st.id = t.statement_id
-            JOIN accounts a ON a.id = st.account_id
-            WHERE ? != '' AND UPPER(t.description) LIKE '%' || ? || '%'
-              AND COALESCE(t.flow_type, 'expense') = 'expense' AND a.currency = ? AND t.amount_minor > 0
-            ORDER BY t.date DESC, t.id DESC LIMIT 1
-        """, (pattern, pattern, target)).fetchone()
-        if last is not None:
-            new, basis = money.from_minor(last["amount_minor"], target), {"kind": "last_payment", "date": last["date"]}
-        elif current == "USD" and target == "SGD":
-            new, basis = round(held["amount"] * fx_rate, 2), {"kind": "rate", "rate": fx_rate}
     return {
         "bill_id": held["id"],
         "paid_from": held["account_name"],

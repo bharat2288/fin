@@ -418,11 +418,15 @@ _READS = [
         "(currency_mismatch: the bill is held in another currency than its paying account's, a flag for "
         "the operator to fix in fin's Bills), status, due (the day it was last due), last_paid, "
         "covered_to (the last day the paying account's statements cover) and next. state is one of "
-        "missed (no payment seen and the statements cover the days it could have been seen in), "
-        "awaiting_statement (late, but the paying account's statement for those days is not imported "
-        "yet: not missed), on_track, paused or stopped; counts says how many are in each, and rule says "
-        "the rule in words. Filter by state. This only reads: no chat tool changes a bill.",
-        _schema({"state": {"type": "string", "enum": ["missed", "awaiting_statement", "on_track", "paused", "stopped"]}}),
+        "missed (a due day the statements cover has no payment since; due is that day), "
+        "awaiting_statement (late, but the statement for those days is not imported yet: not missed; "
+        "waiting_on is the month, YYYY-MM, of the statement it waits for), on_track, unknown_cadence "
+        "(fin cannot read how often it renews), paused or stopped. judged_by is statements, or today "
+        "for a bill paid from no account or from one fin holds no statements for (judged against "
+        "today's date alone). counts says how many are in each, and rule says the rule in words. Filter "
+        "by state. This only reads: no chat tool changes a bill.",
+        _schema({"state": {"type": "string", "enum": ["missed", "awaiting_statement", "on_track", "unknown_cadence",
+                                                      "paused", "stopped"]}}),
         False,
         _get("/api/bills", "state"),
     ),

@@ -4138,7 +4138,12 @@ function billMissedTag(s, missed) {
 }
 /** Late, but the paying account's statement for those days is not in yet: not missed. */
 function billAwaitingTag(s) {
-    return tag('aside', 'awaiting statement', { title: `Due ${day(s.due)}; ${s.account_name || 'its account'}’s statements are in to ${day(s.covered_to)}` });
+    return tag('aside', 'awaiting statement', { title: billWaitsOn(s) });
+}
+/** What an awaiting bill waits for, in words: the statement of the first month
+ *  its payment could show in that fin does not hold yet (the server's waiting_on). */
+function billWaitsOn(s, { named = true } = {}) {
+    return `Due ${day(s.due)}; waiting on ${named ? `${s.account_name || 'its account'}’s` : 'its'} ${s.waiting_on ? monthName(s.waiting_on) + ' ' : ''}statement`;
 }
 /** A bill held in another currency than the account that pays it. */
 function billCurrencyTag(s) {
@@ -4149,7 +4154,7 @@ const BILL_SORT = {
     name: { label: 'Bill', kind: 'text', of: x => x.s.service_name || x.s.match_pattern },
     amount: { label: 'Amount', kind: 'money', of: x => (x.s.currency || 'SGD') === 'SGD' ? toMinor(x.s.amount, 'SGD') : null },
     often: { label: 'How often', kind: 'text', of: x => billEvery(x.s) },
-    month: { label: 'A month', kind: 'money', of: x => toMinor(x.s.monthly_sgd, 'SGD') },
+    month: { label: 'A month', kind: 'money', of: x => x.s.monthly_sgd == null ? null : toMinor(x.s.monthly_sgd, 'SGD') },
     from: { label: 'Paid from', kind: 'text', of: x => x.s.account_name },
     last: { label: 'Last paid', kind: 'date', of: x => x.s.tx_last_paid || x.s.last_paid },
     next: { label: 'Next', kind: 'date', of: x => x.s.status === 'active' ? x.s.computed_renewal : null },
@@ -4166,6 +4171,7 @@ async function viewBills() {
         const name = esc(s.service_name || s.match_pattern);
         // Missed, awaiting its statement, or paused or stopped; and a bill in another currency than its account's.
         const lead = missed ? billMissedTag(s, missed) : s.state === 'awaiting_statement' ? billAwaitingTag(s)
+            : s.state === 'unknown_cadence' ? tag('nofig', 'how often unknown')
             : s.status !== 'active' ? tag('aside', s.status === 'deactivated' ? 'stopped' : s.status) : '';
         const state = [lead, s.currency_mismatch ? billCurrencyTag(s) : ''].filter(Boolean).join(' ');
         const sub = missed ? state
@@ -4174,7 +4180,7 @@ async function viewBills() {
             <td class="sl-name"><b>${name}</b><div class="small muted">${esc(s.display_type || 'no type')}</div>${state ? `<div class="sl-state">${state}</div>` : ''}</td>
             <td class="r num sl-fig">${esc(money(toMinor(s.amount, cur), cur))}${s.is_variable ? '<div class="small muted">varies</div>' : ''}</td>
             <td>${esc(billEvery(s))}</td>
-            <td class="r num">${esc(money(toMinor(s.monthly_sgd, 'SGD'), 'SGD'))}</td>
+            <td class="r num">${s.monthly_sgd == null ? '—' : esc(money(toMinor(s.monthly_sgd, 'SGD'), 'SGD'))}</td>
             <td class="small">${esc(s.account_name || '')}</td>
             <td class="num">${esc(day(s.tx_last_paid || s.last_paid))}</td>
             <td class="num">${s.status === 'active' ? esc(day(s.computed_renewal)) : '—'}</td>
@@ -4182,12 +4188,12 @@ async function viewBills() {
     };
     const groups = [...byBook.entries()].map(([book, list]) => {
         const active = list.filter(x => x.s.status === 'active');
-        const monthly = active.reduce((a, x) => a + toMinor(x.s.monthly_sgd, 'SGD'), 0);
+        const monthly = active.reduce((a, x) => a + (x.s.monthly_sgd == null ? 0 : toMinor(x.s.monthly_sgd, 'SGD')), 0);
         const missed = list.filter(x => x.missed).sort((a, b) => a.missed.due.localeCompare(b.missed.due));
         const awaiting = list.filter(x => x.s.state === 'awaiting_statement').sort((a, b) => String(a.s.due).localeCompare(String(b.s.due)));
         const paid = list.filter(x => !x.missed && x.s.state !== 'awaiting_statement').sort((a, b) => (statusOrder[a.s.status] ?? 3) - (statusOrder[b.s.status] ?? 3)
             || String(a.s.computed_renewal || '').localeCompare(String(b.s.computed_renewal || '')));
-        const counted = [missed.length ? `${missed.length} of ${list.length} not seen` : '', awaiting.length ? `${awaiting.length} awaiting a statement` : ''].filter(Boolean).join(' · ');
+        const counted = [missed.length ? `${missed.length} of ${list.length} not seen` : '', awaiting.length ? `${awaiting.length} awaiting` : ''].filter(Boolean).join(' · ');
         const head = `<tr class="section sl-book"><td colspan="5" class="sl-name">${esc(book)}</td>
             <td colspan="3" class="r sl-fig">${esc(money(monthly, 'SGD'))} a month · ${list.length ? counted || plural(list.length, 'bill') : 'no bills'}</td></tr>`;
         // Sorted, a book's bills are one list (each still says its state); else missed first, then those
@@ -4213,6 +4219,8 @@ function billEveryChoices(s) {
     const own = s?.cadence;
     const choices = BILL_EVERY.map(([unit, count, words]) => [`${unit}:${count}`, words]);
     if (own && !BILL_EVERY.some(([unit, count]) => unit === own.unit && count === own.count)) choices.push([`${own.unit}:${own.count}`, billEvery(s).replace(/^every /, '')]);
+    // A cadence fin cannot read stays as it is held unless one is chosen.
+    if (s && !own) choices.unshift(['', `unknown (${s.frequency})`]);
     return choices;
 }
 ACT.bill = async el => {
@@ -4220,18 +4228,18 @@ ACT.bill = async el => {
     const s = el.dataset.id ? ACT.__subs.get(Number(el.dataset.id)) : null;
     const missed = s ? billMissed(s) : null;
     const awaitingNote = s?.state === 'awaiting_statement' ? `<div class="notice sl-missed">${icon('hourglass')}<div class="grow"><b>Awaiting ${esc(s.account_name || 'its account')}’s statement.</b>
-        <div class="small">Due ${esc(day(s.due))}; the statements are in to ${esc(day(s.covered_to))}. It counts as missed only if no payment shows once they cover the due day.</div></div></div>` : '';
+        <div class="small">${esc(billWaitsOn(s, { named: false }))}. It counts as missed only if no payment shows once the statements cover the due day.</div></div></div>` : '';
     const currencyNote = s?.currency_mismatch ? `<div class="notice warn sl-missed" id="bl-currency">${icon('warning')}<div class="grow"><b>Billed in ${esc(s.currency)}, paid from ${esc(s.account_name || 'an account')} in ${esc(s.account_currency)}.</b>
         <div class="small">A bill is kept in its paying account’s currency.</div>
         <div class="row sl-missed-acts"><button type="button" class="btn sm" data-act="bill-currency" data-id="${s.id}">Change it to ${esc(s.account_currency)}…</button></div></div></div>` : '';
     const sel = (id, opts, v) => `<select id="${id}">${opts.map(([k, l]) => `<option value="${esc(k)}"${String(k) === String(v ?? '') ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
     const paid = s && (s.tx_last_paid || s.last_paid);
     const missedNote = missed ? `<div class="notice warn sl-missed">${icon('hourglass')}<div class="grow"><b>No payment seen for ${esc(day(missed.due))}.</b>
-        <div class="small">${paid ? `Last paid ${esc(money(toMinor(s.tx_amount ?? s.amount, s.currency || 'SGD'), s.currency || 'SGD'))} on ${esc(day(paid))}${s.account_name ? ` from ${esc(s.account_name)}` : ''}.` : 'No payment seen yet.'}</div>
+        <div class="small">${paid ? `Last paid ${esc(money(toMinor(s.tx_amount ?? s.amount, s.currency || 'SGD'), s.currency || 'SGD'))} on ${esc(day(paid))}${s.account_name ? ` from ${esc(s.account_name)}` : ''}.` : 'No payment seen yet.'}${s.judged_by === 'today' ? ` fin holds no statements for ${s.account_name ? esc(s.account_name) : 'a paying account'}, so this is judged by today’s date alone.` : ''}</div>
         <div class="row sl-missed-acts"><button type="button" class="btn sm" data-act="bill-stopped" data-id="${s.id}">It has stopped</button>
             <button type="button" class="btn sm" data-act="bill-find" data-id="${s.id}">Find the payment</button>
             <button type="button" class="link" data-act="bill-queue" data-id="${s.id}">Open it in the queue</button></div></div></div>` : '';
-    const own = s?.cadence ? `${s.cadence.unit}:${s.cadence.count}` : 'month:1';
+    const own = s?.cadence ? `${s.cadence.unit}:${s.cadence.count}` : s ? '' : 'month:1';
     openSheet(s ? esc(s.service_name || 'Bill') : 'Add a bill', `${missedNote}${awaitingNote}${currencyNote}<div class="fields">
         <label class="field"><span>Merchant</span>${sel('bl-svc', [['', 'Choose'], ...services.map(x => [x.id, x.name])], s?.service_id)}</label>
         <div class="fields two"><label class="field"><span>Amount${s ? ` (${esc(s.currency || 'SGD')})` : ''}</span><input type="text" inputmode="decimal" id="bl-amount" value="${s ? esc(s.amount) : ''}"></label>
@@ -4287,9 +4295,10 @@ ACT['bill-save'] = async el => {
     const v = id => $('#' + id).value.trim();
     if (!v('bl-svc')) { toast('Choose the merchant', { bad: true }); return; }
     const [unit, count] = v('bl-every').split(':');
-    // The cadence, never a frequency: the server keeps how the bill holds it when it means the same.
+    // The cadence, never a frequency: the server keeps how the bill holds it when it means the same,
+    // and one fin cannot read is sent only when another is chosen.
     // No currency: a bill's is its paying account's, changed only by its previewed fix.
-    const body = { service_id: Number(v('bl-svc')), amount: Number(v('bl-amount') || 0), every: { unit, count: Number(count) },
+    const body = { service_id: Number(v('bl-svc')), amount: Number(v('bl-amount') || 0), ...(unit ? { every: { unit, count: Number(count) } } : {}),
         account_id: v('bl-acct') ? Number(v('bl-acct')) : null, renewal_date: v('bl-renew') || null,
         status: v('bl-status'), match_pattern: v('bl-pattern') || null, link: v('bl-link') || null, notes: v('bl-notes') || null };
     const r = el.dataset.id ? await act('PUT', `/api/subscriptions/${el.dataset.id}`, body, 'Bill saved') : await act('POST', '/api/subscriptions', body, 'Bill added');
@@ -4312,7 +4321,9 @@ ACT['bill-currency'] = async el => {
             <button type="button" class="btn sm" data-act="bill" data-id="${esc(id)}">Keep it</button></div></div>`;
 };
 ACT['bill-currency-apply'] = async el => {
-    const amount = Number(($('#bl-cur-amount')?.value || '').trim());
+    const text = ($('#bl-cur-amount')?.value || '').trim();
+    const amount = Number(text);
+    if (!text || !Number.isFinite(amount) || amount <= 0) { toast('Give the amount as a figure above nothing; nothing was changed', { bad: true }); return; }
     const r = await act('POST', `/api/bills/${el.dataset.id}/currency`, { token: el.dataset.token, amount }, 'Bill changed to its account’s currency');
     if (r) { closeSheet(); rerender(); }
 };

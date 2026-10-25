@@ -6366,12 +6366,18 @@ def _bill_body(data, conn, held=None):
             raise bills.BillRefused(
                 f"a bill's currency is its paying account's ({paying['currency']}); nothing was added")
         body["currency"] = paying["currency"] if paying is not None else (given or "SGD")
-    elif "currency" in data and data["currency"] != held["currency"]:
-        if paying is None or data["currency"] != paying["currency"]:
+    else:
+        current = held["currency"] or "SGD"
+        # A save never changes a bill's currency: that is the previewed fix's
+        # (POST /api/bills/<id>/currency), which shows the amount it becomes.
+        if "currency" in data and data["currency"] != current:
             raise bills.BillRefused(
-                "a bill's currency is its paying account's"
-                + (f" ({paying['currency']})" if paying is not None else "") + "; nothing was saved")
-        body["currency"] = data["currency"]
+                "a bill's currency changes only through its previewed fix (open the bill, Change it); nothing was saved")
+        # Nor does moving it make it differ from its paying account's.
+        if paying is not None and account_id != held["account_id"] and paying["currency"] != current:
+            raise bills.BillRefused(
+                f"that account is kept in {paying['currency']} and this bill in {current}: "
+                "a bill is in its paying account's currency; nothing was saved")
     return body
 
 
@@ -6400,9 +6406,12 @@ def api_bills():
     return jsonify({
         "bills": [bills.brief(b) for b in shown if wanted in (None, b["state"])],
         "counts": bills.counts(shown),
-        "rule": (f"A bill is missed when no payment is seen from {bills.EARLY_DAYS} days before its due day, "
-                 f"it is {bills.GRACE_DAYS} or more days late, and its paying account's statements cover those days; "
-                 "until they do it is awaiting_statement."),
+        "rule": (f"A due day is paid by a payment seen from {bills.EARLY_DAYS} days before it, and late "
+                 f"{bills.GRACE_DAYS} days after. A bill is missed when a late due day its paying account's "
+                 "statements cover (those days) has no payment since, however long ago; when only later due days "
+                 "are late and not yet covered it is awaiting_statement, and waiting_on names the month of the "
+                 "statement it waits for. A bill paid from no account, or from one fin holds no statements for, "
+                 "is judged against today alone (judged_by: today)."),
     })
 
 
@@ -6481,7 +6490,8 @@ def api_bills_currency(sub_id):
     data = request.get_json(silent=True) or {}
     with get_db() as conn:
         try:
-            preview = bills.currency_fix(conn, sub_id, _get_usd_sgd_rate(), data.get("amount"))
+            preview = bills.currency_fix(conn, sub_id, _get_usd_sgd_rate(),
+                                         *([data["amount"]] if "amount" in data else []))
         except LookupError:
             return jsonify({"error": "No such bill"}), 404
         except bills.BillRefused as e:
