@@ -3171,6 +3171,16 @@ ACT['bill-pause'] = async el => {
 const KIND_PHRASE = { loan: 'a loan', holding: 'a holding', company: 'a company', person: 'a person', bank: 'a bank account', card: 'a card' };
 const OWED_KINDS = ['loan'];   // account_kind.OWED_KINDS: typed positive, saved as owed
 ACT.figure = async el => openFigure(el.dataset.account ? Number(el.dataset.account) : null);
+/** What Enter a figure asks for on an account. A loan with hire-purchase
+ *  terms is owed principal: its statement's total of remaining instalments
+ *  is not what to type (loan_terms.py). */
+function figureLabel(a) {
+    const sign = SIGNS[a.currency] || a.currency;
+    if (OWED_KINDS.includes(a.type)) {
+        return a.terms ? `Principal owed now, in ${sign} (not the statement's total of remaining instalments)` : `What is owed now, in ${sign}`;
+    }
+    return a.type === 'holding' ? `What it is worth now, in ${sign}` : `The balance now, in ${sign}`;
+}
 async function openFigure(accountId) {
     const [r, sheet] = await Promise.all([refs(), sheetFor(currentMonth()).catch(() => null)]);
     const takes = r.accounts.filter(a => a.takes_a_figure && a.status !== 'archived');
@@ -3180,7 +3190,6 @@ async function openFigure(accountId) {
     const lines = sheet ? sheet.sections.flatMap(s => s.lines).filter(l => !l.counted_in) : [];
     const sign = a => SIGNS[a.currency] || a.currency;
     const owes = a => OWED_KINDS.includes(a.type);
-    const label = a => owes(a) ? `What is owed now, in ${sign(a)}` : a.type === 'holding' ? `What it is worth now, in ${sign(a)}` : `The balance now, in ${sign(a)}`;
     const target = a => {
         const l = lines.find(x => x.account_id === a.id);
         const ro = l && l.rests_on;
@@ -3205,7 +3214,7 @@ async function openFigure(accountId) {
     openSheet('Enter a figure', `<div class="record-target fg-target" id="fg-target">${target(chosen)}</div>
         <label class="field" id="fg-pick"${named ? ' hidden' : ''}><span>Account</span><select id="fg-account">${takes.map(a => `<option value="${a.id}"${a.id === chosen.id ? ' selected' : ''}>${esc(a.name)}, ${esc(KIND_PHRASE[a.type] || a.type)}, in ${esc(sign(a))}</option>`).join('')}</select></label>
         <div class="fields">
-        <label class="field"><span id="fg-label">${esc(label(chosen))}</span><input type="text" inputmode="decimal" id="fg-amount" placeholder="${esc(placeholder(chosen))}" aria-describedby="fg-hint"></label>
+        <label class="field"><span id="fg-label">${esc(figureLabel(chosen))}</span><input type="text" inputmode="decimal" id="fg-amount" placeholder="${esc(placeholder(chosen))}" aria-describedby="fg-hint"></label>
         <p class="hint" id="fg-hint">${esc(hint(chosen))}</p>
         <label class="field"><span>On</span><input type="date" id="fg-date" value="${todayIso()}"></label>
         <label class="field"><span>Note</span><input type="text" id="fg-note" placeholder="Where the figure came from"></label></div>
@@ -3215,7 +3224,7 @@ async function openFigure(accountId) {
     $('#fg-account').addEventListener('change', () => {
         const a = current();
         $('#fg-target').innerHTML = target(a);
-        $('#fg-label').textContent = label(a);
+        $('#fg-label').textContent = figureLabel(a);
         $('#fg-amount').placeholder = placeholder(a);
         $('#fg-hint').textContent = hint(a, $('#fg-amount').value);
     });
@@ -5180,26 +5189,56 @@ ACT['rule-drift'] = async () => {
     rerender();
 };
 
-/** A loan's hire-purchase terms on its account sheet (loan_terms.py): all
- *  blank is no terms. With them, its statement's total of remaining
- *  instalments imports as principal owed. */
-function termsFieldsHTML(t) {
-    const units = minor => minor === undefined || minor === null ? '' : (minor / 100).toFixed(2);
-    const v = x => `value="${esc(x === undefined || x === null ? '' : String(x))}"`;
-    return `<fieldset class="fields hp-terms"><legend>Hire-purchase terms</legend>
-        <p class="hint">With these, a statement's remaining instalments import as principal owed (Rule of 78). Leave all blank for none.</p>
-        <label class="field"><span>Amount financed</span><input type="text" inputmode="decimal" id="ac-hp-financed" ${v(units(t?.financed_minor))}></label>
-        <label class="field"><span>Months</span><input type="text" inputmode="numeric" id="ac-hp-months" ${v(t?.months)}></label>
-        <label class="field"><span>Flat rate, % a year</span><input type="text" inputmode="decimal" id="ac-hp-rate" ${v(t?.flat_rate)}></label>
-        <label class="field"><span>First instalment</span><input type="date" id="ac-hp-first" ${v(t?.first_instalment)}></label>
-        ${t ? `<span class="hint">Instalment ${esc(units(t.instalment_minor))}; interest ${esc(units(t.interest_minor))} over the term.</span>` : ''}</fieldset>`;
+/** An amount in whole minor units as an amount field shows it: grouped as
+ *  money() groups it, no sign: "100,000.00". Blank for none. */
+function amountField(minor, cur = 'SGD') {
+    if (minor === null || minor === undefined) return '';
+    return groupFor(cur).format(minor / 10 ** digitsOf(cur));
 }
-/** The terms the sheet's fields say: null when all are blank. */
-function termsFromFields() {
-    const val = id => ($('#' + id)?.value || '').trim();
-    const got = { financed: val('ac-hp-financed').replace(/,/g, ''), months: val('ac-hp-months'), flat_rate: val('ac-hp-rate').replace(/%$/, ''), first_instalment: val('ac-hp-first') };
-    if (Object.values(got).every(x => !x)) return null;
-    return { ...got, months: /^\d+$/.test(got.months) ? Number(got.months) : got.months, method: 'rule-of-78' };
+/** A loan's hire-purchase terms on its account sheet (loan_terms.py), as
+ *  entered: the flat rate as typed, or the interest over the term. All blank
+ *  is no terms. With them, its statement's total of remaining instalments
+ *  imports as principal owed, and the amount financed is its first figure,
+ *  owed from the day given. `lock` (the account's terms_locked) makes them
+ *  read-only, saying why. data-held keeps what the fields first held, so a
+ *  save sends the terms only when the operator changed them (termsChange). */
+function termsFieldsHTML(t, cur = 'SGD', lock = null) {
+    const held = {
+        financed: amountField(t?.financed_minor, cur), months: t ? String(t.months) : '',
+        flat_rate: t?.flat_rate ?? '',
+        interest: t && (t.flat_rate === null || t.flat_rate === undefined) ? amountField(t.interest_minor, cur) : '',
+        first_instalment: t?.first_instalment ?? '', owed_from: t?.owed_from ?? '',
+    };
+    const off = lock ? ' disabled' : '';
+    const field = (label, id, key, attrs) => `<label class="field"><span>${label}</span><input ${attrs} id="${id}" value="${esc(held[key])}"${off}></label>`;
+    const why = lock ? `Read-only: ${String(lock).replace(/ Nothing was saved\.$/, '')}` : 'With these, a statement’s remaining instalments import as principal owed (Rule of 78). Leave all blank for none.';
+    return `<fieldset class="fields hp-terms" id="ac-hp" data-held="${esc(JSON.stringify(held))}"><legend>Hire-purchase terms</legend>
+        <p class="hint">${esc(why)}</p>
+        ${field('Amount financed', 'ac-hp-financed', 'financed', 'type="text" inputmode="decimal"')}
+        ${field('Months', 'ac-hp-months', 'months', 'type="text" inputmode="numeric"')}
+        <div class="fields two">${field('Flat rate, % a year', 'ac-hp-rate', 'flat_rate', 'type="text" inputmode="decimal"')}
+        ${field('or interest over the term', 'ac-hp-interest', 'interest', 'type="text" inputmode="decimal"')}</div>
+        ${field('First instalment', 'ac-hp-first', 'first_instalment', 'type="date"')}
+        ${field('Amount financed owed from', 'ac-hp-from', 'owed_from', 'type="date"')}
+        ${t ? `<span class="hint">Instalment ${esc(money(t.instalment_minor, cur))}; interest ${esc(money(t.interest_minor, cur))} over the term. The amount financed, owed from ${esc(t.owed_from)}, is the loan’s first figure.</span>`
+            : '<span class="hint">Owed from: blank is the day before the first instalment’s month.</span>'}</fieldset>`;
+}
+/** What a save sends for the terms: undefined when the fields say what they
+ *  first held (nothing sent), null when all are cleared, else the terms as
+ *  typed. */
+function termsChange(held, fields) {
+    const keys = ['financed', 'months', 'flat_rate', 'interest', 'first_instalment', 'owed_from'];
+    const val = (o, k) => String(o?.[k] ?? '').trim();
+    if (keys.every(k => val(fields, k) === val(held, k))) return undefined;
+    if (keys.every(k => !val(fields, k))) return null;
+    const months = val(fields, 'months');
+    const out = { financed: val(fields, 'financed').replace(/[, ]/g, ''), months: /^\d+$/.test(months) ? Number(months) : months };
+    if (val(fields, 'flat_rate')) out.flat_rate = val(fields, 'flat_rate').replace(/%$/, '').trim();
+    if (val(fields, 'interest')) out.interest = val(fields, 'interest').replace(/[, ]/g, '');
+    out.first_instalment = val(fields, 'first_instalment');
+    if (val(fields, 'owed_from')) out.owed_from = val(fields, 'owed_from');
+    out.method = 'rule-of-78';
+    return out;
 }
 ACT['account-edit'] = async el => {
     const r = await refs();
@@ -5214,7 +5253,7 @@ ACT['account-edit'] = async el => {
         <label class="field"><span>Currency</span><select id="ac-cur">${['SGD', 'INR', 'USD'].map(c => `<option>${c}</option>`).join('')}</select></label>`}
         <label class="field"><span>Last four digits</span><input type="text" inputmode="numeric" maxlength="4" id="ac-last4" value="${esc(a?.last_four || '')}"></label>
         ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}</div>
-        ${a && a.type === 'loan' ? termsFieldsHTML(a.terms) : ''}
+        ${a && a.type === 'loan' ? termsFieldsHTML(a.terms, a.currency, a.terms_locked) : ''}
         ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`,
     { eyebrow: a ? 'Account' : 'Accounts', foot: `<button class="btn primary" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>` });
     $$('#sheets [data-meaning]').forEach(sel => sel.addEventListener('change', () => {
@@ -5228,8 +5267,14 @@ ACT['account-save'] = async el => {
     let r;
     if (el.dataset.id) {
         const body = { name, last_four: $('#ac-last4').value.trim() || null, status: $('#ac-archived').checked ? 'archived' : 'active' };
-        // A loan's terms go with the save, in the same change (terms the loan holds already change nothing).
-        if ($('#ac-hp-financed')) body.terms = termsFromFields();
+        // A loan's terms go with the save, in the same change, only when the operator changed them.
+        const hp = $('#ac-hp');
+        if (hp && !$('#ac-hp-financed').disabled) {
+            const now = { financed: $('#ac-hp-financed').value, months: $('#ac-hp-months').value, flat_rate: $('#ac-hp-rate').value,
+                interest: $('#ac-hp-interest').value, first_instalment: $('#ac-hp-first').value, owed_from: $('#ac-hp-from').value };
+            const change = termsChange(JSON.parse(hp.dataset.held), now);
+            if (change !== undefined) body.terms = change;
+        }
         r = await act('PUT', `/api/accounts/${el.dataset.id}`, body, 'Account saved');
     } else {
         r = await act('POST', '/api/accounts', { name, type: $('#ac-kind').value, owner: $('#ac-owner').value, currency: $('#ac-cur').value, last_four: $('#ac-last4').value.trim() || null }, 'Account added');

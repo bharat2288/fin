@@ -17,6 +17,13 @@ figures what is owed falls by the principal repaid, as the principal card says.
 Instalments are movement rows on the household's bank accounts and cards that
 name the loan as their other side; positive is money out.
 
+A loan's figures are its anchors and, when it holds hire-purchase terms
+(loan_terms.py), the terms' own first figure: the amount financed, owed from
+their start day, unless a figure is held for that very day. So a hire-purchase
+loan has interest worked out from its start without a figure typed for it.
+With terms, every figure must also fit their schedule (`misfit`), checked by
+an import before it writes.
+
 `derive` is safe to run again: rows that already say what the figures give are
 left as they are, and rows that do not are replaced. It does not commit.
 """
@@ -32,6 +39,7 @@ import anchors
 import book_type
 import flow
 import label_source
+import loan_terms
 
 LOAN = "loan"
 # The name of the statement record derived rows sit under.
@@ -80,14 +88,28 @@ def _months(after: str, to: str) -> list[tuple[str, str]]:
     return months
 
 
+TERMS_SOURCE = "terms"
+
+
+def figures(conn: sqlite3.Connection, loan_id: int) -> list[tuple[str, int, str]]:
+    """The loan's figures, oldest first: (day, amount as stored, owed so
+    negative; source). Its anchors, and its terms' first figure (source
+    TERMS_SOURCE) on a day no anchor holds."""
+    held = [tuple(r) for r in conn.execute(
+        "SELECT date, amount, source FROM anchors WHERE account_id = ? ORDER BY date", (loan_id,)
+    )]
+    terms = loan_terms.held(conn, loan_id)
+    if terms is not None and terms["owed_from"] not in {day for day, _, _ in held}:
+        held.append((terms["owed_from"], -terms["financed_minor"], TERMS_SOURCE))
+    return sorted(held)
+
+
 def periods(conn: sqlite3.Connection, loan_id: int) -> list[dict]:
     """What each figure after the loan's first works out to: one period per
     figure that follows an earlier one, oldest first."""
-    figures = conn.execute(
-        "SELECT date, amount FROM anchors WHERE account_id = ? ORDER BY date", (loan_id,)
-    ).fetchall()
+    held = figures(conn, loan_id)
     worked = []
-    for (start, owed_before), (end, owed_after) in zip(figures, figures[1:]):
+    for (start, owed_before, source), (end, owed_after, _) in zip(held, held[1:]):
         count, paid = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(t.amount_minor), 0) " + _INSTALMENTS_FROM
             + "AND t.other_side_id = ? AND t.date > ? AND t.date <= ?",
@@ -100,6 +122,7 @@ def periods(conn: sqlite3.Connection, loan_id: int) -> list[dict]:
         months = _months(start, end)
         worked.append({
             "from": start,
+            "from_terms": source == TERMS_SOURCE,
             "to": end,
             "instalments": count,
             "paid_minor": paid,
@@ -249,6 +272,40 @@ def month_figures(conn: sqlite3.Connection, month: str) -> dict:
     }
 
 
+def named_by(conn: sqlite3.Connection, loan_id: int, on: str) -> int:
+    """How many instalments name the loan, dated up to a day."""
+    return conn.execute(
+        "SELECT COUNT(*) " + _INSTALMENTS_FROM + "AND t.other_side_id = ? AND t.date <= ?",
+        (*_INSTALMENT_PARAMS, loan_id, on),
+    ).fetchone()[0]
+
+
+def misfit(conn: sqlite3.Connection, loan_id: int, name: str, currency: str | None) -> str | None:
+    """With hire-purchase terms, the first of the loan's figures that does not
+    fit their schedule (loan_terms.fit), named in plain words, or None. A loan
+    without terms has no schedule: None."""
+    terms = loan_terms.held(conn, loan_id)
+    if terms is None:
+        return None
+    for day, amount, _source in figures(conn, loan_id):
+        named = named_by(conn, loan_id, day)
+        out = loan_terms.fit(terms, -amount, named, day)
+        if out is None:
+            continue
+        text = (
+            f"{name}'s figure of {anchors.format_amount(-amount, currency)} for {day_shown(day)} does not "
+            f"fit its hire-purchase terms: with {named} {'instalment' if named == 1 else 'instalments'} "
+            f"naming it by then, they leave about {anchors.format_amount(out['expected_minor'], currency)} "
+            "of principal owed."
+        )
+        if out["looks_printed"]:
+            text += (" It looks like the total of the remaining instalments, not principal owed: "
+                     "enter the principal owed instead.")
+        return text + (" Check the figure, and label the instalments as repayments of the loan where "
+                       "they are not yet.")
+    return None
+
+
 def day_shown(iso: str) -> str:
     """A day as the operator reads it: "30 Jun 2026"."""
     d = date.fromisoformat(iso)
@@ -279,7 +336,9 @@ def sentence(period: dict, currency: str | None) -> str:
         f"Interest {shown(period['interest_minor'])} is counted as spending "
         f"{'in' if len(months) == 1 else 'across'} {_month_names(period)}."
     )
-    text = f"Since your last figure ({day_shown(period['from'])}): {paid} {moved} {spending}"
+    since = (f"Since the loan began ({day_shown(period['from'])}, the amount financed under its terms)"
+             if period.get("from_terms") else f"Since your last figure ({day_shown(period['from'])})")
+    text = f"{since}: {paid} {moved} {spending}"
     if period["negative"]:
         text += (
             " The loan fell by more than was paid, so the interest comes out negative;"

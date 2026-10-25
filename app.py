@@ -443,6 +443,20 @@ def _loan_figure(conn, stmt) -> dict:
     }
 
 
+def _figure_now(conn, loan_id: int, figure: dict) -> int | None:
+    """What a previewed loan figure comes to under the terms the loan holds
+    now: the printed total less the interest not yet earned with terms, the
+    total as printed without; None when the terms refuse it."""
+    printed = figure.get("printed_minor", figure["owed_minor"])
+    terms = loan_terms.held(conn, loan_id)
+    if terms is None:
+        return printed
+    try:
+        return loan_terms.principal_owed(terms, printed, figure["date"])["owed_minor"]
+    except ValueError:
+        return None
+
+
 def _kind_from_account_name(account_name: str) -> str:
     """The kind an import gives an account it has to create, from its name."""
     name = account_name.lower()
@@ -1356,7 +1370,8 @@ def api_accounts():
     `takes_a_figure` is whether the enter-a-figure dialog offers it for a new
     figure; `supplied_figures` is how many figures were typed for it, each of
     which the dialog can correct or delete; `terms` is a loan's hire-purchase
-    terms (loan_terms.shown), or null."""
+    terms (loan_terms.shown), or null, and `terms_locked` why they cannot
+    change now, or null."""
     with get_db() as conn:
         terms = loan_terms.all_held(conn)
         rows = conn.execute(
@@ -1390,6 +1405,10 @@ def api_accounts():
         d["supplied_figures"] = supplied_counts.get(d["id"], 0)
         d["terms"] = loan_terms.shown(terms.get(d["id"]))
         result.append(d)
+    with get_db() as conn:
+        # Why a loan's terms cannot change now (loan_terms.lock_refusal), or null.
+        for d in result:
+            d["terms_locked"] = loan_terms.lock_refusal(conn, d["id"]) if d["type"] == loan_terms.LOAN else None
     return jsonify(result)
 
 
@@ -1424,13 +1443,19 @@ def api_accounts_create():
                 f"of kind {held['type']}; nothing was added"
             )}), 409
         if terms is not None:
-            new_id = conn.execute(
-                "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (name, data.get("short_name", name), kind, data.get("last_four"), currency, owner),
-            ).lastrowid
-            loan_terms.write(conn, new_id, terms)
-            conn.commit()
+            # As _crud_insert: a failed write is a refusal, never a crash.
+            try:
+                new_id = conn.execute(
+                    "INSERT INTO accounts (name, short_name, type, last_four, currency, owner) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (name, data.get("short_name", name), kind, data.get("last_four"), currency, owner),
+                ).lastrowid
+                loan_terms.write(conn, new_id, terms)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                app.logger.warning("Failed to create account: %s", e)
+                return jsonify({"error": "Failed to create account"}), 400
             return jsonify({"id": new_id, "success": True}), 200
         return _crud_insert(
             conn,
@@ -1523,7 +1548,10 @@ def _account_update_with_terms(acct_id: int, data: dict):
                     f"UPDATE accounts SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
                     (*fields.values(), acct_id),
                 )
-            loan_terms.write(conn, acct_id, terms)
+            # Terms the loan holds already change nothing, locked or not.
+            if loan_terms.write(conn, acct_id, terms):
+                # The terms are the loan's first figure: its interest follows.
+                loan_interest.derive(conn, acct_id)
         except loan_terms.TermsRefused as e:
             conn.rollback()
             return jsonify({"error": str(e)}), 400
@@ -1678,7 +1706,7 @@ def api_accounts_delete(acct_id):
                                      "this account as their other side"}), 400
 
         # A loan's terms go with it, in the same change.
-        conn.execute("DELETE FROM loan_terms WHERE account_id = ?", (acct_id,))
+        loan_terms.write(conn, acct_id, None)
         conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
         conn.commit()
     return jsonify({"success": True})
@@ -5546,6 +5574,14 @@ def api_import_confirm():
                         f"{mask_card_number(figure['account'])} is a {kind} account; a loan "
                         "statement's figure goes on a loan. Nothing was imported."
                     )
+                # What the figure comes to under the terms the loan holds now
+                # (loan_terms.py): the preview's, or the confirm is refused.
+                if _figure_now(conn, loan_id, figure) != figure["owed_minor"]:
+                    raise AnchorRefused(
+                        f"{mask_card_number(figure['account'])}'s hire-purchase terms changed since this "
+                        "file was read, so the figure shown is not what would be written. Read the file "
+                        "again. Nothing was imported."
+                    )
                 try:
                     _, written = anchors.record(
                         conn, loan_id, figure["date"], -figure["owed_minor"], anchors.STATEMENT,
@@ -5636,6 +5672,12 @@ def api_import_confirm():
             pairing.match_pairs(conn)
             # Rows that name a loan change what was paid between its figures.
             loan_interest.derive(conn)
+            # With hire-purchase terms, every figure of a loan this import
+            # wrote a figure on must fit their schedule (loan_interest.misfit).
+            for loan_id, (name, currency, _days) in figure_days.items():
+                why = loan_interest.misfit(conn, loan_id, mask_card_number(name), currency)
+                if why:
+                    raise AnchorRefused(f"{why} Nothing was imported.")
             # A figure this import wrote that fell by more than the instalments
             # naming the loan paid would be negative interest: the instalments
             # are not yet filed as its repayments.

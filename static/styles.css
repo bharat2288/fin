@@ -469,6 +469,8 @@ textarea { min-height: 80px; padding-block: var(--space-2); resize: vertical; }
 .hp-terms { border: 0; border-top: 1px solid var(--border-subtle); margin: var(--space-2) 0 0; padding: var(--space-3) 0 0; min-width: 0; }
 .hp-terms legend { padding: 0 8px 0 0; font-weight: var(--font-semibold); color: var(--text-primary); }
 .hp-terms .hint { margin: 0; }
+/* A locked loan's terms: still legible (they are information), but plainly not a field to type in. */
+.hp-terms input:disabled { background: transparent; color: var(--text-secondary); cursor: not-allowed; }
 .check { display: flex; align-items: center; gap: 10px; min-height: 40px; cursor: pointer; font-size: var(--t-ui); }
 .check input, input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-primary); width: 18px; height: 18px; flex: none; margin: 0; }
 /* the switch: folio's ds-toggle, camel when on */

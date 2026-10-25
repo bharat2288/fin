@@ -587,7 +587,8 @@ _WRITES = [
         "that name, in any case: read accounts first. A loan bought on hire purchase may carry "
         "its terms, so its statements' total of remaining instalments imports as principal owed: "
         "terms {financed, months, flat_rate (percent a year) or interest (over the term), "
-        "first_instalment (YYYY-MM-DD), method rule-of-78}; amounts as text, e.g. \"150000.00\". "
+        "first_instalment (YYYY-MM-DD), owed_from (YYYY-MM-DD, the day the amount financed is owed "
+        "from; the last day of the month before the first instalment unless given), method rule-of-78}; amounts as text, e.g. \"150000.00\". "
         "Terms on an account fin holds are the operator's, on Lists › Accounts.",
         {"name": _S, "kind": {"type": "string", "enum": list(account_kind.KIND_NAMES)},
          "currency": _S, "owner": {"type": "string", "enum": list(account_kind.OWNER_NAMES)},
@@ -595,7 +596,7 @@ _WRITES = [
                        "description": "four digits: the account's last four, e.g. 3528"},
          "terms": {"type": "object", "description": "A loan's hire-purchase terms (kind loan only).",
                    "properties": {"financed": _S, "months": _I, "flat_rate": _S, "interest": _S,
-                                  "first_instalment": _DAY,
+                                  "first_instalment": _DAY, "owed_from": _DAY,
                                   "method": {"type": "string", "enum": list(loan_terms.METHOD_NAMES)}}}},
         ("name", "kind"),
         lambda a: ("POST", "/api/accounts",
