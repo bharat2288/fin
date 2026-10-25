@@ -40,6 +40,8 @@ GOLDEN: list[str] = [
     "types", "books", "flows", "coverage", "rates", "history", "change", "expected_back",
     # fin-redesign 12: the Queue's payback suggestions (a read)
     "paybacks",
+    # fin-redesign 10: the bills, with the server's missed-bill rule (a read)
+    "bills",
     # writes
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     # fin-surfaces 51: rerun_rules removed, as Re-run every rule is retired

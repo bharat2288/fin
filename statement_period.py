@@ -27,6 +27,11 @@ closes in it, or a statement's period contains the whole month. So a statement
 printed 1 Jul to 31 Aug holds July and August, and one printed 16 Jul to
 15 Aug holds August alone: a statement missing from a cycle that does not start
 on the 1st is still missing.
+
+The missed-bill rule (bills.py) reads the days themselves: periods gives each
+record's first and last day (end: a printed statement's closing day, a
+calendar-month record's month end), and covers says whether they hold every
+day of a span, so a bill due in a month with no statement waits for it.
 """
 
 from __future__ import annotations
@@ -109,3 +114,42 @@ def held_months(conn: sqlite3.Connection, account_id: int, statement_date: str,
     # A month record covers its month; a printed statement closes in its own,
     # whether or not its period contains it whole.
     return [*held, closes_in]
+
+
+def _last_of_month(day: str) -> str:
+    y, m = int(day[:4]), int(day[5:7])
+    following = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+    return (following - timedelta(days=1)).isoformat()
+
+
+def end(statement_date: str, printed) -> str:
+    """The last day a statement record covers: a printed statement's closing
+    day; a calendar-month record's month end, whatever day it is dated."""
+    return statement_date if printed else _last_of_month(statement_date)
+
+
+def periods(conn: sqlite3.Connection, account_id: int) -> list[tuple[str, str]]:
+    """The (first day, last day) each of the account's statement records
+    covers (start, end), earliest first."""
+    held = conn.execute(
+        "SELECT statement_date, period_start, printed FROM statements WHERE account_id = ?",
+        (account_id,),
+    ).fetchall()
+    return sorted(
+        (start(conn, account_id, closing, first, printed), end(closing, printed))
+        for closing, first, printed in held
+    )
+
+
+def covers(spans: list[tuple[str, str]], first: str, last: str) -> bool:
+    """Whether the periods `spans` (as periods gives them) hold every day from
+    `first` to `last`, with no day between them outside a statement."""
+    need = first
+    for since, until in spans:
+        if since > need:
+            break
+        if until >= need:
+            need = day_after(until)
+            if need > last:
+                return True
+    return need > last

@@ -58,7 +58,9 @@ Rulings this module carries:
 - No tool imports a statement, changes or deletes an imported row, changes
   or deletes an account (adding one is create_account, or
   add_company_or_person), sends merchants to the type-suggestion service,
-  runs a conversion or touches subscriptions.
+  runs a conversion or changes a bill: bills (fin-redesign 10) reads them,
+  with the missed-bill rule's verdict from bills.py, the one home the app's
+  screens read too.
   Statements reach the hosted fin through the upload command (fin_upload.py).
 - Accounts (fin redesign, design evaluation §4): create_account adds an
   account of any declared kind over the app's Add an account, so the
@@ -406,6 +408,23 @@ _READS = [
         _schema(),
         False,
         _get("/api/queue/paybacks"),
+    ),
+    Tool(
+        "bills",
+        "The bills (what renews, from the rows that pay it), with the missed-bill rule's verdict, "
+        "the same one fin's Bills screen and Queue show: each bill's merchant, book and type, amount and "
+        "currency, how often (every: e.g. every 6 months), monthly_sgd (the bill spread over the months "
+        "one cycle covers, in S$), the account that pays it and that account's currency "
+        "(currency_mismatch: the bill is held in another currency than its paying account's, a flag for "
+        "the operator to fix in fin's Bills), status, due (the day it was last due), last_paid, "
+        "covered_to (the last day the paying account's statements cover) and next. state is one of "
+        "missed (no payment seen and the statements cover the days it could have been seen in), "
+        "awaiting_statement (late, but the paying account's statement for those days is not imported "
+        "yet: not missed), on_track, paused or stopped; counts says how many are in each, and rule says "
+        "the rule in words. Filter by state. This only reads: no chat tool changes a bill.",
+        _schema({"state": {"type": "string", "enum": ["missed", "awaiting_statement", "on_track", "paused", "stopped"]}}),
+        False,
+        _get("/api/bills", "state"),
     ),
 ]
 
@@ -822,6 +841,7 @@ TITLES = {
     "change": "Read one change, before and after",
     "expected_back": "Read what is expected back",
     "paybacks": "Read the payback suggestions",
+    "bills": "Read your bills",
     "set_label": "Change a row's book or type",
     "set_note": "Change a row's note",
     "label_review": "Say what a row was",

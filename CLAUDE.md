@@ -43,6 +43,7 @@ fin_upload.py       ← Upload command: sends a folder of statements to fin's im
 schema.sql          ← SQLite schema (source of truth)
 parsers.py          ← Statement parser orchestrator
 parse_dbs.py        ← DBS PDF/CSV parser
+bills.py            ← What a bill reads: cadence, monthly share, the missed-bill rule (awaiting statement), currency flag
 card_balance.py     ← A card split by cardholder held as one balance (the Vantage card)
 book_prefill.py     ← A row's book picker prefill: last book on that card, a company's card, the type's
 parse_citi_csv.py   ← Citi CSV parser

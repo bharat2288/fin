@@ -39,6 +39,8 @@ READS.insert(READS.index("queue") + 1, "queue_summary")
 READS.append("plan_preview")
 # fin-redesign 12: the Queue's payback suggestions, read by the chat.
 READS.insert(READS.index("expected_back") + 1, "paybacks")
+# fin-redesign 10: the bills, with the server's missed-bill rule.
+READS.insert(READS.index("paybacks") + 1, "bills")
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
