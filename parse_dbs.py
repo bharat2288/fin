@@ -505,6 +505,10 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     closing = None   # the last balance carried forward
     sections: dict[str, dict] = {}   # account number -> its opening and closing
     account = statement.accounts[0] if statement.accounts else ""
+    # The account whose heading the rows are under; a section in another
+    # currency is its own account, "<number> <code>".
+    numbered = account
+    currency = statement.currency
 
     while i < len(lines):
         line = lines[i].strip()
@@ -513,18 +517,29 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
         # name another account's number mid-line ("TO Account No. ... :IB").
         heading = re.search(r"Account No\.\s*([\d-]+)\s*$", line) if not current_desc_lines or row_closed else None
         if heading:
-            account = heading.group(1)
-        section = sections.setdefault(account, {"account": account, "opening": None, "closing": None})
+            account = numbered = heading.group(1)
+            currency = statement.currency
+        # An account kept in two currencies prints each in a section of its
+        # own: "CURRENCY: UNITED STATES DOLLAR" after the SGD rows.
+        # The line starts a section, so it ends the row before it.
+        in_currency = re.match(r"CURRENCY:\s*(.+)$", line)
+        if in_currency and money.currency_code(in_currency.group(1)):
+            row_closed = True
+            currency = money.currency_code(in_currency.group(1))
+            account = numbered if currency == statement.currency else f"{numbered} {currency}"
+        section = sections.setdefault(
+            account, {"account": account, "opening": None, "closing": None, "currency": currency}
+        )
 
         # Running balance anchor — restarts at each page/section header
         bf_match = re.search(
-            r"Balance Brought Forward(?:\s+SGD)?\s+([\d,]+\.\d{2})", line
+            r"Balance Brought Forward(?:\s+[A-Z]{3})?\s+([\d,]+\.\d{2})", line
         )
         if bf_match:
             # A row that runs over the page goes on after the brought-forward line.
             row_closed = False
             prev_balance = money.parse_minor(bf_match.group(1))
-            if opening is None:
+            if opening is None and currency == statement.currency:
                 opening = prev_balance
             if section["opening"] is None:
                 section["opening"] = prev_balance
@@ -532,15 +547,18 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             continue
 
         cf_match = re.search(
-            r"Balance Carried Forward(?:\s+SGD)?\s+([\d,]+\.\d{2})", line
+            r"Balance Carried Forward(?:\s+[A-Z]{3})?\s+([\d,]+\.\d{2})", line
         ) or re.search(
             # The account's last page carries its balance forward as a total
             # line: the withdrawals, the deposits, then the balance.
-            r"Total Balance Carried Forward(?: in SGD)?:\s.*?([\d,]+\.\d{2})\s*$", line
+            r"Total Balance Carried Forward(?: in [A-Z]{3})?:\s.*?([\d,]+\.\d{2})\s*$", line
         )
         if cf_match:
-            closing = money.parse_minor(cf_match.group(1))
-            section["closing"] = closing
+            section["closing"] = money.parse_minor(cf_match.group(1))
+            # The statement's own balance is in its own currency, never a
+            # section's in another.
+            if currency == statement.currency:
+                closing = section["closing"]
         if "Balance Carried Forward" in line:
             row_closed = True
 
@@ -613,7 +631,11 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     except ValueError:
         closing_date = None
     statement.account_sections = [s for s in sections.values() if s["account"]]
-    one_account = len(set(re.findall(r"Account No\.\s*([\d-]+)", all_text))) == 1
+    # One account, and no rows in a section in another currency.
+    with_rows = {tx.card_info for tx in statement.transactions}
+    one_account = len(set(re.findall(r"Account No\.\s*([\d-]+)", all_text))) == 1 and all(
+        s["currency"] == statement.currency for s in statement.account_sections if s["account"] in with_rows
+    )
     if one_account and opening is not None and closing is not None and closing_date:
         statement.opening_minor = opening
         statement.closing_minor = closing
@@ -653,7 +675,7 @@ def by_account(statement: ParsedStatement) -> ParsedStatement | list[ParsedState
             opening_minor=own["opening"] if stated else None,
             closing_minor=own["closing"] if stated else None,
             closing_date=closing_date if stated else None,
-            currency=statement.currency,
+            currency=own.get("currency", statement.currency),
             siblings=[other for other in printed if other != account],
         ))
     return split

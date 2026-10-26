@@ -31,7 +31,7 @@ STATEMENT = "statement"
 SUPPLIED = "supplied"
 
 # The currency sign a figure is shown with; any other code is shown as itself.
-CURRENCY_SIGNS = {"SGD": "S$", "INR": "Rs"}
+CURRENCY_SIGNS = {"SGD": "S$", "INR": "Rs", "USD": "US$"}
 DEFAULT_CURRENCY = "SGD"
 
 

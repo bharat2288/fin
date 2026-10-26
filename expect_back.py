@@ -77,7 +77,7 @@ MACHINE = {
 SET_OFF_STATES = ("waiting", "placed")
 
 LET_GO_SINCE = "let go since; undo the let-go first"
-SIGNS = {"SGD": "S$", "INR": "₹"}
+SIGNS = {"SGD": "S$", "INR": "₹", "USD": "US$"}
 
 
 class Refused(ValueError):

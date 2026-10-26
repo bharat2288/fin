@@ -343,7 +343,7 @@ def test_case_11_household_september_ties_with_home_and_adds_the_rupees(client, 
 def test_case_50_a_no_rate_month_is_left_out_and_nothing_is_fetched(client, conn, refuse_outside):
     card = tf.account(conn, "Everyday card")
     rupee = tf.account(conn, "Rupee card", currency="INR")
-    dollar = tf.account(conn, "Dollar card", currency="USD")
+    dollar = tf.account(conn, "Dollar card", currency="EUR")
     for month in ("2026-05", "2026-06", "2026-07", "2026-08", "2026-09"):
         tf.row(conn, tf.statement(conn, card, month), f"CAFE {month}", 10_000,
                type_name="Dining", day=f"{month}-09")
@@ -359,10 +359,10 @@ def test_case_50_a_no_rate_month_is_left_out_and_nothing_is_fetched(client, conn
         payload = answer(client, f"book=Household&span={span}&to=2026-10")
         assert points(by_name(payload)["Dining"])["2026-06"]["net"] == 10_000
         assert payload["left_out"] == [
+            {"kind": "no_rate_kept", "currency": "EUR", "amount_minor": 4_000,
+             "month": "2026-06", "reason": "in EUR, a currency fin keeps no rate for"},
             {"kind": "no_rate", "currency": "INR", "amount_minor": 210_000,
              "month": "2026-06", "reason": "no saved rate for June 2026"},
-            {"kind": "no_rate_kept", "currency": "USD", "amount_minor": 4_000,
-             "month": "2026-06", "reason": "in USD, a currency fin keeps no rate for"},
         ]
     assert refuse_outside == []
     assert conn.execute("SELECT pair, date, rate FROM rates ORDER BY date").fetchall() == saved
