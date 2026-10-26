@@ -317,7 +317,8 @@ def test_existing_tools_keep_every_parameter_and_requirement():
     mark_tool = mcp_tools.BY_NAME["mark_expect_back"].input_schema
 
     assert set(set_off["properties"]) == SET_OFF_BEFORE
-    assert set(mark_tool["properties"]) == MARK_BEFORE | {"book", "type_id"}
+    # flow_type: chat's brief, 26 Oct 2026 (a waiting row said spending with its mark).
+    assert set(mark_tool["properties"]) == MARK_BEFORE | {"book", "type_id", "flow_type"}
     assert mark_tool["required"] == ["tx_id", "direction"]
 
 

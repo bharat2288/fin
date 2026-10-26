@@ -263,6 +263,34 @@ def test_a_plan_that_states_spending_takes_every_row_of_its_card_off_the_list(cl
     assert held(client, SECOND_BUYBACK) == ("expense", "Sample Holdco", True)
 
 
+@pytest.mark.parametrize("stated", ["transfer", "income", "payment", "movement", "review"])
+def test_a_plan_states_no_flow_but_spending(client, ledger, stated):
+    """Any other flow asks what the review list's own choice asks (an account,
+    an income kind): a plan item says spending or nothing."""
+    bring_in(client, BANK, [(14, BUYBACK, BUYBACK_SGD)])
+
+    resp = client.post("/api/plans/preview", json={"items": [{
+        "tx_ids": [row(client, BUYBACK)["id"]], "service_name": "Sample Holdco", "flow_type": stated}]})
+
+    assert resp.status_code == 400 and "expense" in resp.get_json()["error"]
+    assert held(client, BUYBACK) == ("review", None, False)
+
+
+def test_a_plan_stating_spending_leaves_a_row_already_labelled_as_it_is(client, ledger):
+    """Only the card's waiting or untyped rows take the stated flow: a row
+    already labelled spending or a refund keeps its own label."""
+    refund = "SAMPLE SHOP REFUND 7710"
+    bring_in(client, BANK, [(14, BUYBACK, BUYBACK_SGD), (16, refund, -40.00)])
+    before = held(client, refund)
+
+    apply_plan(client, [{"tx_ids": [row(client, BUYBACK)["id"], row(client, refund)["id"]],
+                         "service_name": "Sample Holdco", "type_id": spending_type(client, "Shopping"),
+                         "book": "Household", "flow_type": "expense"}])
+
+    assert held(client, BUYBACK)[0] == "expense"
+    assert held(client, refund)[0] == before[0] != "expense"
+
+
 def test_a_plan_stating_a_flow_fin_does_not_know_is_refused_and_writes_nothing(client, ledger):
     bring_in(client, BANK, [(14, BUYBACK, BUYBACK_SGD)])
 

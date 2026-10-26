@@ -3979,6 +3979,9 @@ def api_update_transaction(tx_id: int):
     spending = data.get("flow_type")
     if spending is not None and (spending != "expense" or expectation is None):
         return jsonify({"error": "flow_type goes only as expense, with a mark on a row waiting for a label"}), 400
+    if spending is not None and expectation.get("direction") != expect_back.BACK:
+        return jsonify({"error": "only money out is said to be spending and expected back; "
+                                 "money in is marked to pay back as it is"}), 400
 
     if not sets and not labels and expectation is None:
         return jsonify({"error": "No valid fields to update"}), 400
@@ -4595,6 +4598,10 @@ def _plan_items(data) -> list[dict]:
         said = [k for k in _PLAN_ITEM_TEXT if item.get(k) is not None and not isinstance(item[k], str)]
         if said:
             raise PlanRefused(f"{said[0]} must be text")
+        # A plan item says spending or nothing: any other flow asks what the
+        # review list's own choice asks (an account, an income kind).
+        if item.get("flow_type") not in (None, "expense"):
+            raise PlanRefused(f"item {n}: flow_type is expense or left out; say what else a row was with label_review")
         if item.get("match_type") not in (None, *relabel_preview.MATCH_TYPES):
             raise PlanRefused(f"match_type must be one of {', '.join(relabel_preview.MATCH_TYPES)}")
         rows = item.get("tx_ids")
@@ -4630,7 +4637,7 @@ def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None", l
     """One item's teach, as a Queue card's save makes it (static/app.js
     saveResolve): resolve on its first row with the wording and the other
     wordings; each of its other rows the rules did not reach, this row only;
-    a flow it states (flow_type) on every one of its rows;
+    a flow it states (flow_type: expense) on every one of its waiting rows;
     taught as Check each row, its rows then checked with their book. Rows
     another merchant holds that a wording reaches change only on past_rows
     apply; left unanswered, only new rows take it. A wording that matches no
@@ -4658,14 +4665,16 @@ def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None", l
     taught, plan = _teach(conn, body, record_choice=False, plan_token=True)
     service_id, label = taught["service_id"], {"book": taught["book"], "type_id": taught["type_id"]}
     # A flow the item states (a waiting row the operator calls spending) goes
-    # on each of its rows, as on the first.
+    # on each of its rows still waiting, as on the first; a row labelled
+    # already keeps its own label.
     stated = {"flow_type": item["flow_type"]} if item.get("flow_type") else {}
     for tx in tx_ids[1:]:
         type_now, flow_now = conn.execute(
             "SELECT type_id, flow_type FROM transactions WHERE id = ?", (tx,)).fetchone()
-        if type_now is None or (stated and flow_now != stated["flow_type"]):
-            _teach(conn, {"tx_id": tx, "service_id": service_id, "apply_scope": "transaction", **label, **stated},
-                   record_choice=False)
+        waiting = flow_now == flow.REVIEW
+        if type_now is None or (stated and waiting):
+            _teach(conn, {"tx_id": tx, "service_id": service_id, "apply_scope": "transaction", **label,
+                          **(stated if waiting else {})}, record_choice=False)
     if item.get("check_each_row") is True:
         # Checked with their book where they are spending or refunds: a row
         # the teach moved out of spending carries no label to check.

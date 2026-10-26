@@ -745,7 +745,8 @@ _WRITES = [
         {"tx_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]}, "all": _B,
          "amount": _S, "names": {"type": "array", "items": _I},
          "new_names": {"type": "array", "items": _S}, "note": _S, "book": _S, "type_id": _I,
-         "flow_type": {**_S, "description": "expense: label a waiting row spending with the mark."}},
+         "flow_type": {"type": "string", "enum": ["expense"],
+                       "description": "expense, with direction back: label a waiting row spending with the mark."}},
         ("tx_id", "direction"),
         lambda a: _mark_request(a),
     ),
@@ -870,10 +871,13 @@ _PLAN_ITEM = {
         "move_chosen": {**_B, "description": "With past_rows apply, on the operator's yes: also move the rows "
                                              "the item's flows_chosen lists, kept only because the operator "
                                              "chose their book or type by hand."},
-        "flow_type": {**_S, "description": "What the card's rows are, when the operator says so: expense makes "
-                                           "a waiting (review) row spending, which a merchant and type alone do "
-                                           "not; the rule its wording makes states it too. Left out, fin works "
-                                           "the flow out and a waiting row stays waiting."},
+        "flow_type": {"type": "string", "enum": ["expense"],
+                      "description": "expense, when the operator says the card's waiting (review) rows were "
+                                     "spending: they become spending, which a merchant and type alone do not "
+                                     "do. The rule its wording makes does not state it, so a later row of that "
+                                     "wording still waits unless add_rule or change_rule states flow expense. "
+                                     "Rows labelled already keep their labels. Left out, a waiting row stays "
+                                     "waiting."},
     },
     "required": ["tx_ids"],
     "additionalProperties": False,

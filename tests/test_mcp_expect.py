@@ -598,3 +598,13 @@ def test_a_read_writes_nothing(client, conn, story):
 
     assert snapshot(conn) == before
     assert last_entry(conn) == before["change_entries"][-1][0]
+
+
+
+def test_money_in_waiting_is_not_said_spending_to_be_marked(client, conn, story):
+    before = snapshot(conn)
+
+    answer = chat("mark_expect_back", tx_id=story.jay_0412, direction="pay", all=True, flow_type="expense")
+
+    refused(conn, answer, before=before)
+    assert "money out" in answer["error"]
