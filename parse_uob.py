@@ -111,7 +111,6 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
     transactions = []
     opening = None        # the first balance brought forward
     last_balance = None   # the balance printed on the last line read
-    pending = None        # a dated line whose amounts are on a line below
 
     for page in pdf.pages:
         text = page.extract_text() or ""
@@ -146,20 +145,8 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
             # Transaction line: starts with "DD MMM"
             m = re.match(r"^(\d{1,2}\s+\w{3})\s+(.+)", line)
             if not m:
-                # A row whose amounts are printed below its date line (a
-                # loan debit: "Misc Debit", then the loan's reference with
-                # the amount and balance, then "Trf. Wd. Loans"): the first
-                # line below carrying amounts completes it.
-                if pending is not None and line:
-                    if re.search(r"[\d,]+\.\d{2}$", line):
-                        tx_date, words = pending
-                        pending = None
-                        rest = f"{words} {line}"
-                    else:
-                        pending = (pending[0], f"{pending[1]} {line}")
-                        continue
                 # Continuation line (description overflow) — append to last transaction
-                elif transactions and line and not re.match(r"^\d", line):
+                if transactions and line and not re.match(r"^\d", line):
                     last = transactions[-1]
                     transactions[-1] = ParsedTransaction(
                         date=last.date,
@@ -171,24 +158,21 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
                         is_transfer=last.is_transfer,
                         card_info=last.card_info,
                     )
-                    continue
-                else:
-                    continue
+                continue
+
+            date_str = m.group(1)
+            rest = m.group(2)
+
+            # Determine year from month (handle Dec→Jan boundary)
+            mon_match = re.match(r"\d{1,2}\s+(\w{3})", date_str)
+            mon_num = int(MONTH_MAP.get(mon_match.group(1).upper()[:3], "01")) if mon_match else 1
+            # If statement spans year boundary (e.g., Dec 2025 to Jan 2026)
+            if start_year != end_year and mon_num >= 10:
+                year = start_year
             else:
-                date_str = m.group(1)
-                rest = m.group(2)
+                year = end_year
 
-                # Determine year from month (handle Dec→Jan boundary)
-                mon_match = re.match(r"\d{1,2}\s+(\w{3})", date_str)
-                mon_num = int(MONTH_MAP.get(mon_match.group(1).upper()[:3], "01")) if mon_match else 1
-                # If statement spans year boundary (e.g., Dec 2025 to Jan 2026)
-                if start_year != end_year and mon_num >= 10:
-                    year = start_year
-                else:
-                    year = end_year
-
-                tx_date = _parse_date_uob(date_str, year)
-                pending = None
+            tx_date = _parse_date_uob(date_str, year)
 
             # Parse rest: Description followed by amounts
             # Amounts are at the end: "8,429.37 77,136.99" (withdrawal + balance)
@@ -198,9 +182,6 @@ def parse_uob_bank_pdf(filepath: str) -> ParsedStatement:
             # Strategy: find amount patterns at end of line
             # Pattern: optional withdrawal, optional deposit, balance (always present)
             amounts = re.findall(r"[\d,]+\.\d{2}", rest)
-            if not amounts:
-                pending = (tx_date, rest)
-                continue
 
             if len(amounts) >= 2:
                 # Last amount is always balance
