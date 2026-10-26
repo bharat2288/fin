@@ -388,3 +388,49 @@ def test_ticking_the_box_says_what_apply_will_do_and_apply_sends_the_opt_in():
     assert got["sent"][1] == {"flow": "movement", "past": "apply", "token": "t0", "move_chosen": True}
     assert got["sent"][3] == {"flow": "movement", "past": "apply", "token": "t0"}
     assert got["counts"] == [3, 1] and got["moved"] == [3, 1]
+
+
+ONLY_HAND = {**DRAWER, "count": 0, "count_with_chosen": 2, "flows": [], "flows_kept": DRAWER["flows_chosen"]}
+
+
+@needs_node
+def test_a_drawer_whose_only_rows_were_chosen_by_hand_never_says_it_changes_0_rows():
+    got = drawer(ONLY_HAND)
+    q = re.search(r'<p class="q" id="pv-count"[^>]*>(.*?)</p>', got["body"]).group(1)
+
+    assert q == "No other past rows change. You chose 2 rows below by hand; tick to move them too."
+    assert "0 past rows" not in got["body"]
+    # No examples to show: no empty examples table under the group.
+    assert "Examples, newest first" not in got["body"]
+    one = drawer({**ONLY_HAND, "count_with_chosen": 1, "flows_chosen": DRAWER["flows_chosen"][:1]})
+    assert "You chose 1 row below by hand; tick to move it too." in one["body"]
+
+
+@needs_node
+def test_ticking_the_box_over_only_rows_chosen_by_hand_says_the_rows_and_unticking_says_none_change():
+    zero = "No other past rows change. You chose 2 rows below by hand; tick to move them too."
+    code = "\n".join([
+        PRELUDE,
+        "const els = { '#pv-apply': { dataset: { count: '0', with: '2', unit: 'past row' }, textContent: '' },",
+        f"              '#pv-count': {{ dataset: {{ count: '0', with: '2', zero: {json.dumps(zero)} }}, textContent: '' }} }};",
+        "const $ = s => els[s] || null;",
+        _function("tickMoveChosen"),
+        "const out = [];",
+        "tickMoveChosen({ checked: true }); out.push(els['#pv-count'].textContent);",
+        "tickMoveChosen({ checked: false }); out.push(els['#pv-count'].textContent);",
+        "console.log(JSON.stringify(out));",
+    ])
+
+    assert _node(code) == ["This changes 2 past rows", zero]
+
+
+@needs_node
+def test_the_group_shows_ten_rows_then_how_many_more_and_the_box_names_them_all():
+    many = [{**CHOSEN_LINE, "id": 100 + n, "description": f"HP SAMPLE MOTOR FINANCE {n:02d}"} for n in range(12)]
+    got = drawer({**DRAWER, "flows_chosen": many, "flows_kept": many, "count_with_chosen": 13})
+    group = got["body"][got["body"].index("You chose these by hand"):]
+
+    assert group.count("HP SAMPLE MOTOR FINANCE") == 10
+    assert "HP SAMPLE MOTOR FINANCE 09" in group and "HP SAMPLE MOTOR FINANCE 10" not in group
+    assert "<li>and 2 more rows</li>" in group
+    assert "Also move these 12 rows you chose by hand" in group

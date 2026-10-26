@@ -4840,11 +4840,15 @@ function previewParts(p, { taught = null } = {}) {
     const more = ownRows || kind === 'rule' ? [] : (p.flows || []).filter(f => !shownIds.has(f.id));
     const rest = ownRows || kind === 'rule' ? 0 : Math.max(0, p.count - p.examples.length - more.length);
     const moreHTML = more.length || rest ? `<ul class="sub ex-more">${more.map(f => `<li>${esc([day(f.date), money(f.amount_minor, f.currency), f.description].join(' · '))}</li>`).join('')}${rest ? `<li>and ${plural(rest, 'more row')}</li>` : ''}</ul>` : '';
+    // Where the only rows are those you chose by hand, the count says so, not "0 past rows";
+    // ticked, it is the count again (tickMoveChosen).
+    const hand = (p.flows_chosen || []).length;
+    const zero = !p.count && hand ? `No other past rows change. You chose ${plural(hand, 'row')} below by hand; tick to move ${hand === 1 ? 'it' : 'them'} too.` : '';
     // The rows whose flow Apply moves or keeps, on every preview that carries them.
     const body = `${lines ? `<ul class="diff">${lines}</ul>` : ''}
-        <p class="q" id="pv-count" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}">This changes ${plural(p.count, 'past row')}</p>
+        <p class="q" id="pv-count" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}"${zero ? ` data-zero="${esc(zero)}"` : ''}>${zero ? esc(zero) : `This changes ${plural(p.count, 'past row')}`}</p>
         ${warns}${facts}${leftOut}${ruleLines}${flowsLine(p, { others })}${kept ? `<p class="sub">${kept}</p>` : ''}
-        <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>
+        ${rows.length ? `<div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>` : ''}
         ${moreHTML}${ownRows ? `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>` : ''}`;
     const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="past row">Apply to ${plural(p.count, 'past row')}</button>`;
     return { eyebrow, title, body, foot };
@@ -4885,9 +4889,10 @@ function flowsLine(p, { others = false } = {}) {
     const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
     const hand = p.flows_chosen || [];
     const one = hand.length === 1;
+    const HAND_SHOWN = 10;   // then "and N more", as a teach's rows are (the box still names and moves them all)
     const group = hand.length ? `<div class="pv-hand"><p class="cap">You chose these by hand</p>
         <p class="sub">A rule leaves the ${one ? 'row' : 'rows'} whose book or type you chose as ${one ? 'it is' : 'they are'}. ${one ? 'That choice' : 'Those choices'} may be out of date.</p>
-        <ul class="sub ex-more">${hand.map(k => `<li>${esc([day(k.date), money(k.amount_minor, k.currency), k.description].join(' · '))}: ${esc(k.now)} → <b>${esc(k.would)}</b>${k.label_cleared ? ', with no book or type' : ''}</li>`).join('')}</ul>
+        <ul class="sub ex-more">${hand.slice(0, HAND_SHOWN).map(k => `<li>${esc([day(k.date), money(k.amount_minor, k.currency), k.description].join(' · '))}: ${esc(k.now)} → <b>${esc(k.would)}</b>${k.label_cleared ? ', with no book or type' : ''}</li>`).join('')}${hand.length > HAND_SHOWN ? `<li>and ${plural(hand.length - HAND_SHOWN, 'more row')}</li>` : ''}</ul>
         <label class="check"><input type="checkbox" id="pv-move-chosen" data-change="preview-move-chosen"> Also move ${one ? 'this row' : `these ${hand.length} rows`} you chose by hand</label></div>` : '';
     return (said ? `<p class="sub">What the ${others ? 'other ' : ''}rows are: ${said}.</p>` : '')
         + keptWords(p).map(k => `<p class="sub">${esc(k)}</p>`).join('') + group;
@@ -4927,7 +4932,7 @@ function tickMoveChosen(el) {
     const apply = $('#pv-apply'), count = $('#pv-count');
     const n = d => Number(el.checked ? d.with : d.count);
     if (apply) apply.textContent = `Apply to ${plural(n(apply.dataset), apply.dataset.unit || 'past row')}`;
-    if (count) count.textContent = `This changes ${plural(n(count.dataset), 'past row')}`;
+    if (count) count.textContent = !el.checked && count.dataset.zero ? count.dataset.zero : `This changes ${plural(n(count.dataset), 'past row')}`;
 }
 ACT['preview-move-chosen'] = tickMoveChosen;
 
