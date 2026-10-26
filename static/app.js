@@ -5615,6 +5615,7 @@ ACT['account-edit'] = async el => {
         ${a ? '' : `<label class="field"><span>Kind</span><select id="ac-kind" data-meaning="ac-kind-hint">${opt(r.kinds.kinds, 'bank')}</select><span class="hint" id="ac-kind-hint">${meaning(r.kinds.kinds, 'bank')}</span></label>
         <label class="field"><span>Whose</span><select id="ac-owner" data-meaning="ac-owner-hint">${opt(r.kinds.owners, 'Household')}</select><span class="hint" id="ac-owner-hint">${meaning(r.kinds.owners, 'Household')}</span></label>
         <label class="field"><span>Currency</span><select id="ac-cur">${['SGD', 'INR', 'USD'].map(c => `<option>${c}</option>`).join('')}</select></label>`}
+        ${a ? `<label class="field"><span>Currency</span><select id="ac-cur">${[...new Set(['SGD', 'INR', 'USD', a.currency || 'SGD'])].map(c => `<option${c === (a.currency || 'SGD') ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select><span class="hint">Its figures and rows are read in it. A figure you typed must be deleted first and entered again.</span></label>` : ''}
         <label class="field"><span>Last four digits</span><input type="text" inputmode="numeric" maxlength="4" id="ac-last4" value="${esc(a?.last_four || '')}"></label>
         ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}
         ${a && ['bank', 'card'].includes(a.type) ? `<label class="check"><input type="checkbox" id="ac-shared"${a.shared ? ' checked' : ''}> Shared: someone else’s money is on it too</label>
@@ -5649,6 +5650,10 @@ ACT['account-save'] = async el => {
     let r;
     if (el.dataset.id) {
         const body = { name, last_four: $('#ac-last4').value.trim() || null, status: $('#ac-archived').checked ? 'archived' : 'active' };
+        // The currency goes with the save only when the operator changed it: the server refuses it under typed figures.
+        const cur = $('#ac-cur');
+        const before = (await refs()).accountById.get(Number(el.dataset.id));
+        if (cur && cur.value && before && cur.value !== (before.currency || 'SGD')) body.currency = cur.value;
         // A loan's terms go with the save, in the same change, only when the operator changed them.
         const hp = $('#ac-hp');
         if (hp && !$('#ac-hp-financed').disabled) {
