@@ -882,6 +882,25 @@ def company_books(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(name for name in book_names(conn) if name != DEFAULT_BOOK)
 
 
+def company_book_of(conn: sqlite3.Connection, account) -> str | None:
+    """The company book whose costs a company account holds, or None. The
+    account's name is matched as a book's name is held unique, ignoring case
+    and runs of spaces, so an account typed "film" is the Film book's
+    (fin-redesign 23). A book is held by one account only: the first company
+    account made with its name, so two never count the same costs."""
+    name = account["name"]
+    if not isinstance(name, str):
+        return None
+    wanted = " ".join(name.split()).casefold()
+    book = next((b for b in company_books(conn) if b.casefold() == wanted), None)
+    if book is None:
+        return None
+    first = next((r[0] for r in conn.execute(
+        "SELECT id, name FROM accounts WHERE type = 'company' ORDER BY id")
+        if isinstance(r[1], str) and " ".join(r[1].split()).casefold() == wanted), None)
+    return book if first == account["id"] else None
+
+
 def add_book(conn: sqlite3.Connection, data: dict) -> str:
     """Add a book the operator named, with what it holds, and return its name.
     The name is unique ignoring case, letters, digits, spaces, & and -, and
