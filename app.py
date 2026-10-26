@@ -3960,7 +3960,9 @@ def api_update_transaction(tx_id: int):
     new_names, note}) the row is also marked as expected back, or to pay back,
     in the same change (fin-redesign 12: chat's mark_expect_back with a book
     or type): the label is written first, so the mark's own guards read the
-    row as labelled, and a refused mark writes neither."""
+    row as labelled, and a refused mark writes neither. With the mark,
+    flow_type expense says a row waiting for a label was spending, as the
+    review list's spending choice does."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data provided"}), 400
@@ -3972,6 +3974,11 @@ def api_update_transaction(tx_id: int):
     expectation = data.get("expectation")
     if expectation is not None and not isinstance(expectation, dict):
         return jsonify({"error": "send the mark as JSON"}), 400
+    # A row waiting for a label is expected back only as spending: flow_type
+    # expense, with the mark, labels it so first (chat's mark_expect_back).
+    spending = data.get("flow_type")
+    if spending is not None and (spending != "expense" or expectation is None):
+        return jsonify({"error": "flow_type goes only as expense, with a mark on a row waiting for a label"}), 400
 
     if not sets and not labels and expectation is None:
         return jsonify({"error": "No valid fields to update"}), 400
@@ -3989,6 +3996,15 @@ def api_update_transaction(tx_id: int):
             conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id = ?", (*values, tx_id))
         held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
         labelled = False
+        if spending and held is not None and held["flow_type"] == flow.REVIEW:
+            # Said as the review list's spending choice says it: flow by
+            # hand, book and type chosen.
+            try:
+                _label_row(conn, review.BY_NAME["spending"], data, tx_id)
+            except (UnknownLabel, BookNeeded, review.LabelRefused, expect_back.Refused) as e:
+                conn.rollback()
+                return jsonify({"error": str(e)}), 400
+            labels, labelled = {}, True
         if held is not None and labels:
             chosen = {label_source.FIELDS[f]: label_source.given(v, label_source.CHOSEN) for f, v in labels.items()}
             labelled = _write_label(conn, held, {**labels, **chosen})
@@ -4544,9 +4560,9 @@ MAX_PLAN_ITEMS = 20
 # What an item takes: resolve's body for a card, its rows in place of its row.
 _PLAN_ITEM_KEYS = frozenset({
     "tx_ids", "service_name", "service_id", "pattern", "wordings", "match_type",
-    "type_id", "book", "check_each_row", "past", "past_rows", relabel_preview.MOVE_CHOSEN,
+    "type_id", "book", "check_each_row", "past", "past_rows", relabel_preview.MOVE_CHOSEN, "flow_type",
 })
-_PLAN_ITEM_TEXT = ("service_name", "pattern", "match_type", "book", "past", "past_rows")
+_PLAN_ITEM_TEXT = ("service_name", "pattern", "match_type", "book", "past", "past_rows", "flow_type")
 PLAN_STALE = "the book changed since the preview: preview again"
 # Columns a write stamps with the clock: left out of the token, so a preview
 # and its apply a second later stamp the same.
@@ -4614,6 +4630,7 @@ def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None", l
     """One item's teach, as a Queue card's save makes it (static/app.js
     saveResolve): resolve on its first row with the wording and the other
     wordings; each of its other rows the rules did not reach, this row only;
+    a flow it states (flow_type) on every one of its rows;
     taught as Check each row, its rows then checked with their book. Rows
     another merchant holds that a wording reaches change only on past_rows
     apply; left unanswered, only new rows take it. A wording that matches no
@@ -4640,9 +4657,14 @@ def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None", l
                 raise TeachRefused({"error": f"The wording {wording.strip()} matches no row"})
     taught, plan = _teach(conn, body, record_choice=False, plan_token=True)
     service_id, label = taught["service_id"], {"book": taught["book"], "type_id": taught["type_id"]}
+    # A flow the item states (a waiting row the operator calls spending) goes
+    # on each of its rows, as on the first.
+    stated = {"flow_type": item["flow_type"]} if item.get("flow_type") else {}
     for tx in tx_ids[1:]:
-        if conn.execute("SELECT type_id FROM transactions WHERE id = ?", (tx,)).fetchone()[0] is None:
-            _teach(conn, {"tx_id": tx, "service_id": service_id, "apply_scope": "transaction", **label},
+        type_now, flow_now = conn.execute(
+            "SELECT type_id, flow_type FROM transactions WHERE id = ?", (tx,)).fetchone()
+        if type_now is None or (stated and flow_now != stated["flow_type"]):
+            _teach(conn, {"tx_id": tx, "service_id": service_id, "apply_scope": "transaction", **label, **stated},
                    record_choice=False)
     if item.get("check_each_row") is True:
         # Checked with their book where they are spending or refunds: a row

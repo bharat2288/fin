@@ -245,6 +245,33 @@ def test_a_plan_that_names_a_waiting_row_leaves_it_waiting(client, ledger):
     assert held(client, BUYBACK) == ("review", "Sample Holdco", False)
 
 
+
+SECOND_BUYBACK = "FAST PAYMENT TO SAMPLE HOLDCO PTE LTD REF 880456 OTHR"
+
+
+def test_a_plan_that_states_spending_takes_every_row_of_its_card_off_the_list(client, ledger):
+    """Chat's Queue card for transfer-shaped rows the operator calls spending
+    (chat's brief, item 3): the item states the flow, as the app's teach can,
+    and each of its rows becomes spending."""
+    bring_in(client, BANK, [(14, BUYBACK, BUYBACK_SGD), (15, SECOND_BUYBACK, 210.00)])
+
+    apply_plan(client, [{"tx_ids": [row(client, BUYBACK)["id"], row(client, SECOND_BUYBACK)["id"]],
+                         "service_name": "Sample Holdco", "type_id": spending_type(client, "Shopping"),
+                         "book": "Household", "flow_type": "expense"}])
+
+    assert held(client, BUYBACK) == ("expense", "Sample Holdco", True)
+    assert held(client, SECOND_BUYBACK) == ("expense", "Sample Holdco", True)
+
+
+def test_a_plan_stating_a_flow_fin_does_not_know_is_refused_and_writes_nothing(client, ledger):
+    bring_in(client, BANK, [(14, BUYBACK, BUYBACK_SGD)])
+
+    resp = client.post("/api/plans/preview", json={"items": [{
+        "tx_ids": [row(client, BUYBACK)["id"]], "service_name": "Sample Holdco", "flow_type": "spendy"}]})
+
+    assert resp.status_code == 400 or resp.get_json().get("token") is None
+    assert held(client, BUYBACK) == ("review", None, False)
+
 # --- what the hold never held keeps its flow -------------------------------------------
 
 # (account, description, amount, the flow it has with a rule matching it)

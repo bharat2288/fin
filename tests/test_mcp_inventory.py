@@ -51,6 +51,8 @@ GOLDEN: list[str] = [
     "create_account",
     # fin redesign ticket 11: a merchant made over the app's own route
     "create_merchant",
+    # chat's brief, 26 Oct 2026: a book made over the app's own route (RUL-021)
+    "add_book",
     # fin-redesign 09: an account joined to a party (a merchant), one change
     "link_party",
     "pair_transfers", "fetch_rate", "set_rate",

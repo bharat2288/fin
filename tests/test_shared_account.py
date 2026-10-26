@@ -421,3 +421,21 @@ def test_a_card_held_as_one_balance_with_its_cardholders_cannot_be_shared(client
     resp = share(client, card)
 
     assert resp.status_code == 400 and "one balance" in resp.get_json()["error"]
+
+
+def test_the_figure_dialog_on_a_shared_account_asks_for_our_part():
+    from test_loan_terms import _const, _function, _node, needs_node  # noqa: F401
+    import shutil
+    if shutil.which("node") is None:
+        pytest.skip("node is not on PATH")
+    code = "\n".join([
+        _const("SIGNS"), "const OWED_KINDS = ['loan'];", _function("figureLabel"), _function("figureEmptyLine"),
+        "const shared = {type: 'bank', currency: 'INR', shared: true};",
+        "const plain = {type: 'bank', currency: 'INR', shared: false};",
+        "console.log(JSON.stringify([figureLabel(shared), figureLabel(plain), figureEmptyLine(shared)]));",
+    ])
+    ours, whole, empty = _node(code)
+
+    assert ours.startswith("Our part now, in ₹")
+    assert whole == "The balance now, in ₹"
+    assert "our part" in empty
