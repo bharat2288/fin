@@ -794,3 +794,172 @@ def test_polish_the_currency_fix_says_plainly_where_to_change_the_amount(client,
 
     assert "If the bill is a different amount in SGD, change it here." in html
     assert "if it bills another" not in html
+
+
+# --- a bill finds its merchant's payments, however the statement words them ----------
+#
+# A bill read its payments by wording alone: a row counted only where its
+# description held the bill's pattern. A bank prints one payment differently in
+# its CSV and its PDF, so once the PDFs came in the payments under the bill's own
+# merchant no longer held the pattern, and the bill read missed while it was paid.
+
+
+def labelled(conn, statement_id, on, description, cents, service_id) -> None:
+    """A payment the merchant's rule (or the operator) has put under a merchant."""
+    conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, service_id) "
+                 "VALUES (?, ?, ?, ?, 'expense', ?)", (statement_id, on, description, cents, service_id))
+    conn.commit()
+
+
+@pytest.fixture
+def club_paid_by_giro(client, conn):
+    """Sample Club: billed monthly on the 25th, S$300 on the bill, collected by GIRO
+    from a bank whose statements cover Mar to Sep. March came in from the bank's
+    CSV, worded as the bill's pattern; August and September from its PDFs."""
+    bank = account(conn, "Sample Bank 0009")
+    for first, last in (("2026-03-01", "2026-03-31"), ("2026-04-01", "2026-04-30"), ("2026-05-01", "2026-05-31"),
+                        ("2026-06-01", "2026-06-30"), ("2026-07-01", "2026-07-31"), ("2026-08-01", "2026-08-31"),
+                        ("2026-09-01", "2026-09-30")):
+        statement(conn, bank, last, first)
+    stmt = {r[1][:7]: r[0] for r in conn.execute("SELECT id, statement_date FROM statements WHERE account_id = ?",
+                                                (bank,))}
+    club = bill(client, "Sample Club", amount=300, frequency="monthly", account_id=bank,
+                renewal_date="2026-03-25", match_pattern="IBG SAMPLE CLUB GIRO")
+    service_id = held(conn, club)["service_id"]
+    labelled(conn, stmt["2026-03"], "2026-03-25", "IBG SAMPLE CLUB GIRO 0042", 31250, service_id)
+    pdf = "GIRO Payments / Collections via GIRO SAMPLE CLUB GIRO COLLECTION"
+    labelled(conn, stmt["2026-08"], "2026-08-25", pdf, 16740, service_id)
+    labelled(conn, stmt["2026-09"], "2026-09-25", pdf, 68910, service_id)
+    return {"bank": bank, "club": club, "service_id": service_id, "stmt": stmt}
+
+
+def test_a_payment_under_the_bills_merchant_counts_whatever_its_wording(client, club_paid_by_giro):
+    got = shown(client, club_paid_by_giro["club"])
+
+    assert got["tx_last_paid"] == "2026-09-25"
+    assert got["state"] == "on_track"
+
+
+def test_the_chat_reads_the_same_last_payment(client, club_paid_by_giro):
+    answer = mcp_tools.call("bills", {}, actor=ACTOR)
+    assert answer["ok"], answer
+    club = next(b for b in answer["result"]["bills"] if b["id"] == club_paid_by_giro["club"])
+
+    assert (club["last_paid"], club["state"]) == ("2026-09-25", "on_track")
+
+
+def test_a_bills_fixed_amount_plays_no_part_in_finding_its_payments(client, club_paid_by_giro):
+    # S$300 on the bill; S$167.40 and S$689.10 collected. Both count, and the
+    # bill reads as varying at their 90-day average.
+    got = shown(client, club_paid_by_giro["club"])
+
+    assert got["tx_months_90d"] == 2
+    assert got["tx_avg_90d"] == 428.25
+    assert got["is_variable"] is True
+    assert got["tx_amount"] == 689.10
+
+
+def test_a_payment_held_by_both_wording_and_merchant_counts_once(client, conn, club_paid_by_giro):
+    conn.execute("UPDATE transactions SET description = 'IBG SAMPLE CLUB GIRO 0043' WHERE date = '2026-09-25'")
+    conn.commit()
+
+    got = shown(client, club_paid_by_giro["club"])
+    assert (got["tx_last_paid"], got["tx_amount"], got["tx_avg_90d"]) == ("2026-09-25", 689.10, 428.25)
+
+
+def test_a_row_under_another_merchant_with_other_wording_is_not_the_bills(client, conn, club_paid_by_giro):
+    other = merchant(client, "Sample Gym")
+    conn.execute("UPDATE transactions SET service_id = ? WHERE date >= '2026-08-01'", (other,))
+    conn.commit()
+
+    got = shown(client, club_paid_by_giro["club"])
+    assert got["tx_last_paid"] == "2026-03-25"
+    assert got["state"] == "missed"
+
+
+def test_a_transfer_under_the_bills_merchant_is_not_a_payment_of_it(client, conn, club_paid_by_giro):
+    conn.execute("UPDATE transactions SET flow_type = 'transfer' WHERE date >= '2026-08-01'")
+    conn.commit()
+
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-03-25"
+
+
+def test_refresh_from_rows_takes_the_same_last_payment_as_the_screen(client, conn, club_paid_by_giro):
+    resp = client.post("/api/subscriptions/enrich", json={})
+    assert resp.status_code == 200, resp.get_json()
+
+    stored = held(conn, club_paid_by_giro["club"])
+    assert stored["last_paid"] == "2026-09-25"
+    assert stored["last_paid"] == shown(client, club_paid_by_giro["club"])["tx_last_paid"]
+
+
+def test_the_merchants_row_on_another_account_is_not_the_bills_payment(client, conn, club_paid_by_giro):
+    other = account(conn, "Sample Card 0010", kind="card")
+    card = statement(conn, other, "2026-09-30", "2026-09-01")
+    labelled(conn, card, "2026-09-28", "SAMPLE CLUB BAR TAB", 4500, club_paid_by_giro["service_id"])
+
+    got = shown(client, club_paid_by_giro["club"])
+    assert (got["tx_last_paid"], got["tx_amount"]) == ("2026-09-25", 689.10)
+
+
+def test_a_refund_or_a_one_off_under_the_merchant_is_no_payment_of_the_bill(client, conn, club_paid_by_giro):
+    conn.execute("UPDATE transactions SET is_one_off = 1 WHERE date = '2026-09-25'")
+    conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, service_id) "
+                 "VALUES (?, '2026-09-28', 'SAMPLE CLUB LOCKER DEPOSIT BACK', -2500, 'refund', ?)",
+                 (club_paid_by_giro["stmt"]["2026-09"], club_paid_by_giro["service_id"]))
+    conn.commit()
+
+    got = shown(client, club_paid_by_giro["club"])
+    assert (got["tx_last_paid"], got["tx_amount"]) == ("2026-08-25", 167.40)
+
+
+def test_two_bills_on_one_merchant_and_account_are_told_apart_by_wording(client, conn, club_paid_by_giro):
+    # A second running bill on the club's merchant and bank: the PDF rows hold
+    # neither bill's wording, so neither bill takes them.
+    conn.execute("INSERT INTO subscriptions (service_id, account_id, amount, currency, frequency, periods, "
+                 "renewal_date, status, match_pattern) VALUES (?, ?, 40, 'SGD', 'monthly', 1, '2026-03-10', "
+                 "'active', 'SAMPLE CLUB LOCKER')", (club_paid_by_giro["service_id"], club_paid_by_giro["bank"]))
+    conn.commit()
+
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-03-25"
+
+
+def test_a_bill_naming_no_paying_account_reads_its_wording_alone(client, conn, club_paid_by_giro):
+    conn.execute("UPDATE subscriptions SET account_id = NULL WHERE id = ?", (club_paid_by_giro["club"],))
+    conn.commit()
+
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-03-25"
+
+
+def test_refresh_from_rows_holds_what_the_rows_say_after_a_row_leaves_the_bill(client, conn, club_paid_by_giro):
+    client.post("/api/subscriptions/enrich", json={})
+    # September's row moves to another book: it is no longer the bill's.
+    conn.execute("INSERT OR IGNORE INTO books (name) VALUES ('Sample Firm')")
+    conn.execute("UPDATE transactions SET book = 'Sample Firm' WHERE date = '2026-09-25'")
+    conn.commit()
+    client.post("/api/subscriptions/enrich", json={})
+
+    assert held(conn, club_paid_by_giro["club"])["last_paid"] == "2026-08-25"
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-08-25"
+
+
+def _sibling(conn, club, account_id, pattern, status="active") -> None:
+    conn.execute("INSERT INTO subscriptions (service_id, account_id, amount, currency, frequency, periods, "
+                 "renewal_date, status, match_pattern) VALUES (?, ?, 40, 'SGD', 'monthly', 1, '2026-03-10', ?, ?)",
+                 (club["service_id"], account_id, status, pattern))
+    conn.commit()
+
+
+def test_a_running_bill_on_the_merchant_naming_no_account_holds_every_account(client, conn, club_paid_by_giro):
+    _sibling(conn, club_paid_by_giro, None, "SAMPLE CLUB LOCKER")
+
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-03-25"
+
+
+def test_a_stopped_bills_payments_under_the_merchant_are_not_its_replacements(client, conn, club_paid_by_giro):
+    _sibling(conn, club_paid_by_giro, club_paid_by_giro["bank"], "SAMPLE CLUB OLD PLAN", status="cancelled")
+    labelled(conn, club_paid_by_giro["stmt"]["2026-09"], "2026-09-05", "SAMPLE CLUB OLD PLAN", 3000,
+             club_paid_by_giro["service_id"])
+
+    got = shown(client, club_paid_by_giro["club"])
+    assert (got["tx_last_paid"], got["tx_avg_90d"]) == ("2026-09-25", 428.25)

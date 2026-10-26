@@ -2,7 +2,8 @@
 
 A bill (the subscriptions table; Bill on screen) is the home of cadence: what
 it costs a cycle, how often it renews (frequency x periods), the account that
-pays it and the rows that pay it (match_pattern). What it reads is worked out
+pays it and the rows that pay it (its merchant's, or any worded as its
+match_pattern). What it reads is worked out
 here at read time and stored nowhere, and the app's Bills screen, the Queue
 and Home (GET /api/subscriptions) and the chat's bills tool (GET /api/bills)
 all read it from here:
@@ -310,31 +311,57 @@ def state(bill: dict, on: date, spans: list[tuple[str, str]] | None) -> dict:
 
 # --- the read -----------------------------------------------------------------
 
-# The rows a bill matches: its wording, spending or a refund, in its
-# merchant's book. Over subscriptions s and transactions t.
+# The rows a bill matches, in its merchant's book: spending or a refund that
+# holds its wording, or a payment under its merchant on the account paying it.
+# A bank words one payment differently in its CSV and its PDF, so the wording
+# alone loses the payments a statement prints another way. The merchant counts
+# only for a bill naming its paying account and holding that merchant and
+# account alone among the bills that run (a running bill naming no account
+# holds every account), and only spending that is no one-off and holds no
+# other bill's wording: a refund, a one-off or another bill's payment (a
+# stopped one's too) under the merchant is no payment of this bill, and two
+# bills on one merchant and account are told apart by their wording.
+# Over subscriptions s and transactions t.
 _MATCHED_ROWS = """
     FROM subscriptions s
     JOIN transactions t
-        ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
+        ON (COALESCE(s.match_pattern, '') != ''
+            AND UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%')
+        OR (t.service_id = s.service_id AND s.account_id IS NOT NULL
+            AND COALESCE(t.flow_type, 'expense') = 'expense' AND t.amount_minor > 0
+            AND COALESCE(t.is_one_off, 0) = 0
+            AND (SELECT st.account_id FROM statements st WHERE st.id = t.statement_id) = s.account_id
+            AND NOT EXISTS (SELECT 1 FROM subscriptions o
+                            WHERE o.id != s.id AND o.service_id = s.service_id
+                              AND (o.account_id = s.account_id OR o.account_id IS NULL)
+                              AND o.status IN ('active', 'paused'))
+            AND NOT EXISTS (SELECT 1 FROM subscriptions o
+                            WHERE o.id != s.id AND COALESCE(o.match_pattern, '') != ''
+                              AND UPPER(t.description) LIKE '%' || UPPER(o.match_pattern) || '%'))
     LEFT JOIN services svc ON s.service_id = svc.id
     {joins}
-    WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
-      AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
-      AND """ + book_expr("t") + " = " + book_expr("svc")
+    WHERE COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
+      AND """ + book_expr("t") + " = " + book_expr("svc") + "\n"
 
 
-def _matched(conn: sqlite3.Connection, cutoff_90d: str):
-    """Each bill's latest matching row and its monthly sums over 90 days."""
-    latest = conn.execute("""
+def latest_payments(conn: sqlite3.Connection) -> dict[int, dict]:
+    """Each bill's latest matching row, {bill id: {tx_id, tx_date, amount_minor}}."""
+    rows = conn.execute("""
         WITH matched AS (
             SELECT s.id as sub_id,
                    t.id as tx_id, t.date as tx_date, t.amount_minor,
-                   ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY t.date DESC) as rn
+                   ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY t.date DESC, t.id DESC) as rn
             """ + _MATCHED_ROWS.format(joins="") + """
         )
         SELECT sub_id, tx_id, tx_date, amount_minor
         FROM matched WHERE rn = 1
     """).fetchall()
+    return {r["sub_id"]: dict(r) for r in rows}
+
+
+def _matched(conn: sqlite3.Connection, cutoff_90d: str):
+    """Each bill's latest matching row and its monthly sums over 90 days."""
+    latest = latest_payments(conn)
     monthly = conn.execute("""
         SELECT s.id as sub_id,
                SUBSTR(t.date, 1, 7) as ym,
@@ -347,7 +374,7 @@ def _matched(conn: sqlite3.Connection, cutoff_90d: str):
     by_sub: dict[int, list[dict]] = {}
     for r in monthly:
         by_sub.setdefault(r["sub_id"], []).append({"ym": r["ym"], "month_total": r["month_total"]})
-    return {r["sub_id"]: dict(r) for r in latest}, by_sub
+    return latest, by_sub
 
 
 def read(conn: sqlite3.Connection, fx_rate: float, on: date | None = None) -> list[dict]:
@@ -379,24 +406,22 @@ def read(conn: sqlite3.Connection, fx_rate: float, on: date | None = None) -> li
         d = dict(r)
         d["book"] = d.pop("merchant_book")
         d["type_id"] = d.pop("merchant_type_id")
-        pat = (d["match_pattern"] or "").upper()
-        monthly_sums = monthly_by_sub.get(d["id"], []) if pat else []
+        monthly_sums = monthly_by_sub.get(d["id"], [])
 
         # A month_total is whole minor units, and so is every figure worked
         # out from the rows until it is put on the payload.
         d.update(tx_last_paid=None, tx_amount=None, tx_id=None, tx_avg_90d=None, tx_months_90d=0)
-        if pat:
-            tx = latest_tx.get(d["id"])
-            if tx:
-                d["tx_last_paid"] = tx["tx_date"]
-                d["tx_amount"] = money.from_minor(tx["amount_minor"])
-                d["tx_id"] = tx["tx_id"]
-            d["tx_months_90d"] = len(monthly_sums)
-            if monthly_sums:
-                totals = [m["month_total"] for m in monthly_sums]
-                d["tx_avg_90d"] = money.from_minor(money.mean_minor(sum(totals), len(totals)))
+        tx = latest_tx.get(d["id"])
+        if tx:
+            d["tx_last_paid"] = tx["tx_date"]
+            d["tx_amount"] = money.from_minor(tx["amount_minor"])
+            d["tx_id"] = tx["tx_id"]
+        d["tx_months_90d"] = len(monthly_sums)
+        if monthly_sums:
+            totals = [m["month_total"] for m in monthly_sums]
+            d["tx_avg_90d"] = money.from_minor(money.mean_minor(sum(totals), len(totals)))
         # Last paid amount: latest month's sum (handles split payments)
-        if pat and d.get("tx_months_90d"):
+        if d.get("tx_months_90d"):
             d["tx_amount"] = money.from_minor(monthly_sums[0]["month_total"])
 
         amt = d.get("amount") or 0
