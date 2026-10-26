@@ -145,8 +145,8 @@ def test_case_11_the_trend_pages_read_the_s_dollar_figure_and_name_the_rupees(cl
     assert {name: bar["inr_minor"] for name, bar in bars.items() if bar["inr_minor"]} == {"Dining": RUPEES}
     assert bars["Dining"]["rate"]["text"] == "0.0155"
     assert lines["Dining"] - RUPEES_IN_SGD == HOUSEHOLD_SEP["Dining"][0]
-    # Take the rupees off and every page states Home's figure, hidden merchant inside.
-    assert sum(lines.values()) - RUPEES_IN_SGD == home == 390_000
+    # Every page states Home's figure, hidden merchant and rupees inside (RUL-022).
+    assert sum(lines.values()) == home == 395_348
     for name, (spent, back) in HOUSEHOLD_SEP.items():
         if name != "Dining":
             assert (bars[name]["spent"], bars[name]["back"], bars[name]["net"]) == (spent, back, spent - back)
@@ -158,11 +158,11 @@ def test_case_11_home_and_spending_draw_the_same_s_dollar_figure(client, conn, s
     home_tile = words(household(stat_cards(client)))
     spending = tile(page(server)["html"])
 
-    assert "S$ 3,900.00" in home_tile and "after S$ 312.50 refunds" in home_tile
-    assert spending["figure"] == "S$ 3,900.00"
-    # Spending stays on S$ accounts: the rupees are named beside the figure, not in it.
-    assert spending["other"] and "₹ 3,450.00" in spending["other"]
-    assert sum(types_over_time(client, HOUSEHOLD).values()) - RUPEES_IN_SGD == money.to_minor("3900.00")
+    assert "S$ 3,953.48" in home_tile and "after S$ 312.50 refunds" in home_tile
+    assert spending["figure"] == "S$ 3,953.48"
+    # The rupees are in the figure at their rate (RUL-022), and named beside it.
+    assert spending["other"] and "Includes ₹ 3,450.00" in spending["other"]
+    assert sum(types_over_time(client, HOUSEHOLD).values()) == money.to_minor("3953.48")
 
 
 def test_rupees_are_valued_per_merchant_so_the_type_page_and_types_over_time_agree_to_the_cent(

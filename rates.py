@@ -107,6 +107,20 @@ def fetch_reference_rate(base: str, quote: str, on: str) -> tuple[str, str]:
     return answer["rates"][quote], answer["date"]
 
 
+RANGE_URL = "https://api.frankfurter.dev/v1/{start}..{end}?base={base}&symbols={quote}"
+# How far before the first day a range asks from: a first day after a long
+# holiday still finds the business day before it.
+RANGE_LEAD_DAYS = 7
+
+
+def fetch_reference_range(base: str, quote: str, start: str, end: str) -> dict:
+    """The reference rates of every business day from `start` to `end` from
+    the public source: {day: rate as the decimal text the source printed}."""
+    body = _http_get(RANGE_URL.format(start=start, end=end, base=base, quote=quote))
+    answer = json.loads(body, parse_float=str, parse_int=str)
+    return {day: by_quote[quote] for day, by_quote in answer["rates"].items()}
+
+
 # --- the saved copy -------------------------------------------------------------
 
 def _row(row) -> dict | None:
@@ -202,3 +216,41 @@ def ensure(conn: sqlite3.Connection, currency, on, today: date | None = None) ->
         (pair, on, answered[0], FETCHED_SOURCE.format(effective=answered[1]), _now()),
     )
     return saved(conn, pair, on), True
+
+
+def save_range(conn: sqlite3.Connection, currency, days: list[str], today: date | None = None) -> int:
+    """Save a rate for each of `days` that has none saved, from one request
+    for their span: each day's own reference rate, or failing it (a weekend,
+    a holiday) the latest business day's before it, as `ensure` would get.
+    A day that has not come is skipped. Returns how many were saved. Raises
+    FetchFailed when the source gives no usable answer; nothing is saved
+    then. Does not commit."""
+    pair = pair_for(currency)
+    last_day = (today or date.today()).isoformat()
+    wanted = sorted({checked_date(d) for d in days if checked_date(d) <= last_day
+                     and saved(conn, pair, d) is None})
+    if not wanted:
+        return 0
+    lead = date.fromordinal(date.fromisoformat(wanted[0]).toordinal() - RANGE_LEAD_DAYS).isoformat()
+    try:
+        by_day = sorted((checked_date(d), checked_rate(r)) for d, r in
+                        fetch_reference_range(currency, QUOTE, lead, wanted[-1]).items())
+    except Exception:
+        by_day = None
+    # Raised outside the except block: what the source said is not carried.
+    if not by_day:
+        raise FetchFailed("The rates could not be fetched; nothing was saved")
+
+    count, at, fetched = 0, -1, _now()
+    for day in wanted:
+        while at + 1 < len(by_day) and by_day[at + 1][0] <= day:
+            at += 1
+        if at < 0:
+            continue
+        effective, rate = by_day[at]
+        conn.execute(
+            "INSERT INTO rates (pair, date, rate, source, fetched_at) VALUES (?, ?, ?, ?, ?)",
+            (pair, day, rate, FETCHED_SOURCE.format(effective=effective), fetched),
+        )
+        count += 1
+    return count

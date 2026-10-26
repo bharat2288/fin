@@ -314,7 +314,7 @@ def test_case_57_an_entrant_takes_the_lowest_free_slot(client, conn):
 def test_case_11_household_september_ties_with_home_and_adds_the_rupees(client, conn):
     """Household, Sep 2026: S$ 3,900.00 net on S$ accounts, a hidden merchant
     and a refund inside it; Swiggy's ₹ 3,450 at 0.0155 makes Types over
-    time's September S$ 3,953.48. Home's tile stays S$ accounts only."""
+    time's September S$ 3,953.48, and Home's tile the same (RUL-022)."""
     card = tf.account(conn, "Everyday card")
     rupee = tf.account(conn, "Rupee card", currency="INR")
     sep = tf.statement(conn, card, "2026-09")
@@ -334,7 +334,7 @@ def test_case_11_household_september_ties_with_home_and_adds_the_rupees(client, 
                          "Dining": 50_500 + 5_348}
     assert sum(september.values()) == 395_348
     home = cents(client.get("/api/dashboard/stat-cards?ref_month=2026-09").get_json()["household"])
-    assert home == 390_000 == sum(september.values()) - 5_348
+    assert home == 395_348 == sum(september.values())
 
 
 # --- case 50: opening a trend never fetches ---------------------------------

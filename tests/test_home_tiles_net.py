@@ -135,7 +135,8 @@ def bars(tile_html):
 def test_the_household_tile_reads_net_of_refunds(cards):
     text = words(household(cards))
 
-    assert "S$ 3,900.00" in text           # was S$ 4,212.50, money out
+    # S$ 3,900.00 net on S$ accounts and Swiggy's ₹ 3,450 at 0.0155 (S$ 53.48, RUL-022).
+    assert "S$ 3,953.48" in text           # was S$ 4,212.50, money out
     assert "S$ 4,212.50" not in text
     assert "after S$ 312.50 refunds" in text
 
@@ -149,7 +150,7 @@ def test_the_bars_are_net_months_and_a_month_below_zero_hangs_under_the_axis(car
     # Net, not money out: August is 3,600.00 less a 100.00 refund = 3,500.00, tallest July's 4,100.00.
     heights = {t: h for _, h, t in drawn}
     assert heights["Aug 2026"] == round(3500 / 4100 * 100)
-    assert heights["Sep 2026"] == round(3900 / 4100 * 100)
+    assert heights["Sep 2026"] == round(3953.48 / 4100 * 100)
     # March's net is -50.00: marked below the axis, and only March.
     below = [t for c, _, t in drawn if "is-neg" in c]
     assert len(below) == 1 and below[0].startswith("Mar 2026") and "below zero" in below[0]
@@ -171,18 +172,19 @@ def test_the_average_is_the_net_average_of_the_three_prior_months(cards):
     text = words(household(cards))
 
     assert "S$ 3,766.67" in text
-    assert "above its recent average" in text and "4%" in text   # 3,900.00 against 3,766.67
+    assert "above its recent average" in text and "5%" in text   # 3,953.48 against 3,766.67
 
 
 # --- case 11 (Home's leg) -----------------------------------------------------------------------
 
 
 @needs_node
-def test_home_stays_on_s_dollar_accounts_with_a_hidden_merchant_inside_and_a_rupee_row_outside(cards):
+def test_home_counts_a_hidden_merchant_and_a_rupee_row_at_its_rate(cards):
     # The seed holds Tidy Storage (hidden, S$ 45.00) and Swiggy (₹ 3,450, rate saved): the figure is
-    # still the S$-account net, S$ 3,900.00, so Home, Spending and Types over time can be tied by it.
-    assert cards["household"] == 3900.00
-    assert "S$ 3,900.00" in words(household(cards))
+    # the S$-account net, S$ 3,900.00, and the rupees at their rate, S$ 53.48 (RUL-022), so Home,
+    # Spending and Types over time are one figure.
+    assert cards["household"] == 3953.48
+    assert "S$ 3,953.48" in words(household(cards))
 
 
 # --- case 52: a company book ----------------------------------------------------------------

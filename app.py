@@ -8,6 +8,7 @@ Usage:
     py app.py --port 8450      # Explicit port
 """
 
+import calendar
 import functools
 import hashlib
 import json
@@ -52,11 +53,12 @@ import tie
 import trend_routes
 import expect_back
 import trend_series
+import valuation
 import expect_routes
 import expectation_api
 import refund_links
 import relabel_preview
-from scope import _HOUSEHOLD_ACCOUNT, _SGD_ACCOUNT, _TYPE_JOINS, book_expr
+from scope import _HOUSEHOLD_ACCOUNT, _TYPE_JOINS, book_expr
 from missing import missing_months
 from db import first_rule, get_connection, get_db, init_db, invalidate_rules_cache, match_merchant, rule_label
 
@@ -2935,17 +2937,20 @@ def _waiting_sides(conn, filters: str = "", params: tuple | list = ()) -> dict:
     many each side holds and what each adds up to in whole minor units, both
     as positive figures. `count` is both sides together and `net_minor` is
     money out less money in. `filters` narrows them by the row (t) or its
-    statement (s). Every waiting row is counted; the totals are of the rows
-    on SGD accounts. Once switched, the rows are _waiting_rows' and each adds
+    statement (s). Every waiting row is counted; the totals are in S$, a row
+    in another currency at the rate of its own day and one with no rate
+    adding nothing (valuation.py). Once switched, the rows are _waiting_rows' and each adds
     what it has left of its own, never what is expected or placed on it."""
     rows, rows_params = _waiting_rows()
     own = expect_back.own_sql("t")
+    # In S$ on the one path (valuation.py): a foreign row with no rate adds nothing.
+    valued = f"sgd_value({own}, (SELECT currency FROM accounts WHERE id = s.account_id), t.date)"
     row = conn.execute(
         "SELECT "
         "SUM(CASE WHEN t.amount_minor < 0 THEN 0 ELSE 1 END), "
-        f"SUM(CASE WHEN t.amount_minor >= 0 AND {_SGD_ACCOUNT} THEN {own} ELSE 0 END), "
+        f"SUM(CASE WHEN t.amount_minor >= 0 THEN {valued} ELSE 0 END), "
         "SUM(CASE WHEN t.amount_minor < 0 THEN 1 ELSE 0 END), "
-        f"SUM(CASE WHEN t.amount_minor < 0 AND {_SGD_ACCOUNT} THEN -{own} ELSE 0 END) "
+        f"SUM(CASE WHEN t.amount_minor < 0 THEN -{valued} ELSE 0 END) "
         "FROM transactions t "
         f"LEFT JOIN statements s ON t.statement_id = s.id WHERE {rows} {filters}",
         [*rows_params, *params],
@@ -3143,11 +3148,10 @@ def api_dashboard_stat_cards():
                     COUNT(CASE WHEN t.type_id IS NULL THEN t.id END),
                     COUNT(t.id),
                     COUNT(CASE WHEN {book_expr('t')} = ? AND a.owner = ? THEN t.id END)
-                FROM {trend_series.counted_from()}
+                FROM {trend_series.counted_from_sgd()}
                 LEFT JOIN services svc ON t.service_id = svc.id
                 LEFT JOIN accounts a ON s.account_id = a.id
                 WHERE t.flow_type IN ('expense', 'refund')
-                  AND {_SGD_ACCOUNT}
                   AND t.date >= ? AND t.date <= ?
                   {extra_filters}
             """, params).fetchone()
@@ -3216,6 +3220,11 @@ def api_dashboard_stat_cards():
         # Everything waiting, whenever it is dated: the review list's own count.
         waiting = _waiting_sides(conn)
         loan = loan_interest.month_figures(conn, f"{ref_y:04d}-{ref_m:02d}")
+        # Spending lines in another currency the month has no rate for: left
+        # out of every figure above (valuation.py), never guessed.
+        ref_first = f"{ref_y:04d}-{ref_m:02d}-01"
+        ref_last = f"{ref_y:04d}-{ref_m:02d}-{calendar.monthrange(ref_y, ref_m)[1]:02d}"
+        unvalued = valuation.unvalued_count(conn, ref_first, ref_last, extra_filters, extra_params)
 
         # ?history=N (at most 24): each card's figure for the N months ending
         # with the reference month, oldest first, worked out as the card is.
@@ -3254,6 +3263,7 @@ def api_dashboard_stat_cards():
         "untyped": ref_data["untyped"],
         "tx_count": ref_data["tx_count"],
         "household_rows": ref_data["household_rows"],
+        "unvalued_count": unvalued,
         "held_out_count": held_out["count"],
         "held_out_total": money.from_minor(held_out["net_minor"]),
         **_sides_payload("held_out", held_out),
@@ -3320,10 +3330,10 @@ def api_dashboard_monthly():
                 {time_bucket} as period,
                 {type_expr} as type,
                 SUM(t.amount_minor) as total
-            FROM {trend_series.counted_from()}
+            FROM {trend_series.counted_from_sgd()}
             {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
-            WHERE t.flow_type IN ('expense', 'refund') AND {_SGD_ACCOUNT} {filters}
+            WHERE t.flow_type IN ('expense', 'refund') {filters}
             GROUP BY period, type
             ORDER BY period, total DESC
         """, params).fetchall()
@@ -3361,10 +3371,10 @@ def api_dashboard_types():
                 {type_expr} as type,
                 SUM(t.amount_minor) as total,
                 COUNT(t.id) as count
-            FROM {trend_series.counted_from()}
+            FROM {trend_series.counted_from_sgd()}
             {_TYPE_JOINS.format(owner="t")}
             LEFT JOIN services svc ON t.service_id = svc.id
-            WHERE t.flow_type IN ('expense', 'refund') AND {_SGD_ACCOUNT} {filters}
+            WHERE t.flow_type IN ('expense', 'refund') {filters}
             GROUP BY type
             ORDER BY total DESC
         """, params).fetchall()
@@ -3542,6 +3552,7 @@ def api_transactions():
                 COALESCE(svc.review_each_time, 0) as review_each_time,
                 CASE WHEN {_not_checked_rows()} THEN 1 ELSE 0 END as not_checked,
                 rp.expected_minor, rp.placed_minor, rp.own_minor,
+                sgd_value(rp.own_minor, a.currency, t.date) AS counted_sgd_minor,
                 (SELECT COALESCE(SUM(so.amount_minor), 0) FROM set_off so
                  WHERE so.payment_row_id = t.id AND so.expectation_id IS NULL) as waiting_minor
             FROM transactions t
@@ -3569,6 +3580,8 @@ def api_transactions():
         # is what a sum of rows adds: the own part. The pill words them; the
         # client works nothing out.
         tx["counted_minor"] = tx["own_minor"]
+        # The own part in S$ on the one path (valuation.py): at the rate of
+        # the row's day; None for a row in another currency with no rate.
         tx["expect_pill"] = _parts_pill(tx["amount_minor"], tx["expected_minor"], tx["placed_minor"],
                                         tx.pop("waiting_minor"), tx["currency"])
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])
@@ -6783,6 +6796,22 @@ def api_rates_fetch():
             return jsonify({"error": str(e)}), 502
         conn.commit()
     return jsonify({"success": True, "created": created, "rate": held})
+
+
+@app.route("/api/rates/fetch-missing", methods=["POST"])
+def api_rates_fetch_missing():
+    """Fetch and save the European Central Bank rate for every day a row in
+    another currency is on that no saved rate values (valuation.py), one
+    request per currency. A weekend or holiday takes the business day's
+    before it, and the saved source says which. A rate already saved is kept.
+
+    Answers {saved, currencies (still short of a rate), failed}. 502 when a
+    currency's fetch failed: nothing of that currency was saved.
+    """
+    with get_db() as conn:
+        done = valuation.fetch_missing(conn)
+        conn.commit()
+    return jsonify(done), 502 if done["failed"] else 200
 
 
 @app.route("/api/rates", methods=["PUT"])
