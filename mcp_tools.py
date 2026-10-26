@@ -55,8 +55,12 @@ Rulings this module carries:
   the book moved since (a replay included). Both stop with the switch off. The
   token stands in for expected_count: a batch over MANY_ROWS rows applies on
   it and is recorded as asked first.
-- No tool imports a statement, changes or deletes an imported row, changes
-  or deletes an account (adding one is create_account, or
+- Duplicate rows (fin RUL-026): duplicate_rows reads the rows that have a
+  twin (same account, day and amount) and remove_duplicate takes one out, as
+  one change, over the app's own route; a row with no twin, or one a record
+  rests on, is refused. It is the one imported row a tool removes.
+- No tool imports a statement, changes or deletes an imported row (but a
+  twin, above), changes or deletes an account (adding one is create_account, or
   add_company_or_person; joining one to a party is link_party), sends merchants to the type-suggestion service,
   runs a conversion or changes a bill: bills (fin-redesign 10) reads them,
   with the missed-bill rule's verdict from bills.py, the one home the app's
@@ -488,6 +492,20 @@ _READS = [
         False,
         _get("/api/bills", "state"),
     ),
+    # fin RUL-026: the rows that have a twin (a read)
+    Tool(
+        "duplicate_rows",
+        "Rows that have a twin: another row on the same account, the same day and the same amount, "
+        "newest day first. Each set gives the account, day and amount, and each row its id, wording, "
+        "flow, book, type, the statement it came in on (from, to) and refusal (why remove_duplicate "
+        "would refuse it, or null). statements counts the statements the set came in on, and reading "
+        "says what that suggests: one row on each of two statements covering the day is most likely one "
+        "payment an import read twice; one statement printing both may be two real payments. Give "
+        "account_id for one account's, or tx_id for one row's own set.",
+        _schema({"account_id": _I, "tx_id": _I}),
+        False,
+        _get("/api/duplicates", "account_id", "tx_id"),
+    ),
 ]
 
 
@@ -818,6 +836,17 @@ _WRITES = [
         lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/not-a-payback", {}),
     ),
     _w(
+        "remove_duplicate",
+        "Remove a row that has a twin (another row on the same account, the same day and the same "
+        "amount), as one change the operator can undo in fin. Refused, writing nothing, when the row "
+        "has no twin, or when a record rests on it (an expect-back mark, a set-off, a refund link, a "
+        "set-aside, a folio link or a cross-currency pair): the refusal names a twin to remove instead. "
+        "Read duplicate_rows first, and remove only the twins the operator said are one payment.",
+        {"tx_id": _I},
+        ("tx_id",),
+        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/remove-duplicate", {}),
+    ),
+    _w(
         "undo",
         "Undo one change made from the chat. Refused, naming it, when a later change touched "
         "the same rows: undo that one first. A change made in fin itself is the operator's to undo.",
@@ -939,6 +968,7 @@ TITLES = {
     "expected_back": "Read what is expected back",
     "paybacks": "Read the payback suggestions",
     "bills": "Read your bills",
+    "duplicate_rows": "Read rows that have a twin",
     "set_label": "Change a row's book or type",
     "set_note": "Change a row's note",
     "label_review": "Say what a row was",
@@ -965,6 +995,7 @@ TITLES = {
     "let_go": "Let an expected-back amount go",
     "undo_let_go": "Undo a let-go",
     "not_a_payback": "Say a row is not a payback",
+    "remove_duplicate": "Remove a duplicate row",
     "undo": "Undo a chat change",
     "plan_preview": "Preview a batch of Queue changes",
     "plan_apply": "Apply a batch of Queue changes",

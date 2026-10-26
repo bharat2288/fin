@@ -6100,6 +6100,8 @@ function undoWords(e, ctx, byId) {
 }
 function entryTitle(e, ctx, byId) {
     if (e.undoes) return undoWords(e, ctx, byId);
+    // A twin taken out says so, and which twin stays (fin RUL-026), not only "Took out …".
+    if (String(e.summary || '').startsWith('Removed a duplicate row:')) return esc(e.summary);
     return sentence(changeWords(e.first, ctx, { rows: e.rows })) || esc(e.summary || 'A change');
 }
 /** Why an undo is refused, naming who and what (walk C6.2), said as an
@@ -6566,6 +6568,28 @@ function rowFactsHTML(found, label, by) {
         </dl>`;
 }
 
+/** A row's twins (fin RUL-026): the other rows on its account, day and amount, each with the
+ *  statement it came in on, what that suggests, and Remove when the server allows it. '' for none. */
+function twinNoticeHTML(set, txId) {
+    if (!set) return '';
+    const me = set.rows.find(r => r.id === txId);
+    const others = set.rows.filter(r => r.id !== txId);
+    const on = r => `the statement ${esc(day(r.statement.from))} – ${esc(day(r.statement.to))}`;
+    const listed = others.map(r => `<li><button type="button" class="link" data-act="row" data-tx="${r.id}">#${r.id}</button> ${esc(r.description)}, on ${on(r)}</li>`).join('');
+    const action = me && !me.refusal
+        ? `<button class="btn sm" data-act="remove-duplicate" data-tx="${txId}">Remove this row as a duplicate</button>`
+        : `<p class="small muted">${esc(me?.refusal || '')}</p>`;
+    return `<div class="notice warn twin-notice">${icon('warning')}<div>
+        <p><b>${others.length === 1 ? 'A twin' : `${others.length} twins`}</b> on the same account, day and amount. This row is on ${on(me)}.</p>
+        <ul class="twin-list">${listed}</ul>
+        <p class="small">${esc(set.reading)}</p>${action}</div></div>`;
+}
+ACT['remove-duplicate'] = async el => {
+    if (!confirm('Remove this row as a duplicate? Its twin stays. You can undo it from Changes.')) return;
+    const r = await act('POST', `/api/transactions/${Number(el.dataset.tx)}/remove-duplicate`, undefined, 'Duplicate removed; its twin stays');
+    if (r) { closeSheet(); rerender(); }
+};
+
 // One row: its amount, its facts, its note, the one-off toggle, "This was…", and its history.
 ACT.row = el => openRowSheet(Number(el.dataset.tx));
 // Expect back's reserved entry points (personal-ledger 23): a button with one of these data-acts opens a drawer an expect-*.js shell fills.
@@ -6577,7 +6601,8 @@ async function openRowSheet(txId, opts = {}) {
     const found = (await get(`/api/transactions?tx_id=${txId}`, { fresh: true })).transactions[0];
     if (!found) { sheetBody().innerHTML = '<p class="notice">This row is no longer in the books (an import was undone, perhaps).</p>' + await timelineHTML('transactions', txId, opts); return; }
     ACT.__lastRow = found;
-    const held = await rowHistory('transactions', txId);
+    const [held, twins] = await Promise.all([rowHistory('transactions', txId),
+        get(`/api/duplicates?tx_id=${txId}`, { fresh: true }).catch(() => ({ twins: [] }))]);
     const waiting = found.flow_type === 'review';
     const untyped = !found.display_type && ['expense', 'refund'].includes(found.flow_type);
     const label = waiting ? tag('nofig', 'waiting for a label') : found.display_type ? esc(found.display_type) : (untyped ? tag('nofig', 'no type') : esc(FLOW_WORDS[found.flow_type] || found.flow_type));
@@ -6590,6 +6615,7 @@ async function openRowSheet(txId, opts = {}) {
     sheetBody().innerHTML = `<div class="row-figure-block">
             <div class="row-figure num">${esc(money(-minor, found.currency, { signed: true }))}</div>
             <p class="row-figure-sub">${rowSheetSubHTML(found, minor)}</p></div>
+        ${twinNoticeHTML(twins.twins[0], found.id)}
         ${rowFactsHTML(found, label, labelledBy(found, held.details))}
         ${sourceLinesHTML(found)}
         ${window.folioSlot?.('row', found.id) || ''}
