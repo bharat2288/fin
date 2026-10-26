@@ -56,6 +56,8 @@ TRACKED = (
     "books",
     # The accounts marked shared (fin-redesign 20; shared.py).
     "shared_accounts",
+    # A cross-currency pair and its real rate (fin-redesign 24; fx_pair.py).
+    "fx_pair",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was
@@ -64,7 +66,7 @@ TRACKED = (
 # start and no conversion step is owed; so are a new table's, made by the
 # same start. has_shape does not ask for them.
 ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms", "folio_link", "books",
-                  "shared_accounts")
+                  "shared_accounts", "fx_pair")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens

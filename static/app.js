@@ -722,11 +722,48 @@ function rowItem(row, kind) {
             { label: 'Something else', act: 'resolve', data: { tx: row.id, kind: 'mixed' } }] };
 }
 
+/** A cross-currency pair offered (fx_pair.py): the S$ row out and the row in
+ *  another currency, said once in the money-out lane. */
+function fxPairItem(o) {
+    const sign = SIGNS[o.currency] || o.currency;
+    const back = `${money(Math.abs(o.in.amount_minor), o.in.currency)} into ${o.in.account}${o.in.date !== o.out.date ? ` on ${day(o.in.date)}` : ''}`;
+    return {
+        key: `fxpair-${o.out.id}-${o.in.id}`, kind: 'fxpair', lane: 'out', offer: o,
+        row: { id: o.out.id, description: o.out.description, date: o.out.date, account_name: o.out.account },
+        currency: o.out.currency, amount: o.out.amount_minor, signed: o.out.amount_minor,
+        title: o.out.description,
+        meta: `${day(o.out.date)} · ${o.out.account} · ${back}`,
+        holds: `${sign} ${o.per_sgd} a dollar${o.source === 'wording' ? ', the rate in its wording' : ''}; the ECB’s was ${sign} ${o.ecb_per_sgd} (${o.off_percent}% off). Pairing keeps this rate for both rows`,
+        actions: [{ label: 'Yes, pair them', act: 'fx-pair-yes', data: { out: o.out.id, in: o.in.id }, primary: true },
+            { label: 'Not a pair', act: 'fx-pair-no', data: { out: o.out.id, in: o.in.id } }],
+    };
+}
+/** The offer under a pair's card: the rate, the ECB's, and the yes and no. */
+function fxPairOfferHTML(card) {
+    const data = a => Object.entries(a.data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
+    return {
+        html: `<div class="guess"><span>${esc(card.holds)}.</span></div>`,
+        actions: card.actions.map(a => `<button type="button" class="btn sm${a.primary ? ' subtle' : ''}" data-act="${a.act}"${data(a)}>${a.primary ? icon('check-circle') : ''}${esc(a.label)}</button>`).join(''),
+    };
+}
+ACT['fx-pair-yes'] = async el => {
+    el.disabled = true;
+    const r = await act('POST', '/api/fx-pairs', { out_id: Number(el.dataset.out), in_id: Number(el.dataset.in) }, 'Paired: the rate is kept for both rows');
+    el.disabled = false;
+    if (r) rerender();
+};
+ACT['fx-pair-no'] = async el => {
+    el.disabled = true;
+    const r = await act('POST', '/api/fx-pairs/decline', { out_id: Number(el.dataset.out), in_id: Number(el.dataset.in) }, 'Not a pair: it will not be offered again');
+    el.disabled = false;
+    if (r) rerender();
+};
+
 async function loadQueue() {
     if (cache.has('queue')) return cache.get('queue');
     const p = (async () => {
         const month = currentMonth();
-        const [review, untyped, mixed, sheet, refused, subs, r] = await Promise.all([
+        const [review, untyped, mixed, sheet, refused, subs, r, fx] = await Promise.all([
             getAllRows('flow=review&sort=amount&sort_dir=desc'),
             getAllRows('types=__untyped__&sort=amount&sort_dir=desc'),
             getAllRows('look=each&sort=amount&sort_dir=desc'),
@@ -734,11 +771,17 @@ async function loadQueue() {
             get('/api/statements/refused'),
             get('/api/subscriptions'),
             refs(),
+            get('/api/fx-pairs/offers').catch(() => ({ offers: [] })),
         ]);
         const items = [];
         // One item per row: a row the server lists twice is shown once, as
-        // the first of these it is (waiting for review, no type, not checked).
+        // the first of these it is (a leg of a cross-currency pair offered,
+        // waiting for review, no type, not checked).
         const seen = new Set();
+        fx.offers.forEach(o => {
+            seen.add(o.out.id); seen.add(o.in.id);
+            items.push(fxPairItem(o));
+        });
         [[review, 'transfer'], [untyped, 'untyped'], [mixed, 'mixed']].forEach(([list, kind]) => list.transactions.forEach(row => {
             if (seen.has(row.id)) return;
             seen.add(row.id);
@@ -1027,7 +1070,7 @@ function monthCheckMini(sheet) {
  *  its marker, what it holds out, the amount, and its actions (its next step
  *  outlined; accepting fin's guess is sand, a save in a row; setting aside a
  *  ghost). */
-const HOME_ITEM_ICONS = { transfer: 'arrows-left-right', untyped: 'warning', mixed: 'list-bullets', bill: 'receipt',
+const HOME_ITEM_ICONS = { transfer: 'arrows-left-right', fxpair: 'arrows-left-right', untyped: 'warning', mixed: 'list-bullets', bill: 'receipt',
     refused: 'prohibit', off: 'prohibit', stale: 'clock', nofig: 'warning', aside: 'circle-dashed' };
 function homeItemHTML(item, guesses) {
     const amount = item.kind === 'nofig' ? '' : item.kind === 'stale'
@@ -1065,7 +1108,7 @@ function homeItemHTML(item, guesses) {
 
 /** What a lane holds, said kind by kind: "5 transfers S$ 12,200.00 · 84 rows with no type S$ 6,477.50 · 7 bills not seen". */
 function laneSummary(list) {
-    const kinds = [['transfer', 'transfer', 'transfers', true], ['untyped', 'row with no type', 'rows with no type', true],
+    const kinds = [['fxpair', 'pair across currencies', 'pairs across currencies', true], ['transfer', 'transfer', 'transfers', true], ['untyped', 'row with no type', 'rows with no type', true],
         ['mixed', 'row to check', 'rows to check', true], ['bill', 'bill not seen', 'bills not seen', false],
         ['refused', 'refused statement', 'refused statements', false], ['off', 'statement off', 'statements off', false],
         ['stale', 'old figure', 'old figures', false], ['nofig', 'line with no figure', 'lines with no figure', false]];
@@ -1357,6 +1400,7 @@ const LINES_PAGE = 12;         // the sure card's merchants, and a Check each ro
 const queueGroups = new Map();     // a card's key -> its rows, for "This was… (all 4)"
 const transferGuesses = new Map(); // a waiting transfer's id -> fin's guess for it
 const QUEUE_STEPS = [
+    { k: 'fxpair', label: 'Pair across currencies?' },
     { k: 'transfer', label: 'Transfer?' },
     { k: 'pick', label: 'Pick a type' },
     { k: 'noguess', label: 'No guess' },
@@ -1582,6 +1626,7 @@ async function queueCardHTML(card) {
     let guess = { html: '', actions: '' };
     if (card.kind === 'untyped') guess = await showResolveSuggestion(row, { n, guess: (await loadGuesses()).get(row.id) || null });
     else if (card.kind === 'transfer') guess = transferGuessHTML(row, await transferGuess(row));
+    else if (card.kind === 'fxpair') guess = fxPairOfferHTML(card);
     const bill = card.kind === 'bill';
     const title = bill ? card.sub.service_name || card.sub.match_pattern : card.title;
     const meta = bill ? `No payment seen · ${card.meta}`
@@ -1589,7 +1634,9 @@ async function queueCardHTML(card) {
     const data = a => Object.entries(a.data || {}).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('') + (card.rows.length ? ` data-group="${esc(card.key)}"` : '');
     const own = (card.actions || []).find(a => !a.href);
     const links = (card.actions || []).filter(a => a.href).map(a => ` · <a class="link" href="${a.href}">${esc(a.label)}</a>`).join('');
-    const act = own ? `<button type="button" class="btn sm" data-act="${own.act}"${data(own)}>${esc(guess.actions && /^This was/.test(own.label) ? 'Something else' : own.label)}</button>` : '';
+    // A pair offered says its yes and its no under the offer, as a guess does.
+    const act = card.kind === 'fxpair' ? ''
+        : own ? `<button type="button" class="btn sm" data-act="${own.act}"${data(own)}>${esc(guess.actions && /^This was/.test(own.label) ? 'Something else' : own.label)}</button>` : '';
     return `<article class="qi qi--${card.kind}">
         <div class="qi__w"><p class="qi__t">${queueTitleHTML(card, title)}${row ? rowMark(row.id) : ''}</p><p class="qi__m">${qiMeta(card, meta)}${links}</p></div>
         <div class="qi__amt num">${esc(sumByCurrency([card], c => c.amount))}</div>
@@ -1614,6 +1661,7 @@ function laneCards(lane, items, guesses) {
     };
     items.forEach(i => {
         if (i.kind === 'transfer') cards.push({ ...i, step: 'transfer', rows: [i.row], find: i.title });
+        else if (i.kind === 'fxpair') cards.push({ ...i, step: 'fxpair', rows: [i.row], find: `${i.title} ${i.offer.in.description || ''}` });
         else if (i.kind === 'bill') cards.push({ ...i, step: 'bill', rows: [], find: i.sub.service_name || i.sub.match_pattern || '' });
         else if (i.kind === 'mixed') group(mixed, i.row.service_name || i.row.description || '', { key: `each-${i.row.id}`, kind: 'mixed', step: 'mixed' }, i);
         else if (i.kind === 'untyped') {

@@ -8,6 +8,9 @@ at its month-end rate, as it did before). A rate from another month is no rate
 for it, as balance_sheet's ruling 4 says. A row in S$ is its own amount. A
 foreign row with no such rate has no S$ value: it is left out of the sum,
 never guessed, and the reader may say how many were (`unvalued_count`).
+A row a confirmed cross-currency pair holds is valued at the pair's real
+rate instead (fx_pair.py; RUL-022): the SQL function takes the row's id as a
+fourth argument, and a reader that passes it gets that rate.
 
 The value is worked out in SQL through `sgd_value(amount_minor, currency,
 day)`, a function `attach` gives a connection, over a snapshot of the saved
@@ -33,8 +36,10 @@ import trend_series
 
 
 def _snapshot(conn: sqlite3.Connection) -> dict:
-    """{currency: ([days], [Decimal rates])}, days ascending."""
-    out: dict = {}
+    """{currency: ([days], [Decimal rates])}, days ascending; and under
+    REAL, {row id: (currency, Decimal rate)} for the rows a confirmed pair
+    holds."""
+    out: dict = {REAL: _real_rates(conn)}
     for row in conn.execute("SELECT pair, date, rate FROM rates ORDER BY pair, date"):
         currency, _, quote = row[0].partition("/")
         if quote != rates.QUOTE:
@@ -45,14 +50,23 @@ def _snapshot(conn: sqlite3.Connection) -> dict:
     return out
 
 
-def _value(held: dict, amount_minor, currency, day):
-    if amount_minor is None:
-        return None
-    currency = currency or rates.QUOTE
-    if currency == rates.QUOTE:
-        return amount_minor
-    if currency not in money.MINOR_UNIT_DIGITS or not day:
-        return None
+# The key a snapshot holds the real rates under: never a currency code.
+REAL = "real"
+
+
+def _real_rates(conn: sqlite3.Connection) -> dict:
+    """{row id: (currency, Decimal rate)}: the in rows of confirmed pairs. A
+    book with no fx_pair table yet holds none."""
+    try:
+        found = conn.execute("SELECT in_row_id, currency, rate FROM fx_pair WHERE state = 'confirmed'")
+    except sqlite3.OperationalError:
+        return {}
+    return {row[0]: (row[1], Decimal(row[2])) for row in found}
+
+
+def day_rate(held: dict, currency: str, day: str) -> Decimal | None:
+    """The saved rate a foreign row of `day` is valued at: the latest on or
+    before it in its month, else the first later in its month, else None."""
     days, values = held.get(currency, ((), ()))
     at = bisect.bisect_right(days, day[:10]) - 1
     if at < 0 or days[at] < f"{day[:7]}-01":
@@ -60,12 +74,32 @@ def _value(held: dict, amount_minor, currency, day):
         at += 1
         if at >= len(days) or days[at][:7] != day[:7]:
             return None
-    return money.convert_minor(int(amount_minor), values[at], currency, rates.QUOTE)
+    return values[at]
+
+
+def _value(held: dict, amount_minor, currency, day, row_id=None):
+    if amount_minor is None:
+        return None
+    currency = currency or rates.QUOTE
+    if currency == rates.QUOTE:
+        return amount_minor
+    if currency not in money.MINOR_UNIT_DIGITS:
+        return None
+    real = held.get(REAL, {}).get(row_id) if row_id is not None else None
+    if real is not None and real[0] == currency:
+        return money.convert_minor(int(amount_minor), real[1], currency, rates.QUOTE)
+    if not day:
+        return None
+    rate = day_rate(held, currency, day)
+    if rate is None:
+        return None
+    return money.convert_minor(int(amount_minor), rate, currency, rates.QUOTE)
 
 
 def attach(conn: sqlite3.Connection) -> None:
-    """Give the connection `sgd_value(amount_minor, currency, day)`, over the
-    rates saved when it is attached: every connection fin opens is attached
+    """Give the connection `sgd_value(amount_minor, currency, day[, row_id])`,
+    over the rates saved when it is attached (and the real rates of confirmed
+    pairs, read by the row's id when it is given): every connection fin opens is attached
     (db.get_connection). Attach again after saving a rate on the same
     connection. A book with no rates table yet reads it at the first call."""
     held: dict = {}
@@ -74,19 +108,20 @@ def attach(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
-    def sgd_value(amount, currency, day):
+    def sgd_value(amount, currency, day, row_id=None):
         if "rates" not in held:
             held["rates"] = _snapshot(conn)
-        return _value(held["rates"], amount, currency, day)
+        return _value(held["rates"], amount, currency, day, row_id)
 
     conn.create_function("sgd_value", 3, sgd_value, deterministic=True)
+    conn.create_function("sgd_value", 4, sgd_value, deterministic=True)
 
 
 def valuer(conn: sqlite3.Connection):
-    """`value(amount_minor, currency, day)` by the same rule, over the rates
-    saved now: for a reader in Python that values many rows."""
+    """`value(amount_minor, currency, day, row_id=None)` by the same rule,
+    over the rates saved now: for a reader in Python that values many rows."""
     held = _snapshot(conn)
-    return lambda amount_minor, currency, day: _value(held, amount_minor, currency, day)
+    return lambda amount_minor, currency, day, row_id=None: _value(held, amount_minor, currency, day, row_id)
 
 
 def value_minor(conn: sqlite3.Connection, amount_minor: int, currency: str, day: str) -> int | None:
@@ -105,7 +140,7 @@ def unvalued_count(conn: sqlite3.Connection, start: str, end: str, where: str = 
         f"SELECT COUNT(DISTINCT t.id) FROM {trend_series.counted_from()} JOIN accounts a ON a.id = t.account_id"
         " LEFT JOIN services svc ON svc.id = t.service_id"
         " WHERE t.flow_type IN ('expense', 'refund') AND t.date >= ? AND t.date <= ?"
-        " AND sgd_value(t.amount_minor, a.currency, t.date) IS NULL"
+        " AND sgd_value(t.amount_minor, a.currency, t.date, t.id) IS NULL"
         + (" AND a.owner = ?" if owner else "") + where,
         (start, end, *([owner] if owner else []), *params),
     ).fetchone()
