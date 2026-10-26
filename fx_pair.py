@@ -6,9 +6,9 @@ rupees never pairs. Here the Queue is offered such a move instead: an S$ row
 out and a row in another currency in, both on household bank accounts, a day
 apart at most, whose rate is within BAND of that day's ECB rate (the saved
 rate valuation.py would value the row in at). The offer's rate is the real
-one: an RFX rate in the in row's wording ("SGD500.0@74.52", rupees a dollar)
-when it carries one, else the two amounts'. With no saved rate for the day
-nothing is offered, never guessed.
+one: the bank's rate in the in row's wording ("SGD500.0@74.52", rupees a
+dollar; valuation.wording_rate) when it prints one, else the two amounts'.
+With no saved rate for the day nothing is offered, never guessed.
 
 Confirming writes one fx_pair row holding the real rate for both rows; from
 then on every S$ reader values the in row at it (valuation.py). A leg still
@@ -35,7 +35,6 @@ A refusal is a 4xx with {"error": words} and writes nothing.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from datetime import date
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
@@ -66,34 +65,18 @@ DECLINED = "declined"
 FROM_AMOUNTS = "amounts"
 FROM_WORDING = "wording"
 
-# An RFX rate in a wording: "SGD500.0@74.52", units of the row's currency for
-# one S$.
-_RFX = re.compile(r"\bSGD\s?[0-9][0-9,]*(?:\.[0-9]+)?\s?@\s?([0-9]+(?:\.[0-9]+)?)\b")
-
 # The digits a stored rate keeps: enough that an amount of a billion minor
 # units is valued to the cent the two amounts say.
-_RATE_PLACES = Decimal(1).scaleb(-20)
+_RATE_PLACES = valuation.RATE_PLACES
 _SHOWN_PLACES = Decimal("0.01")
 
 NOTHING = "Nothing was changed."
 NOT_OFFERED = f"these two rows are not offered as a pair now (one may be paired already, or said not to be). {NOTHING}"
 
 
-def wording_rate(description: str | None) -> Decimal | None:
-    """The RFX rate a wording carries, as units of its currency for one S$,
-    or None."""
-    found = _RFX.search((description or "").upper())
-    if found is None:
-        return None
-    rate = Decimal(found.group(1))
-    return rate if rate > 0 else None
-
-
-def _per_unit(per_sgd: Decimal) -> Decimal:
-    """S$ for one unit, from units for one S$, at the places a rate is kept."""
-    with localcontext() as exact:
-        exact.prec = 60
-        return (Decimal(1) / per_sgd).quantize(_RATE_PLACES, rounding=ROUND_HALF_EVEN)
+# The bank's rate a wording prints (valuation.py reads it for every row).
+wording_rate = valuation.wording_rate
+_per_unit = valuation.per_unit
 
 
 def _per_sgd(per_unit: Decimal) -> Decimal:
@@ -165,6 +148,16 @@ def _legs(conn: sqlite3.Connection) -> list[dict]:
             continue  # a row with no readable date is nobody's leg
         found.append({**dict(r), "day": day})
     return found
+
+
+def shown_printed(held: tuple | None) -> dict | None:
+    """The bank's rate a row's wording prints, as /api/transactions lists it,
+    from valuation.bank_rates' (currency, rate), or None: shaped as `shown`,
+    with no other row."""
+    if held is None:
+        return None
+    currency, rate = held
+    return {"per_sgd": shown_rate(rate), "currency": currency, "source": FROM_WORDING, "pair_row_id": None}
 
 
 def _declined(conn: sqlite3.Connection) -> set[tuple[int, int]]:

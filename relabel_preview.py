@@ -1284,7 +1284,7 @@ def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict]
     default = book_type.DEFAULT_BOOK
     marked = _marked(conn)
     months: set[str] = set()
-    lines = []                         # (key, amount, day)
+    lines = []                         # (key, amount, day, row id)
     with_parts = []                    # (row id, key, amount, day)
     for p in plan.rows:
         apply = p.apply
@@ -1302,17 +1302,18 @@ def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict]
         if marked and held["id"] in marked:
             with_parts.append((held["id"], key, held["amount_minor"], held["date"]))
             continue
-        lines.append((key, held["amount_minor"] or 0, held["date"]))
+        lines.append((key, held["amount_minor"] or 0, held["date"], held["id"]))
     own = _parts(conn, [row_id for row_id, _, _, _ in with_parts], marked)
     for row_id, key, amount, day in with_parts:
         part = own.get(row_id, {}).get("own_minor", amount)
-        lines.append((key, part or 0, day))
+        lines.append((key, part or 0, day, row_id))
+    # Each row at its own rate: a pair's or its printed one, else its day's.
     value = valuation.valuer(conn)
     moved: dict = {}
     short: dict = {}                   # (pair, month, currency) -> what no rate values
-    for key, amount, day in lines:
+    for key, amount, day, row_id in lines:
         (pair, month, currency) = key
-        in_sgd = amount if currency in (None, "SGD") else value(amount, currency, day)
+        in_sgd = amount if currency in (None, "SGD") else value(amount, currency, day, row_id)
         moved[pair] = moved.get(pair, 0) + (in_sgd or 0)
         if in_sgd is None:
             short[key] = short.get(key, 0) + amount

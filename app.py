@@ -960,6 +960,10 @@ def _close_change_entry() -> tuple[int | None, int]:
 @app.after_request
 def _finish_change_entry(response):
     entry_id, count = _close_change_entry()
+    if "closed_change" in g:
+        # A route that closed its change before writing a second one names
+        # the first (the import's, not the rates fetched after it).
+        entry_id, count = g.pop("closed_change")
     if entry_id is not None:
         response.headers["X-Fin-Change"] = str(entry_id)
         response.headers["X-Fin-Change-Rows"] = str(count)
@@ -3793,6 +3797,8 @@ def api_transactions():
             """,
             params + [per_page, offset],
         ).fetchall()
+        # The bank's rate a row's wording prints, which values it (valuation.py).
+        printed = valuation.bank_rates(conn)
 
     txns = []
     for r in rows:
@@ -3801,7 +3807,8 @@ def api_transactions():
         # the key is the old one, and holds rupees for a rupee account.
         tx["amount_sgd"] = money.from_minor(tx["amount_minor"], tx["currency"])
         # The real rate a confirmed cross-currency pair holds for it (fx_pair.py).
-        tx["real_rate"] = fx_pair.shown(tx["real_rate"])
+        # Failing one, the bank's rate its wording prints.
+        tx["real_rate"] = fx_pair.shown(tx["real_rate"]) or fx_pair.shown_printed(printed.get(tx["id"]))
         # Its parts (spec 23): what is expected and placed on it, and its own
         # part, each in whole minor units with the row's sign. counted_minor
         # is what a sum of rows adds: the own part. The pill words them; the
@@ -5926,6 +5933,33 @@ def _unheld(amount_minor: int) -> str:
     return "income" if amount_minor < 0 else "expense"
 
 
+# What the change that saves an import's rates is called in Changes.
+IMPORT_RATES_SUMMARY = "Fetched the exchange rates for the imported rows"
+
+
+def _fetch_rates_for_import(conn, account_ids) -> dict:
+    """Save the ECB rate for every day a row in another currency on these
+    accounts is on that no saved rate values (valuation.fetch_missing), as a
+    change of its own after the import's: undoing the import never takes
+    away a rate other rows use. The import's change is closed first, and the
+    response names it (g.closed_change). A fetch that fails saves nothing and
+    says which currencies in {saved, currencies, failed}; the import stands."""
+    try:
+        entry_id = g.pop("change_entry", None)
+        if entry_id is not None:
+            count = history.close_entry(conn, entry_id, _CHANGE_SUMMARIES["api_import_confirm"])
+            g.closed_change = (entry_id if count else None, count)
+            g.change_entry = history.open_entry(conn, *_caller(), IMPORT_RATES_SUMMARY)
+        done = valuation.fetch_missing(conn, accounts=account_ids)
+        conn.commit()
+    except Exception as e:  # the import is in; a rate is the Home notice's to fetch
+        conn.rollback()
+        app.logger.warning("Rates for an import were not fetched: %s", type(e).__name__)
+        short = sorted(valuation.missing_days(conn, account_ids))
+        done = {"saved": 0, "currencies": short, "failed": short}
+    return done
+
+
 @app.route("/api/import/confirm", methods=["POST"])
 def api_import_confirm():
     """Commit an upload's preview to the database.
@@ -6078,6 +6112,7 @@ def api_import_confirm():
     figures_written = 0
     rows_refiled = 0
     wordings_tidied = 0
+    touched_accounts: set[int] = set()   # the accounts the rows land on
 
     with get_db() as conn:
         try:
@@ -6131,6 +6166,7 @@ def api_import_confirm():
                     ]
                     for name, held_id in account_ids.items()
                 }
+                touched_accounts.update(account_ids.values())
                 month_stmt_ids: dict[tuple[str, str], int] = {}
                 for tx in active_txns:
                     if tx.get("statement") is not None:
@@ -6509,9 +6545,11 @@ def api_import_confirm():
             # merchants and rules land together or not at all.
             conn.commit()
             invalidate_rules_cache()
+            fetched = _fetch_rates_for_import(conn, touched_accounts)
 
             return jsonify({
                 "success": True,
+                "rates": fetched,
                 "transactions_saved": total_saved,
                 "duplicates_skipped": total_duplicates,
                 "rules_added": rules_added,

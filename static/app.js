@@ -5898,7 +5898,12 @@ ACT['import-confirm'] = async el => {
     importState.preview = null; importState.files = null;
     const figuresDone = r.data.figures_written ? ` and ${plural(r.data.figures_written, 'figure')}` : '';
     const held = r.data.duplicates_skipped ? `; ${plural(r.data.duplicates_skipped, 'row')} already held ${r.data.duplicates_skipped === 1 ? 'was' : 'were'} not added again` : '';
-    importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}${figuresDone}${held}. It is one change in Changes, with Undo.`;
+    // The rates of the rows' days, fetched after it as a change of their own (app.py _fetch_rates_for_import).
+    const fx = r.data.rates || {};
+    const ratesDone = (fx.failed || []).length
+        ? ` The exchange rates for ${fx.failed.join(' and ')} could not be fetched: Fetch the rates on Home.`
+        : fx.saved ? ` ${plural(fx.saved, 'exchange rate')} for its days ${fx.saved === 1 ? 'was' : 'were'} fetched, a change of ${fx.saved === 1 ? 'its' : 'their'} own.` : '';
+    importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}${figuresDone}${held}. It is one change in Changes, with Undo.${ratesDone}`;
     toast('Imported', { undo: r.change });
     if (importState.queue.length) return readGroup(nextGroup());
     rerender();

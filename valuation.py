@@ -10,7 +10,13 @@ foreign row with no such rate has no S$ value: it is left out of the sum,
 never guessed, and the reader may say how many were (`unvalued_count`).
 A row a confirmed cross-currency pair holds is valued at the pair's real
 rate instead (fx_pair.py; RUL-022): the SQL function takes the row's id as a
-fourth argument, and a reader that passes it gets that rate.
+fourth argument, and a reader that passes it gets that rate. A row whose
+wording prints the bank's own rate ("SGD@ 0.7400000" on a DBS US$ row,
+"SGD500.0@74.52" on an RFX remittance) is valued at that rate the same way,
+when it is within WORDING_BAND of the saved rate of its day: a printed rate
+read the wrong way up, or off a balance line, is no rate for the row, and
+with no saved rate to check it against the row is left unvalued. A pair's
+rate comes before a printed one. Nothing of it is stored.
 
 The value is worked out in SQL through `sgd_value(amount_minor, currency,
 day)`, a function `attach` gives a connection, over a snapshot of the saved
@@ -20,15 +26,18 @@ Books and chat. Decimal arithmetic, rounded half-even to the cent
 
 `fetch_missing` saves the European Central Bank rate for every day a foreign
 row is on that has none of its own, in one request per currency
-(rates.save_range). Nothing here fetches by itself: a reader only reads.
+(rates.save_range): an import asks it for the accounts it brought rows to,
+and Home's Fetch the rates for every account. Nothing here fetches by
+itself: a reader only reads.
 """
 
 from __future__ import annotations
 
 import bisect
+import re
 import sqlite3
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 
 import money
 import rates
@@ -36,9 +45,10 @@ import trend_series
 
 
 def _snapshot(conn: sqlite3.Connection) -> dict:
-    """{currency: ([days], [Decimal rates])}, days ascending; and under
-    REAL, {row id: (currency, Decimal rate)} for the rows a confirmed pair
-    holds."""
+    """{currency: ([days], [Decimal rates])}, days ascending; under REAL,
+    {row id: (currency, Decimal rate)} for the rows a confirmed pair holds;
+    and under BANK, the same for the rows whose wording prints the bank's
+    rate (bank_rates)."""
     out: dict = {REAL: _real_rates(conn)}
     for row in conn.execute("SELECT pair, date, rate FROM rates ORDER BY pair, date"):
         currency, _, quote = row[0].partition("/")
@@ -47,11 +57,80 @@ def _snapshot(conn: sqlite3.Connection) -> dict:
         days, values = out.setdefault(currency, ([], []))
         days.append(row[1])
         values.append(Decimal(row[2]))
+    out[BANK] = _bank_rates(conn, out)
     return out
 
 
-# The key a snapshot holds the real rates under: never a currency code.
+# The keys a snapshot holds the real rates and the printed ones under: never
+# a currency code.
 REAL = "real"
+BANK = "bank"
+
+# A bank's own rate printed in a wording, as units of the row's currency for
+# one S$: "SGD@ 0.7400000" (DBS, US$ moved to S$), "SGD500.0@74.52" (an RFX
+# remittance into rupees).
+_PRINTED_RATE = re.compile(r"SGD\s*(?:[0-9][0-9,]*(?:\.[0-9]+)?)?\s*@\s*([0-9]+(?:\.[0-9]+)?)")
+# How far a printed rate may be from the saved rate of its day, as a share of
+# it, and still be the row's. A bank's margin is a few per cent at most; a
+# rate read the wrong way up is off by a third or more.
+WORDING_BAND = Decimal("0.05")
+# The digits a rate worked out from a printed one keeps (fx_pair's).
+RATE_PLACES = Decimal(1).scaleb(-20)
+
+
+def wording_rate(description: str | None) -> Decimal | None:
+    """The bank's rate a wording prints, as units of the row's currency for
+    one S$, or None."""
+    found = _PRINTED_RATE.search((description or "").upper())
+    if found is None:
+        return None
+    rate = Decimal(found.group(1))
+    return rate if rate > 0 else None
+
+
+def per_unit(per_sgd: Decimal) -> Decimal:
+    """S$ for one unit, from units for one S$, at the places a rate is kept."""
+    with localcontext() as exact:
+        exact.prec = 60
+        return (Decimal(1) / per_sgd).quantize(RATE_PLACES, rounding=ROUND_HALF_EVEN)
+
+
+# Rows in another currency whose wording may print a rate.
+_PRINTED_ROWS = """
+    SELECT t.id, a.currency, t.date, t.description FROM transactions t
+    JOIN statements s ON s.id = t.statement_id
+    JOIN accounts a ON a.id = s.account_id
+    WHERE COALESCE(a.currency, 'SGD') <> 'SGD' AND t.description LIKE '%@%'
+"""
+
+
+def _bank_rates(conn: sqlite3.Connection, held: dict) -> dict:
+    """{row id: (currency, Decimal rate)}: the rows in another currency whose
+    wording prints a rate within WORDING_BAND of the saved rate of their day,
+    each at its printed rate as S$ for one unit. A book with no rows yet
+    holds none."""
+    try:
+        found = conn.execute(_PRINTED_ROWS).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out = {}
+    for row_id, currency, day, description in found:
+        per_sgd = wording_rate(description)
+        if per_sgd is None or currency not in money.MINOR_UNIT_DIGITS or not day:
+            continue
+        saved = day_rate(held, currency, day)
+        if saved is None:
+            continue  # nothing to check it against: never guessed
+        rate = per_unit(per_sgd)
+        if abs(rate - saved) / saved <= WORDING_BAND:
+            out[row_id] = (currency, rate)
+    return out
+
+
+def bank_rates(conn: sqlite3.Connection) -> dict:
+    """{row id: (currency, Decimal rate)}: each row valued at the bank's rate
+    its wording prints, as S$ for one unit, over the rates saved now."""
+    return _snapshot(conn)[BANK]
 
 
 def _real_rates(conn: sqlite3.Connection) -> dict:
@@ -85,7 +164,9 @@ def _value(held: dict, amount_minor, currency, day, row_id=None):
         return amount_minor
     if currency not in money.MINOR_UNIT_DIGITS:
         return None
-    real = held.get(REAL, {}).get(row_id) if row_id is not None else None
+    real = None
+    if row_id is not None:
+        real = held.get(REAL, {}).get(row_id) or held.get(BANK, {}).get(row_id)
     if real is not None and real[0] == currency:
         return money.convert_minor(int(amount_minor), real[1], currency, rates.QUOTE)
     if not day:
@@ -158,12 +239,17 @@ _FOREIGN_DAYS = """
 """
 
 
-def missing_days(conn: sqlite3.Connection) -> dict:
+def missing_days(conn: sqlite3.Connection, accounts=None) -> dict:
     """{currency: [days]}: each day a foreign row is on that no saved rate
-    values (none on or before it in its month), oldest first."""
+    values (none on or before it in its month), oldest first; with
+    `accounts` (ids), only the rows on those."""
     held = _snapshot(conn)
     out: dict = {}
-    for currency, day in conn.execute(_FOREIGN_DAYS + " ORDER BY a.currency, t.date"):
+    where, params = "", ()
+    if accounts is not None:
+        params = tuple(sorted(accounts))
+        where = f" AND a.id IN ({', '.join('?' * len(params))})" if params else " AND 0"
+    for currency, day in conn.execute(_FOREIGN_DAYS + where + " ORDER BY a.currency, t.date", params):
         day = day[:10]
         if currency in money.MINOR_UNIT_DIGITS and _value(held, 0, currency, day) is None \
                 and day not in out.get(currency, ()):
@@ -171,16 +257,16 @@ def missing_days(conn: sqlite3.Connection) -> dict:
     return out
 
 
-def fetch_missing(conn: sqlite3.Connection, today: date | None = None) -> dict:
-    """Save the ECB rate for every day in missing_days, one request per
-    currency for the span of its days. Returns {saved, currencies, failed}:
-    how many rates were saved, the currencies still short of a rate, and
-    those whose fetch failed (nothing of theirs is saved; the others' rates
-    are). Does not commit."""
+def fetch_missing(conn: sqlite3.Connection, today: date | None = None, accounts=None) -> dict:
+    """Save the ECB rate for every day in missing_days (with `accounts`, of
+    the rows on those), one request per currency for the span of its days.
+    Returns {saved, currencies, failed}: how many rates were saved, the
+    currencies still short of a rate, and those whose fetch failed (nothing
+    of theirs is saved; the others' rates are). Does not commit."""
     saved, failed = 0, []
-    for currency, days in missing_days(conn).items():
+    for currency, days in missing_days(conn, accounts).items():
         try:
             saved += rates.save_range(conn, currency, days, today=today)
         except rates.FetchFailed:
             failed.append(currency)
-    return {"saved": saved, "currencies": sorted(missing_days(conn)), "failed": failed}
+    return {"saved": saved, "currencies": sorted(missing_days(conn, accounts)), "failed": failed}
