@@ -179,3 +179,28 @@ def test_a_table_no_screen_shows_still_counts_and_change_history_and_new_tables_
     kept = "kept: merchants, accounts, figures, types, history"
     assert "meta.table_rows.dismissal" in found(result, kept)
     assert not any("party_link_example" in p or ".change_" in p for p in found(result, kept))
+
+
+def test_a_book_from_before_books_were_rows_snaps_with_the_seeded_three(book, conn):
+    """A copy taken before fin RUL-021 has no books table: the snapshot gives
+    its own copy the seeded three, and the book itself is untouched."""
+    for op in ("insert", "update", "delete"):
+        conn.execute(f"DROP TRIGGER history_books_{op}")
+    conn.execute("DROP TABLE books")
+    conn.commit()
+    conn.close()
+    path = book["path"]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    taken = snap(path)
+
+    assert sorted(taken["spending_by_month"]) == ["Household", "Kalesh", "Moom", "_all"]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+
+
+def test_an_added_books_figures_are_in_the_snapshot(book, client):
+    assert client.post("/api/books", json={"name": "Film", "description": "the film"}).status_code == 201
+    taken = snap(book["path"])
+    assert "Film" in taken["spending_by_month"]
+    month = sorted(taken["spending_cards"])[-1]
+    assert {"film", "film_out", "film_back"} <= set(taken["spending_cards"][month])

@@ -728,7 +728,7 @@ def test_g1_the_serialised_body_holds_only_the_merchant_string_the_model_id_and_
         "2026-04-17", "2026-04-18", "2026-04-19", "18APR26", "19/04", "2026-04-10",
         "0001", "XXXX", "Sample Card", "Sample-0001",    # the card
         "88120457", "88120458", "77003131", "REF",       # reference numbers
-        "MOSSY", "sample.csv", "2026-04-01", *book_type.BOOK_NAMES,
+        "MOSSY", "sample.csv", "2026-04-01", *(name for name, _ in book_type.BOOKS),
     ):
         assert never not in body, never
     assert not re.search(r"\b(APR|SGD|SG)\b", body)

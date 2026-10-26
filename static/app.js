@@ -4430,7 +4430,7 @@ function plainWords(s) {
 }
 const listState = { search: '', filter: 'all' };
 async function viewLists(tab) {
-    const tabs = [['merchants', 'Merchants', 'coins'], ['rules', 'Rules', 'sliders-horizontal'], ['accounts', 'Accounts', 'bank'], ['rates', 'Rates', 'arrows-left-right'], ['types', 'Types', 'list-bullets']];
+    const tabs = [['merchants', 'Merchants', 'coins'], ['rules', 'Rules', 'sliders-horizontal'], ['accounts', 'Accounts', 'bank'], ['rates', 'Rates', 'arrows-left-right'], ['types', 'Types', 'list-bullets'], ['books', 'Books', 'wallet']];
     const head = `${booksNav('lists')}<div class="page-head"><div><span class="eyebrow">Books</span><h1>Lists</h1><p>What the rules and labels are made of. Every change here lands in Changes, with Undo.</p></div></div>
         <nav class="seg sl-tabs" aria-label="Lists">${tabs.map(([k, l, ic]) => `<a href="#/books/lists/${k}"${k === tab ? ' aria-current="page"' : ''}>${icon(ic)}${l}</a>`).join('')}</nav>`;
     const search = placeholder => `<label class="field sl-search"><span class="sr-only">Search</span><input type="search" id="ls-search" value="${esc(listState.search)}" placeholder="${placeholder}"></label>`;
@@ -4468,6 +4468,17 @@ async function viewLists(tab) {
             ${filingsHTML(filings.slots, r.types, income)}
             ${income.length ? `<h3 class="sl-subhead">Income kinds</h3>${sortPicker('income-kinds', KIND_SORT)}<div class="table-wrap"><table class="t sl-stack"><thead><tr>${heads('income-kinds', KIND_SORT)}<th></th></tr></thead><tbody>${sortRows('income-kinds', income, KIND_SORT).map(row).join('')}</tbody></table></div>`
                 : '<p class="card-foot">Income kinds: none set up yet.</p>'}</section>`;
+    }
+    if (tab === 'books') {
+        // Books are the operator's to add (fin RUL-021): every page, picker and chat tool reads this list.
+        const BOOK_SORT = { name: { label: 'Book', kind: 'text', of: b => b.name }, holds: { label: 'What it holds', kind: 'text', of: b => b.description } };
+        const row = (b, i) => `<tr><td class="sl-name"><b>${esc(b.name)}</b>${b.added_in_fin ? ` ${tag('yours', 'added in fin')}` : ''}</td><td class="small">${esc(b.description)}</td>
+            <td class="small muted">${i === 0 ? 'the household' : 'a company: its costs move its balance, not household spending'}</td>
+            <td class="sl-sub">${esc(b.description)}</td></tr>`;
+        const order = new Map(r.books.map((b, i) => [b.name, i]));
+        return `${head}<section class="card"><div class="section-header"><div><h2>Books</h2><p>Whose spending a row is. Each book has its own total and is never added to another. A book you add is listed everywhere books are: Home, Spending, the Queue’s book picker and chat. Renaming or removing a book is a code change.</p></div>
+            <button class="btn" data-act="book-add">${icon('plus')}Add a book</button></div>
+            ${sortPicker('books', BOOK_SORT, { own: 'Household first' })}<div class="table-wrap"><table class="t sl-stack"><thead><tr><th>${sortHead('books', 'name', BOOK_SORT)}</th><th>${sortHead('books', 'holds', BOOK_SORT)}</th><th>Counts as</th></tr></thead><tbody>${sortRows('books', r.books, BOOK_SORT).map(b => row(b, order.get(b.name))).join('')}</tbody></table></div></section>`;
     }
     if (tab === 'rates') {
         const saved = await get('/api/rates');
@@ -4606,6 +4617,23 @@ async function typeWrite(el, method, url, body, done) {
     closeSheet();
     rerender();
 }
+ACT['book-add'] = () => {
+    openSheet('Add a book', `<div class="fields">
+        <label class="field"><span>Name</span><input type="text" id="bk-name" maxlength="30"></label>
+        <label class="field"><span>What it holds</span><input type="text" id="bk-desc" placeholder="costs of the film, whichever account paid them"></label></div>
+        <p class="hint">A book other than Household is a company: its costs move its company balance, not household spending. Renaming or removing a book is a code change.</p>`,
+    { eyebrow: 'Books', foot: '<button class="btn primary" data-act="book-add-save">Add the book</button>' });
+};
+ACT['book-add-save'] = async el => {
+    el.disabled = true;
+    const r = await send('POST', '/api/books', { name: $('#bk-name').value, description: $('#bk-desc').value });
+    el.disabled = false;
+    if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return; }
+    toast(`Added the book ${r.data.book.name}`, { undo: r.change });
+    refreshFrame();
+    closeSheet();
+    rerender();
+};
 ACT['type-add-save'] = el => {
     const parent = $('#ty-parent').value;
     return typeWrite(el, 'POST', '/api/types', { name: $('#ty-name').value, parent_id: parent ? Number(parent) : null,
@@ -6200,6 +6228,7 @@ function rowLabel(table, row, ctx, shown = null) {
     if (!row) return esc(table);
     // A type is named as every screen names it (Kids > Childcare): the server reads its parent.
     if (table === 'types') return `type ${esc(shown || row.name)}`;
+    if (table === 'books') return `book ${esc(row.name)}`;
     // A type's settings and fin's own filings (type-relationships 06), named as Lists › Types names them.
     if (table === 'type_settings') return `type ${valueText(table, 'type_id', row.type_id, ctx) || 'no longer listed'}`;
     if (table === 'type_slots') return `what fin files as ${esc(SLOT_FILES[row.slot] || String(row.slot).replace(/_/g, ' '))}`;

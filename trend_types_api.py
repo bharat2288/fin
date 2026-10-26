@@ -150,7 +150,7 @@ def types_over_time(conn: sqlite3.Connection, book: str = book_type.DEFAULT_BOOK
     """The R2 answer for one book over one span ending at `to` ('YYYY-MM',
     default this month). Raises trend_span.SpanError (400) for a bad span or
     month, and NoSuchBook (404) for a book fin does not keep."""
-    if book not in book_type.BOOK_NAMES:
+    if book not in book_type.book_names(conn):
         raise NoSuchBook(f"book {book} is not in fin")
     reference = trend_span.resolve(REFERENCE_SPAN, to, today=today)  # checks `to`
     end = reference["end"]

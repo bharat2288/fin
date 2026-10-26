@@ -71,13 +71,14 @@ def book_prefills(conn: sqlite3.Connection, tx_ids) -> dict[int, dict]:
                 held.append((h["id"], h["book"]))
 
     proposes = book_type.proposed_books(conn)  # by spending type
+    companies = book_type.company_books(conn)
     out = {}
     for r in rows:
         last = next((book for hid, book in latest.get((r["service_id"], r["account_id"]), [])
                      if hid != r["id"]), None)
         if last is not None:
             book, reason = last, LAST
-        elif r["owner"] and r["owner"] != book_type.DEFAULT_BOOK and r["owner"] in book_type.BOOK_NAMES:
+        elif r["owner"] in companies:
             book, reason = r["owner"], ACCOUNT
         else:
             book, reason = proposes.get(r["type_id"]), TYPE

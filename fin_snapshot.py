@@ -90,8 +90,10 @@ ROW_FIELDS = {
     "service_id": "service_id", "is_one_off": "is_one_off", "not_checked": "not_checked",
 }
 
-STAT_CARDS = ("household", "moom", "kalesh", "household_out", "household_back", "moom_out", "moom_back",
-              "kalesh_out", "kalesh_back", "loan_principal", "loan_interest", "loan_instalments", "cash_out",
+# Each book's cards, under its name in lower case (household, household_out,
+# household_back), for every book the copy holds, then the cards of their own.
+BOOK_CARDS = ("", "_out", "_back")
+STAT_CARDS = ("loan_principal", "loan_interest", "loan_instalments", "cash_out",
               "untyped", "held_out_count", "held_out_total", "household_rows")
 
 
@@ -141,6 +143,22 @@ def _refuse(*_a, **_k):
     raise OSError("the snapshot makes no network calls")
 
 
+def _give_books(copy: sqlite3.Connection) -> None:
+    """A copy from before books were rows (fin RUL-021) has no books table,
+    and every reader now takes the list from it: give the copy, never the
+    book, the table as schema.sql declares it and the three seeded books,
+    which are the books it held. No other seed runs (a start would seed
+    more). The history conversion makes the table empty on a book no start
+    has seeded yet; a copy whose table holds the three is left as it is."""
+    import book_type
+    import db
+
+    declared = re.search(r"CREATE TABLE IF NOT EXISTS books \(.*?\n\);", db.SCHEMA_PATH.read_text(), re.S)
+    copy.execute(declared.group(0))
+    book_type.seed_books(copy)
+    copy.commit()
+
+
 def snap(book: Path | str) -> dict:
     """The snapshot of `book` (see the module's doc). Leaves fin pointed at
     the book it was pointed at before."""
@@ -157,6 +175,7 @@ def snap(book: Path | str) -> dict:
     try:
         into = sqlite3.connect(str(copy))
         held.backup(into)
+        _give_books(into)
         into.close()
     finally:
         held.close()
@@ -231,6 +250,9 @@ def _take(c, conn: sqlite3.Connection) -> dict:
     out["rows"] = rows
 
     # 2: spending by book and type, every month, and each month's stat cards
+    # The books as the copy holds them (a copy from before books were rows
+    # was given the seeded three by snap).
+    names = [b["name"] for b in get("/api/books")]
     span = {"start": f"{start}-01", "end": f"{end}-{calendar.monthrange(*map(int, end.split('-')))[1]:02d}"}
     out["spending_by_month"] = {
         book or "_all": {
@@ -238,12 +260,13 @@ def _take(c, conn: sqlite3.Connection) -> dict:
             "by_sub_type": _clean(get("/api/dashboard/monthly", book=book, group_parent=False, **span)),
             "regular_only": _clean(get("/api/dashboard/monthly", book=book, exclude_one_off=True, **span)),
         }
-        for book in [*book_type.BOOK_NAMES, None]
+        for book in [*names, None]
     }
     out["spending_cards"] = {}
     for month in months:
         cards = get("/api/dashboard/stat-cards", ref_month=month)
-        out["spending_cards"][month] = _clean({k: cards.get(k) for k in STAT_CARDS})
+        keys = [f"{name.lower()}{end}" for name in names for end in BOOK_CARDS] + list(STAT_CARDS)
+        out["spending_cards"][month] = _clean({k: cards.get(k) for k in keys})
 
     # 3: the month-end balance sheet, every month (a month it is not shown
     # for is held as refused, with the reason)
