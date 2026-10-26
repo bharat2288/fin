@@ -115,6 +115,13 @@ def _parse_statement_date(text: str) -> str:
         day, mon, year = m.group(1), m.group(2).upper()[:3], m.group(3)
         return f"{year}-{MONTH_MAP.get(mon, '01')}-{day}"
 
+    # Wealth Management layout (from Sep 2026): "Statement as of: 30-SEP-2026",
+    # before "as at", which its messages use for rates
+    m = re.search(r"Statement as of:\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})", text)
+    if m:
+        day, mon, year = m.group(1).zfill(2), m.group(2).upper(), m.group(3)
+        return f"{year}-{MONTH_MAP.get(mon, '01')}-{day}"
+
     # Bank format: "as at 30 Apr 2025"
     m = re.search(r"as at\s+(\d{1,2})\s+(\w{3})\s+(\d{4})", text)
     if m:
@@ -148,11 +155,17 @@ def _infer_tx_date(day: str, month: str, statement_date: str) -> str:
     return f"{stmt.year}-{month}-{day}"
 
 
+# The Wealth Management Consolidated Statement DBS sends from Sep 2026: a cover
+# page with the address, then "Your Banking Products At A Glance" (the account
+# summary), then the same transaction details as before.
+WEALTH_LAYOUT = "Your Banking Products At A Glance"
+
+
 def _detect_statement_type(text: str) -> str:
     """Detect whether this is a credit card or bank statement."""
     if "Credit Cards" in text or "Statement of Account" in text:
         return "credit_card"
-    if "Consolidated Statement" in text or "Transaction Details" in text:
+    if "Consolidated Statement" in text or "Transaction Details" in text or WEALTH_LAYOUT in text:
         return "bank"
     return "unknown"
 
@@ -443,7 +456,8 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     and last "Balance Carried Forward" (on its last page, the balance of its
     "Total Balance Carried Forward" line, in SGD) as its opening and closing
     balance, the closing dated by the statement date; the import path checks the rows
-    against them (tie.py). With more than one account number in the file, a
+    against them (tie.py). A row's wording ends at a carried-forward line: the
+    page footer and the bank's messages that follow are not its. With more than one account number in the file, a
     balance line missing or no statement date, it states no balance.
     """
     path = Path(pdf_path)
@@ -469,6 +483,9 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     lines = all_text.split("\n")
     i = 0
     current_desc_lines = []
+    # A row's wording stops at the page's or the account's carried-forward
+    # line: what follows (the page footer, the bank's messages) is not its.
+    row_closed = False
     current_date = None
     current_withdrawal = None
     current_deposit = None
@@ -484,6 +501,8 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             r"Balance Brought Forward(?:\s+SGD)?\s+([\d,]+\.\d{2})", line
         )
         if bf_match:
+            # A row that runs over the page goes on after the brought-forward line.
+            row_closed = False
             prev_balance = money.parse_minor(bf_match.group(1))
             if opening is None:
                 opening = prev_balance
@@ -499,6 +518,8 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
         )
         if cf_match:
             closing = money.parse_minor(cf_match.group(1))
+        if "Balance Carried Forward" in line:
+            row_closed = True
 
         # Match transaction start: DD/MM/YYYY Description [amount] [amount] balance
         tx_match = re.match(
@@ -526,6 +547,7 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             desc_part = re.sub(r"[\d,]+\.\d{2}", "", rest).strip()
 
             current_desc_lines = [desc_part]
+            row_closed = False
             current_withdrawal = None
             current_deposit = None
 
@@ -544,9 +566,11 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
                     current_withdrawal = candidates[0]
                 prev_balance = balance
 
-        elif current_date and line and not line.startswith("Balance") and not line.startswith("Total Balance") and not line.startswith("PDS_"):
+        elif current_date and line and not row_closed and not line.startswith("Balance") and not line.startswith("PDS_"):
             # Continuation line for current transaction description
-            if not re.match(r"^[A-Z]\d+$", line):  # skip reference numbers
+            # Skip reference numbers, and a line of single digits the
+            # Wealth Management layout prints under an account's last row.
+            if not re.match(r"^([A-Z]\d+|(\d )+\d)$", line):
                 current_desc_lines.append(line)
 
         i += 1
@@ -616,12 +640,13 @@ def parse_statement(pdf_path: str) -> ParsedStatement | list[ParsedStatement]:
     if not path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    # Read first page to detect type
+    # Read the first page to detect type; a Wealth Management statement's
+    # first page is its cover, so the second is read when the first says nothing.
     pdf = pdfplumber.open(str(path))
-    first_page = pdf.pages[0].extract_text() or ""
+    stmt_type = _detect_statement_type(pdf.pages[0].extract_text() or "")
+    if stmt_type == "unknown" and len(pdf.pages) > 1 and WEALTH_LAYOUT in (pdf.pages[1].extract_text() or ""):
+        stmt_type = "bank"
     pdf.close()
-
-    stmt_type = _detect_statement_type(first_page)
 
     # A read that finds nothing it knows is refused, never handed on as an
     # empty statement: a file this reader takes by default (a loan's
