@@ -254,15 +254,19 @@ async function send(method, url, body, { keep = false, waitMs = 0, slow = '' } =
     else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
     // waitMs: give up after so long, with `slow` as the words, rather than wait on forever.
     const stop = waitMs ? new AbortController() : null;
-    if (stop) { opts.signal = stop.signal; setTimeout(() => stop.abort(), waitMs); }
+    const timer = stop ? (opts.signal = stop.signal, setTimeout(() => stop.abort(), waitMs)) : null;
+    const gaveUp = () => ({ ok: false, status: 0, data: { error: slow } });
     let res;
     try { res = await fetch(url, opts); }
     catch (_) {
-        const error = stop && stop.signal.aborted && slow ? slow : 'fin could not be reached; nothing was changed';
-        return { ok: false, status: 0, data: { error } };
+        clearTimeout(timer);
+        if (stop && stop.signal.aborted && slow) return gaveUp();
+        return { ok: false, status: 0, data: { error: 'fin could not be reached; nothing was changed' } };
     }
-    if (res.status === 413) return { ok: false, status: 413, data: { error: 'That is more than fin takes in one go (10 MB); nothing was changed. Send fewer files at a time.' } };
+    if (res.status === 413) { clearTimeout(timer); return { ok: false, status: 413, data: { error: 'That is more than fin takes in one go (10 MB); nothing was changed. Send fewer files at a time.' } }; }
     const data = await res.json().catch(() => ({}));
+    clearTimeout(timer);
+    if (stop && stop.signal.aborted && slow) return gaveUp();
     if (!keep) cache.clear();
     const change = res.headers.get('X-Fin-Change');
     return { ok: res.ok && !data.error, status: res.status, data, change: change ? Number(change) : null };
@@ -5479,7 +5483,7 @@ ACT['account-save'] = async el => {
 // Import: three results, each drawn as a sum; a drop strip on the desk
 // ---------------------------------------------------------------------------
 
-const importState = { preview: null, done: null, busy: false, showEmpty: false, rowsFrom: '', queue: [], dropped: 0, read: 0 };
+const importState = { preview: null, done: null, busy: false, showEmpty: false, rowsFrom: '', queue: [], dropped: 0, read: 0, failed: null, seq: 0 };
 // A drop is read a group at a time: one request under what the server takes
 // (10 MB) and well inside how long the hosting proxy waits. Confirming a
 // group reads the next.
@@ -5501,6 +5505,8 @@ async function viewImport() {
         <label class="field import-from"><span>Leave out rows before <span class="muted">(optional)</span></span>
             <input type="date" id="imp-rows-from" value="${esc(importState.rowsFrom)}" data-change="import-rows-from"></label>
         ${importState.busy ? `<p class="loading">Reading…${groupWords()}</p>` : ''}
+        ${importState.failed && !importState.busy ? `<div class="notice warn">${icon('warning')}<span class="grow">${importState.dropped > importState.failed.length ? `Files ${importState.read - importState.failed.length + 1}–${importState.read} of ${importState.dropped}` : 'These files'} could not be read; nothing was written.${laterWords(false)}</span>
+            <button class="btn" data-act="import-retry">Try them again</button>${importState.queue.length ? '<button class="btn" data-act="import-next">Skip to the next files</button>' : ''}</div>` : ''}
     </section>
     ${p ? importPreviewHTML(p) : ''}
     ${importState.done ? `<div class="notice ok import-done">${icon('check-circle')}<span>${esc(importState.done)}</span></div>` : ''}
@@ -5587,20 +5593,23 @@ function laterWords(offered = true) {
     const n = importState.queue.length;
     if (!n) return '';
     if (!offered) return ` ${plural(n, 'file')} still to read; Start again drops them.`;
-    return ` The next ${n === 1 ? 'file is' : `${Math.min(n, IMPORT_GROUP_FILES)} are`} read when you import these; Start again drops all ${n} still to read.`;
+    const next = groupSize(importState.queue);
+    return ` The next ${next === 1 ? 'file is' : `${next} are`} read when you import these; Start again drops all ${n} still to read.`;
 }
 ACT['import-next'] = () => { importState.preview = null; return readGroup(nextGroup()); };
 /** The next group of a drop: at most IMPORT_GROUP_FILES files and
  *  IMPORT_GROUP_BYTES bytes, and never none (a file over it goes alone). */
-function nextGroup() {
-    const group = [];
-    let bytes = 0;
-    while (importState.queue.length && group.length < IMPORT_GROUP_FILES) {
-        const size = importState.queue[0].size || 0;
-        if (group.length && bytes + size > IMPORT_GROUP_BYTES) break;
-        group.push(importState.queue.shift());
-        bytes += size;
+function groupSize(queue) {
+    let n = 0, bytes = 0;
+    while (n < queue.length && n < IMPORT_GROUP_FILES) {
+        const size = queue[n].size || 0;
+        if (n && bytes + size > IMPORT_GROUP_BYTES) break;
+        n += 1; bytes += size;
     }
+    return n;
+}
+function nextGroup() {
+    const group = importState.queue.splice(0, groupSize(importState.queue));
     importState.read += group.length;
     return group;
 }
@@ -5616,23 +5625,35 @@ function uploadFiles(files) {
     importState.queue = Array.from(files).sort((a, b) => a.name.localeCompare(b.name));
     importState.dropped = importState.queue.length;
     importState.read = 0;
+    importState.done = null;
     return readGroup(nextGroup());
 }
 async function readGroup(files) {
+    // Only the latest read is answered: a drop made while a group is read
+    // replaces the first drop whole, and its late answer is let go.
+    const mine = ++importState.seq;
     importState.files = files;
+    importState.failed = null;
     const sentFrom = importState.rowsFrom;
     const form = new FormData();
     importState.files.forEach(f => form.append('files', f));
     if (sentFrom) form.append('rows_from', sentFrom);
     // The old preview goes while the files are read: nothing is confirmed
     // against a day it was not read with.
-    importState.busy = true; importState.done = null; importState.preview = null; rerender();
+    importState.busy = true; importState.preview = null; rerender();
     const r = await send('POST', '/api/import/upload', form, { waitMs: IMPORT_WAIT_MS,
         slow: 'fin took too long to read these files; nothing was written. Send fewer at a time.' });
+    if (mine !== importState.seq) return;
     importState.busy = false;
+    if (r.status === 413 && files.length === 1) {
+        // One file over what fin takes: named, left out, and the rest read on.
+        toast(`${files[0].name} is more than fin takes in one go (10 MB); it was left out.`, { bad: true });
+        if (importState.queue.length) return readGroup(nextGroup());
+        rerender(); return;
+    }
     if (!r.ok) {
-        // The files not yet read stay out: drop them again, fewer at a time.
-        importState.queue = [];
+        // The files still to read stay: this group can be read again or skipped.
+        importState.failed = files;
         toast(r.data.error || 'fin could not read those files', { bad: true }); rerender(); return;
     }
     // The day changed while they were read: read them again with it.
@@ -5640,6 +5661,7 @@ async function readGroup(files) {
     importState.preview = r.data;
     rerender();
 }
+ACT['import-retry'] = () => importState.failed && readGroup(importState.failed);
 /** The same six lines for every statement: opening, money out, money in,
  *  what the rows make it, the closing it states, and the result. */
 function stmtSum(s, cur) {
@@ -5738,7 +5760,7 @@ function importChoices(t) {
     IMPORT_CHOICES.forEach(k => { if (k in t) out[k] = t[k]; });
     return out;
 }
-ACT['import-clear'] = () => { importState.preview = null; importState.done = null; importState.files = null; importState.queue = []; importState.dropped = importState.read = 0; rerender(); };
+ACT['import-clear'] = () => { importState.seq += 1; importState.busy = false; importState.preview = null; importState.done = null; importState.files = null; importState.failed = null; importState.queue = []; importState.dropped = importState.read = 0; rerender(); };
 ACT['import-confirm'] = async el => {
     const p = importState.preview;
     el.disabled = true;

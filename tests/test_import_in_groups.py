@@ -140,3 +140,76 @@ def test_a_read_that_takes_too_long_ends_with_words_and_writes_nothing():
 
     assert got["busy"] is False and got["html"] is False
     assert any("too long" in t and "nothing was written" in t for t in got["toasts"])
+
+
+@needs_node
+def test_a_second_drop_while_a_group_is_read_replaces_the_first_whole():
+    got = run("""
+      let release;
+      __answer(s => s.files.length === 8 ? new Promise(r => { release = () => r(__reply(200, __preview('A'))); })
+                                         : __reply(200, __preview('B')));
+      const a = uploadFiles(__files(20));
+      await uploadFiles(__files(3));
+      release(); await a;
+      await rerender();
+      return { id: importState.preview.import_id, queued: importState.queue.length, words: __view.html.includes('of 20') };
+    """)
+
+    # The first drop's late answer is not shown, and nothing of it is left to read.
+    assert got == {"id": "B", "queued": 0, "words": False}
+
+
+@needs_node
+def test_the_imported_notice_stays_while_the_next_group_is_read():
+    got = run("""
+      __answer(s => s.url.includes('confirm') ? __reply(200, {transactions_saved: 5})
+                  : __sent.length > 2 ? 'hang' : __reply(200, __preview(1)));
+      await uploadFiles(__files(12));
+      ACT['import-confirm']({ disabled: false });
+      await new Promise(r => setImmediate(r));
+      await rerender();
+      return { done: importState.done, reading: __view.html.includes('Files 9–12 of 12') };
+    """)
+
+    assert got["done"].startswith("Imported 5 rows") and got["reading"] is True
+
+
+@needs_node
+def test_one_file_too_big_is_named_and_skipped_and_the_rest_are_read():
+    got = run("""
+      const big = { name: 'A big statement.pdf', size: 12_000_000 };
+      __answer(s => s.files.includes(big.name) ? __reply(413, 'too large') : __reply(200, __preview(2)));
+      await uploadFiles([big, ...__files(3)]);
+      await new Promise(r => setImmediate(r));
+      return { sent: __sent.map(s => s.files.length), toasts: __toasts, id: importState.preview && importState.preview.import_id };
+    """)
+
+    assert got["sent"] == [1, 3] and got["id"] == 2
+    assert any("A big statement.pdf" in t and "10 MB" in t for t in got["toasts"])
+
+
+@needs_node
+def test_the_preview_says_how_many_the_next_group_holds():
+    got = run("""
+      __answer(() => __reply(200, Object.assign(__preview(1), {groups: [{account: 'Sample Bank', currency: 'SGD', transactions: [{date: '2026-09-01', description: 'X', amount_sgd: '1.00', flow_type: 'expense', status: 'untyped', statement: 0}], statements: [{status: 'ties', opening: 0, closing: -100, in: 0, out: 100, opening_date: '2026-09-01'}], tie: 'ties', total: 1, typed: 0, untyped: 1, skipped: 0}]})));
+      await uploadFiles(__files(5, 3_000_000));
+      await rerender();
+      return __view.html.match(/The next [^;]+;/)?.[0] || __view.html.slice(0, 300);
+    """)
+
+    assert got == "The next 2 are read when you import these;"
+
+
+@needs_node
+def test_a_group_that_fails_keeps_the_rest_and_offers_to_try_again_or_skip():
+    got = run("""
+      __answer(s => __sent.length === 1 ? __reply(500, {error: 'Sample failure'}) : __reply(200, __preview(3)));
+      await uploadFiles(__files(12));
+      await rerender();
+      const offered = ['import-retry', 'import-next'].every(a => __view.html.includes(`data-act="${a}"`));
+      const queued = importState.queue.length;
+      await ACT['import-retry']();
+      return { offered, queued, sent: __sent.map(s => s.files.length), id: importState.preview.import_id };
+    """)
+
+    assert got == {"offered": True, "queued": 4, "sent": [8, 8], "id": 3}
