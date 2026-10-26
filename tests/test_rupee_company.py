@@ -68,3 +68,22 @@ def test_a_company_kept_in_sgd_has_no_currency_change(client):
 
     assert "Moom" not in names
     assert FILM in names
+
+
+def test_rupees_paid_in_from_an_account_left_out_of_the_check_cross_its_edge_at_the_month_end_rate(client):
+    """A second rupee account (a shared account with no figure for our part
+    at the end of July, or one whose first statement is August's) pays into
+    the film: the rupees cross the check's edge valued at the month-end
+    rate, never read as cents."""
+    film = film_months(client)
+    other = "Sample Second Rupee 0004"
+    make_account(client, other, "bank", currency="INR", last_four="0004")
+    bring_in(client, other, 5_000_000, [
+        ("2026-08-20", "NEFT DR SAMPLE FILM AUG 2", 2_000_000, "movement", {"names": film}),
+    ], currency="INR")
+
+    shown = check(client)
+
+    # Rs 20,000.00 at 0.01534.
+    assert shown["outside_minor"] == 30_680
+    assert shown["unexplained_minor"] == 0
