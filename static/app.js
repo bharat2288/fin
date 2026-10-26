@@ -3574,7 +3574,7 @@ function drawBridge(sheet) {
 const KIND_WORDS = { bank: 'Bank account', card: 'Card', loan: 'Loan', holding: 'Holding', company: 'Company', person: 'Person', untracked: 'Untracked account' };
 /** What a row is labelled, as an account's rows show it. */
 function acctRowLabel(row) {
-    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted">transfer</span>', payment: '<span class="muted">card payment</span>', movement: `<span class="muted">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted">income</span>' }[row.flow_type];
+    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted">transfer</span>', payment: '<span class="muted">card payment</span>', movement: `<span class="muted">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted">income</span>', not_ours: '<span class="muted">not ours</span>' }[row.flow_type];
     return flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
 }
 /** One of an account's rows: money in and money out in two plain columns. */
@@ -3796,7 +3796,7 @@ function pager(list, actName, sorted = false) {
 function notCheckedTag(row) { return row.not_checked ? ` ${tag('notchecked', 'not checked')}` : ''; }
 function rowTr(row, { account = true, book = false } = {}) {
     const minor = toMinor(row.amount_sgd, row.currency);
-    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted small">transfer</span>', payment: '<span class="muted small">card payment</span>', movement: `<span class="muted small">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted small">income</span>' }[row.flow_type];
+    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted small">transfer</span>', payment: '<span class="muted small">card payment</span>', movement: `<span class="muted small">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted small">income</span>', not_ours: '<span class="muted small">not ours</span>' }[row.flow_type];
     const label = flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
