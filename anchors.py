@@ -198,3 +198,58 @@ def remove(conn: sqlite3.Connection, anchor_id: int) -> dict | None:
     if held is not None:
         conn.execute("DELETE FROM anchors WHERE id = ?", (anchor_id,))
     return held
+
+
+def currency_refusal(conn: sqlite3.Connection, account_id: int, currency: str) -> str | None:
+    """Why an account may not change to another currency, or None: a figure
+    the operator supplied is held in its currency now, and would be read in
+    the new one (S$ 1,000.00 as Rs 1,000.00). A statement balance is the
+    statement's, and is no bar: setting an account that took a statement in
+    the wrong currency right is how that is mended."""
+    held = conn.execute("SELECT currency FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    if held is None or (held[0] or "SGD") == currency:
+        return None
+    if conn.execute("SELECT 1 FROM anchors WHERE account_id = ? AND source = ? LIMIT 1",
+                    (account_id, SUPPLIED)).fetchone() is None:
+        return None
+    return (f"This account holds figures typed in {held[0] or 'SGD'}; they would be read in {currency}. "
+            "Delete its figures first, then enter them again in the new currency. Nothing was saved.")
+
+
+def currency_refusal_to_undo(conn: sqlite3.Connection, entry_id: int) -> str | None:
+    """Why undoing a change entry would read a figure in another currency
+    than it was typed in, or None: putting back an account's currency while
+    it holds figures typed since (currency_refusal), or putting back a figure
+    on an account whose currency has changed since."""
+    import json
+
+    for tbl, row_id, before, after in conn.execute(
+        "SELECT tbl, row_id, before, after FROM change_rows WHERE entry_id = ? AND tbl IN ('accounts', 'anchors')",
+        (entry_id,),
+    ):
+        old = json.loads(before) if before else None
+        new = json.loads(after) if after else None
+        if tbl == "accounts":
+            if old and new and (old.get("currency") or "SGD") != (new.get("currency") or "SGD"):
+                why = currency_refusal(conn, row_id, old.get("currency") or "SGD")
+                if why:
+                    return why.replace("Nothing was saved.", "Nothing was undone.")
+            continue
+        if old is None or old.get("source") != SUPPLIED:
+            continue  # the undo takes a figure out, or it is a statement's
+        # The account's currency when the figure was typed: as the first
+        # later change to the account found it, else as it is now.
+        first = conn.execute(
+            "SELECT before FROM change_rows WHERE tbl = 'accounts' AND row_id = ? AND entry_id > ? "
+            "AND op = 'update' ORDER BY entry_id, id LIMIT 1", (old["account_id"], entry_id),
+        ).fetchone()
+        now = conn.execute("SELECT currency FROM accounts WHERE id = ?", (old["account_id"],)).fetchone()
+        if first is None or not first[0] or now is None:
+            continue
+        was = json.loads(first[0]).get("currency") or "SGD"
+        if (now[0] or "SGD") != was:
+            return (f"This figure was typed in {was}, and its account is kept in {now[0]} since; "
+                    "putting it back would read it in the new currency. Enter it again instead. "
+                    "Nothing was undone.")
+    return None
+

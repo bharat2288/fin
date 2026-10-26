@@ -474,6 +474,14 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     locked = loan_terms.refusal_to_undo(conn, entry_id)
     if locked:
         raise UndoRefused(locked)
+    # A figure is read in its account's currency: no undo puts one back, or
+    # puts back a currency, so that a figure is read in another than it was
+    # typed in.
+    import anchors
+
+    rereads = anchors.currency_refusal_to_undo(conn, entry_id)
+    if rereads:
+        raise UndoRefused(rereads)
     # So does a loan whose choice of book for its interest it puts back
     # (interest_book.py): rows worked out since, in a later change, follow it.
     import interest_book

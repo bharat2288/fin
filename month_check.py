@@ -172,23 +172,42 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
     touched: set = set()
     if not in_check:
         return 0, touched
+    currency_of = {r[0]: r[1] or CURRENCY for r in conn.execute("SELECT id, currency FROM accounts")}
+
+    def in_cents(amounts: dict) -> int:
+        """Amounts summed per currency, each sum valued at the month-end rate
+        as the sheet values a line kept in it (never rupees read as cents);
+        a currency with no rate is taken as it is, as before."""
+        cents = 0
+        for currency, amount in amounts.items():
+            found = None
+            if currency != CURRENCY:
+                found = rates.on_or_before(conn, rates.pair_for(currency), upto)
+            cents += amount if found is None else money.convert_minor(
+                amount, found["value"], currency, CURRENCY)
+        return cents
     checked = ", ".join("?" for _ in in_check)
     moves = ", ".join("?" for _ in MOVE_FLOWS)
     if out_of_check:
         left = ", ".join("?" for _ in out_of_check)
-        for other, amount in conn.execute(
-            "SELECT t.other_side_id, t.amount_minor FROM transactions t "
+        leaving: dict = {}
+        for source, other, amount in conn.execute(
+            "SELECT s.account_id, t.other_side_id, t.amount_minor FROM transactions t "
             "JOIN statements s ON t.statement_id = s.id "
             f"WHERE s.account_id IN ({checked}) AND t.flow_type IN ({moves}) "
             f"AND t.other_side_id IN ({left}) AND {window}",
             (*in_check, *MOVE_FLOWS, *out_of_check, after, upto),
         ):
             # Money out of the checked account (positive) leaves the check.
-            total -= amount
+            leaving[currency_of[source]] = leaving.get(currency_of[source], 0) + amount
             touched.add(other)
+        total -= in_cents(leaving)
 
-    def entering(condition: str, params: tuple) -> None:
+    def entering(condition: str, params: tuple, currency: str) -> None:
+        """Rows on accounts left out that move a line in the check, in the
+        line's currency, as its balance adds them up (balance_sheet)."""
         nonlocal total
+        moved = 0
         for source, amount in conn.execute(
             "SELECT s.account_id, t.amount_minor FROM transactions t "
             "JOIN statements s ON t.statement_id = s.id "
@@ -197,8 +216,9 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
             (*in_check, after, upto, *params),
         ):
             # Money out of the left-out account (positive) moves the line up.
-            total += amount
+            moved += amount
             touched.add(source)
+        total += in_cents({currency: moved})
 
     names = dict(conn.execute("SELECT id, name FROM accounts"))
     # An account that is part of another's balance has no line of its own.
@@ -209,7 +229,7 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
             # Worth what its terms work out: no row moves it.
             continue
         if kind in ("loan", "holding"):
-            entering("t.flow_type = ? AND t.other_side_id = ?", (flow.MOVEMENT, acct))
+            entering("t.flow_type = ? AND t.other_side_id = ?", (flow.MOVEMENT, acct), currency)
         elif kind == "bank" and conn.execute(
             "SELECT 1 FROM statements WHERE account_id = ? LIMIT 1", (acct,)
         ).fetchone() is None:
@@ -218,6 +238,7 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
                 f"t.flow_type IN ({flows}) AND t.other_side_id = ? AND a.owner = ? "
                 "AND COALESCE(a.currency, ?) = ?",
                 (*balance_sheet.INTO_UNSTATED_FLOWS, acct, account_kind.HOUSEHOLD, CURRENCY, currency),
+                currency,
             )
         elif kind == "company":
             # Only a company that is a book has rows paid for it, as its line counts them.
@@ -229,6 +250,7 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
                 f"(t.flow_type IN ({paid}) AND t.book = ?) OR (t.flow_type = ? AND t.other_side_id = ?))",
                 (account_kind.HOUSEHOLD, CURRENCY, currency, *balance_sheet.PAID_FOR_FLOWS, book,
                  flow.MOVEMENT, acct),
+                currency,
             )
     return total, touched
 

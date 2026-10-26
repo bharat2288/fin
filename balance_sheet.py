@@ -692,8 +692,9 @@ def _counterparty_line(conn: sqlite3.Connection, account, as_at: date, month: st
 
 def _currency_change(conn: sqlite3.Connection, accounts: list, as_at: date, name_of) -> dict:
     """Currency change for the month ending on `as_at`: for each account kept
-    in another currency, its balance at the start of the month valued at the
-    end rate, less the same balance valued at the start rate. Each valuation
+    in another currency, a company kept in rupees included, its balance at the
+    start of the month valued at the end rate, less the same balance valued at
+    the start rate. Each valuation
     is rounded to the cent on its own, as the sheet shows it, so the figure
     is the difference of two figures the sheets show.
 
@@ -726,7 +727,13 @@ def _currency_change(conn: sqlite3.Connection, accounts: list, as_at: date, name
         if currency not in money.MINOR_UNIT_DIGITS:
             line["why"] = f"in {currency}, {NO_RATE_KEPT}"
             continue
-        opening = balance_on(conn, account, start)
+        if account["type"] in COUNTERPARTIES[2]:
+            # A company's balance is its line's (_counterparty_line), which
+            # needs no figure.
+            opening = _counterparty_line(conn, account, date.fromisoformat(start), start[:7],
+                                         name_of)["balance_minor"]
+        else:
+            opening = balance_on(conn, account, start)
         if opening is None:
             line["why"] = f"no balance on {start}"
             continue
@@ -824,6 +831,7 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name,
         f"WHERE type IN ({', '.join('?' for _ in kinds)}) AND owner = ? ORDER BY name, id",
         (*kinds, account_kind.HOUSEHOLD),
     ).fetchall()
+    listed += accounts
     lines = [
         _marked(_counterparty_line(conn, account, as_at, month, name_of), account)
         for account in accounts
