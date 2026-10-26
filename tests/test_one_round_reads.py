@@ -140,7 +140,7 @@ SHEET = {"as_at": "2026-10-31", "net_worth_minor": 488000, "left_out": [], "note
 SUBS = [{"id": 1, "service_name": "Netflix", "amount": 22.98, "currency": "SGD", "frequency": "monthly", "periods": 1, "status": "active",
          "book": "Household", "account_name": "citi card", "tx_last_paid": "2026-07-03", "computed_renewal": "2026-11-03",
          # The server's verdict (bills.py, fin-redesign 10): the screens read it, never work it out.
-         "state": "missed", "due": "2026-10-03", "every": "every month"}]
+         "state": "missed", "due": "2026-10-03", "every": "monthly"}]
 CARDS = {"ref_month": "2026-09", "household": 1234.5, "moom": 300, "avg_household": 1100, "avg_moom": 280, "avg_months": 3,
          "household_rows": 40, "moom_out_rows": 4, "held_out_out_total": 500, "held_out_in_total": 0,
          "loan_principal": 0, "loan_instalments": 0, "loan_interest": 0,

@@ -140,7 +140,7 @@ const SIGNS = { SGD: 'S$', INR: '₹' };
 const digitsOf = cur => 2;
 const formatters = {};
 """
-PREVIEW_FUNCS = ["groupFor", "money", "day", "monthName", "plural", "bandedTable", "keptWords", "flowsLine",
+PREVIEW_FUNCS = ["groupFor", "money", "day", "monthName", "plural", "bandedTable", "keptWords", "flowsLine", "exampleCell",
                  "driftParts", "slotParts", "previewParts"]
 PREVIEW_CONSTS = ["MONTHS", "LONG_MONTHS", "PREVIEW_FIELD", "PREVIEW_TITLE"]
 

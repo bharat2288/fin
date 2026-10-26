@@ -173,7 +173,7 @@ def test_case_17_a_half_yearly_bill_reads_its_monthly_share(client, conn):
     six = bill(client, "Sample Club", amount=19500, frequency="monthly", periods=6, account_id=bank, renewal_date="2027-02-15")
 
     for got in (shown(client, half), shown(client, six)):
-        assert (got["monthly_sgd"], got["every"], got["cadence"]) == (3250.0, "every 6 months", {"unit": "month", "count": 6})
+        assert (got["monthly_sgd"], got["every"], got["cadence"]) == (3250.0, "half-yearly", {"unit": "month", "count": 6})
 
 
 def test_case_17_saving_a_bill_by_its_cadence_keeps_how_it_is_held(client, conn):
@@ -283,7 +283,7 @@ def test_case_17_saving_the_bill_sheet_untouched_keeps_every_6_months(client, co
 
     assert (held(conn, rent)["frequency"], held(conn, rent)["periods"]) == (held_as["frequency"], held_as.get("periods", 1))
     got = shown(client, rent)
-    assert (got["every"], got["monthly_sgd"]) == ("every 6 months", 3250.0)
+    assert (got["every"], got["monthly_sgd"]) == ("half-yearly", 3250.0)
 
 
 # --- case 19: a bill's currency is its paying account's ---------------------------------
@@ -387,7 +387,7 @@ def test_case_18_the_bills_screen_says_awaiting_statement_and_missed_from_the_se
 
     assert "awaiting statement" in rows["Sample Ledger"] and "no payment seen" not in rows["Sample Ledger"]
     assert "no payment seen for 15 Aug" in rows["Sample Rent"]
-    assert "every 6 months" in rows["Sample Rent"]
+    assert "half-yearly" in rows["Sample Rent"]
     assert "1 of 2 not seen" in html
 
 
@@ -539,7 +539,7 @@ def test_review_8_annual_reads_as_yearly_and_an_unknown_cadence_says_so(client, 
     lunar = _held_frequency(conn, "Sample Lunar", "lunar", bank)
 
     got = shown(client, annual)
-    assert (got["every"], got["monthly_sgd"], got["computed_renewal"]) == ("every 12 months", 10.0, "2027-08-10")
+    assert (got["every"], got["monthly_sgd"], got["computed_renewal"]) == ("yearly", 10.0, "2027-08-10")
     got = shown(client, lunar)
     assert (got["state"], got["every"], got["monthly_sgd"], got["due"]) == ("unknown_cadence", "how often unknown (lunar)", None, None)
 
@@ -652,3 +652,145 @@ def test_review_v3_the_awaiting_note_names_the_due_day_it_waits_on():
                       "console.log(JSON.stringify([billWaitsOn(b, { named: false }), billWaitsOn(b)]));"])
     assert _node(code) == ["17 Apr 2026 not checked yet; waiting on its April 2026 statement",
                            "17 Apr 2026 not checked yet; waiting on Sample Bank 1002\u2019s April 2026 statement"]
+
+
+# --- the polish pass (the operator's screen review, ui-review-10) ------------------------
+
+
+def test_polish_how_often_reads_in_the_common_words_in_the_app_and_the_chat(client, conn):
+    bank = account(conn, "Sample Bank 2001")
+    held_as = {
+        "weekly": {"frequency": "weekly"}, "fortnightly": {"frequency": "biweekly"},
+        "monthly": {"frequency": "monthly"}, "quarterly": {"frequency": "quarterly"},
+        "half-yearly": {"frequency": "monthly", "periods": 6}, "yearly": {"frequency": "yearly"},
+        "every 2 months": {"frequency": "monthly", "periods": 2},
+        "every 24 months": {"frequency": "yearly", "periods": 2},
+        "every 3 weeks": {"frequency": "weekly", "periods": 3},
+    }
+    ids = {words: bill(client, f"Sample Bill {n}", amount=10, account_id=bank, renewal_date="2027-02-15", **fields)
+           for n, (words, fields) in enumerate(held_as.items())}
+
+    app_read = {s["id"]: s["every"] for s in client.get("/api/subscriptions").get_json()}
+    chat = mcp_tools.call("bills", {}, actor=ACTOR)
+    assert chat["ok"], chat
+    chat_read = {b["id"]: b["every"] for b in chat["result"]["bills"]}
+
+    assert {words: app_read[i] for words, i in ids.items()} == {words: words for words in ids}
+    assert {words: chat_read[i] for words, i in ids.items()} == {words: words for words in ids}
+    assert "every 6 months" not in mcp_tools.BY_NAME["bills"].description
+
+
+def _bills_js(*lines):
+    return "\n".join([SHEET_PRELUDE, (STATIC / "app.js").read_text(encoding="utf-8"), *lines])
+
+
+@needs_node
+def test_polish_the_sheet_offers_how_often_in_the_common_words():
+    code = _bills_js(
+        "const own = { cadence: { unit: 'month', count: 2 }, every: 'every 2 months', frequency: 'monthly' };",
+        "console.log(JSON.stringify([billEveryChoices(null), billEveryChoices(own).slice(-1)]));")
+    choices, [other] = _node(code)
+
+    assert [words for _, words in choices] == ["weekly", "fortnightly", "monthly", "quarterly", "half-yearly", "yearly"]
+    assert other == ["month:2", "every 2 months"]
+
+
+@needs_node
+def test_polish_the_bill_sheet_labels_the_picker_how_often(client, conn):
+    bank = account(conn, "Sample Bank 2002")
+    rent = bill(client, "Sample Rent", amount=19500, frequency="half-yearly", account_id=bank, renewal_date="2027-02-15")
+    reads = ["/api/subscriptions", "/api/types", "/api/books", "/api/accounts", "/api/review", "/api/account-kinds", "/api/services"]
+    answers = {u: client.get(u).get_json() for u in reads}
+    html = _node(_bills_js(f"ANSWERS = {json.dumps(answers)};", "render = async () => {}; refreshFrame = () => {};",
+                           "(async () => { await viewBills();",
+                           f"await ACT.bill({{ dataset: {{ id: '{rent}' }} }});",
+                           "console.log(JSON.stringify(sheets.innerHTML)); })()"
+                           ".catch(e => { console.error(e && e.stack || e); process.exit(1); });"))
+
+    assert "<span>How often</span>" in html and "<span>Every</span>" not in html
+    assert '<option value="month:6" selected>half-yearly</option>' in html
+
+
+@needs_node
+def test_polish_a_books_head_puts_the_counts_on_their_own_line(client, covered_to_31_aug):
+    reads = ["/api/subscriptions", "/api/types", "/api/books", "/api/accounts", "/api/review", "/api/account-kinds"]
+    answers = {u: client.get(u).get_json() for u in reads}
+    html = _node(_bills_js(f"ANSWERS = {json.dumps(answers)};",
+                           "(async () => { console.log(JSON.stringify(await viewBills())); })()"
+                           ".catch(e => { console.error(e && e.stack || e); process.exit(1); });"))
+    import re
+    head = re.search(r'<tr class="section sl-book">.*?</tr>', html, re.S).group(0)
+
+    assert re.search(r'<span class="sl-amt">[^<]*a month</span>', head), head
+    assert '<span class="sl-counts">1 of 2 not seen · 1 awaiting</span>' in head, head
+
+
+@needs_node
+def test_polish_a_bills_state_tags_sit_together_in_one_compact_group(client, conn):
+    bank = account(conn, "Sample Bank 2003", kind="card")
+    statement(conn, bank, "2026-08-31", "2026-08-01")
+    conn.execute("INSERT INTO subscriptions (service_id, amount, currency, frequency, periods, account_id, renewal_date, "
+                 "match_pattern, status) VALUES (?, 10, 'USD', 'monthly', 1, ?, '2026-09-17', 'SAMPLE NOTES', 'active')",
+                 (merchant(client, "Sample Notes"), bank))
+    conn.commit()
+    reads = ["/api/subscriptions", "/api/types", "/api/books", "/api/accounts", "/api/review", "/api/account-kinds"]
+    answers = {u: client.get(u).get_json() for u in reads}
+    html = _node(_bills_js(f"ANSWERS = {json.dumps(answers)};",
+                           "(async () => { console.log(JSON.stringify(await viewBills())); })()"
+                           ".catch(e => { console.error(e && e.stack || e); process.exit(1); });"))
+    import re
+    sub = re.search(r'<td class="sl-sub">(.*?)</td>', html, re.S).group(1)
+
+    group = re.search(r'<span class="sl-tags">(.*?)</span>\s*$', sub, re.S)
+    assert group, sub
+    assert "awaiting statement" in group.group(1) and "USD bill, SGD account" in group.group(1)
+
+
+def _sheet_html(client, bill_id, then=""):
+    reads = ["/api/subscriptions", "/api/types", "/api/books", "/api/accounts", "/api/review", "/api/account-kinds", "/api/services"]
+    answers = {u: client.get(u).get_json() for u in reads}
+    return _node(_bills_js(f"ANSWERS = {json.dumps(answers)};", "render = async () => {}; refreshFrame = () => {};",
+                           "(async () => { await viewBills();",
+                           f"await ACT.bill({{ dataset: {{ id: '{bill_id}' }} }});", then,
+                           "console.log(JSON.stringify(sheets.innerHTML)); })()"
+                           ".catch(e => { console.error(e && e.stack || e); process.exit(1); });"))
+
+
+@pytest.fixture
+def notes_usd_awaiting(client, conn):
+    """Sample Notes, US$10 a month on an S$ card whose statements stop at 31 Aug: awaiting, and in another currency."""
+    card = account(conn, "Sample Card 2004", kind="card")
+    statement(conn, card, "2026-08-31", "2026-08-01")
+    conn.execute("INSERT INTO subscriptions (service_id, amount, currency, frequency, periods, account_id, renewal_date, "
+                 "match_pattern, status) VALUES (?, 10, 'USD', 'monthly', 1, ?, '2026-09-17', 'SAMPLE NOTES', 'active')",
+                 (merchant(client, "Sample Notes"), card))
+    conn.commit()
+    got = next(s for s in client.get("/api/subscriptions").get_json() if s["service_name"] == "Sample Notes")
+    assert got["state"] == "awaiting_statement" and got["currency_mismatch"]
+    return got["id"]
+
+
+@needs_node
+def test_polish_an_awaiting_bill_in_another_currency_has_one_notice_before_its_fields(client, notes_usd_awaiting):
+    html = _sheet_html(client, notes_usd_awaiting)
+    before_fields = html.split('<div class="fields">', 1)[0]
+
+    assert before_fields.count('class="notice') == 1, before_fields
+    assert "statement" in before_fields and "Billed in USD" in before_fields
+    assert 'id="bl-currency"' in before_fields
+
+
+@needs_node
+def test_polish_the_currency_fix_says_plainly_where_to_change_the_amount(client, notes_usd_awaiting):
+    preview = client.post(f"/api/bills/{notes_usd_awaiting}/currency", json={}).get_json()
+    code = _bills_js(
+        "render = async () => {}; refreshFrame = () => {};",
+        "const box = { innerHTML: '' };",
+        "document.querySelector = s => s === '#bl-currency' ? box : null;",
+        f"fetch = async () => ({{ ok: false, status: 409, json: async () => ({json.dumps(preview)}), headers: {{ get: () => null }} }});",
+        "(async () => { await ACT['bill-currency']({ dataset: { id: '1' } }); console.log(JSON.stringify(box.innerHTML)); })()"
+        ".catch(e => { console.error(e && e.stack || e); process.exit(1); });")
+    html = _node(code)
+
+    assert "If the bill is a different amount in SGD, change it here." in html
+    assert "if it bills another" not in html

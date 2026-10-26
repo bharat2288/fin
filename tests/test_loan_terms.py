@@ -693,6 +693,7 @@ def preview_html(preview: dict) -> str:
     code = "\n".join([
         *MONEY_JS,
         _const("MONTHS"), _function("day"), _function("plural"), _function("tag"),
+        _const("RULE_FLOWS"), _function("flowSaid"),
         _function("stmtSum"), _function("loanFigureSum"), _function("importPreviewHTML"),
         f"console.log(JSON.stringify(importPreviewHTML({json.dumps(preview)})));",
     ])
@@ -741,7 +742,7 @@ SHOWN = {"financed_minor": 10_000_000, "interest_minor": INTEREST, "flat_rate": 
 
 def terms_fields_html(terms, lock=None) -> str:
     code = "\n".join([
-        *MONEY_JS, _function("amountField"), _function("termsFieldsHTML"),
+        *MONEY_JS, _const("MONTHS"), _function("day"), _function("amountField"), _function("termsFieldsHTML"),
         f"console.log(JSON.stringify(termsFieldsHTML({json.dumps(terms)}, 'SGD', {json.dumps(lock)})));",
     ])
     return _node(code)
@@ -843,3 +844,62 @@ def test_undoing_the_terms_takes_the_interest_worked_out_from_them(client, conn)
     assert loan_interest.periods(conn, loan) == []
     assert [t for t in client.get("/api/transactions?per_page=500").get_json()["transactions"]
             if t["book_source"] == "derived"] == []
+
+
+# --- the polish pass (the operator's screen review, ui-review-14) ------------------------
+
+
+@needs_node
+def test_polish_the_terms_hint_says_its_day_in_the_apps_own_date_format():
+    html = terms_fields_html(SHOWN)
+    hint = html.rsplit('<span class="hint">', 1)[1]
+
+    assert "owed from 31 Dec 2025" in hint, hint
+    assert "2025-12-31" not in hint
+
+
+def figure_js():
+    return ["const OWED_KINDS = ['loan'];", _const("STALE_DAYS"), _const("MONTHS"), _function("day"),
+            _function("figureEmptyLine"), _function("figureCheckLine")]
+
+
+@needs_node
+def test_polish_a_loan_with_terms_and_no_figure_says_what_is_true():
+    code = "\n".join([
+        *figure_js(),
+        "const a = {type: 'loan', currency: 'SGD', terms: {months: 48}};",
+        "const b = {type: 'loan', currency: 'SGD', terms: null};",
+        "const c = {type: 'holding', currency: 'SGD'};",
+        "console.log(JSON.stringify([figureEmptyLine(a), figureEmptyLine(b), figureEmptyLine(c)]));",
+    ])
+    with_terms, without, holding = _node(code)
+
+    assert "left out of net worth until it has one" not in with_terms
+    assert "interest is worked out from its terms" in with_terms
+    assert "joins net worth" in with_terms and "first statement" in with_terms and "principal owed" in with_terms
+    assert without == holding == "No figure yet: it is left out of net worth until it has one."
+
+
+@needs_node
+def test_polish_the_figure_dialog_says_the_next_import_checks_a_figure_on_a_loan_with_terms():
+    code = "\n".join([
+        *figure_js(),
+        "const a = {type: 'loan', currency: 'SGD', terms: {months: 48}};",
+        "const b = {type: 'loan', currency: 'SGD', terms: null};",
+        "console.log(JSON.stringify([figureCheckLine(a), figureCheckLine(b)]));",
+    ])
+    with_terms, without = _node(code)
+
+    assert "nothing checks it" not in with_terms
+    assert "next statement import checks it against the terms" in with_terms
+    assert "nothing checks it" in without
+
+
+@needs_node
+def test_polish_the_loan_figure_cards_rule_of_78_note_sits_on_its_own_line():
+    html = preview_html({"groups": [], "errors": [], "figures": [FIGURE]})
+    import re
+    row = re.search(r'<tr><td class="op">−</td><td>(.*?)</td>', html, re.S).group(1)
+
+    assert row.startswith("interest not yet earned")
+    assert '<div class="small muted">Rule of 78: 47 of 48 instalments left</div>' in row, row

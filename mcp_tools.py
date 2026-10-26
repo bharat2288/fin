@@ -456,7 +456,7 @@ _READS = [
         "bills",
         "The bills (what renews, from the rows that pay it), with the missed-bill rule's verdict, "
         "the same one fin's Bills screen and Queue show: each bill's merchant, book and type, amount and "
-        "currency, how often (every: e.g. every 6 months), monthly_sgd (the bill spread over the months "
+        "currency, how often (every: e.g. monthly, half-yearly, every 2 months), monthly_sgd (the bill spread over the months "
         "one cycle covers, in S$), the account that pays it and that account's currency "
         "(currency_mismatch: the bill is held in another currency than its paying account's, a flag for "
         "the operator to fix in fin's Bills), status, due (the day it was last due), last_paid, "

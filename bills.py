@@ -7,7 +7,7 @@ here at read time and stored nowhere, and the app's Bills screen, the Queue
 and Home (GET /api/subscriptions) and the chat's bills tool (GET /api/bills)
 all read it from here:
 
-- **cadence**: frequency x periods as a unit and a count ("every 6 months");
+- **cadence**: frequency x periods as a unit and a count ("half-yearly");
   half-yearly and monthly x 6 are the same cadence. The sheet saves a cadence
   (`every`) and the bill keeps the pair it holds when the meaning is the same,
   so saving never rewrites it (case 17). A frequency held from before is read
@@ -124,13 +124,20 @@ def cadence(frequency: str | None, periods) -> dict | None:
     return {"unit": unit, "count": step * (periods or 1)}
 
 
+# A cadence said in its common word where there is one; any other count reads
+# "every 2 months", "every 3 weeks".
+COMMON_WORDS = {("week", 1): "weekly", ("week", 2): "fortnightly", ("month", 1): "monthly",
+                ("month", 3): "quarterly", ("month", 6): "half-yearly", ("month", 12): "yearly"}
+
+
 def every(frequency: str | None, periods) -> str:
-    """The cadence in words: "every month", "every 6 months", "every 2 weeks";
-    "how often unknown (lunar)" for one fin cannot read."""
+    """The cadence in words: "monthly", "half-yearly", "fortnightly", or
+    "every 2 months" where no common word fits; "how often unknown (lunar)"
+    for one fin cannot read."""
     c = cadence(frequency, periods)
     if c is None:
         return f"how often unknown ({frequency})"
-    return f"every {c['unit']}" if c["count"] == 1 else f"every {c['count']} {c['unit']}s"
+    return COMMON_WORDS.get((c["unit"], c["count"])) or f"every {c['count']} {c['unit']}s"
 
 
 def held_as(unit, count) -> tuple[str, int]:

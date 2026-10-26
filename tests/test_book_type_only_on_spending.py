@@ -606,3 +606,26 @@ def test_this_was_offers_the_merchants_type_first_on_a_waiting_row_only():
         "  offeredType({ flow_type: 'review', service_id: null, type_id: null }, services)]));",
     ])
     assert _node(code) == [21, 30, None, None, None]
+
+
+# --- the polish pass (the operator's screen review, ui-review-05) ------------------------------
+
+
+@needs_node
+def test_polish_a_teachs_drawer_counts_the_row_taught_apart_from_the_others(client, fees):
+    from test_preview_rules_and_merges import drawer_for, text_of
+    taught = fees["taken"][0]
+    preview = client.post("/api/transactions/resolve", json={**fees["teach"], "tx_id": taught}).get_json()["preview"]
+    assert taught not in [f["id"] for f in preview["flows"]]
+
+    got = drawer_for(preview, {"taught": taught})
+    text = text_of(got["body"])
+
+    assert f"This changes {preview['count']} past rows" in text
+    # The count is the row taught and the others; the flow line counts the others.
+    assert preview["count"] == len(preview["flows"]) + 1
+    assert "What the other rows are: 1 spending → a movement" in text, text
+    # The row taught is marked among the examples, so the count above reads as it and the others.
+    import re
+    mine = next(r for r in re.findall(r"<tr>.*?</tr>", got["body"], re.S) if "this row" in r)
+    assert "1,850.00" in mine

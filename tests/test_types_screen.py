@@ -348,7 +348,7 @@ def test_a_refused_undo_names_the_type_that_blocks_it_as_every_screen_does(serve
     resp = api.put(f"/api/types/{listed(api)['Kids > Childcare']['id']}", json={"covers": "nannies, creches"})
     assert resp.status_code == 200
     html = run(server, "return await viewChanges();")
-    refusal = re.search(r'<div class="notice bad refusal">(.*?)<button', html, re.S)
+    refusal = re.search(r'<div class="notice refusal">(.*?)<button', html, re.S)
     assert refusal, html
     said = words(refusal.group(1))
     assert "fixed the wording of Kids > Childcare" in said, said

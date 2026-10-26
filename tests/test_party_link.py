@@ -37,6 +37,7 @@ import mcp_tools
 import party
 from test_balance_sheet import bring_in, make_account
 from test_client_seams import PRELUDE, _const, _function, _node, needs_node
+from test_types_screen import server  # noqa: F401 (a fixture: the real app on a local port)
 
 ACTOR = "chat:sample-subject"
 BANK = "Sample Bank 0002"
@@ -575,6 +576,30 @@ def test_a_link_and_an_unlink_title_their_change_in_words():
         " changeWords({table: 'accounts', op: 'update', row_id: 3, before: {name: 'Sample Co', status: 'active'},"
         " after: {name: 'Sample Co', status: 'archived'}}, ctx)]));",
     ])
-    assert _node(code) == ["joined the account Sample Co to the party Sample Co Health",
-                           "took the account Sample Co off the party Sample Co Health",
+    # Short enough for one line on a phone (polish, ui-review-09): the party named as one.
+    assert _node(code) == ["joined Sample Co to Sample Co Health (party)",
+                           "took Sample Co off Sample Co Health (party)",
                            "changed the account Sample Co"]
+
+
+# --- the polish pass (the operator's screen review, ui-review-09) ------------------------
+
+
+@needs_node
+def test_polish_an_older_entry_a_link_holds_explains_its_refused_undo_quietly(client, placed, server):
+    from test_types_screen import run, words
+    import re
+    resp = client.put(f"/api/accounts/{placed['co']}/party", json={"service_id": placed["co_merchant"]})
+    assert resp.status_code == 200, resp.get_json()
+
+    html = run(server, "return await viewChanges();")
+    titles = [words(t) for t in re.findall(r'<button class="entry-title"[^>]*>(.*?)</button>', html, re.S)]
+    assert "Joined Sample Co to Sample Co Health (party)" in titles, titles
+    added = re.search(r'<li class="entry[^"]*refused[^"]*"[^>]*>(?:(?!</li>).)*?Added the account Sample Co(?:(?!</li>).)*</li>', html, re.S)
+    assert added, titles
+    notice = re.search(r'<div class="notice([^"]*)">(.*?)<button', added.group(0), re.S)
+    assert notice, added.group(0)
+    assert "bad" not in notice.group(1).split() and "refusal" in notice.group(1).split()
+    said = words(notice.group(2))
+    assert said.startswith("Waits on a later change."), said
+    assert "Undo that first, then this one." in said, said
