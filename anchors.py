@@ -200,7 +200,8 @@ def remove(conn: sqlite3.Connection, anchor_id: int) -> dict | None:
     return held
 
 
-def currency_refusal(conn: sqlite3.Connection, account_id: int, currency: str) -> str | None:
+def currency_refusal(conn: sqlite3.Connection, account_id: int, currency: str,
+                     terms_sent: bool = False) -> str | None:
     """Why an account may not change to another currency, or None: a figure
     the operator supplied is held in its currency now, and would be read in
     the new one (S$ 1,000.00 as Rs 1,000.00). A statement balance is the
@@ -209,6 +210,11 @@ def currency_refusal(conn: sqlite3.Connection, account_id: int, currency: str) -
     held = conn.execute("SELECT currency FROM accounts WHERE id = ?", (account_id,)).fetchone()
     if held is None or (held[0] or "SGD") == currency:
         return None
+    import loan_terms  # it reads figures from this module
+
+    if not terms_sent and loan_terms.held(conn, account_id) is not None:
+        return (f"This loan's hire-purchase terms are typed in {held[0] or 'SGD'}; they would be read in "
+                f"{currency}. Enter its terms again in the new currency in the same save. Nothing was saved.")
     if conn.execute("SELECT 1 FROM anchors WHERE account_id = ? AND source = ? LIMIT 1",
                     (account_id, SUPPLIED)).fetchone() is None:
         return None
