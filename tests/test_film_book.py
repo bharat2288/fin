@@ -230,3 +230,18 @@ def test_chat_adds_a_company_in_the_currency_it_is_given(client):
     assert done["ok"], done
     accounts = {a["name"]: a for a in client.get("/api/accounts").get_json()}
     assert (accounts["Film"]["type"], accounts["Film"]["currency"]) == ("company", "INR")
+
+
+def test_a_book_is_counted_on_one_company_account_only(client, conn, film):
+    # Two company accounts whose names are the same book's, told apart only
+    # by spacing (the duplicate check does not collapse inner spaces): the
+    # first made holds the book's costs, the other none, never both.
+    conn.execute("INSERT INTO accounts (name, short_name, type, currency, owner) "
+                 "VALUES ('FILM', 'FILM', 'company', 'INR', 'Household')")
+    conn.commit()
+    state_the_film(client, film)
+
+    shown = client.get("/api/balance-sheet?month=2026-09").get_json()
+    paid = {l["name"]: l["made_of"]["paid_for_minor"] for s in shown["sections"] for l in s["lines"]
+            if l.get("kind") == "company"}
+    assert paid == {"Film": FILM_COSTS, "FILM": 0}

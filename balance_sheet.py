@@ -555,7 +555,7 @@ def _counterparty_line(conn: sqlite3.Connection, account, as_at: date, month: st
     # The book whose spending is this company's costs; a company that is no
     # book has none.
     name = account["name"]
-    book = book_type.company_book_named(conn, name)
+    book = book_type.company_book_of(conn, account)
 
     flows = ", ".join("?" for _ in PAID_FOR_FLOWS)
     paid_for_row = f"(t.flow_type IN ({flows}) AND t.book = ?)"
