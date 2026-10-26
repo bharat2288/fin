@@ -232,3 +232,27 @@ def test_uob_bank_states_no_balance_when_one_cannot_be_read(monkeypatch, page1, 
 
     assert (stmt.opening_minor, stmt.closing_minor, stmt.closing_date) == (None, None, None)
     assert tie.check(stmt) is None
+
+
+def test_uob_bank_reads_a_row_whose_amounts_are_printed_below_its_date_line(monkeypatch):
+    """A loan debit is printed over three lines: the date and its first words,
+    then the loan's reference with the amount and the balance, then the rest
+    of its wording. It is a row, its words joined, and the statement ties."""
+    page2 = "\n".join([
+        "Account Transaction Details",
+        "One Account 000-000-000-0",
+        "Date Description Withdrawals Deposits Balance",
+        "SGD SGD SGD",
+        "01 Aug BALANCE B/F 1,000.00",
+        "03 Aug Misc Debit",
+        "0000000001-00000 300.25 699.75",
+        "Trf. Wd. Loans",
+        "05 Aug SAMPLE EMPLOYER 500.25 1,200.00",
+        "End of Transaction Details",
+    ])
+
+    stmt = _read(monkeypatch, parse_uob, parse_uob.parse_uob_bank_pdf, [UOB_PAGE1, page2])
+
+    assert [(t.date, t.amount_minor) for t in stmt.transactions] == [("2026-08-03", 30025), ("2026-08-05", -50025)]
+    assert stmt.transactions[0].description == "Misc Debit 0000000001-00000 Trf. Wd. Loans"
+    assert tie.check(stmt)["difference_minor"] == 0
