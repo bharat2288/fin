@@ -248,14 +248,25 @@ async function get(url, { fresh = false } = {}) {
 /** A write. Returns {ok, status, data, change}: change is the history entry
  *  it made, for the toast's Undo. Every write clears what was read, but one
  *  that changes no book data (keep: "looked") keeps it and re-reads its own. */
-async function send(method, url, body, { keep = false } = {}) {
+async function send(method, url, body, { keep = false, waitMs = 0, slow = '' } = {}) {
     const opts = { method, headers: { Accept: 'application/json' } };
     if (body instanceof FormData) opts.body = body;
     else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    // waitMs: give up after so long, with `slow` as the words, rather than wait on forever.
+    const stop = waitMs ? new AbortController() : null;
+    const timer = stop ? (opts.signal = stop.signal, setTimeout(() => stop.abort(), waitMs)) : null;
+    const gaveUp = () => ({ ok: false, status: 0, data: { error: slow } });
     let res;
     try { res = await fetch(url, opts); }
-    catch (_) { return { ok: false, status: 0, data: { error: 'fin could not be reached; nothing was changed' } }; }
+    catch (_) {
+        if (timer) clearTimeout(timer);
+        if (stop && stop.signal.aborted && slow) return gaveUp();
+        return { ok: false, status: 0, data: { error: 'fin could not be reached; nothing was changed' } };
+    }
+    if (res.status === 413) { if (timer) clearTimeout(timer); return { ok: false, status: 413, data: { error: 'That is more than fin takes in one go (10 MB); nothing was changed. Send fewer files at a time.' } }; }
     const data = await res.json().catch(() => ({}));
+    if (timer) clearTimeout(timer);
+    if (stop && stop.signal.aborted && slow) return gaveUp();
     if (!keep) cache.clear();
     const change = res.headers.get('X-Fin-Change');
     return { ok: res.ok && !data.error, status: res.status, data, change: change ? Number(change) : null };
@@ -5477,7 +5488,13 @@ ACT['account-save'] = async el => {
 // Import: three results, each drawn as a sum; a drop strip on the desk
 // ---------------------------------------------------------------------------
 
-const importState = { preview: null, done: null, busy: false, showEmpty: false, rowsFrom: '' };
+const importState = { preview: null, done: null, busy: false, showEmpty: false, rowsFrom: '', queue: [], dropped: 0, read: 0, failed: null, seq: 0 };
+// A drop is read a group at a time: one request under what the server takes
+// (10 MB) and well inside how long the hosting proxy waits. Confirming a
+// group reads the next.
+const IMPORT_GROUP_FILES = 8;
+const IMPORT_GROUP_BYTES = 8 * 1024 * 1024;
+const IMPORT_WAIT_MS = 4 * 60 * 1000;
 async function viewImport() {
     // refs() beside the page's reads: the coverage grid names each account from window.__accountById, which refs() fills.
     const [, past, coverage] = await Promise.all([refs(), get('/api/import/history').catch(() => []), get('/api/statements/coverage?months=6').catch(() => null)]);
@@ -5492,7 +5509,9 @@ async function viewImport() {
         <input type="file" id="imp-files" multiple hidden data-change="import-files">
         <label class="field import-from"><span>Leave out rows before <span class="muted">(optional)</span></span>
             <input type="date" id="imp-rows-from" value="${esc(importState.rowsFrom)}" data-change="import-rows-from"></label>
-        ${importState.busy ? '<p class="loading">Reading…</p>' : ''}
+        ${importState.busy ? `<p class="loading">Reading…${groupWords()}</p>` : ''}
+        ${importState.failed && !importState.busy ? `<div class="notice warn">${icon('warning')}<span class="grow">${importState.dropped > importState.failed.length ? `Files ${importState.read - importState.failed.length + 1}–${importState.read} of ${importState.dropped}` : 'These files'} could not be read; nothing was written.${laterWords(false)}</span>
+            <button class="btn" data-act="import-retry">Try them again</button>${importState.queue.length ? '<button class="btn" data-act="import-next">Skip to the next files</button><button class="btn" data-act="import-clear">Start again</button>' : ''}</div>` : ''}
     </section>
     ${p ? importPreviewHTML(p) : ''}
     ${importState.done ? `<div class="notice ok import-done">${icon('check-circle')}<span>${esc(importState.done)}</span></div>` : ''}
@@ -5568,30 +5587,93 @@ function wireDrop() {
     zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('over'); uploadFiles(e.dataTransfer.files); });
 }
 ACT['import-files'] = el => uploadFiles(el.files);
+/** " Files 9–16 of 64." while a drop is read in groups; nothing for one group. */
+function groupWords() {
+    const n = (importState.files || []).length;
+    if (importState.dropped <= n) return '';
+    return ` Files ${importState.read - n + 1}–${importState.read} of ${importState.dropped}.`;
+}
+/** What happens to the files after this group. */
+function laterWords(offered = true) {
+    const n = importState.queue.length;
+    if (!n) return '';
+    if (!offered) return ` ${plural(n, 'file')} still to read; Start again drops them.`;
+    const next = groupSize(importState.queue);
+    return ` The next ${next === 1 ? 'file is' : `${next} are`} read when you import these; Start again drops all ${n} still to read.`;
+}
+ACT['import-next'] = () => { importState.preview = null; return readGroup(nextGroup()); };
+/** The next group of a drop: at most IMPORT_GROUP_FILES files and
+ *  IMPORT_GROUP_BYTES bytes, and never none (a file over it goes alone). */
+function groupSize(queue) {
+    let n = 0, bytes = 0;
+    while (n < queue.length && n < IMPORT_GROUP_FILES) {
+        const size = queue[n].size || 0;
+        if (n && bytes + size > IMPORT_GROUP_BYTES) break;
+        n += 1; bytes += size;
+    }
+    return n;
+}
+function nextGroup() {
+    const group = importState.queue.splice(0, groupSize(importState.queue));
+    importState.read += group.length;
+    return group;
+}
 // A range statement that starts before the books do comes in from this day
 // (tie.from_day). Changed with a preview open, the same files are read again.
 ACT['import-rows-from'] = el => {
     importState.rowsFrom = el.value;
-    if (importState.preview && importState.files && !importState.busy) uploadFiles(importState.files);
+    if (importState.preview && importState.files && !importState.busy) readGroup(importState.files);
 };
-async function uploadFiles(files) {
+/** A drop: in name order, read a group at a time (nextGroup). */
+function uploadFiles(files) {
     if (!files || !files.length) return;
-    importState.files = Array.from(files);
+    importState.queue = Array.from(files).sort((a, b) => a.name.localeCompare(b.name));
+    importState.dropped = importState.queue.length;
+    importState.read = 0;
+    importState.done = null;
+    return readGroup(nextGroup());
+}
+async function readGroup(files) {
+    // Only the latest read is answered: a drop made while a group is read
+    // replaces the first drop whole, and its late answer is let go.
+    const mine = ++importState.seq;
+    importState.files = files;
+    importState.failed = null;
     const sentFrom = importState.rowsFrom;
     const form = new FormData();
     importState.files.forEach(f => form.append('files', f));
     if (sentFrom) form.append('rows_from', sentFrom);
     // The old preview goes while the files are read: nothing is confirmed
     // against a day it was not read with.
-    importState.busy = true; importState.done = null; importState.preview = null; rerender();
-    const r = await send('POST', '/api/import/upload', form);
+    importState.busy = true; importState.preview = null; rerender();
+    const r = await send('POST', '/api/import/upload', form, { waitMs: IMPORT_WAIT_MS,
+        slow: 'fin took too long to read these files; nothing was written. Send fewer at a time.' });
+    if (mine !== importState.seq) return;
     importState.busy = false;
-    if (!r.ok) { toast(r.data.error || 'fin could not read those files', { bad: true }); rerender(); return; }
+    if (r.status === 413 && files.length > 1) {
+        // A group over what the server takes after all: read in halves, the second half next.
+        const half = Math.ceil(files.length / 2);
+        importState.queue.unshift(...files.slice(half));
+        importState.read -= files.length - half;
+        return readGroup(files.slice(0, half));
+    }
+    if (r.status === 413 && files.length === 1) {
+        // One file over what fin takes: named, left out, and the rest read on.
+        toast(`${files[0].name} is more than fin takes in one go (10 MB); it was left out.`, { bad: true });
+        if (importState.queue.length) return readGroup(nextGroup());
+        rerender(); return;
+    }
+    if (!r.ok) {
+        // The files still to read stay: this group can be read again or skipped.
+        importState.failed = files;
+        toast(r.data.error || 'fin could not read those files', { bad: true }); rerender(); return;
+    }
     // The day changed while they were read: read them again with it.
-    if (importState.rowsFrom !== sentFrom) return uploadFiles(importState.files);
+    if (importState.rowsFrom !== sentFrom) return readGroup(importState.files);
     importState.preview = r.data;
     rerender();
 }
+ACT['import-retry'] = () => importState.failed && readGroup(importState.failed);
 /** The same six lines for every statement: opening, money out, money in,
  *  what the rows make it, the closing it states, and the result. */
 function stmtSum(s, cur) {
@@ -5678,9 +5760,9 @@ function importPreviewHTML(p) {
     return `${leftOut}<div class="results">${card('ties', tag('ties', 'Ties'), ties.reduce((a, g) => a + g.statements.length, 0), tiesBody)}${card('off', tag('off', 'Off by'), refused.length, refusedBody)}${card('notchecked', tag('notchecked', 'Not checked'), unchecked.length, uncheckedBody)}</div>
         ${figuresHTML}
         ${unread.length ? `<div class="notice bad import-unread">${icon('warning-circle')}<span>${unread.map(e => `${esc(e.file)}: ${esc(e.error)}`).join('<br>')}</span></div>` : ''}
-        ${offered ? `<section class="card import-bar"><p>${offered} ready. A refused statement stays in the queue until a file that ties is imported.</p>
+        ${offered ? `<section class="card import-bar"><p>${offered} ready. A refused statement stays in the queue until a file that ties is imported.${groupWords()}${laterWords()}</p>
             <div class="row"><button class="btn" data-act="import-clear">Start again</button><button class="btn primary" data-act="import-confirm">Import ${offered}</button></div></section>${groupsHTML}`
-            : `<section class="card import-bar"><p>Nothing to import.</p><div class="row"><button class="btn" data-act="import-clear">Start again</button></div></section>`}`;
+            : `<section class="card import-bar"><p>Nothing to import.${groupWords()}${laterWords(false)}</p><div class="row"><button class="btn" data-act="import-clear">Start again</button>${importState.queue.length ? '<button class="btn primary" data-act="import-next">Read the next files</button>' : ''}</div></section>`}`;
 }
 /** The choices a confirm may carry for one previewed row (app.py
  *  _CONFIRM_ROW_CHOICES); its facts stay on the server. */
@@ -5690,9 +5772,10 @@ function importChoices(t) {
     IMPORT_CHOICES.forEach(k => { if (k in t) out[k] = t[k]; });
     return out;
 }
-ACT['import-clear'] = () => { importState.preview = null; importState.done = null; importState.files = null; rerender(); };
+ACT['import-clear'] = () => { importState.seq += 1; importState.busy = false; importState.preview = null; importState.done = null; importState.files = null; importState.failed = null; importState.queue = []; importState.dropped = importState.read = 0; rerender(); };
 ACT['import-confirm'] = async el => {
     const p = importState.preview;
+    const at = importState.seq;
     el.disabled = true;
     const r = await send('POST', '/api/import/confirm', {
         import_id: p.import_id,
@@ -5701,11 +5784,14 @@ ACT['import-confirm'] = async el => {
         groups: p.groups.map(g => ({ account: g.account, transactions: g.transactions.map(importChoices) })),
     });
     if (!r.ok) { el.disabled = false; toast(r.data.error || 'Nothing was imported', { bad: true }); return; }
+    // A drop made while it was confirmed has the page now: it was imported, and the page is the new drop's.
+    if (at !== importState.seq) { toast('Imported', { undo: r.change }); return; }
     importState.preview = null; importState.files = null;
     const figuresDone = r.data.figures_written ? ` and ${plural(r.data.figures_written, 'figure')}` : '';
     const held = r.data.duplicates_skipped ? `; ${plural(r.data.duplicates_skipped, 'row')} already held ${r.data.duplicates_skipped === 1 ? 'was' : 'were'} not added again` : '';
     importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}${figuresDone}${held}. It is one change in Changes, with Undo.`;
     toast('Imported', { undo: r.change });
+    if (importState.queue.length) return readGroup(nextGroup());
     rerender();
 };
 

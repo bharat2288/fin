@@ -1311,7 +1311,7 @@ def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict]
     short: dict = {}                   # (pair, month, currency) -> what no rate values
     for key, amount, day in lines:
         (pair, month, currency) = key
-        in_sgd = value(amount, currency, day)
+        in_sgd = amount if currency in (None, "SGD") else value(amount, currency, day)
         moved[pair] = moved.get(pair, 0) + (in_sgd or 0)
         if in_sgd is None:
             short[key] = short.get(key, 0) + amount
