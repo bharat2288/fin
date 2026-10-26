@@ -49,6 +49,13 @@ class ParsedStatement:
     # them: what by_card splits the statement by. Not part of what the import
     # reads.
     card_sections: list = field(default_factory=list, repr=False)
+    # A bank statement's accounts, in the order printed, each with its first
+    # brought-forward and last carried-forward balance (None where not
+    # printed): what by_account splits the statement by.
+    account_sections: list = field(default_factory=list, repr=False)
+    # The other accounts the same printed statement carried, when by_account
+    # split it: where an older read may have filed this account's rows.
+    siblings: list = field(default_factory=list)
 
 
 # Month abbreviation → number
@@ -457,8 +464,11 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     "Total Balance Carried Forward" line, in SGD) as its opening and closing
     balance, the closing dated by the statement date; the import path checks the rows
     against them (tie.py). A row's wording ends at a carried-forward line: the
-    page footer and the bank's messages that follow are not its. With more than one account number in the file, a
-    balance line missing or no statement date, it states no balance.
+    page footer and the bank's messages that follow are not its. With more than
+    one account number in the file, a balance line missing or no statement
+    date, it states no balance. Each row is the account's whose "Account No."
+    heads its section (a BS statement prints the Multiplier and Home Reno one
+    after the other), and each account's balances are kept for by_account.
     """
     path = Path(pdf_path)
     pdf = pdfplumber.open(str(path))
@@ -487,14 +497,24 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     # line: what follows (the page footer, the bank's messages) is not its.
     row_closed = False
     current_date = None
+    current_account = None
     current_withdrawal = None
     current_deposit = None
     prev_balance = None
     opening = None   # the first balance brought forward
     closing = None   # the last balance carried forward
+    sections: dict[str, dict] = {}   # account number -> its opening and closing
+    account = statement.accounts[0] if statement.accounts else ""
 
     while i < len(lines):
         line = lines[i].strip()
+
+        # A section's heading ends with its number; a row's own wording may
+        # name another account's number mid-line ("TO Account No. ... :IB").
+        heading = re.search(r"Account No\.\s*([\d-]+)\s*$", line) if not current_desc_lines or row_closed else None
+        if heading:
+            account = heading.group(1)
+        section = sections.setdefault(account, {"account": account, "opening": None, "closing": None})
 
         # Running balance anchor — restarts at each page/section header
         bf_match = re.search(
@@ -506,6 +526,8 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             prev_balance = money.parse_minor(bf_match.group(1))
             if opening is None:
                 opening = prev_balance
+            if section["opening"] is None:
+                section["opening"] = prev_balance
             i += 1
             continue
 
@@ -518,6 +540,7 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
         )
         if cf_match:
             closing = money.parse_minor(cf_match.group(1))
+            section["closing"] = closing
         if "Balance Carried Forward" in line:
             row_closed = True
 
@@ -532,7 +555,7 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             if current_date and (current_withdrawal or current_deposit):
                 _save_bank_tx(
                     statement, current_date, current_desc_lines,
-                    current_withdrawal, current_deposit,
+                    current_withdrawal, current_deposit, current_account,
                 )
 
             date_str = tx_match.group(1)  # DD/MM/YYYY
@@ -547,6 +570,7 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             desc_part = re.sub(r"[\d,]+\.\d{2}", "", rest).strip()
 
             current_desc_lines = [desc_part]
+            current_account = account
             row_closed = False
             current_withdrawal = None
             current_deposit = None
@@ -579,7 +603,7 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     if current_date and (current_withdrawal or current_deposit):
         _save_bank_tx(
             statement, current_date, current_desc_lines,
-            current_withdrawal, current_deposit,
+            current_withdrawal, current_deposit, current_account,
         )
 
     pdf.close()
@@ -588,6 +612,7 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
         closing_date = date.fromisoformat(statement.statement_date).isoformat()
     except ValueError:
         closing_date = None
+    statement.account_sections = [s for s in sections.values() if s["account"]]
     one_account = len(set(re.findall(r"Account No\.\s*([\d-]+)", all_text))) == 1
     if one_account and opening is not None and closing is not None and closing_date:
         statement.opening_minor = opening
@@ -596,14 +621,54 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     return statement
 
 
+def by_account(statement: ParsedStatement) -> ParsedStatement | list[ParsedStatement]:
+    """A bank statement as the import takes it. A statement whose rows are on
+    more than one account (a BS statement: the Multiplier, then Home Reno) is
+    one statement per account with rows (one, when the other accounts printed
+    have none, as SRS has none), with that account's rows and, when
+    both are printed and the statement is dated, its own brought-forward and
+    carried-forward balances, closing on the statement date. An account with
+    no rows is left out. Any other statement is returned as it is."""
+    with_rows = list(dict.fromkeys(tx.card_info for tx in statement.transactions))
+    if len(with_rows) < 2 and (statement.opening_minor is not None or len(statement.account_sections) < 2):
+        return statement
+    try:
+        closing_date = date.fromisoformat(statement.statement_date).isoformat()
+    except (TypeError, ValueError):
+        closing_date = None
+    balances = {s["account"]: s for s in statement.account_sections}
+    # Every account the statement printed, rows or none: an older read filed
+    # all of them on the first.
+    printed = list(dict.fromkeys([*statement.accounts, *balances]))
+    split = []
+    for account in with_rows:
+        own = balances.get(account, {})
+        stated = closing_date and own.get("opening") is not None and own.get("closing") is not None
+        split.append(ParsedStatement(
+            statement_type=statement.statement_type,
+            statement_date=statement.statement_date,
+            accounts=[account],
+            transactions=[tx for tx in statement.transactions if tx.card_info == account],
+            filename=statement.filename,
+            opening_minor=own["opening"] if stated else None,
+            closing_minor=own["closing"] if stated else None,
+            closing_date=closing_date if stated else None,
+            currency=statement.currency,
+            siblings=[other for other in printed if other != account],
+        ))
+    return split
+
+
 def _save_bank_tx(
     statement: ParsedStatement,
     date: str,
     desc_lines: list[str],
     withdrawal: int | None,
     deposit: int | None,
+    account: str | None = None,
 ) -> None:
-    """Helper to save a bank transaction."""
+    """Helper to save a bank transaction, on the account given or the
+    statement's first."""
     description = " ".join(line.strip() for line in desc_lines if line.strip())
     # Clean up description
     description = re.sub(r"\s+", " ", description).strip()
@@ -628,7 +693,7 @@ def _save_bank_tx(
         amount_minor=amount,
         is_payment=is_payment,
         is_transfer=is_transfer,
-        card_info=statement.accounts[0] if statement.accounts else "",
+        card_info=account or (statement.accounts[0] if statement.accounts else ""),
     )
     statement.transactions.append(tx)
 
@@ -667,7 +732,7 @@ def parse_statement(pdf_path: str) -> ParsedStatement | list[ParsedStatement]:
                 f"{path.name}: not a DBS account statement fin can read: no account was found in it; "
                 "nothing was read."
             )
-        return statement
+        return by_account(statement)
     else:
         raise ValueError(f"Could not detect statement type from: {path.name}")
 
