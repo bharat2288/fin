@@ -48,6 +48,8 @@ TRACKED = (
     "type_settings",
     # fin's own filings: the type each slot files under (type-relationships 03).
     "type_slots",
+    # A loan's hire-purchase terms (fin-redesign 14; loan_terms.py).
+    "loan_terms",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was
@@ -55,7 +57,7 @@ TRACKED = (
 # schema.sql's CREATE TRIGGER IF NOT EXISTS gives a book them on its next
 # start and no conversion step is owed; so are a new table's, made by the
 # same start. has_shape does not ask for them.
-ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots")
+ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens
@@ -415,7 +417,10 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     changes no row (NOTHING_TO_UNDO); and, naming it, when it
     would leave an expect-back record pointing at nothing or broken
     (expect_back.refusal_to_undo, expect_back.invariant_check), or take out
-    a type something still uses (book_type.refusal_to_undo)."""
+    a type something still uses (book_type.refusal_to_undo), or change a
+    loan's terms under figures worked out with them (loan_terms.refusal_to_undo).
+    A loan whose terms it puts back has its worked-out interest brought in
+    line in the same undo (loan_interest.derive)."""
     r = conn.execute("SELECT * FROM change_entries WHERE id = ?", (entry_id,)).fetchone()
     if r is None or r["open"]:
         raise UndoRefused("no such change")
@@ -443,11 +448,26 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     in_use = book_type.refusal_to_undo(conn, entry_id)
     if in_use:
         raise UndoRefused(in_use)
+    # A loan's hire-purchase terms do not change under figures worked out with
+    # them, by undo either: the lock's own words (fin-redesign 14).
+    import loan_terms
+
+    locked = loan_terms.refusal_to_undo(conn, entry_id)
+    if locked:
+        raise UndoRefused(locked)
+    loans = loan_terms.loans_in_entry(conn, entry_id)
     try:
         _write_back(conn, entry_id)
     except sqlite3.IntegrityError:
         conn.rollback()
         raise UndoRefused("undoing this change would break a link between rows; nothing was changed") from None
+    if loans:
+        # The terms are a loan's first figure: its worked-out interest follows
+        # them back, in this undo. Imported here: loan_interest reads the books.
+        import loan_interest
+
+        for loan in sorted(loans):
+            loan_interest.derive(conn, loan)
     if row_count(conn, undo_entry_id) == 0:
         conn.rollback()
         raise UndoRefused(NOTHING_TO_UNDO)

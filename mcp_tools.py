@@ -63,7 +63,9 @@ Rulings this module carries:
 - Accounts (fin redesign, design evaluation §4): create_account adds an
   account of any declared kind over the app's Add an account, so the
   statements imported after find it with its right kind. The route refuses a
-  name fin already holds.
+  name fin already holds. A loan may be made with its hire-purchase terms
+  (fin-redesign 14; loan_terms.py), in the same change; terms on an account
+  fin already holds are an account change, the operator's on Lists › Accounts.
 - The chat's relabel reach (fin redesign ticket 11): label_review, on any
   row, also says a refund (keeping its type), a card payment, or a move into
   or out of a holding (review.MORE_CHOICES); a person stays no movement's
@@ -100,6 +102,7 @@ import chat_writes
 import db
 import history
 import party
+import loan_terms
 
 MANY_ROWS = 20
 
@@ -604,14 +607,23 @@ _WRITES = [
         "holding is something owned that no statement reports; untracked is the household's own "
         "account fin holds no statements for (a family member's own bank). currency: SGD unless "
         "given; owner: Household unless a company's. Refused when fin already has an account of "
-        "that name, in any case: read accounts first.",
+        "that name, in any case: read accounts first. A loan bought on hire purchase may carry "
+        "its terms, so its statements' total of remaining instalments imports as principal owed: "
+        "terms {financed, months, flat_rate (percent a year) or interest (over the term), "
+        "first_instalment (YYYY-MM-DD), owed_from (YYYY-MM-DD, the day the amount financed is owed "
+        "from; the last day of the month before the first instalment unless given), method rule-of-78}; amounts as text, e.g. \"150000.00\". "
+        "Terms on an account fin holds are the operator's, on Lists › Accounts.",
         {"name": _S, "kind": {"type": "string", "enum": list(account_kind.KIND_NAMES)},
          "currency": _S, "owner": {"type": "string", "enum": list(account_kind.OWNER_NAMES)},
          "last_four": {"type": "string", "pattern": "^[0-9]{4}$",
-                       "description": "four digits: the account's last four, e.g. 3528"}},
+                       "description": "four digits: the account's last four, e.g. 3528"},
+         "terms": {"type": "object", "description": "A loan's hire-purchase terms (kind loan only).",
+                   "properties": {"financed": _S, "months": _I, "flat_rate": _S, "interest": _S,
+                                  "first_instalment": _DAY, "owed_from": _DAY,
+                                  "method": {"type": "string", "enum": list(loan_terms.METHOD_NAMES)}}}},
         ("name", "kind"),
         lambda a: ("POST", "/api/accounts",
-                   {**_account_body(a), **_pick(a, "currency", "owner", "last_four")}),
+                   {**_account_body(a), **_pick(a, "currency", "owner", "last_four", "terms")}),
     ),
     _w(
         "create_merchant",

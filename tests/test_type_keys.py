@@ -37,7 +37,7 @@ BEFORE = Path(__file__).parent / "fixtures" / "book_before_type_keys.sql"
 # ticket 05's marker that the PayNow wordings were made rules
 # (tests/test_paynow_rules.py) goes in, the flow-rules step made already
 # (fin-redesign 08, book_before).
-NEW_TABLES = {"type_keys", "type_settings", "type_slots"}
+NEW_TABLES = {"type_keys", "type_settings", "type_slots", "loan_terms"}
 
 
 def book_before(tmp_path, monkeypatch) -> Path:
