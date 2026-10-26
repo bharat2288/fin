@@ -60,6 +60,7 @@ import valuation
 import expect_routes
 import folio_link
 import fx_pair
+import duplicates
 import expectation_api
 import refund_links
 import relabel_preview
@@ -79,6 +80,7 @@ app.register_blueprint(trend_routes.bp)
 app.register_blueprint(expect_routes.bp)
 app.register_blueprint(folio_link.bp)
 app.register_blueprint(fx_pair.bp)
+app.register_blueprint(duplicates.bp)
 
 
 def format_type_display(parent: str | None, child: str | None) -> str:
@@ -926,6 +928,7 @@ _CHANGE_SUMMARIES = {
 _CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
 _CHANGE_SUMMARIES.update({f"{folio_link.bp.name}.{name}": words for name, words in folio_link.SUMMARIES.items()})
 _CHANGE_SUMMARIES.update({f"{fx_pair.bp.name}.{name}": words for name, words in fx_pair.SUMMARIES.items()})
+_CHANGE_SUMMARIES.update({f"{duplicates.bp.name}.{name}": words for name, words in duplicates.SUMMARIES.items()})
 
 
 def _caller() -> tuple[str, str]:
@@ -964,6 +967,10 @@ def _close_change_entry() -> tuple[int | None, int]:
 @app.after_request
 def _finish_change_entry(response):
     entry_id, count = _close_change_entry()
+    if "closed_change" in g:
+        # A route that closed its change before writing a second one names
+        # the first (the import's, not the rates fetched after it).
+        entry_id, count = g.pop("closed_change")
     if entry_id is not None:
         response.headers["X-Fin-Change"] = str(entry_id)
         response.headers["X-Fin-Change-Rows"] = str(count)
@@ -3911,7 +3918,8 @@ def api_transactions():
                 (SELECT json_object('rate', fp.rate, 'currency', fp.currency, 'source', fp.source,
                         'pair_row_id', CASE WHEN fp.out_row_id = t.id THEN fp.in_row_id ELSE fp.out_row_id END)
                  FROM fx_pair fp WHERE fp.state = 'confirmed'
-                   AND (fp.out_row_id = t.id OR fp.in_row_id = t.id)) AS real_rate
+                   AND (fp.out_row_id = t.id OR fp.in_row_id = t.id)) AS real_rate,
+                printed_rate(t.id) AS printed_rate
             FROM transactions t
             {type_joins}
             LEFT JOIN services svc ON t.service_id = svc.id
@@ -3933,7 +3941,9 @@ def api_transactions():
         # the key is the old one, and holds rupees for a rupee account.
         tx["amount_sgd"] = money.from_minor(tx["amount_minor"], tx["currency"])
         # The real rate a confirmed cross-currency pair holds for it (fx_pair.py).
-        tx["real_rate"] = fx_pair.shown(tx["real_rate"])
+        # Failing one, the bank's rate its wording prints.
+        printed = tx.pop("printed_rate")
+        tx["real_rate"] = fx_pair.shown(tx["real_rate"]) or fx_pair.shown_printed(tx["currency"], printed)
         # Its parts (spec 23): what is expected and placed on it, and its own
         # part, each in whole minor units with the row's sign. counted_minor
         # is what a sum of rows adds: the own part. The pill words them; the
@@ -6089,6 +6099,41 @@ def _unheld(amount_minor: int) -> str:
     return "income" if amount_minor < 0 else "expense"
 
 
+# What the change that saves an import's rates is called in Changes.
+IMPORT_RATES_SUMMARY = "Fetched the exchange rates for the imported rows"
+
+
+def _fetch_rates_for_import(conn, account_ids) -> dict:
+    """Save the ECB rate for every day a row in another currency on these
+    accounts is on that no saved rate values (valuation.fetch_missing), as a
+    change of its own after the import's: undoing the import never takes
+    away a rate other rows use. The import's change is closed first, and the
+    response names it (g.closed_change). A fetch that fails saves nothing and
+    says which currencies in {saved, currencies, failed}; the import stands."""
+    entry_id = g.pop("change_entry", None)
+    if entry_id is not None:
+        # Named first: should closing fail, the import is still the response's change.
+        g.closed_change = (entry_id, history.row_count(conn, entry_id))
+    short: list[str] = []
+    try:
+        if entry_id is not None:
+            count = history.close_entry(conn, entry_id, _CHANGE_SUMMARIES["api_import_confirm"])
+            g.closed_change = (entry_id if count else None, count)
+            g.change_entry = history.open_entry(conn, *_caller(), IMPORT_RATES_SUMMARY)
+        short = sorted(valuation.missing_days(conn, account_ids))
+        done = valuation.fetch_missing(conn, accounts=account_ids)
+        conn.commit()
+    except Exception as e:  # the import is in; a rate is the Home notice's to fetch
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        app.logger.warning("Rates for an import were not fetched: %s", type(e).__name__)
+        # Not read again: the book that just failed is not asked twice.
+        done = {"saved": 0, "currencies": short, "failed": short}
+    return done
+
+
 @app.route("/api/import/confirm", methods=["POST"])
 def api_import_confirm():
     """Commit an upload's preview to the database.
@@ -6241,6 +6286,7 @@ def api_import_confirm():
     figures_written = 0
     rows_refiled = 0
     wordings_tidied = 0
+    touched_accounts: set[int] = set()   # the accounts the rows land on
 
     with get_db() as conn:
         try:
@@ -6294,6 +6340,7 @@ def api_import_confirm():
                     ]
                     for name, held_id in account_ids.items()
                 }
+                touched_accounts.update(account_ids.values())
                 month_stmt_ids: dict[tuple[str, str], int] = {}
                 for tx in active_txns:
                     if tx.get("statement") is not None:
@@ -6318,16 +6365,36 @@ def api_import_confirm():
                 # genuine same-day repeats (e.g. two identical coffees).
                 # For each group, count how many already exist in DB for this account.
                 # Only insert (import_count - existing_count), minimum 0.
+                #
+                # A row is counted by the statement that printed it: two
+                # statements of one account whose periods both cover its day
+                # (HDFC 3528's Apr–Sep file and a download from 1 Sep, read
+                # in one import) each print the same row once, and it is one
+                # row. Of those statements, the one that printed the most
+                # copies brings them in. A copy printed outside its
+                # statement's period (a card's late posting) and rows from a
+                # source that states no balance count on their own, summed,
+                # as before.
                 from collections import Counter
 
-                import_counts = Counter()
-                import_by_key = {}  # key -> [list of tx dicts]
+                def covers(position, day) -> bool:
+                    line = statement_lines[position] if position is not None else {}
+                    return bool(line.get("opening_date") and line.get("closing_date")
+                                and line["opening_date"] <= day <= line["closing_date"])
+
+                by_source = {}  # key -> {statement position or None -> [tx dicts]}
                 for tx in active_txns:
                     key = (account_ids[target_name(tx)], tx["date"], tx["description"], minor_of[id(tx)])
-                    import_counts[key] += 1
-                    import_by_key.setdefault(key, []).append(tx)
+                    by_source.setdefault(key, {}).setdefault(tx.get("statement"), []).append(tx)
+                import_by_key = {}
+                for key, sources in by_source.items():
+                    overlapping = [txs for position, txs in sources.items() if covers(position, key[1])]
+                    import_by_key[key] = (max(overlapping, key=len) if overlapping else []) + [
+                        tx for position, txs in sources.items() if not covers(position, key[1]) for tx in txs]
+                import_counts = Counter({key: len(txs) for key, txs in import_by_key.items()})
 
-                duplicates_skipped = 0
+                # A second statement's copies are skipped as duplicates.
+                duplicates_skipped = len(active_txns) - sum(import_counts.values())
                 # The other accounts the same printed statement carried (a BS
                 # statement: the Multiplier and Home Reno), where an older
                 # read may have filed this account's rows.
@@ -6672,9 +6739,11 @@ def api_import_confirm():
             # merchants and rules land together or not at all.
             conn.commit()
             invalidate_rules_cache()
+            fetched = _fetch_rates_for_import(conn, touched_accounts)
 
             return jsonify({
                 "success": True,
+                "rates": fetched,
                 "transactions_saved": total_saved,
                 "duplicates_skipped": total_duplicates,
                 "rules_added": rules_added,
