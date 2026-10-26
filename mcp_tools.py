@@ -635,10 +635,12 @@ _WRITES = [
     _w(
         "add_company_or_person",
         "Add a company (so movements can name it as their other side) or a person (to name on "
-        "what is expected back or to pay back).",
-        {"kind": {"type": "string", "enum": ["company", "person"]}, "name": _S},
+        "what is expected back or to pay back). currency: SGD unless given; a company whose costs "
+        "are paid in another currency is kept in that one (a rupee film company in INR), as its "
+        "line counts only rows in its own currency. A company named as a book is that book's.",
+        {"kind": {"type": "string", "enum": ["company", "person"]}, "name": _S, "currency": _S},
         ("kind", "name"),
-        lambda a: ("POST", "/api/accounts", _account_body(a)),
+        lambda a: ("POST", "/api/accounts", {**_account_body(a), **_pick(a, "currency")}),
     ),
     _w(
         "create_account",

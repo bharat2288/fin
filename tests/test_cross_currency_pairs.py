@@ -64,6 +64,8 @@ def book(conn):
     dbs = make_account(conn, "Sample DBS")
     hdfc = make_account(conn, "Sample HDFC 3528", "INR")
     shared = make_account(conn, "Sample HDFC 6324", "INR")
+    # 6324 is shared (fin-redesign 20): #2124's rupee leg is hers, not ours.
+    conn.execute("INSERT INTO shared_accounts (account_id) VALUES (?)", (shared,))
     save_rates(conn)
     legs = {
         "2094": (make_row(conn, dbs, "2026-04-16", "REMITTANCE TO SAMPLE HDFC", 15_000_001),
@@ -73,7 +75,8 @@ def book(conn):
         "2117": (make_row(conn, dbs, "2026-08-17", "REMITTANCE TO SAMPLE HDFC", 4_059_600),
                  make_row(conn, hdfc, "2026-08-17", "INWARD REMITTANCE SAMPLE", -300_000_000)),
         "2124": (make_row(conn, dbs, "2026-08-24", "REMITTANCE TO SAMPLE PARTNER", 3_358_500),
-                 make_row(conn, shared, "2026-08-24", "INWARD REMITTANCE SAMPLE", -250_000_000)),
+                 make_row(conn, shared, "2026-08-24", "INWARD REMITTANCE SAMPLE", -250_000_000,
+                          flow_type="not_ours")),
     }
     return {"dbs": dbs, "hdfc": hdfc, "shared": shared, "legs": legs}
 
@@ -222,6 +225,7 @@ def test_a_leg_labelled_by_hand_keeps_its_label(client, conn, book):
     assert out_row["flow_type"] == "movement" and out_row["other_side_id"] == owed
     assert out_row["real_rate"]["per_sgd"] == "74.44"
     assert listed(client, in_id)["sgd_minor"] == -3_358_500
+    assert listed(client, in_id)["flow_type"] == "not_ours"     # hers on the shared account, still
 
 
 def test_an_rfx_rate_confirmed_values_the_leg_at_the_wording_s_rate(client, conn, book):

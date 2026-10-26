@@ -405,6 +405,7 @@ function restsOn(line, { short = false } = {}) {
     const r = line.rests_on;
     if (line.counted_in) return `<span class="muted">${esc(line.balance)}</span>`;
     if (!r) {
+        if (line.shared) return '<span class="muted">shared: enter a figure for our part</span>';
         if (line.since_label) return `<span class="muted">worked out from rows ${esc(line.since_label)}</span>`;
         return '<span class="muted">nothing to rest on yet</span>';     // the "no figure" marker sits where the amount would
     }
@@ -412,7 +413,7 @@ function restsOn(line, { short = false } = {}) {
     if (r.source === 'supplied') {
         const stale = r.age_days > STALE_DAYS;
         const age = `${r.age_days} days old`;
-        return `your figure ${esc(date)}${r.age_days > 0 ? `, <b>${esc(age)}</b>` : ''} ${stale ? tag('stale', 'stale', { act: 'figure', data: { account: line.account_id }, title: 'Enter a newer figure' }) : ''}`;
+        return `${line.shared ? 'our part, ' : ''}your figure ${esc(date)}${r.age_days > 0 ? `, <b>${esc(age)}</b>` : ''} ${stale ? tag('stale', 'stale', { act: 'figure', data: { account: line.account_id }, title: 'Enter a newer figure' }) : ''}`;
     }
     return `statement ${esc(date)}`;
 }
@@ -3621,7 +3622,7 @@ function drawBridge(sheet) {
 const KIND_WORDS = { bank: 'Bank account', card: 'Card', loan: 'Loan', holding: 'Holding', company: 'Company', person: 'Person', untracked: 'Untracked account' };
 /** What a row is labelled, as an account's rows show it. */
 function acctRowLabel(row) {
-    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted">transfer</span>', payment: '<span class="muted">card payment</span>', movement: `<span class="muted">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted">income</span>' }[row.flow_type];
+    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted">transfer</span>', payment: '<span class="muted">card payment</span>', movement: `<span class="muted">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted">income</span>', not_ours: '<span class="muted">not ours</span>' }[row.flow_type];
     return flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
 }
 /** One of an account's rows: money in and money out in two plain columns. */
@@ -3843,7 +3844,7 @@ function pager(list, actName, sorted = false) {
 function notCheckedTag(row) { return row.not_checked ? ` ${tag('notchecked', 'not checked')}` : ''; }
 function rowTr(row, { account = true, book = false } = {}) {
     const minor = toMinor(row.amount_sgd, row.currency);
-    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted small">transfer</span>', payment: '<span class="muted small">card payment</span>', movement: `<span class="muted small">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted small">income</span>' }[row.flow_type];
+    const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted small">transfer</span>', payment: '<span class="muted small">card payment</span>', movement: `<span class="muted small">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted small">income</span>', not_ours: '<span class="muted small">not ours</span>' }[row.flow_type];
     const label = flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num">${esc(day(row.date, { year: false }))}</td>
@@ -5171,9 +5172,10 @@ async function viewMerchant(id) {
     // Every read at once, none waiting on another; the page draws once all are in.
     // A merchant gone (deleted in another tab) answers 404 to its own reads.
     const gone = err => { if (err.status === 404) return null; throw err; };
-    const [s, r, list, varies] = await Promise.all([get(`/api/services/${id}`, { fresh: true }).catch(gone), refs(),
+    const [s, r, list, varies, owing] = await Promise.all([get(`/api/services/${id}`, { fresh: true }).catch(gone), refs(),
         get(`/api/transactions?service_id=${id}&expense_only=true&${new URLSearchParams(sortServer('mp', MP_SORT))}&per_page=${MP_PAGE}&page=${mp.page}${monthQuery(mp.month)}`, { fresh: true }),
-        get(`/api/services/${id}/book-varies`, { fresh: true }).catch(gone)]);
+        get(`/api/services/${id}/book-varies`, { fresh: true }).catch(gone),
+        get(`/api/services/${id}/balances`, { fresh: true }).catch(() => null)]);
     if (!s) {
         return `<div class="mp">${mpCrumbs()}<div class="page-head"><div><h1>Merchant</h1></div></div>
             <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div></div>`;
@@ -5210,6 +5212,7 @@ async function viewMerchant(id) {
         <div class="mp-fact"><span class="cap">Rows</span><b class="num">${s.rows || 0}</b>${notChecked ? `<span class="sub">${notChecked} not checked</span>` : ''}</div>
         <div class="mp-fact mp-fact--set"><span class="cap" id="mp-nr">New rows</span>${eachSegHTML(s, 'mp-nr')}</div>
     </div></section>
+    ${partyBalancesHTML(s, owing)}
     <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>${sortOf('mp').key ? '' : 'Newest first. '}What you set is chosen and stays; the rest follows ${esc(s.name)}. Each change is undone in Changes. <a class="link" href="#/books/rows?party=${s.id}&month=all">Its rows on the Rows page</a>, with the rows on accounts linked to it.</p></div>
         ${list.transactions.length ? `<div class="bulk"><span class="bulk__n" id="mp-ticked">${mpTickedWords()}</span>
             <select class="sel" data-change="mp-bulk-book" aria-label="Book for the ticked rows">${bookOptions(r.books, mp.book, 'Choose book')}</select>
@@ -5219,6 +5222,21 @@ async function viewMerchant(id) {
             <thead><tr><th scope="col" class="k"><span class="sr-only">Tick</span></th><th scope="col">${sortHead('mp', 'date', MP_SORT)}</th><th scope="col">${sortHead('mp', 'account', MP_SORT)}</th><th scope="col">${sortHead('mp', 'description', MP_SORT)}</th><th scope="col" class="r">${sortHead('mp', 'amount', MP_SORT)}</th><th scope="col">${sortHead('mp', 'type', MP_SORT)}</th><th scope="col">Book</th><th scope="col"><span class="sr-only">State</span></th></tr></thead>
             <tbody>${rows}</tbody></table>${pager(list, 'mp-page', !!sortOf('mp').key)}`
         : '<p class="card-empty">No spending rows from this merchant yet.</p>'}</section></div>`;
+}
+/** A party's balances with the household and their net (RUL-020): what we
+ *  owe them on a loan joined to them, our money they hold on a shared
+ *  account joined to them. Nothing when no account with a balance is joined. */
+function partyBalancesHTML(s, owing) {
+    if (!owing || !owing.lines.length) return '';
+    const side = { owed: 'we owe them', held: 'ours they hold' };
+    const lines = owing.lines.map(l => `<tr><td>${pageLink('account', l.account_id, l.name)}<div class="small muted">${esc(side[l.side])}</div></td>
+        <td class="r num">${l.balance_minor == null ? tag('nofig', 'no figure') : esc(money(Math.abs(l.balance_minor), l.currency))}</td>
+        <td class="r num">${l.value_minor == null ? (l.balance_minor == null ? '' : tag('nofig', 'no rate')) : esc(money(Math.abs(l.value_minor), 'SGD'))}</td></tr>`).join('');
+    const out = owing.left_out.length ? `<div class="card-head"><p class="card-foot">Left out of the net: ${owing.left_out.map(x => `${esc(x.name)} (${esc(x.why)})`).join('; ')}.</p></div>` : '';
+    return `<section class="card mp-card" aria-labelledby="mp-owing"><div class="card-head"><div><h2 id="mp-owing">Balances with ${esc(s.name)}</h2>
+        <p>At ${esc(day(owing.as_at))}: what we owe them, what of ours they hold, and the net.</p></div></div>
+        <table class="t"><thead><tr><th scope="col">Account</th><th scope="col" class="r">In its currency</th><th scope="col" class="r">In S$</th></tr></thead>
+        <tbody>${lines}</tbody><tfoot><tr><th scope="row" colspan="2">Net</th><td class="r num"><b>${owing.net ? esc(owing.net) : '—'}</b></td></tr></tfoot></table>${out}</section>`;
 }
 /** Where the page sits: Books › Lists › Merchants (folio's crumbs). */
 function mpCrumbs() {
@@ -5530,7 +5548,9 @@ ACT['account-edit'] = async el => {
         <label class="field"><span>Whose</span><select id="ac-owner" data-meaning="ac-owner-hint">${opt(r.kinds.owners, 'Household')}</select><span class="hint" id="ac-owner-hint">${meaning(r.kinds.owners, 'Household')}</span></label>
         <label class="field"><span>Currency</span><select id="ac-cur">${['SGD', 'INR', 'USD'].map(c => `<option>${c}</option>`).join('')}</select></label>`}
         <label class="field"><span>Last four digits</span><input type="text" inputmode="numeric" maxlength="4" id="ac-last4" value="${esc(a?.last_four || '')}"></label>
-        ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}</div>
+        ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}
+        ${a && ['bank', 'card'].includes(a.type) ? `<label class="check"><input type="checkbox" id="ac-shared"${a.shared ? ' checked' : ''}> Shared: someone else’s money is on it too</label>
+        <span class="hint">A shared account’s rows are not ours unless a rule says what they are, or the money came from one of our own accounts. Its balance is our part, from a figure you enter; its statements still tie every row.</span>` : ''}</div>
         ${a && a.type === 'loan' ? termsFieldsHTML(a.terms, a.currency, a.terms_locked) : ''}
         ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`,
     { eyebrow: a ? 'Account' : 'Accounts', foot: `<button class="btn primary" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>` });
@@ -5554,6 +5574,19 @@ ACT['account-save'] = async el => {
             if (change !== undefined) body.terms = change;
         }
         r = await act('PUT', `/api/accounts/${el.dataset.id}`, body, 'Account saved');
+        // Shared or not is its own change: the rows on the account move with it.
+        const shared = $('#ac-shared');
+        const held = (await refs()).accountById.get(Number(el.dataset.id));
+        if (r && shared && shared.checked !== !!held?.shared) {
+            const s = await send('PUT', `/api/accounts/${el.dataset.id}/shared`, { shared: shared.checked });
+            if (!s.ok) { toast(s.data.error || 'That did not work; nothing was changed', { bad: true }); r = null; }
+            else {
+                const kept = s.data.kept.length ? `; ${plural(s.data.kept.length, 'row')} kept by what rests on them` : '';
+                const chosen = s.data.chosen ? `; ${plural(s.data.chosen, 'row')} lost the label you chose (Undo puts it back)` : '';
+                toast(`${shared.checked ? 'Marked shared' : 'Marked not shared'}: ${plural(s.data.moved, 'row')} moved${kept}${chosen}`, { undo: s.change });
+                refreshFrame();
+            }
+        }
     } else {
         r = await act('POST', '/api/accounts', { name, type: $('#ac-kind').value, owner: $('#ac-owner').value, currency: $('#ac-cur').value, last_four: $('#ac-last4').value.trim() || null }, 'Account added');
     }
@@ -5923,7 +5956,7 @@ const SLOT_FILES = { loan_interest: 'loan interest', gift_given: 'gifts given', 
 // An empty old or new value said plainly, never as bad news (C4.2).
 const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty',
     party_id: 'no party', role: 'no role' };
-const FLOW_WORDS = { expense: 'money out', income: 'money in', refund: 'a refund', review: 'waiting for a label', transfer: 'a move between own accounts' };
+const FLOW_WORDS = { expense: 'money out', income: 'money in', refund: 'a refund', review: 'waiting for a label', transfer: 'a move between own accounts', not_ours: 'not ours' };
 function isEmpty(v) { return v === null || v === undefined || v === ''; }
 function changedFields(c) {
     const b = c.before || {}, a = c.after || {};

@@ -54,6 +54,8 @@ TRACKED = (
     "folio_link",
     # The books the operator creates (fin RUL-021; book_type.add_book).
     "books",
+    # The accounts marked shared (fin-redesign 20; shared.py).
+    "shared_accounts",
     # A cross-currency pair and its real rate (fin-redesign 24; fx_pair.py).
     "fx_pair",
 )
@@ -63,7 +65,8 @@ TRACKED = (
 # schema.sql's CREATE TRIGGER IF NOT EXISTS gives a book them on its next
 # start and no conversion step is owed; so are a new table's, made by the
 # same start. has_shape does not ask for them.
-ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms", "folio_link", "books", "fx_pair")
+ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms", "folio_link", "books",
+                  "shared_accounts", "fx_pair")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens
@@ -424,7 +427,9 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     would leave an expect-back record pointing at nothing or broken
     (expect_back.refusal_to_undo, expect_back.invariant_check), or take out
     a type something still uses (book_type.refusal_to_undo), or change a
-    loan's terms under figures worked out with them (loan_terms.refusal_to_undo).
+    loan's terms under figures worked out with them (loan_terms.refusal_to_undo),
+    or leave a bank account or a card joined to a party unshared
+    (shared.joined_unshared).
     A loan whose terms it puts back has its worked-out interest brought in
     line in the same undo (loan_interest.derive)."""
     r = conn.execute("SELECT * FROM change_entries WHERE id = ?", (entry_id,)).fetchone()
@@ -481,6 +486,14 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     if broken:
         conn.rollback()
         raise UndoRefused(broken)
+    # A bank account or a card joins a party only while shared (fin-redesign
+    # 21): an undo of the mark, or of taking it off its party, cannot part them.
+    import shared
+
+    unshared = shared.joined_unshared(conn, entry_id)
+    if unshared:
+        conn.rollback()
+        raise UndoRefused(unshared)
     conn.execute(
         "UPDATE change_entries SET undoes = ?, summary = ? WHERE id = ?",
         (entry_id, f"Undid: {r['summary'] or 'change ' + str(entry_id)}", undo_entry_id),

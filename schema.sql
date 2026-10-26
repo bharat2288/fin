@@ -444,6 +444,17 @@ CREATE TABLE IF NOT EXISTS fx_pair (
     CHECK ((state = 'confirmed') = (rate IS NOT NULL AND currency IS NOT NULL AND source IS NOT NULL))
 );
 
+-- A shared account (shared.py, fin-redesign 20): a bank account or a card
+-- the household keeps money on beside someone else's. One row per account
+-- marked shared. A new table, made empty by CREATE IF NOT EXISTS on start,
+-- its triggers with it (history.ADDED_ON_START); no row is converted. The
+-- account is named by id, with no foreign key, as folio_link names its
+-- subject.
+CREATE TABLE IF NOT EXISTS shared_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL UNIQUE
+);
+
 -- These indexes are made on start (db.init_db), after the tables exist. They
 -- are written with a space before the column list: retire_categories.py puts
 -- back every index written without one, on a database older than these tables.
@@ -1049,6 +1060,29 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'fx_pair', OLD.id, 'delete',
         json_object('id', OLD.id, 'out_row_id', OLD.out_row_id, 'in_row_id', OLD.in_row_id, 'state', OLD.state, 'currency', OLD.currency, 'rate', OLD.rate, 'source', OLD.source, 'made_at', OLD.made_at), NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS history_shared_accounts_insert AFTER INSERT ON shared_accounts
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'shared_accounts', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'account_id', NEW.account_id));
+END;
+CREATE TRIGGER IF NOT EXISTS history_shared_accounts_update AFTER UPDATE ON shared_accounts
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'account_id', OLD.account_id) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'shared_accounts', NEW.id, 'update',
+        json_object('id', OLD.id, 'account_id', OLD.account_id),
+        json_object('id', NEW.id, 'account_id', NEW.account_id));
+END;
+CREATE TRIGGER IF NOT EXISTS history_shared_accounts_delete AFTER DELETE ON shared_accounts
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'shared_accounts', OLD.id, 'delete',
+        json_object('id', OLD.id, 'account_id', OLD.account_id), NULL);
 END;
 -- history:end
 

@@ -152,6 +152,12 @@ def test_case_2_two_rows_one_month_is_a_line_not_a_chart():
     assert 'data-trend="span"' not in got["html"]
 
 
+def test_a_merchant_with_no_row_at_all_says_so():
+    # A party joined only by its accounts (fin-redesign 21) has no month to name.
+    p = few_payload(0, None, None, 0, "Sample Friend")
+    assert run(f"out(MT.plan({json.dumps(p)}));") == {"kind": "empty", "text": "No rows yet."}
+
+
 def test_case_3_three_rows_one_month_is_still_the_line():
     p = few_payload(3, "2026-05", "2026-05", 13000, "Hana Florist")
     assert run(f"out(MT.plan({json.dumps(p)}));")["text"].startswith("3 rows, all in May 2026: S$ 130 net.")

@@ -689,7 +689,8 @@ _NEW_RULE = {"id": None, "pattern": "", "match_type": "contains", "priority": 0,
              "flow": None, "other_side_id": None}
 # A row's flow as a preview names it.
 FLOW_WORDS = {"expense": "spending", "income": "income", "transfer": "a transfer", "payment": "a card payment",
-              "refund": "a refund", flow.MOVEMENT: "a movement", flow.REVIEW: "waiting for review"}
+              "refund": "a refund", flow.MOVEMENT: "a movement", flow.REVIEW: "waiting for review",
+              flow.NOT_OURS: "not ours"}
 # What a rule that states no flow says of its rows.
 _NO_FLOW = "what fin works out"
 

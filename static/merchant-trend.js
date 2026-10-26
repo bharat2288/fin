@@ -69,6 +69,8 @@
      *  The few-rows rule is over all time, so it comes before the span's emptiness. */
     function plan(payload) {
         const cur = payload.currency || 'SGD';
+        // A merchant with no row at all (a party joined only by its accounts) has no month to name.
+        if (payload.few && !payload.few.rows) return { kind: 'empty', text: 'No rows yet.' };
         if (payload.few) return { kind: 'few', text: fewLine(payload.few, cur) };
         if (payload.empty) return { kind: 'empty', text: emptyLine(payload.empty, payload.span) };
         return { kind: 'chart' };

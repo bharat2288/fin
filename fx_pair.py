@@ -52,8 +52,10 @@ from db import get_db
 BAND = Decimal("0.03")
 # How many days apart the two legs may be dated.
 WINDOW_DAYS = 1
-# The flows a leg may have: money moving, never spending or income.
-PAIRABLE_FLOWS = (flow.REVIEW, "transfer", flow.MOVEMENT)
+# The flows a leg may have: money moving, never spending or income. A row
+# that is someone else's on a shared account (#2124's rupee leg on 6324, hers)
+# is a leg too, and keeps its flow.
+PAIRABLE_FLOWS = (flow.REVIEW, "transfer", flow.MOVEMENT, flow.NOT_OURS)
 # What a waiting leg becomes once its pair is confirmed.
 PAIRED_FLOW = "transfer"
 
