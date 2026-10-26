@@ -79,6 +79,7 @@ const sourceTagsHTML = () => ''; const rowAmount = () => ''; const struckAmount 
 const typeOptions = () => ''; const bookOptions = () => ''; const eachSegHTML = () => ''; const pager = () => '';
 const mpTickedWords = () => ''; const mpCanApply = () => false; const bookVariesWords = () => ''; const bookVariesButtons = () => '';
 const mpAccountCell = () => ''; const rowMark = id => `<mark data-row="${id}"></mark>`; const afterRender = () => {};
+const partyBalancesHTML = () => '';
 const sortOf = () => ({ key: null }); const sortServer = () => ({ sort: 'date', sort_dir: 'desc' }); const sortHead = (t, k) => k; const sortPicker = () => ''; const MP_SORT = {};
 const S = { marks: { rows: {}, accounts: {} } };
 const ACT = {};
@@ -112,6 +113,8 @@ def test_case_4_every_read_is_asked_for_before_any_answers():
     assert any(u.startswith("/api/transactions?service_id=104&") for u in before), before
     assert "/api/services/104/book-varies" in before
     assert "/api/types" in before and "/api/books" in before
+    # A party's balances (fin-redesign 21) are read in the same round.
+    assert "/api/services/104/balances" in before
     # Nothing is asked for once the first answers arrive: one round, nothing waits on another.
     assert out["after"] == before
     assert out["h1"]

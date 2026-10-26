@@ -65,3 +65,30 @@ def mark(conn: sqlite3.Connection, account_id: int, shared: bool) -> bool:
     else:
         conn.execute("DELETE FROM shared_accounts WHERE account_id = ?", (account_id,))
     return True
+
+
+def joined_unshared(conn: sqlite3.Connection, entry_id: int) -> str | None:
+    """Why the book, as an undo of a change entry has written it back, would
+    hold a bank account or a card joined to a party without being shared,
+    or None: such an account joins a party only as the one shared with them
+    (balance_sheet.party_lines). Checked over the accounts the entry touched
+    (their own row, or their share mark), before the undo commits."""
+    import json
+
+    touched = set()
+    for tbl, row_id, before, after in conn.execute(
+        "SELECT tbl, row_id, before, after FROM change_rows WHERE entry_id = ? "
+        "AND tbl IN ('accounts', 'shared_accounts')", (entry_id,),
+    ):
+        if tbl == "accounts":
+            touched.add(row_id)
+        else:
+            touched.update(json.loads(side)["account_id"] for side in (before, after) if side)
+    marked = ids(conn)
+    for account in sorted(touched):
+        held = conn.execute(
+            "SELECT name, type, party_id FROM accounts WHERE id = ?", (account,)).fetchone()
+        if held and held[2] is not None and held[1] in KINDS and account not in marked:
+            return (f"undoing this change would leave {held[0]} joined to a party without being shared: "
+                    "a bank account or a card joins a party only while it is shared. Nothing was changed")
+    return None
