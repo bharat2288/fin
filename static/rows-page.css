@@ -36,7 +36,8 @@
     table.rows.rp-rows td.rp-amt { grid-column: 3; grid-row: 1; }
     table.rows.rp-rows td.rp-flowcell { grid-column: 2; grid-row: 2; padding-top: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
     table.rows.rp-rows td.rp-sgd { grid-column: 3; grid-row: 2; padding-top: 0; font-size: var(--t-meta); }
-    table.rows.rp-rows td.rp-where { grid-column: 2 / 4; grid-row: 3; padding-top: 0; font-size: var(--t-ui); color: var(--text-secondary); }
+    table.rows.rp-rows td.rp-where { grid-column: 2 / 4; grid-row: 3; padding-top: 0; font-size: var(--t-ui); color: var(--text-secondary);
+        white-space: normal; min-width: 0; overflow-wrap: anywhere; }
     /* the row's own words already open its merchant, and an S$ row's value is its amount */
     table.rows.rp-rows td.rp-party { display: none; }
     table.rows.rp-rows td.rp-sgd:has(> .rp-same) { display: none; }

@@ -3650,7 +3650,8 @@ def api_rows_summary():
     filters (the flow chips), and for the flow picked the rows, money in and
     money out in S$ on the one path (never a spending figure: a transfer counts
     on both sides), the rows in another currency with no rate (left out of the
-    S$ figures, never guessed) and the rows waiting for a label. Also the months
+    S$ figures, never guessed), and the rows waiting for a label as the Queue
+    counts them, whatever the flow picked. Also the months
     the book holds, newest first, and the parties there are to pick."""
     args = request.args.copy()
     args["every"] = "true"
@@ -3680,11 +3681,14 @@ def api_rows_summary():
             SELECT COUNT(*) AS n,
                    COALESCE(SUM(CASE WHEN v < 0 THEN -v ELSE 0 END), 0) AS in_minor,
                    COALESCE(SUM(CASE WHEN v > 0 THEN v ELSE 0 END), 0) AS out_minor,
-                   SUM(CASE WHEN v IS NULL THEN 1 ELSE 0 END) AS unvalued,
-                   SUM(CASE WHEN flow = ? THEN 1 ELSE 0 END) AS waiting
-            FROM (SELECT sgd_value(t.amount_minor, a.currency, t.date) AS v,
-                         COALESCE(t.flow_type, 'expense') AS flow
-                  {rows_from} WHERE 1=1 {filters})""", [flow.REVIEW] + params).fetchone()
+                   SUM(CASE WHEN v IS NULL THEN 1 ELSE 0 END) AS unvalued
+            FROM (SELECT sgd_value(t.amount_minor, a.currency, t.date) AS v
+                  {rows_from} WHERE 1=1 {filters})""", params).fetchone()
+        # Waiting: the Queue's rows (what its count counts), under the filters
+        # other than the flow, so a flow picked never hides them.
+        rows_waiting, waiting_params = _waiting_rows()
+        waiting = conn.execute(f"SELECT COUNT(*) {rows_from} WHERE 1=1 {others} AND {rows_waiting}",
+                               list(other_params) + waiting_params).fetchone()[0]
         months = [r[0] for r in conn.execute(
             "SELECT DISTINCT strftime('%Y-%m', date) FROM transactions ORDER BY 1 DESC")]
         # A party: the merchant of a row, or the party of the account a row is
@@ -3707,7 +3711,7 @@ def api_rows_summary():
         "in_sgd_minor": figures["in_minor"],
         "out_sgd_minor": figures["out_minor"],
         "unvalued": figures["unvalued"] or 0,
-        "waiting": figures["waiting"] or 0,
+        "waiting": waiting,
         "months": months,
         "latest_month": months[0] if months else None,
         "parties": parties,

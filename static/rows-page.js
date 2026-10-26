@@ -189,6 +189,9 @@
     ACT['rows-page'] = el => { state.page = Number(el.dataset.page) || 1; rerender(); window.scrollTo(0, 0); };
     SORT_REDRAW.rows = () => { state.page = 1; rerender(); };
 
+    // Leaving the page forgets the link it came in by, so the same link followed
+    // again sets its filters again; a bare return keeps the filters as they were.
+    window.addEventListener?.('hashchange', () => { if (!String(location.hash || '').startsWith('#/books/rows')) linked = null; });
     registerRoute(/^\/books\/rows$/, () => view());
     if (Array.isArray(window.booksNavExtra)) window.booksNavExtra.push(['rows', '#/books/rows', 'Rows', 'arrows-left-right', 'spending']);
 })();

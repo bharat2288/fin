@@ -172,3 +172,10 @@ def test_the_summary_names_the_months_and_the_parties_there_are_to_pick(client, 
 
 def test_an_unknown_flow_is_refused(client, book):
     assert client.get("/api/rows/summary?flow=spending").status_code == 400
+
+
+def test_the_waiting_count_is_the_queues_whatever_flow_is_picked(client, book):
+    # The rows waiting for a label are the Queue's (_waiting_rows), under the
+    # filters other than the flow: picking Spending does not hide them.
+    assert summary(client, month="2026-08", flow="expense")["waiting"] == 1
+    assert summary(client, month="2026-08", account_id=book["card"])["waiting"] == 0

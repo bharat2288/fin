@@ -79,6 +79,7 @@ def run(body, *, hash="#/books/rows", answers=None):
         "globalThis.localStorage = { getItem: k => memory.has(k) ? memory.get(k) : null, setItem: (k, v) => memory.set(k, String(v)) };",
         f"globalThis.location = {{ hash: {json.dumps(hash)} }};",
         "globalThis.scrollTo = () => {};",
+        "const listeners = {}; globalThis.addEventListener = (t, fn) => { listeners[t] = fn; };",
         *lifted,
         "window.booksNavExtra = booksNavExtra;",
         "const ROUTES = [];", _function("registerRoute"),
@@ -173,3 +174,13 @@ def test_every_month_reads_without_a_month():
     got = run("""await page(); ACT['rows-pick']({ dataset: { k: 'month' }, value: 'all' }); await page();
         out({ asked: rowsAsked() });""")
     assert "month=" not in got["asked"][-1]
+
+
+def test_the_same_link_followed_again_sets_its_filters_again():
+    got = run("""await page();
+        ACT['rows-pick']({ dataset: { k: 'account' }, value: '1' });
+        location.hash = '#/books/merchant/30'; listeners.hashchange();
+        location.hash = '#/books/rows?account=3&month=all'; listeners.hashchange();
+        await page();
+        out({ asked: rowsAsked() });""", hash="#/books/rows?account=3&month=all")
+    assert "account_id=3" in got["asked"][-1]
