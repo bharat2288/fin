@@ -6,6 +6,9 @@ lists only Loans:
   - "Auto Loan Total Outstanding: SGD 52,340.00";
   - under "Vehicle No. Account No. Outstanding (SGD)", one line per car loan:
     the vehicle, the loan number and what is outstanding on it.
+From Sep 2026 it comes as a Wealth Management Consolidated Statement: a cover
+page, then "Statement as of: 30-SEP-2026", "Auto Loan", the same table, and
+"Total Outstanding Amount 137,700.00" under it. Both are read.
 
 It prints no rows, no instalment, no instalments left and no split of an
 instalment into principal and interest: the one fact is what is outstanding.
@@ -40,6 +43,13 @@ ACCOUNT = "DBS auto loan"
 CURRENCY = "SGD"
 
 _TOTAL = re.compile(r"Auto Loan Total Outstanding:\s*SGD\s*([\d,]+\.\d{2})")
+# The Wealth Management layout (from Sep 2026) prints the auto loan's total
+# under its table: "Auto Loan", the table, "Total Outstanding Amount 137,700.00".
+_WEALTH_TOTAL = re.compile(
+    r"^Auto Loan\nVehicle No\. Account No\. Outstanding \(SGD\)\n(?:.*\n)*?"
+    r"Total Outstanding Amount\s+([\d,]+\.\d{2})$",
+    re.MULTILINE,
+)
 _TABLE_HEADER = "Vehicle No. Account No. Outstanding (SGD)"
 _LOAN_LINE = re.compile(r"^(\S+)\s+(\S+)\s+([\d,]+\.\d{2})$")
 # What a statement with rows prints: the DBS bank reader's and card reader's.
@@ -59,7 +69,11 @@ class LoanStatement:
 
 def looks_like_auto_loan(text: str) -> bool:
     """Whether the text is a DBS car-loan summary and nothing else."""
-    return bool(_TOTAL.search(text)) and not any(marker in text for marker in _ROWS_MARKERS)
+    return bool(_total(text)) and not any(marker in text for marker in _ROWS_MARKERS)
+
+
+def _total(text: str):
+    return _TOTAL.search(text) or _WEALTH_TOTAL.search(text)
 
 
 def _pages(filepath: str) -> list[str]:
@@ -79,7 +93,7 @@ def parse_auto_loan_text(text: str, filename: str = "") -> LoanStatement:
     on = _parse_statement_date(text)
     if on == "unknown":
         raise ValueError("DBS car loan: the summary's date was not found; nothing was read.")
-    total = money.parse_minor(_TOTAL.search(text).group(1), CURRENCY)
+    total = money.parse_minor(_total(text).group(1), CURRENCY)
 
     lines = [line.strip() for line in text.splitlines()]
     loans = []
