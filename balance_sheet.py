@@ -330,7 +330,7 @@ def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: s
     if kind in OWN_ROW_KINDS:
         ours = shared.is_shared(conn, account_id)
         count, total = _own_rows(conn, account_id, anchor["date"], upto, ours_only=ours)
-        return anchor["amount"] - total, count, f"+ {_counted(count, 'row', 'rows')}{' of ours' if ours else ''}"
+        return anchor["amount"] - total, count, f"+ {_counted(count, 'row of ours', 'rows of ours') if ours else _counted(count, 'row', 'rows')}"
     count, total, money_in = _naming_rows(conn, account_id, anchor["date"], upto)
     if kind == "loan":
         since = _counted(count, "instalment", "instalments")
