@@ -5541,18 +5541,23 @@ ACT['import-files'] = el => uploadFiles(el.files);
 // (tie.from_day). Changed with a preview open, the same files are read again.
 ACT['import-rows-from'] = el => {
     importState.rowsFrom = el.value;
-    if (importState.preview && importState.files) uploadFiles(importState.files);
+    if (importState.preview && importState.files && !importState.busy) uploadFiles(importState.files);
 };
 async function uploadFiles(files) {
     if (!files || !files.length) return;
     importState.files = Array.from(files);
+    const sentFrom = importState.rowsFrom;
     const form = new FormData();
-    Array.from(files).forEach(f => form.append('files', f));
-    if (importState.rowsFrom) form.append('rows_from', importState.rowsFrom);
-    importState.busy = true; importState.done = null; rerender();
+    importState.files.forEach(f => form.append('files', f));
+    if (sentFrom) form.append('rows_from', sentFrom);
+    // The old preview goes while the files are read: nothing is confirmed
+    // against a day it was not read with.
+    importState.busy = true; importState.done = null; importState.preview = null; rerender();
     const r = await send('POST', '/api/import/upload', form);
     importState.busy = false;
     if (!r.ok) { toast(r.data.error || 'fin could not read those files', { bad: true }); rerender(); return; }
+    // The day changed while they were read: read them again with it.
+    if (importState.rowsFrom !== sentFrom) return uploadFiles(importState.files);
     importState.preview = r.data;
     rerender();
 }
