@@ -180,11 +180,12 @@ def attach_rows(conn: sqlite3.Connection, set_off_id: int) -> dict:
     sign = "t.amount_minor > 0" if direction == xb.BACK else "t.amount_minor < 0"
     found = conn.execute(
         "SELECT t.id, t.date, t.description, t.amount_minor, t.flow_type, t.other_side_id, t.type_id, "
-        "COALESCE(t.book, ?) AS book, s.account_id, a.name AS account_name, "
+        f"{xb.BOOK_SQL} AS book, s.account_id, a.name AS account_name, "
         "COALESCE(a.currency, 'SGD') AS currency, a.owner, o.type AS other_kind, "
         "ty.name AS type_name, pt.name AS parent_type, rp.placed_minor "
         "FROM transactions t JOIN statements s ON s.id = t.statement_id "
         "JOIN accounts a ON a.id = s.account_id JOIN row_parts rp ON rp.row_id = t.id "
+        "LEFT JOIN services sv ON sv.id = t.service_id "
         "LEFT JOIN accounts o ON o.id = t.other_side_id "
         "LEFT JOIN types ty ON ty.id = t.type_id LEFT JOIN types pt ON pt.id = ty.parent_id "
         f"WHERE {sign} AND COALESCE(a.currency, 'SGD') = ? AND t.id != ? "

@@ -454,7 +454,8 @@ def test_the_drift_apply_relabels_and_leaves_a_flow_fin_did_not_work_out(client,
     """Relabelling the rows that differ from their rule works flow out again
     only where the stored flow is still what fin worked out (ADR-009): this
     row is held as income though its wording reads as a refund today, so it
-    is relabelled and keeps its flow."""
+    takes its rule's merchant and keeps its flow; income is no one's
+    spending, so it takes no book or type (fin-redesign 05)."""
     shopping = _type_id(conn, "Shopping")
     conn.execute(
         "INSERT INTO services (name, book, type_id) VALUES ('Refund Service', 'Household', ?)",
@@ -493,7 +494,7 @@ def test_the_drift_apply_relabels_and_leaves_a_flow_fin_did_not_work_out(client,
         "SELECT flow_type, flow_type_manual, book, type_id, service_id FROM transactions WHERE id = ?",
         (tx_id,),
     ).fetchone()
-    assert (row["book"], row["type_id"]) == ("Household", shopping)
+    assert (row["book"], row["type_id"]) == (None, None)
     assert row["service_id"] == svc_id
     assert row["flow_type"] == "income"
     assert row["flow_type_manual"] == 0

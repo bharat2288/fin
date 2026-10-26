@@ -2879,6 +2879,13 @@ function drawChoices() {
         : `<button type="button" class="choice more" data-act="ww-more"><strong>${esc(sentence(rest.map(c => c.label).slice(0, 3).join(', ')))}…</strong><span>${COUNT_WORDS[rest.length] || rest.length} more</span></button>`);
     $('#ww-ask').innerHTML = '';
 }
+/** The type This was… offers first: the row's own; on a waiting row, which
+ *  carries its merchant and no type (fin-redesign 05), its merchant's. An
+ *  untyped spending or refund row offers none, the picker blank. */
+function offeredType(row, services) {
+    if (row.flow_type !== 'review') return row.type_id ?? null;
+    return row.type_id ?? (services || []).find(s => s.id === row.service_id)?.type_id ?? null;
+}
 ACT['ww-more'] = () => { step.more = true; drawChoices(); $('#ww-choices .choice:nth-child(4)')?.focus(); };
 ACT['ww-change'] = () => { step.choice = null; drawChoices(); $('#ww-choices .choice')?.focus(); };
 ACT['ww-pick'] = el => {
@@ -2891,7 +2898,7 @@ ACT['ww-pick'] = el => {
     // or Check each row (fin-surfaces 13), shown with that scope only.
     const teaches = untyped && choice.name === 'spending';
     if (choice.asks === 'type') {
-        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types, row.type_id)}</select></label>
+        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types, offeredType(row, step.services))}</select></label>
             <label class="field"><span id="cw-book-l">Book</span><select id="cw-book">${bookOptions(r.books, null, untyped ? 'As the merchant or type says' : 'As the type says')}</select></label>
             ${teaches ? `<label class="field" id="cw-set-f"><span>New rows from it</span><select id="cw-set">
                 <option value="same">Every row the same</option><option value="each"${merchantChecksEach(step.merchant, step.services) ? ' selected' : ''}>Check each row</option></select></label>` : ''}`;
@@ -4754,11 +4761,12 @@ function driftParts(p) {
     return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
 }
 /** The rows whose flow Apply changes (every one is in p.flows), by what they
- *  are now and after: "2 spending → a movement · the loan"; then each row
- *  it keeps, in its own sentence. */
+ *  are now and after: "2 spending → a movement · the loan", and where the
+ *  move empties their book and type (label_cleared), "with no book or
+ *  type"; then each row it keeps, in its own sentence. */
 function flowsLine(p) {
     const pairs = {};
-    (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}`; pairs[k] = (pairs[k] || 0) + 1; });
+    (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}${f.label_cleared ? ', with no book or type' : ''}`; pairs[k] = (pairs[k] || 0) + 1; });
     const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
     return (said ? `<p class="sub">What the rows are: ${said}.</p>` : '')
         + keptWords(p).map(k => `<p class="sub">${esc(k)}</p>`).join('');

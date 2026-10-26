@@ -186,7 +186,10 @@ _RULE_FLOW_SAID = (
     "A rule may state what its rows are (flow, other_side_id): it beats what fin works out, never a flow "
     "the operator set by hand, and the preview lists every past row whose flow would change (flows). "
     "Only a flow fin worked out under the rules before the change moves (not one Only new rows left); a row "
-    "a record of expect back rests on keeps its flow where a hand label would be refused (flows_kept, with why). "
+    "a record of expect back rests on keeps its flow where a hand label would be refused, and so does a row whose "
+    "book or type the operator chose (flows_kept, with why). "
+    "Book and type go only on spending and refund rows: a row moved to any other flow loses both in the same "
+    "change (each flows line's label_cleared says what it loses). "
 )
 # A merchant's role as a party (party.py); "" says none.
 _ROLE = {
@@ -494,8 +497,9 @@ _WRITES = [
         "type proposes none), gift, own_account (account_id of a bank account, card or untracked "
         "account), company (account_id), "
         "loan_repayment (account_id of a loan), income (income_kind_id), refund (it keeps the row's "
-        "book and type, or takes type_id; it links to its purchase when exactly one fits, and a "
-        "row with no type to keep then takes the purchase's), "
+        "book and type, or takes type_id; a row with no spending type takes its merchant's book and "
+        "type, chosen; it links to its purchase when exactly one fits, and a row with neither a type "
+        "to keep nor a merchant's then takes the purchase's), "
         "card_payment (paying a card's bill or a payment reversed: no book or type), holding "
         "(account_id of a holding: money that bought, or came back from, something owned). A row "
         "that stops being a refund drops its refund link. A person is no "

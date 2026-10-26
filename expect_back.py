@@ -167,13 +167,22 @@ def let_go_sql() -> str:
 # --- eligibility ---------------------------------------------------------------
 
 
+# Whose money a row is, as eligibility reads it: its own book; a row with
+# none (one that is no one's spending carries none, fin-redesign 05) its
+# merchant's, so a company's salary or payment is the company's; else the
+# default book. `t` is the row, `sv` its merchant (LEFT JOIN services), and
+# the default book the one parameter.
+BOOK_SQL = "COALESCE(t.book, sv.book, ?)"
+
+
 def _row(conn: sqlite3.Connection, row_id) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT t.id, t.description, t.amount_minor, t.flow_type, t.other_side_id, "
-        "COALESCE(t.book, ?) AS book, t.type_id, s.account_id, "
+        f"{BOOK_SQL} AS book, t.type_id, s.account_id, "
         "COALESCE(a.currency, 'SGD') AS currency, a.owner, o.type AS other_kind "
         "FROM transactions t JOIN statements s ON s.id = t.statement_id "
         "JOIN accounts a ON a.id = s.account_id "
+        "LEFT JOIN services sv ON sv.id = t.service_id "
         "LEFT JOIN accounts o ON o.id = t.other_side_id WHERE t.id = ?",
         (book_type.DEFAULT_BOOK, row_id),
     ).fetchone()

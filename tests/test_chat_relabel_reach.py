@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+import db
 import mcp_tools
 import review
 from test_balance_sheet import bring_in, make_account
@@ -97,6 +98,15 @@ def trip(client):
     t.credit = row_id(client, "SAMPLE AIR BOOKING", -94800)
     t.reversal = row_id(client, "PAYMENT REVERSAL", 1342415)
     t.payout = row_id(client, "SAMPLE EXCHANGE", -2645500)
+    # The credit as the book holds case 20's row: imported before income
+    # stopped taking a merchant's label (fin-redesign 05), it carries the
+    # airline's book and type, as its purchase does.
+    conn = db.get_connection()
+    conn.execute("UPDATE transactions SET book = p.book, type_id = p.type_id, book_source = p.book_source,"
+                 " type_source = p.type_source FROM (SELECT book, type_id, book_source, type_source"
+                 " FROM transactions WHERE id = ?) AS p WHERE id = ?", (t.purchase, t.credit))
+    conn.commit()
+    conn.close()
     return t
 
 
@@ -212,9 +222,13 @@ def test_a_refund_to_pay_back_is_not_taken_out_of_refund_until_the_mark_is_undon
     assert (state(conn), len(entries())) == (before, count)
 
 
-def test_a_refund_with_no_type_of_its_own_takes_its_purchases_book_and_type_when_linked(trip, conn):
+def test_a_refund_with_no_type_or_merchant_of_its_own_takes_its_purchases_book_and_type_when_linked(trip, conn):
     assert call("label_review", tx_id=trip.credit, choice="card_payment")["ok"]
     assert (held(conn, trip.credit)["book"], held(conn, trip.credit)["type_id"]) == (None, None)
+    # A credit no merchant holds: one its merchant holds takes the
+    # merchant's label instead (case 20, test_book_type_only_on_spending).
+    conn.execute("UPDATE transactions SET service_id = NULL WHERE id = ?", (trip.credit,))
+    conn.commit()
 
     answer = call("label_review", tx_id=trip.credit, choice="refund")
 
@@ -361,6 +375,13 @@ def credits(client):
     bring_in(client, CARD, [(f"2026-08-{n:02d}", f"SAMPLE SHOP CREDIT {n:02d}", -(1000 + n)) for n in range(1, 28)],
              kind="card")
     ids = [row_id(client, f"SAMPLE SHOP CREDIT {n:02d}", -(1000 + n)) for n in range(1, 28)]
+    # As the book holds such credits: imported before income stopped taking
+    # a merchant's label (fin-redesign 05), each carries the shop's type.
+    conn = db.get_connection()
+    conn.executemany("UPDATE transactions SET book = 'Household', type_id = ?, book_source = 'merchant',"
+                     " type_source = 'merchant' WHERE id = ?", [(shopping, i) for i in ids])
+    conn.commit()
+    conn.close()
     return {"ids": ids, "rule": rule, "shop": shop, "shopping": shopping}
 
 
@@ -393,10 +414,13 @@ def test_a_batch_with_its_token_is_one_change_and_one_undo(credits, conn):
 def test_a_relabel_applied_with_a_token_gone_stale_after_a_rule_changed_is_refused_and_writes_nothing(client, credits, conn):
     first, *more = credits["ids"][:3]
     token = call("label_review", tx_id=first, tx_ids=more, choice="refund")["preview"]["token"]
-    # Mid-preview, the shop's rule now gives its rows another type.
-    groceries = type_id(client, "Groceries")
-    asked = call("change_rule", rule_id=credits["rule"], type_override_id=groceries)
-    changed = call("change_rule", rule_id=credits["rule"], type_override_id=groceries, past="apply",
+    # Mid-preview, the shop's rule now names another merchant: the merchant
+    # link is on every row, income too (an income row takes no rule's type,
+    # fin-redesign 05).
+    other = client.post("/api/services", json={"name": "Sample Other Shop",
+                                               "type_id": type_id(client, "Groceries")}).get_json()["id"]
+    asked = call("change_rule", rule_id=credits["rule"], service_id=other)
+    changed = call("change_rule", rule_id=credits["rule"], service_id=other, past="apply",
                    token=asked["preview"]["token"], expected_count=27)
     assert changed["ok"], changed
     before, count = state(conn), len(entries())
