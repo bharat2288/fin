@@ -5975,18 +5975,26 @@ def _fetch_rates_for_import(conn, account_ids) -> dict:
     away a rate other rows use. The import's change is closed first, and the
     response names it (g.closed_change). A fetch that fails saves nothing and
     says which currencies in {saved, currencies, failed}; the import stands."""
+    entry_id = g.pop("change_entry", None)
+    if entry_id is not None:
+        # Named first: should closing fail, the import is still the response's change.
+        g.closed_change = (entry_id, history.row_count(conn, entry_id))
+    short: list[str] = []
     try:
-        entry_id = g.pop("change_entry", None)
         if entry_id is not None:
             count = history.close_entry(conn, entry_id, _CHANGE_SUMMARIES["api_import_confirm"])
             g.closed_change = (entry_id if count else None, count)
             g.change_entry = history.open_entry(conn, *_caller(), IMPORT_RATES_SUMMARY)
+        short = sorted(valuation.missing_days(conn, account_ids))
         done = valuation.fetch_missing(conn, accounts=account_ids)
         conn.commit()
     except Exception as e:  # the import is in; a rate is the Home notice's to fetch
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         app.logger.warning("Rates for an import were not fetched: %s", type(e).__name__)
-        short = sorted(valuation.missing_days(conn, account_ids))
+        # Not read again: the book that just failed is not asked twice.
         done = {"saved": 0, "currencies": short, "failed": short}
     return done
 

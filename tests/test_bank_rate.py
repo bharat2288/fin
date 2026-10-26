@@ -264,3 +264,18 @@ def test_an_import_in_sgd_asks_for_nothing_even_with_older_rows_short_of_a_rate(
     done = upload(client, "Sample Card 0001", [("2026-08-05", "SAMPLE GROCER SINGAPORE", 10000)], "SGD")
 
     assert done.get_json()["rates"] == {"saved": 0, "currencies": [], "failed": []}
+
+
+def test_a_book_error_while_saving_the_rates_still_leaves_the_import_in(client, conn, monkeypatch):
+    import sqlite3
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(valuation, "fetch_missing", locked)
+
+    done = upload(client, RUPEE_BANK, RUPEE_ROWS, "INR")
+
+    assert done.get_json()["transactions_saved"] == 2
+    assert done.get_json()["rates"] == {"saved": 0, "currencies": ["INR"], "failed": ["INR"]}
+    assert conn.execute("SELECT status FROM batch_imports ORDER BY id DESC").fetchone()[0] == "committed"
+    assert [e["id"] for e in entries(client)] == [int(done.headers["X-Fin-Change"])]
