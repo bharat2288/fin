@@ -104,6 +104,9 @@ def _rebuild(conn: sqlite3.Connection, table: str, retired: str, body: str) -> N
     for column in sorted(conversion.added_after(STEP_NAME).get(table, ())):
         if column not in old_columns:
             body = re.sub(rf"\n[ \t]+{re.escape(column)}[ \t][^\n]*", "", body)
+            # A column declared last leaves the one before it ending in the
+            # comma it had for it (its comment kept).
+            body = re.sub(r",([ \t]*(?:--[^\n]*)?)$", r"\1", body)
     conn.execute(f"CREATE TABLE {new} ({body}\n)")
     # The columns a later step drops (here, and those the chain declares).
     for column, declaration in (*RETIRED_LATER.get(table, ()), *conversion.retired_after(STEP_NAME).get(table, ())):

@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS merchant_rules (
     type_override_id INTEGER REFERENCES types(id),  -- type the rule sets in place of the merchant's
     min_amount_minor INTEGER,      -- if set, rule only matches when the row's amount_minor >= this
     max_amount_minor INTEGER,      -- if set, rule only matches when the row's amount_minor <= this
+    flow TEXT,                     -- what the rule says a row is (flow.RULE_FLOWS); NULL = it states no flow and labels only (ADR-009). An existing database gains it through convert_rule_flow.py
+    other_side_id INTEGER REFERENCES accounts(id),  -- the account it names as the row's other side, with its flow; NULL = none named
     FOREIGN KEY (service_id) REFERENCES services(id)
 );
 
@@ -35,7 +37,25 @@ CREATE TABLE IF NOT EXISTS accounts (
     currency TEXT DEFAULT 'SGD', -- three-letter code with a declared minor unit (money.py): SGD, INR
     status TEXT DEFAULT 'active', -- 'active', 'archived'
     created_at TEXT DEFAULT (datetime('now')),
-    owner TEXT NOT NULL DEFAULT 'Household'  -- whose sheet it is on: Household, or a company (declared in account_kind.py)
+    owner TEXT NOT NULL DEFAULT 'Household',  -- whose sheet it is on: Household or a company (declared in account_kind.py)
+    party_id INTEGER REFERENCES services(id)  -- the party (a merchant) a person, company, loan, holding or untracked account belongs to (party.py); NULL = none. An existing database gains it through convert_party_link.py
+);
+
+-- Hire-purchase terms on a loan (loan_terms.py): what turns its statement's
+-- total of remaining instalments into principal owed when it is imported,
+-- and the loan's first figure (the amount financed, owed from `owed_from`).
+-- At most one row per loan. A new table, made empty by CREATE IF NOT EXISTS
+-- on start, its triggers with it (history.ADDED_ON_START); no row is converted.
+CREATE TABLE IF NOT EXISTS loan_terms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL UNIQUE REFERENCES accounts(id),
+    financed_minor INTEGER NOT NULL,  -- the amount financed, whole minor units of the loan's currency
+    interest_minor INTEGER NOT NULL,  -- the flat interest over the whole term
+    flat_rate TEXT,                   -- the flat rate a year in percent as entered ("1.68"); NULL when the interest was entered
+    months INTEGER NOT NULL,          -- how many monthly instalments
+    first_instalment TEXT NOT NULL,   -- YYYY-MM-DD, the first instalment's due day
+    owed_from TEXT NOT NULL,          -- YYYY-MM-DD, the day the amount financed is owed from: the loan's first figure
+    method TEXT NOT NULL              -- how the interest is spread over the instalments (declared in loan_terms.py)
 );
 
 -- An anchor: one account's balance on one date, from a statement or supplied
@@ -74,6 +94,7 @@ CREATE TABLE IF NOT EXISTS statements (
     filename TEXT,                  -- original PDF filename
     imported_at TEXT DEFAULT (datetime('now')),
     printed INTEGER NOT NULL DEFAULT 0,  -- 1 = one statement as printed: statement_date is its closing day and it holds the rows it printed; 0 = a calendar-month record (statement_date the 1st) of rows from a source that states no balance. An existing database gains it through convert_printed_statements.py
+    period_start TEXT,              -- YYYY-MM-DD, the first day the statement covers, where it is known on its own (statement_period.py): a printed statement's opening day as its parser read it, so it covers period_start to statement_date; a calendar-month record's 1st, so it covers its month. NULL on a printed statement is read from the closing before it (statement_period.start); on any other record, as the 1st of its month. An existing database gains it through convert_statement_periods.py
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     UNIQUE(account_id, statement_date)
 );
@@ -131,7 +152,8 @@ CREATE TABLE IF NOT EXISTS services (
     created_at TEXT DEFAULT (datetime('now')),
     book TEXT,                          -- default book for this merchant's rows
     type_id INTEGER REFERENCES types(id),  -- default type for this merchant's rows
-    review_each_time INTEGER DEFAULT 0  -- 1 = a mixed merchant: its rows take the default type and are flagged for a look each time
+    review_each_time INTEGER DEFAULT 0,  -- 1 = a mixed merchant: its rows take the default type and are flagged for a look each time
+    role TEXT                           -- the part the merchant plays as a party (declared in party.py); NULL = it says none. An existing database gains it through convert_party_link.py
 );
 
 -- The type list: one list for every book, with one level of sub-type, and
@@ -483,69 +505,69 @@ WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'services', NEW.id, 'insert', NULL,
-        json_object('id', NEW.id, 'name', NEW.name, 'is_one_off', NEW.is_one_off, 'exclude_from_expense_views', NEW.exclude_from_expense_views, 'notes', NEW.notes, 'created_at', NEW.created_at, 'book', NEW.book, 'type_id', NEW.type_id, 'review_each_time', NEW.review_each_time));
+        json_object('id', NEW.id, 'name', NEW.name, 'is_one_off', NEW.is_one_off, 'exclude_from_expense_views', NEW.exclude_from_expense_views, 'notes', NEW.notes, 'created_at', NEW.created_at, 'book', NEW.book, 'type_id', NEW.type_id, 'review_each_time', NEW.review_each_time, 'role', NEW.role));
 END;
 CREATE TRIGGER IF NOT EXISTS history_services_update AFTER UPDATE ON services
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
-    AND json_object('id', OLD.id, 'name', OLD.name, 'is_one_off', OLD.is_one_off, 'exclude_from_expense_views', OLD.exclude_from_expense_views, 'notes', OLD.notes, 'created_at', OLD.created_at, 'book', OLD.book, 'type_id', OLD.type_id, 'review_each_time', OLD.review_each_time) IS NOT json_object('id', NEW.id, 'name', NEW.name, 'is_one_off', NEW.is_one_off, 'exclude_from_expense_views', NEW.exclude_from_expense_views, 'notes', NEW.notes, 'created_at', NEW.created_at, 'book', NEW.book, 'type_id', NEW.type_id, 'review_each_time', NEW.review_each_time)
+    AND json_object('id', OLD.id, 'name', OLD.name, 'is_one_off', OLD.is_one_off, 'exclude_from_expense_views', OLD.exclude_from_expense_views, 'notes', OLD.notes, 'created_at', OLD.created_at, 'book', OLD.book, 'type_id', OLD.type_id, 'review_each_time', OLD.review_each_time, 'role', OLD.role) IS NOT json_object('id', NEW.id, 'name', NEW.name, 'is_one_off', NEW.is_one_off, 'exclude_from_expense_views', NEW.exclude_from_expense_views, 'notes', NEW.notes, 'created_at', NEW.created_at, 'book', NEW.book, 'type_id', NEW.type_id, 'review_each_time', NEW.review_each_time, 'role', NEW.role)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'services', NEW.id, 'update',
-        json_object('id', OLD.id, 'name', OLD.name, 'is_one_off', OLD.is_one_off, 'exclude_from_expense_views', OLD.exclude_from_expense_views, 'notes', OLD.notes, 'created_at', OLD.created_at, 'book', OLD.book, 'type_id', OLD.type_id, 'review_each_time', OLD.review_each_time),
-        json_object('id', NEW.id, 'name', NEW.name, 'is_one_off', NEW.is_one_off, 'exclude_from_expense_views', NEW.exclude_from_expense_views, 'notes', NEW.notes, 'created_at', NEW.created_at, 'book', NEW.book, 'type_id', NEW.type_id, 'review_each_time', NEW.review_each_time));
+        json_object('id', OLD.id, 'name', OLD.name, 'is_one_off', OLD.is_one_off, 'exclude_from_expense_views', OLD.exclude_from_expense_views, 'notes', OLD.notes, 'created_at', OLD.created_at, 'book', OLD.book, 'type_id', OLD.type_id, 'review_each_time', OLD.review_each_time, 'role', OLD.role),
+        json_object('id', NEW.id, 'name', NEW.name, 'is_one_off', NEW.is_one_off, 'exclude_from_expense_views', NEW.exclude_from_expense_views, 'notes', NEW.notes, 'created_at', NEW.created_at, 'book', NEW.book, 'type_id', NEW.type_id, 'review_each_time', NEW.review_each_time, 'role', NEW.role));
 END;
 CREATE TRIGGER IF NOT EXISTS history_services_delete AFTER DELETE ON services
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'services', OLD.id, 'delete',
-        json_object('id', OLD.id, 'name', OLD.name, 'is_one_off', OLD.is_one_off, 'exclude_from_expense_views', OLD.exclude_from_expense_views, 'notes', OLD.notes, 'created_at', OLD.created_at, 'book', OLD.book, 'type_id', OLD.type_id, 'review_each_time', OLD.review_each_time), NULL);
+        json_object('id', OLD.id, 'name', OLD.name, 'is_one_off', OLD.is_one_off, 'exclude_from_expense_views', OLD.exclude_from_expense_views, 'notes', OLD.notes, 'created_at', OLD.created_at, 'book', OLD.book, 'type_id', OLD.type_id, 'review_each_time', OLD.review_each_time, 'role', OLD.role), NULL);
 END;
 CREATE TRIGGER IF NOT EXISTS history_merchant_rules_insert AFTER INSERT ON merchant_rules
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'merchant_rules', NEW.id, 'insert', NULL,
-        json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor));
+        json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor, 'flow', NEW.flow, 'other_side_id', NEW.other_side_id));
 END;
 CREATE TRIGGER IF NOT EXISTS history_merchant_rules_update AFTER UPDATE ON merchant_rules
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
-    AND json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor) IS NOT json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor)
+    AND json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor, 'flow', OLD.flow, 'other_side_id', OLD.other_side_id) IS NOT json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor, 'flow', NEW.flow, 'other_side_id', NEW.other_side_id)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'merchant_rules', NEW.id, 'update',
-        json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor),
-        json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor));
+        json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor, 'flow', OLD.flow, 'other_side_id', OLD.other_side_id),
+        json_object('id', NEW.id, 'pattern', NEW.pattern, 'service_id', NEW.service_id, 'match_type', NEW.match_type, 'confidence', NEW.confidence, 'priority', NEW.priority, 'created_at', NEW.created_at, 'book_override', NEW.book_override, 'type_override_id', NEW.type_override_id, 'min_amount_minor', NEW.min_amount_minor, 'max_amount_minor', NEW.max_amount_minor, 'flow', NEW.flow, 'other_side_id', NEW.other_side_id));
 END;
 CREATE TRIGGER IF NOT EXISTS history_merchant_rules_delete AFTER DELETE ON merchant_rules
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'merchant_rules', OLD.id, 'delete',
-        json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor), NULL);
+        json_object('id', OLD.id, 'pattern', OLD.pattern, 'service_id', OLD.service_id, 'match_type', OLD.match_type, 'confidence', OLD.confidence, 'priority', OLD.priority, 'created_at', OLD.created_at, 'book_override', OLD.book_override, 'type_override_id', OLD.type_override_id, 'min_amount_minor', OLD.min_amount_minor, 'max_amount_minor', OLD.max_amount_minor, 'flow', OLD.flow, 'other_side_id', OLD.other_side_id), NULL);
 END;
 CREATE TRIGGER IF NOT EXISTS history_accounts_insert AFTER INSERT ON accounts
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'accounts', NEW.id, 'insert', NULL,
-        json_object('id', NEW.id, 'name', NEW.name, 'short_name', NEW.short_name, 'type', NEW.type, 'last_four', NEW.last_four, 'currency', NEW.currency, 'status', NEW.status, 'created_at', NEW.created_at, 'owner', NEW.owner));
+        json_object('id', NEW.id, 'name', NEW.name, 'short_name', NEW.short_name, 'type', NEW.type, 'last_four', NEW.last_four, 'currency', NEW.currency, 'status', NEW.status, 'created_at', NEW.created_at, 'owner', NEW.owner, 'party_id', NEW.party_id));
 END;
 CREATE TRIGGER IF NOT EXISTS history_accounts_update AFTER UPDATE ON accounts
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
-    AND json_object('id', OLD.id, 'name', OLD.name, 'short_name', OLD.short_name, 'type', OLD.type, 'last_four', OLD.last_four, 'currency', OLD.currency, 'status', OLD.status, 'created_at', OLD.created_at, 'owner', OLD.owner) IS NOT json_object('id', NEW.id, 'name', NEW.name, 'short_name', NEW.short_name, 'type', NEW.type, 'last_four', NEW.last_four, 'currency', NEW.currency, 'status', NEW.status, 'created_at', NEW.created_at, 'owner', NEW.owner)
+    AND json_object('id', OLD.id, 'name', OLD.name, 'short_name', OLD.short_name, 'type', OLD.type, 'last_four', OLD.last_four, 'currency', OLD.currency, 'status', OLD.status, 'created_at', OLD.created_at, 'owner', OLD.owner, 'party_id', OLD.party_id) IS NOT json_object('id', NEW.id, 'name', NEW.name, 'short_name', NEW.short_name, 'type', NEW.type, 'last_four', NEW.last_four, 'currency', NEW.currency, 'status', NEW.status, 'created_at', NEW.created_at, 'owner', NEW.owner, 'party_id', NEW.party_id)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'accounts', NEW.id, 'update',
-        json_object('id', OLD.id, 'name', OLD.name, 'short_name', OLD.short_name, 'type', OLD.type, 'last_four', OLD.last_four, 'currency', OLD.currency, 'status', OLD.status, 'created_at', OLD.created_at, 'owner', OLD.owner),
-        json_object('id', NEW.id, 'name', NEW.name, 'short_name', NEW.short_name, 'type', NEW.type, 'last_four', NEW.last_four, 'currency', NEW.currency, 'status', NEW.status, 'created_at', NEW.created_at, 'owner', NEW.owner));
+        json_object('id', OLD.id, 'name', OLD.name, 'short_name', OLD.short_name, 'type', OLD.type, 'last_four', OLD.last_four, 'currency', OLD.currency, 'status', OLD.status, 'created_at', OLD.created_at, 'owner', OLD.owner, 'party_id', OLD.party_id),
+        json_object('id', NEW.id, 'name', NEW.name, 'short_name', NEW.short_name, 'type', NEW.type, 'last_four', NEW.last_four, 'currency', NEW.currency, 'status', NEW.status, 'created_at', NEW.created_at, 'owner', NEW.owner, 'party_id', NEW.party_id));
 END;
 CREATE TRIGGER IF NOT EXISTS history_accounts_delete AFTER DELETE ON accounts
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'accounts', OLD.id, 'delete',
-        json_object('id', OLD.id, 'name', OLD.name, 'short_name', OLD.short_name, 'type', OLD.type, 'last_four', OLD.last_four, 'currency', OLD.currency, 'status', OLD.status, 'created_at', OLD.created_at, 'owner', OLD.owner), NULL);
+        json_object('id', OLD.id, 'name', OLD.name, 'short_name', OLD.short_name, 'type', OLD.type, 'last_four', OLD.last_four, 'currency', OLD.currency, 'status', OLD.status, 'created_at', OLD.created_at, 'owner', OLD.owner, 'party_id', OLD.party_id), NULL);
 END;
 CREATE TRIGGER IF NOT EXISTS history_rates_insert AFTER INSERT ON rates
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
@@ -575,23 +597,23 @@ WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'statements', NEW.id, 'insert', NULL,
-        json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed));
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed, 'period_start', NEW.period_start));
 END;
 CREATE TRIGGER IF NOT EXISTS history_statements_update AFTER UPDATE ON statements
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
-    AND json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed)
+    AND json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed, 'period_start', OLD.period_start) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed, 'period_start', NEW.period_start)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'statements', NEW.id, 'update',
-        json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed),
-        json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed));
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed, 'period_start', OLD.period_start),
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'statement_date', NEW.statement_date, 'filename', NEW.filename, 'imported_at', NEW.imported_at, 'printed', NEW.printed, 'period_start', NEW.period_start));
 END;
 CREATE TRIGGER IF NOT EXISTS history_statements_delete AFTER DELETE ON statements
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
 BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'statements', OLD.id, 'delete',
-        json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed), NULL);
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'statement_date', OLD.statement_date, 'filename', OLD.filename, 'imported_at', OLD.imported_at, 'printed', OLD.printed, 'period_start', OLD.period_start), NULL);
 END;
 CREATE TRIGGER IF NOT EXISTS history_subscriptions_insert AFTER INSERT ON subscriptions
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
@@ -876,6 +898,29 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'type_slots', OLD.id, 'delete',
         json_object('id', OLD.id, 'slot', OLD.slot, 'type_id', OLD.type_id), NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS history_loan_terms_insert AFTER INSERT ON loan_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'loan_terms', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'financed_minor', NEW.financed_minor, 'interest_minor', NEW.interest_minor, 'flat_rate', NEW.flat_rate, 'months', NEW.months, 'first_instalment', NEW.first_instalment, 'owed_from', NEW.owed_from, 'method', NEW.method));
+END;
+CREATE TRIGGER IF NOT EXISTS history_loan_terms_update AFTER UPDATE ON loan_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'account_id', OLD.account_id, 'financed_minor', OLD.financed_minor, 'interest_minor', OLD.interest_minor, 'flat_rate', OLD.flat_rate, 'months', OLD.months, 'first_instalment', OLD.first_instalment, 'owed_from', OLD.owed_from, 'method', OLD.method) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id, 'financed_minor', NEW.financed_minor, 'interest_minor', NEW.interest_minor, 'flat_rate', NEW.flat_rate, 'months', NEW.months, 'first_instalment', NEW.first_instalment, 'owed_from', NEW.owed_from, 'method', NEW.method)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'loan_terms', NEW.id, 'update',
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'financed_minor', OLD.financed_minor, 'interest_minor', OLD.interest_minor, 'flat_rate', OLD.flat_rate, 'months', OLD.months, 'first_instalment', OLD.first_instalment, 'owed_from', OLD.owed_from, 'method', OLD.method),
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'financed_minor', NEW.financed_minor, 'interest_minor', NEW.interest_minor, 'flat_rate', NEW.flat_rate, 'months', NEW.months, 'first_instalment', NEW.first_instalment, 'owed_from', NEW.owed_from, 'method', NEW.method));
+END;
+CREATE TRIGGER IF NOT EXISTS history_loan_terms_delete AFTER DELETE ON loan_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'loan_terms', OLD.id, 'delete',
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'financed_minor', OLD.financed_minor, 'interest_minor', OLD.interest_minor, 'flat_rate', OLD.flat_rate, 'months', OLD.months, 'first_instalment', OLD.first_instalment, 'owed_from', OLD.owed_from, 'method', OLD.method), NULL);
 END;
 -- history:end
 

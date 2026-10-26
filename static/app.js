@@ -18,8 +18,6 @@
 const STALE_DAYS = 60;
 // The balance sheet starts here (balance_sheet.START).
 const SHEET_START = '2026-01';
-// A missed bill: no payment seen this many days after it was due.
-const BILL_GRACE_DAYS = 7;
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -672,22 +670,11 @@ ACT.month = el => { S.month = el.value; store.set('month', S.month); rerender();
 // What waits: one list behind Home's cards, the Queue and the counts
 // ---------------------------------------------------------------------------
 
-function addPeriod(iso, frequency, periods, sign) {
-    const [y, m, d] = iso.split('-').map(Number);
-    const months = ({ monthly: 1, quarterly: 3, yearly: 12, annual: 12 }[frequency] || 1) * (periods || 1) * sign;
-    const t = new Date(y, m - 1 + months, 1);
-    const last = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
-    t.setDate(Math.min(d, last));
-    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
-}
-/** A bill whose last renewal came and went with no payment seen. */
+/** A bill the server reads as missed (bills.py holds the rule, for the app and the
+ *  chat alike): its due day and the last payment seen. One waiting on its paying
+ *  account's statement is not missed. */
 function billMissed(sub) {
-    if (sub.status !== 'active' || !sub.computed_renewal) return null;
-    const due = addPeriod(sub.computed_renewal, sub.frequency, sub.periods, -1);
-    if (daysBetween(due, todayIso()) < BILL_GRACE_DAYS) return null;
-    const paid = sub.tx_last_paid || sub.last_paid;
-    if (paid && daysBetween(paid, due) <= 5) return null;
-    return { due, paid };
+    return sub.state === 'missed' ? { due: sub.due, paid: sub.tx_last_paid || sub.last_paid } : null;
 }
 
 function rowItem(row, kind) {
@@ -1211,10 +1198,10 @@ ACT['home-guess-yes'] = async el => {
     const pattern = suggestPattern(row.description);
     const body = { tx_id: row.id, service_name: el.dataset.merchant || row.service_name || suggestName(row.description) || titleCase(pattern || row.description),
         type_id: Number(el.dataset.type), apply_scope: pattern ? 'service_default' : 'transaction', pattern, match_type: 'contains', suggestion_visible: true };
-    const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
+    const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows', taught: body.tx_id });
     if (r.cancelled) return;
     if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return; }
-    toast(previewedWords(r, 'Labelled'), { undo: r.change });
+    toast(resolvedWords(r, 'Labelled'), { undo: r.change });
     refreshFrame();
     rerender();
 };
@@ -2879,6 +2866,13 @@ function drawChoices() {
         : `<button type="button" class="choice more" data-act="ww-more"><strong>${esc(sentence(rest.map(c => c.label).slice(0, 3).join(', ')))}…</strong><span>${COUNT_WORDS[rest.length] || rest.length} more</span></button>`);
     $('#ww-ask').innerHTML = '';
 }
+/** The type This was… offers first: the row's own; on a waiting row, which
+ *  carries its merchant and no type (fin-redesign 05), its merchant's. An
+ *  untyped spending or refund row offers none, the picker blank. */
+function offeredType(row, services) {
+    if (row.flow_type !== 'review') return row.type_id ?? null;
+    return row.type_id ?? (services || []).find(s => s.id === row.service_id)?.type_id ?? null;
+}
 ACT['ww-more'] = () => { step.more = true; drawChoices(); $('#ww-choices .choice:nth-child(4)')?.focus(); };
 ACT['ww-change'] = () => { step.choice = null; drawChoices(); $('#ww-choices .choice')?.focus(); };
 ACT['ww-pick'] = el => {
@@ -2891,7 +2885,7 @@ ACT['ww-pick'] = el => {
     // or Check each row (fin-surfaces 13), shown with that scope only.
     const teaches = untyped && choice.name === 'spending';
     if (choice.asks === 'type') {
-        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types, row.type_id)}</select></label>
+        fields = `<label class="field"><span>Type</span><select id="cw-type">${typeOptions(r.types, offeredType(row, step.services))}</select></label>
             <label class="field"><span id="cw-book-l">Book</span><select id="cw-book">${bookOptions(r.books, null, untyped ? 'As the merchant or type says' : 'As the type says')}</select></label>
             ${teaches ? `<label class="field" id="cw-set-f"><span>New rows from it</span><select id="cw-set">
                 <option value="same">Every row the same</option><option value="each"${merchantChecksEach(step.merchant, step.services) ? ' selected' : ''}>Check each row</option></select></label>` : ''}`;
@@ -2998,14 +2992,14 @@ async function saveResolve(body, group = [], { quiet = false, check = null, onSc
     }
     // Teaching a merchant fin holds a new default reaches its past rows
     // through the preview, as the merchant sheet does (fin-surfaces 21).
-    const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows' });
+    const r = await sendPreviewed('POST', '/api/transactions/resolve', body, { key: 'past_rows', taught: body.tx_id });
     if (r.cancelled) return { ok: false, resolved: false, cancelled: true, changes: [], labelled: 0, labelledIds: [], error: 'Nothing was saved.' };
     if (!r.ok) {
         const error = r.data.error || 'That did not work; nothing was changed';
         if (!quiet) toast(error, { bad: true });
         return { ok: false, resolved: false, changes: [], labelled: 0, labelledIds: [], error };
     }
-    if (!quiet) { toast(previewedWords(r, 'Saved'), { undo: r.change }); refreshFrame(); }
+    if (!quiet) { toast(resolvedWords(r, 'Saved'), { undo: r.change }); refreshFrame(); }
     const changes = r.change ? [r.change] : [];
     // The group's other rows the rule did not reach (a merchant text too plain
     // for a rule, or rows whose text the pattern misses) are labelled one by one.
@@ -3171,6 +3165,34 @@ ACT['bill-pause'] = async el => {
 const KIND_PHRASE = { loan: 'a loan', holding: 'a holding', company: 'a company', person: 'a person', bank: 'a bank account', card: 'a card' };
 const OWED_KINDS = ['loan'];   // account_kind.OWED_KINDS: typed positive, saved as owed
 ACT.figure = async el => openFigure(el.dataset.account ? Number(el.dataset.account) : null);
+/** What Enter a figure asks for on an account. A loan with hire-purchase
+ *  terms is owed principal: its statement's total of remaining instalments
+ *  is not what to type (loan_terms.py). */
+function figureLabel(a) {
+    const sign = SIGNS[a.currency] || a.currency;
+    if (OWED_KINDS.includes(a.type)) {
+        return a.terms ? `Principal owed now, in ${sign} (not the statement's total of remaining instalments)` : `What is owed now, in ${sign}`;
+    }
+    return a.type === 'holding' ? `What it is worth now, in ${sign}` : `The balance now, in ${sign}`;
+}
+/** What Enter a figure says of an account with no figure yet. A loan with
+ *  hire-purchase terms already has its interest worked out from them; it
+ *  joins net worth with its first figure (loan_interest, balance_sheet). */
+function figureEmptyLine(a) {
+    if (OWED_KINDS.includes(a.type) && a.terms) {
+        return 'No figure yet. Its interest is worked out from its terms; it joins net worth when its first statement comes in, or when you enter the principal owed.';
+    }
+    return 'No figure yet: it is left out of net worth until it has one.';
+}
+/** The dialog's closing line. On a loan with terms the next statement import
+ *  checks every figure against their schedule and stops if one does not fit
+ *  (loan_interest.misfit), so "nothing checks it" is not said there. */
+function figureCheckLine(a) {
+    if (OWED_KINDS.includes(a.type) && a.terms) {
+        return `It shows as “your figure” with its date, and turns stale after ${STALE_DAYS} days. The next statement import checks it against the terms’ schedule, and stops if it does not fit.`;
+    }
+    return `A figure you enter is the fact: nothing checks it. It shows as “your figure” with its date, and turns stale after ${STALE_DAYS} days.`;
+}
 async function openFigure(accountId) {
     const [r, sheet] = await Promise.all([refs(), sheetFor(currentMonth()).catch(() => null)]);
     const takes = r.accounts.filter(a => a.takes_a_figure && a.status !== 'archived');
@@ -3180,7 +3202,6 @@ async function openFigure(accountId) {
     const lines = sheet ? sheet.sections.flatMap(s => s.lines).filter(l => !l.counted_in) : [];
     const sign = a => SIGNS[a.currency] || a.currency;
     const owes = a => OWED_KINDS.includes(a.type);
-    const label = a => owes(a) ? `What is owed now, in ${sign(a)}` : a.type === 'holding' ? `What it is worth now, in ${sign(a)}` : `The balance now, in ${sign(a)}`;
     const target = a => {
         const l = lines.find(x => x.account_id === a.id);
         const ro = l && l.rests_on;
@@ -3188,7 +3209,7 @@ async function openFigure(accountId) {
         const now = l && l.balance_minor !== null && l.balance_minor !== undefined
             ? `<div class="fg-now">Now <b class="num${l.balance_minor < 0 ? ' neg' : ''}">${esc(money(l.balance_minor, l.currency))}</b> ${stale ? tag('stale', 'stale') : ''}</div>
                 ${ro ? `<div class="small muted">${ro.source === 'supplied' ? 'your figure' : 'statement'} ${esc(day(ro.date))}, ${esc(plural(ro.age_days, 'day'))} old</div>` : ''}`
-            : '<div class="small muted">No figure yet: it is left out of net worth until it has one.</div>';
+            : `<div class="small muted">${esc(figureEmptyLine(a))}</div>`;
         return `<div class="spread"><b>${esc(a.name)}</b>${named && takes.length > 1 ? '<button type="button" class="link" data-act="fg-another" aria-controls="fg-pick" aria-expanded="false">Another account</button>' : ''}</div>
             <div class="small">${esc(KIND_PHRASE[a.type] || a.type)}, in ${esc(sign(a))}${owes(a) ? ' · owed' : ''}</div>${now}`;
     };
@@ -3205,19 +3226,20 @@ async function openFigure(accountId) {
     openSheet('Enter a figure', `<div class="record-target fg-target" id="fg-target">${target(chosen)}</div>
         <label class="field" id="fg-pick"${named ? ' hidden' : ''}><span>Account</span><select id="fg-account">${takes.map(a => `<option value="${a.id}"${a.id === chosen.id ? ' selected' : ''}>${esc(a.name)}, ${esc(KIND_PHRASE[a.type] || a.type)}, in ${esc(sign(a))}</option>`).join('')}</select></label>
         <div class="fields">
-        <label class="field"><span id="fg-label">${esc(label(chosen))}</span><input type="text" inputmode="decimal" id="fg-amount" placeholder="${esc(placeholder(chosen))}" aria-describedby="fg-hint"></label>
+        <label class="field"><span id="fg-label">${esc(figureLabel(chosen))}</span><input type="text" inputmode="decimal" id="fg-amount" placeholder="${esc(placeholder(chosen))}" aria-describedby="fg-hint"></label>
         <p class="hint" id="fg-hint">${esc(hint(chosen))}</p>
         <label class="field"><span>On</span><input type="date" id="fg-date" value="${todayIso()}"></label>
         <label class="field"><span>Note</span><input type="text" id="fg-note" placeholder="Where the figure came from"></label></div>
-        <p class="small muted">A figure you enter is the fact: nothing checks it. It shows as “your figure” with its date, and turns stale after ${STALE_DAYS} days.</p>`,
+        <p class="small muted" id="fg-check">${esc(figureCheckLine(chosen))}</p>`,
     { eyebrow: 'Your figure', foot: '<button class="btn primary" data-act="figure-save">Save the figure</button>' });
     const current = () => r.accountById.get(Number($('#fg-account').value));
     $('#fg-account').addEventListener('change', () => {
         const a = current();
         $('#fg-target').innerHTML = target(a);
-        $('#fg-label').textContent = label(a);
+        $('#fg-label').textContent = figureLabel(a);
         $('#fg-amount').placeholder = placeholder(a);
         $('#fg-hint').textContent = hint(a, $('#fg-amount').value);
+        $('#fg-check').textContent = figureCheckLine(a);
     });
     $('#fg-amount').addEventListener('input', () => { $('#fg-hint').textContent = hint(current(), $('#fg-amount').value); });
 }
@@ -4144,18 +4166,30 @@ function drawSpendingCharts(perBook, months) {
 // Grouped by book, each with its own monthly line; missed bills first.
 // ---------------------------------------------------------------------------
 
-function billEvery(s) {
-    return s.periods > 1 ? `every ${s.periods} ${s.frequency.replace('ly', '').replace('month', 'months').replace('year', 'years').replace('quarter', 'quarters')}` : s.frequency;
-}
+/** How often, in the server's words (bills.py): "monthly", "half-yearly", "every 2 months". */
+function billEvery(s) { return s.every || s.frequency; }
 function billMissedTag(s, missed) {
-    return `<button type="button" class="tag stale" data-act="bill-queue" data-id="${s.id}" title="Open it in the queue">${icon('hourglass')}no payment seen for ${esc(day(missed.due, { year: false }))}</button>`;
+    return `<button type="button" class="tag stale" data-act="bill-queue" data-id="${s.id}" title="Open it in the queue">${icon('hourglass')}no payment seen for ${esc(day(missed.due, { year: missed.due.slice(0, 4) !== todayIso().slice(0, 4) }))}</button>`;
+}
+/** Late, but the paying account's statement for those days is not in yet: not missed. */
+function billAwaitingTag(s) {
+    return tag('aside', 'awaiting statement', { title: billWaitsOn(s) });
+}
+/** What an awaiting bill waits for, in words: the oldest due day not checked yet
+ *  (the server's waiting_due) and the statement that would show it (waiting_on). */
+function billWaitsOn(s, { named = true } = {}) {
+    return `${day(s.waiting_due || s.due)} not checked yet; waiting on ${named ? `${s.account_name || 'its account'}’s` : 'its'} ${s.waiting_on ? monthName(s.waiting_on) + ' ' : ''}statement`;
+}
+/** A bill held in another currency than the account that pays it. */
+function billCurrencyTag(s) {
+    return tag('nofig', `${s.currency} bill, ${s.account_currency} account`, { title: 'A bill is in its paying account’s currency: open it to change it' });
 }
 /** Bills' sortable columns. Amount sorts by its S$ figure: a bill in another currency has none on it, so goes last. */
 const BILL_SORT = {
     name: { label: 'Bill', kind: 'text', of: x => x.s.service_name || x.s.match_pattern },
     amount: { label: 'Amount', kind: 'money', of: x => (x.s.currency || 'SGD') === 'SGD' ? toMinor(x.s.amount, 'SGD') : null },
     often: { label: 'How often', kind: 'text', of: x => billEvery(x.s) },
-    month: { label: 'A month', kind: 'money', of: x => toMinor(x.s.monthly_sgd, 'SGD') },
+    month: { label: 'A month', kind: 'money', of: x => x.s.monthly_sgd == null ? null : toMinor(x.s.monthly_sgd, 'SGD') },
     from: { label: 'Paid from', kind: 'text', of: x => x.s.account_name },
     last: { label: 'Last paid', kind: 'date', of: x => x.s.tx_last_paid || x.s.last_paid },
     next: { label: 'Next', kind: 'date', of: x => x.s.status === 'active' ? x.s.computed_renewal : null },
@@ -4170,14 +4204,20 @@ async function viewBills() {
     const row = ({ s, missed }) => {
         const cur = s.currency || 'SGD';
         const name = esc(s.service_name || s.match_pattern);
-        const state = missed ? billMissedTag(s, missed) : s.status !== 'active' ? tag('aside', s.status === 'deactivated' ? 'stopped' : s.status) : '';
-        const sub = missed ? billMissedTag(s, missed)
-            : `${esc(billEvery(s))}${s.status === 'active' ? ` · next ${esc(day(s.computed_renewal, { year: false }))}` : ''}${s.account_name ? ' · ' + esc(s.account_name) : ''} ${s.status !== 'active' ? state : ''}`;
+        // Missed, awaiting its statement, or paused or stopped; and a bill in another currency than its account's.
+        const lead = missed ? billMissedTag(s, missed) : s.state === 'awaiting_statement' ? billAwaitingTag(s)
+            : s.state === 'unknown_cadence' ? tag('nofig', 'how often unknown')
+            : s.status !== 'active' ? tag('aside', s.status === 'deactivated' ? 'stopped' : s.status) : '';
+        const state = [lead, s.currency_mismatch ? billCurrencyTag(s) : ''].filter(Boolean).join(' ');
+        // On a phone the tags sit together, compact, on their own line under the bill's line.
+        const tags = state ? `<span class="sl-tags">${state}</span>` : '';
+        const sub = missed ? tags
+            : `${esc(billEvery(s))}${s.status === 'active' ? ` · next ${esc(day(s.computed_renewal, { year: false }))}` : ''}${s.account_name ? ' · ' + esc(s.account_name) : ''} ${tags}`;
         return `<tr class="clickable${s.status === 'active' ? '' : ' sl-inactive'}" data-act="bill" data-id="${s.id}">
             <td class="sl-name"><b>${name}</b><div class="small muted">${esc(s.display_type || 'no type')}</div>${state ? `<div class="sl-state">${state}</div>` : ''}</td>
             <td class="r num sl-fig">${esc(money(toMinor(s.amount, cur), cur))}${s.is_variable ? '<div class="small muted">varies</div>' : ''}</td>
             <td>${esc(billEvery(s))}</td>
-            <td class="r num">${esc(money(toMinor(s.monthly_sgd, 'SGD'), 'SGD'))}</td>
+            <td class="r num">${s.monthly_sgd == null ? '—' : esc(money(toMinor(s.monthly_sgd, 'SGD'), 'SGD'))}</td>
             <td class="small">${esc(s.account_name || '')}</td>
             <td class="num">${esc(day(s.tx_last_paid || s.last_paid))}</td>
             <td class="num">${s.status === 'active' ? esc(day(s.computed_renewal)) : '—'}</td>
@@ -4185,17 +4225,21 @@ async function viewBills() {
     };
     const groups = [...byBook.entries()].map(([book, list]) => {
         const active = list.filter(x => x.s.status === 'active');
-        const monthly = active.reduce((a, x) => a + toMinor(x.s.monthly_sgd, 'SGD'), 0);
+        const monthly = active.reduce((a, x) => a + (x.s.monthly_sgd == null ? 0 : toMinor(x.s.monthly_sgd, 'SGD')), 0);
         const missed = list.filter(x => x.missed).sort((a, b) => a.missed.due.localeCompare(b.missed.due));
-        const paid = list.filter(x => !x.missed).sort((a, b) => (statusOrder[a.s.status] ?? 3) - (statusOrder[b.s.status] ?? 3)
+        const awaiting = list.filter(x => x.s.state === 'awaiting_statement').sort((a, b) => String(a.s.due).localeCompare(String(b.s.due)));
+        const paid = list.filter(x => !x.missed && x.s.state !== 'awaiting_statement').sort((a, b) => (statusOrder[a.s.status] ?? 3) - (statusOrder[b.s.status] ?? 3)
             || String(a.s.computed_renewal || '').localeCompare(String(b.s.computed_renewal || '')));
+        const counted = [missed.length ? `${missed.length} of ${list.length} not seen` : '', awaiting.length ? `${awaiting.length} awaiting` : ''].filter(Boolean).join(' · ');
         const head = `<tr class="section sl-book"><td colspan="5" class="sl-name">${esc(book)}</td>
-            <td colspan="3" class="r sl-fig">${esc(money(monthly, 'SGD'))} a month · ${list.length ? (missed.length ? `${missed.length} of ${list.length} not seen` : plural(list.length, 'bill')) : 'no bills'}</td></tr>`;
-        // Sorted, a book's bills are one list (a missed one still says so); else missed first, then paid.
+            <td colspan="3" class="r sl-fig"><span class="sl-amt">${esc(money(monthly, 'SGD'))} a month</span> <span class="sep" aria-hidden="true">·</span> <span class="sl-counts">${list.length ? counted || plural(list.length, 'bill') : 'no bills'}</span></td></tr>`;
+        // Sorted, a book's bills are one list (each still says its state); else missed first, then those
+        // awaiting their account's statement, then those paid as expected.
         if (sortOf('bills').key) return head + sortRows('bills', list, BILL_SORT).map(row).join('');
-        return head + missed.map(row).join('')
-            + (missed.length && paid.length ? '<tr class="section sl-sub-head"><td colspan="8" class="sl-name">Paid as expected</td></tr>' : '')
-            + paid.map(row).join('');
+        const part = (words, rows, headed) => rows.length ? (headed ? `<tr class="section sl-sub-head"><td colspan="8" class="sl-name">${words}</td></tr>` : '') + rows.map(row).join('') : '';
+        return head + part('', missed, false)
+            + part('Awaiting a statement', awaiting, true)
+            + part('Paid as expected', paid, missed.length || awaiting.length);
     }).join('');
     return `${booksNav('bills')}
     <div class="page-head"><div><span class="eyebrow">Books</span><h1>Bills</h1><p>What renews and when, from the rows that pay it. A renewal with no payment seen also waits in the queue.</p></div>
@@ -4205,24 +4249,44 @@ async function viewBills() {
         <tbody>${subs.length ? groups : '<tr><td colspan="8" class="empty sl-name">No bills yet.</td></tr>'}</tbody></table></div>
         <p class="card-foot">Monthly figures in S$ at each bill’s own rate. Each book’s bills are their own total; no line adds the books.</p></section>`;
 }
+// The cadences the sheet offers, in the words bills.py says them (COMMON_WORDS); a bill
+// held at another keeps its own as one more choice ("every 2 months"), so saving never rewrites it.
+const BILL_EVERY = [['week', 1, 'weekly'], ['week', 2, 'fortnightly'], ['month', 1, 'monthly'], ['month', 3, 'quarterly'], ['month', 6, 'half-yearly'], ['month', 12, 'yearly']];
+function billEveryChoices(s) {
+    const own = s?.cadence;
+    const choices = BILL_EVERY.map(([unit, count, words]) => [`${unit}:${count}`, words]);
+    if (own && !BILL_EVERY.some(([unit, count]) => unit === own.unit && count === own.count)) choices.push([`${own.unit}:${own.count}`, billEvery(s)]);
+    // A cadence fin cannot read stays as it is held unless one is chosen.
+    if (s && !own) choices.unshift(['', `unknown (${s.frequency})`]);
+    return choices;
+}
 ACT.bill = async el => {
     const [r, services] = await Promise.all([refs(), servicesList()]);
     const s = el.dataset.id ? ACT.__subs.get(Number(el.dataset.id)) : null;
     const missed = s ? billMissed(s) : null;
+    // A bill both awaiting its statement and in another currency gets one notice, the
+    // awaiting line short above the currency fix, so the fields start high on a phone.
+    const waits = s?.state === 'awaiting_statement';
+    const awaitingNote = waits && !s.currency_mismatch ? `<div class="notice sl-missed">${icon('hourglass')}<div class="grow"><b>Awaiting ${esc(s.account_name || 'its account')}’s statement.</b>
+        <div class="small">${esc(billWaitsOn(s, { named: false }))}. It counts as missed only if no payment shows once the statements cover the due day.</div></div></div>` : '';
+    const currencyNote = s?.currency_mismatch ? `<div class="notice warn sl-missed">${icon('warning')}<div class="grow">${waits
+        ? `<p class="small sl-also"><b>Awaiting a statement, not missed:</b> ${esc(billWaitsOn(s, { named: false }))}.</p>` : ''}<div id="bl-currency"><b>Billed in ${esc(s.currency)}, paid from ${esc(s.account_name || 'an account')} in ${esc(s.account_currency)}.</b>
+        <div class="small">A bill is kept in its paying account’s currency.</div>
+        <div class="row sl-missed-acts"><button type="button" class="btn sm" data-act="bill-currency" data-id="${s.id}">Change it to ${esc(s.account_currency)}…</button></div></div></div></div>` : '';
     const sel = (id, opts, v) => `<select id="${id}">${opts.map(([k, l]) => `<option value="${esc(k)}"${String(k) === String(v ?? '') ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
     const paid = s && (s.tx_last_paid || s.last_paid);
     const missedNote = missed ? `<div class="notice warn sl-missed">${icon('hourglass')}<div class="grow"><b>No payment seen for ${esc(day(missed.due))}.</b>
-        <div class="small">${paid ? `Last paid ${esc(money(toMinor(s.tx_amount ?? s.amount, s.currency || 'SGD'), s.currency || 'SGD'))} on ${esc(day(paid))}${s.account_name ? ` from ${esc(s.account_name)}` : ''}.` : 'No payment seen yet.'}</div>
+        <div class="small">${paid ? `Last paid ${esc(money(toMinor(s.tx_amount ?? s.amount, s.currency || 'SGD'), s.currency || 'SGD'))} on ${esc(day(paid))}${s.account_name ? ` from ${esc(s.account_name)}` : ''}.` : 'No payment seen yet.'}${s.judged_by === 'today' ? ` fin holds no statements for ${s.account_name ? esc(s.account_name) : 'a paying account'}, so this is judged by today’s date alone.` : ''}</div>
         <div class="row sl-missed-acts"><button type="button" class="btn sm" data-act="bill-stopped" data-id="${s.id}">It has stopped</button>
             <button type="button" class="btn sm" data-act="bill-find" data-id="${s.id}">Find the payment</button>
             <button type="button" class="link" data-act="bill-queue" data-id="${s.id}">Open it in the queue</button></div></div></div>` : '';
-    openSheet(s ? esc(s.service_name || 'Bill') : 'Add a bill', `${missedNote}<div class="fields">
+    const own = s?.cadence ? `${s.cadence.unit}:${s.cadence.count}` : s ? '' : 'month:1';
+    openSheet(s ? esc(s.service_name || 'Bill') : 'Add a bill', `${missedNote}${awaitingNote}${currencyNote}<div class="fields">
         <label class="field"><span>Merchant</span>${sel('bl-svc', [['', 'Choose'], ...services.map(x => [x.id, x.name])], s?.service_id)}</label>
-        <div class="fields two"><label class="field"><span>Amount</span><input type="text" inputmode="decimal" id="bl-amount" value="${s ? esc(s.amount) : ''}"></label>
-            <label class="field"><span>Currency</span>${sel('bl-cur', ['SGD', 'USD', 'INR', 'EUR', 'GBP', 'AUD'].map(c => [c, c]), s?.currency || 'SGD')}</label></div>
-        <div class="fields two"><label class="field"><span>How often</span>${sel('bl-freq', [['monthly', 'monthly'], ['quarterly', 'quarterly'], ['yearly', 'yearly']], s?.frequency || 'monthly')}</label>
-            <label class="field"><span>Every how many</span><input type="number" min="1" id="bl-periods" value="${s ? s.periods : 1}"></label></div>
+        <div class="fields two"><label class="field"><span>Amount${s ? ` (${esc(s.currency || 'SGD')})` : ''}</span><input type="text" inputmode="decimal" id="bl-amount" value="${s ? esc(s.amount) : ''}"></label>
+            <label class="field"><span>How often</span>${sel('bl-every', billEveryChoices(s), own)}</label></div>
         <label class="field"><span>Paid from</span>${sel('bl-acct', [['', '—'], ...r.accounts.filter(a => ['bank', 'card'].includes(a.type)).map(a => [a.id, a.name])], s?.account_id)}</label>
+        ${s ? '' : '<p class="small muted">A bill is kept in the currency of the account that pays it.</p>'}
         <div class="fields two"><label class="field"><span>Counts from</span><input type="date" id="bl-renew" value="${esc(s?.renewal_date || '')}"></label>
             ${s && s.status === 'active' && s.computed_renewal ? `<div class="field"><span class="sp-label">Next renewal</span><div class="sl-readonly num">${esc(day(s.computed_renewal))}</div></div>` : ''}</div>
         <label class="field"><span>State</span>${sel('bl-status', [['active', 'active'], ['paused', 'paused'], ['deactivated', 'stopped']], s?.status || 'active')}</label>
@@ -4271,10 +4335,38 @@ ACT['bills-refresh'] = async el => {
 ACT['bill-save'] = async el => {
     const v = id => $('#' + id).value.trim();
     if (!v('bl-svc')) { toast('Choose the merchant', { bad: true }); return; }
-    const body = { service_id: Number(v('bl-svc')), amount: Number(v('bl-amount') || 0), currency: v('bl-cur'), frequency: v('bl-freq'),
-        periods: Number(v('bl-periods') || 1), account_id: v('bl-acct') ? Number(v('bl-acct')) : null, renewal_date: v('bl-renew') || null,
+    const [unit, count] = v('bl-every').split(':');
+    // The cadence, never a frequency: the server keeps how the bill holds it when it means the same,
+    // and one fin cannot read is sent only when another is chosen.
+    // No currency: a bill's is its paying account's, changed only by its previewed fix.
+    const body = { service_id: Number(v('bl-svc')), amount: Number(v('bl-amount') || 0), ...(unit ? { every: { unit, count: Number(count) } } : {}),
+        account_id: v('bl-acct') ? Number(v('bl-acct')) : null, renewal_date: v('bl-renew') || null,
         status: v('bl-status'), match_pattern: v('bl-pattern') || null, link: v('bl-link') || null, notes: v('bl-notes') || null };
     const r = el.dataset.id ? await act('PUT', `/api/subscriptions/${el.dataset.id}`, body, 'Bill saved') : await act('POST', '/api/subscriptions', body, 'Bill added');
+    if (r) { closeSheet(); rerender(); }
+};
+// A bill in another currency than its paying account's: the change previewed in
+// the sheet (before, after, where the new amount comes from), then made on its token.
+ACT['bill-currency'] = async el => {
+    const id = el.dataset.id;
+    const r = await send('POST', `/api/bills/${id}/currency`, {});
+    if (r.status !== 409 || !r.data.preview) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return; }
+    const p = r.data.preview, to = p.after.currency;
+    const basis = { last_payment: `the last payment seen, on ${day(p.basis.date)}`, rate: `the old amount at US$1 = S$${p.basis.rate}`, kept: 'the same figure' }[p.basis.kind] || '';
+    const box = $('#bl-currency');
+    if (!box) return;
+    // Compact: the amount and the two answers on one line under the sentence.
+    box.innerHTML = `<b>Change this bill to ${esc(to)}?</b>
+        <div class="small">Now ${esc(money(toMinor(p.before.amount, p.before.currency), p.before.currency))}. After: ${esc(money(toMinor(p.after.amount, to), to))}, ${esc(basis)}. If the bill is a different amount in ${esc(to)}, change it here.</div>
+        <div class="row sl-missed-acts sl-cur-fix"><label class="field"><span class="sr-only">Amount (${esc(to)})</span><input type="text" inputmode="decimal" id="bl-cur-amount" value="${esc(Number(p.after.amount).toFixed(2))}"></label>
+            <button type="button" class="btn sm primary" data-act="bill-currency-apply" data-id="${esc(id)}" data-token="${esc(p.token)}">Change it</button>
+            <button type="button" class="btn sm" data-act="bill" data-id="${esc(id)}">Keep it</button></div>`;
+};
+ACT['bill-currency-apply'] = async el => {
+    const text = ($('#bl-cur-amount')?.value || '').trim();
+    const amount = Number(text);
+    if (!text || !Number.isFinite(amount) || amount <= 0) { toast('Give the amount as a figure above nothing; nothing was changed', { bad: true }); return; }
+    const r = await act('POST', `/api/bills/${el.dataset.id}/currency`, { token: el.dataset.token, amount }, 'Bill changed to its account’s currency');
     if (r) { closeSheet(); rerender(); }
 };
 ACT['bill-delete'] = async el => {
@@ -4388,13 +4480,7 @@ async function viewLists(tab) {
         const [rules, drift] = await Promise.all([get('/api/rules'), get('/api/rules/drift').catch(() => ({ count: 0 }))]);
         const shown = rules.filter(x => !needle || `${x.pattern} ${x.service_name}`.toLowerCase().includes(needle));
         ACT.__rules = new Map(rules.map(x => [x.id, x]));
-        const sets = x => {
-            const book = esc(x.book_override || x.book || '');
-            const type = x.type_override_id || x.type_name ? esc(x.type_override_id ? r.typeById.get(x.type_override_id)?.display_name || r.typeById.get(x.type_override_id)?.name : x.display_type || x.type_name) : '';
-            const range = x.min_amount !== null || x.max_amount !== null
-                ? `only ${x.min_amount !== null ? esc(money(toMinor(x.min_amount), 'SGD')) : 'any amount'} to ${x.max_amount !== null ? esc(money(toMinor(x.max_amount), 'SGD')) : 'any amount'}` : '';
-            return [book, type, range].filter(Boolean).join(' · ') + (x.book_override || x.type_override_id ? ' ' + tag('yours', 'overrides') : '');
-        };
+        const sets = x => ruleSets(x, r);
         const RULE_SORT = { pattern: { label: 'Pattern', kind: 'text', of: x => x.pattern }, match: { label: 'Match', kind: 'text', of: x => MATCH_WORDS[x.match_type] || x.match_type },
             merchant: { label: 'Merchant', kind: 'text', of: x => x.service_name }, sets: { label: 'Sets', kind: 'text', of: x => plainText(sets(x)) },
             rows: { label: 'Rows it labelled', kind: 'number', of: x => x.rows_labelled } };
@@ -4557,12 +4643,13 @@ function filingsHTML(slots, types, income) {
 }
 /** The drawer's parts for a slot move's preview. The type names come from the picker: an income kind too. */
 function slotParts(p, from, to) {
-    const asked = p.past_known
+    let asked = p.past_known
         ? `<p class="q">${plural(p.count, 'past row')} fin filed as ${esc(p.subject.name)}</p>
             <p class="sub">Move them to ${esc(to)} too, or only new rows go there.</p>
             <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }],
                 rows: p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(from)} → <b>${esc(to)}</b></td></tr>`) })}</div>`
         : `<p class="sub">fin cannot tell which past rows it filed as ${esc(p.subject.name)}, so only new rows go under ${esc(to)}. Past rows keep their type.</p>`;
+    asked += flowsLine(p);
     const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span>${p.past_known
         ? `<button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`
         : '<button type="button" class="btn primary" data-act="preview-answer" data-past="only_new">Only new rows</button>'}`;
@@ -4703,21 +4790,27 @@ const PREVIEW_TITLE = { add: 'Add the rule', edit: 'Save the rule', delete: 'Del
  *  merchant's book or type, a merge (the merchant line, then each label that
  *  changes), a rule (its changed fields), or a wording taught from the Queue
  *  (fin-surfaces 53). The rows another merchant holds, a rule's or a taught
- *  wording's, are named in one warning line, as mocked (21, screen 2). No See
- *  all for a rule (its rows sit with several merchants) or for a merchant not
- *  made yet (it has no page). */
-function previewParts(p) {
+ *  wording's, are named in one warning line, as mocked (21, screen 2). See
+ *  all only for a change to a merchant's own book or type: a rule's rows sit
+ *  with several merchants, a taught wording's with another merchant or none
+ *  yet, and a merchant not made yet has no page. `taught`: a teach's own row,
+ *  marked "this row" among the examples. */
+function previewParts(p, { taught = null } = {}) {
     const name = p.subject.name;
     const kind = p.subject.kind;
     if (kind === 'drift') return driftParts(p);
     const fieldLines = p.change.filter(c => c.label || c.from !== c.to);
     const words = fieldLines.map(c => (c.label ? [c.label.toLowerCase(), c.label] : (PREVIEW_FIELD[c.field] || [c.field, c.field])));
     const only = fieldLines.length === 1 ? fieldLines[0] : null;
+    // A teach whose only question is its rows' flows changes no field of
+    // the merchant: it is asked as applying the merchant to those rows.
     const title = kind === 'rule' ? `${PREVIEW_TITLE[p.subject.verb] || 'Save the rule'} ${esc(name)}?`
         : kind === 'merge' ? `Merge ${esc(name)} into ${esc(p.subject.into.name)}?`
+        : !fieldLines.length ? `Apply ${esc(name)} to these rows?`
         : only && only.field === 'wording' ? `Teach ${esc(name)} the wording ${esc(only.to)}?`
         : only ? `Change ${esc(name)}’s ${words[0][0]} to ${esc(only.to)}?` : `Change ${esc(name)}’s ${words.map(w => w[0]).join(' and ')}?`;
-    const eyebrow = kind === 'rule' ? 'Rule' : kind === 'merge' ? 'Merge' : `${esc(name)} · ${words.map(w => w[0]).join(' and ')}`;
+    const eyebrow = kind === 'rule' ? 'Rule' : kind === 'merge' ? 'Merge'
+        : fieldLines.length ? `${esc(name)} · ${words.map(w => w[0]).join(' and ')}` : esc(name);
     const line = (label, from, to) => `<li>${label}: ${[from != null ? `<s>${esc(from)}</s>` : '', to != null ? `<b>${esc(to)}</b>` : ''].filter(Boolean).join(' → ')}</li>`;
     const lines = [kind === 'merge' ? line('Merchant', name, p.subject.into.name) : '', ...fieldLines.map((c, i) => line(words[i][1], c.from, c.to))].join('');
     // Where the rows would move: a rule's merchant, or the merchant taught.
@@ -4733,13 +4826,31 @@ function previewParts(p) {
         <div><span class="cap">Months</span><b class="num">${p.months.count}</b><span class="sub">${esc(span(p.months))}</span></div></div>` : '';
     const leftOut = (p.left_out || []).length ? `<p class="sub">Not in the S$ figure: ${p.left_out.map(x => `${esc(money(x.amount_minor, x.currency))} in ${esc(monthName(x.month, { short: true }))} (${esc(x.reason)})`).join('; ')}.</p>` : '';
     const kept = [p.checked ? `Of them, <b>${p.checked} you checked</b>.` : '', p.chosen ? `<b>${p.chosen} you chose</b> stay as they are.` : ''].filter(Boolean).join(' ');
-    const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b>${x.source === 'checked' ? ' <span class="prev-mark">checked</span>' : ''}</td></tr>`);
-    const body = `<ul class="diff">${lines}</ul>
-        <p class="q">This changes ${plural(p.count, 'past row')}</p>
-        ${warns}${facts}${leftOut}${ruleLines}${kept ? `<p class="sub">${kept}</p>` : ''}
-        <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>
-        ${kind === 'rule' || p.subject.id == null ? '' : `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>`}`;
-    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`;
+    // The row being taught is marked among the examples; the flow line then counts the others.
+    const mark = x => `${x.source === 'checked' ? ' <span class="prev-mark">checked</span>' : ''}${taught != null && x.id === taught ? ' <span class="prev-mark">this row</span>' : ''}`;
+    const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${exampleCell(x, mark(x))}</td></tr>`);
+    const others = taught != null && !(p.flows || []).some(f => f.id === taught);
+    // See all opens the merchant's page, which lists only its own rows: so only for a change to a
+    // merchant's own book or type. A taught wording's rows are another merchant's, or no merchant's yet.
+    const ownRows = p.subject.id != null && (kind === 'merge' || (kind === 'merchant' && fieldLines.length
+        && !fieldLines.some(c => c.field === 'wording') && !(p.others || []).length));
+    // Without See all, the rows the examples leave out are said here: each the flow line names, by
+    // date, amount and wording, then how many more the preview does not name.
+    const shownIds = new Set(p.examples.map(x => x.id));
+    const more = ownRows || kind === 'rule' ? [] : (p.flows || []).filter(f => !shownIds.has(f.id));
+    const rest = ownRows || kind === 'rule' ? 0 : Math.max(0, p.count - p.examples.length - more.length);
+    const moreHTML = more.length || rest ? `<ul class="sub ex-more">${more.map(f => `<li>${esc([day(f.date), money(f.amount_minor, f.currency), f.description].join(' · '))}</li>`).join('')}${rest ? `<li>and ${plural(rest, 'more row')}</li>` : ''}</ul>` : '';
+    // Where the only rows are those you chose by hand, the count says so, not "0 past rows";
+    // ticked, it is the count again (tickMoveChosen).
+    const hand = (p.flows_chosen || []).length;
+    const zero = !p.count && hand ? `No other past rows change. You chose ${plural(hand, 'row')} below by hand; tick to move ${hand === 1 ? 'it' : 'them'} too.` : '';
+    // The rows whose flow Apply moves or keeps, on every preview that carries them.
+    const body = `${lines ? `<ul class="diff">${lines}</ul>` : ''}
+        <p class="q" id="pv-count" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}"${zero ? ` data-zero="${esc(zero)}"` : ''}>${zero ? esc(zero) : `This changes ${plural(p.count, 'past row')}`}</p>
+        ${warns}${facts}${leftOut}${ruleLines}${flowsLine(p, { others })}${kept ? `<p class="sub">${kept}</p>` : ''}
+        ${rows.length ? `<div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>` : ''}
+        ${moreHTML}${ownRows ? `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>` : ''}`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="past row"${zero ? ' data-zero="Save without moving them"' : ''}>${zero ? 'Save without moving them' : `Apply to ${plural(p.count, 'past row')}`}</button>`;
     return { eyebrow, title, body, foot };
 }
 /** The drift's drawer (fin-surfaces 51, mocked as 21's screen 6): the rows
@@ -4747,34 +4858,108 @@ function previewParts(p) {
  *  Apply relabels them. No Only new rows: nothing new is being taught. */
 function driftParts(p) {
     const one = p.count === 1;
-    const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${esc(x.now)} → <b>${esc(x.after)}</b></td></tr>`);
-    const body = `<p class="sub">Rows labelled by a rule or a merchant whose label is not what the rules give now. Rows you checked or chose are not counted.</p>
+    // Only rows you chose by hand: Apply moves none of them until the box is ticked (tickMoveChosen).
+    const zero = !p.count && (p.flows_chosen || []).length ? 'Apply without moving them' : '';
+    const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${exampleCell(x)}</td></tr>`);
+    const body = `<p class="sub">Rows labelled by a rule or a merchant whose label is not what the rules give now. Rows you checked or chose are not counted.</p>${flowsLine(p)}
         <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>`;
-    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'row')}</button>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="row"${zero ? ` data-zero="${zero}"` : ''}>${zero || `Apply to ${plural(p.count, 'row')}`}</button>`;
     return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
 }
-/** Ask the preview: 'apply', 'only_new', or null when it is closed. */
+/** One example's Now → after, as two parts: on a phone the after takes its
+ *  own line (styles.css .ex-after). An after that keeps the row's merchant
+ *  names it once: "Sample Car Loan · Transport → no book or type". */
+function exampleCell(x, mark = '') {
+    const now = String(x.now ?? ''), after = String(x.after ?? '');
+    const [lead, ...rest] = after.split(' · ');
+    const nowParts = now.split(' · ');
+    const shown = rest.length && nowParts.length > 1 && nowParts[0] === lead ? rest.join(' · ') : after;
+    return `<span class="ex-now">${esc(now)}</span> <span class="ex-after">→ <b>${esc(shown)}</b>${mark}</span>`;
+}
+/** The rows whose flow Apply changes (every one is in p.flows), by what they
+ *  are now and after: "2 spending → a movement · the loan", and where the
+ *  move empties their book and type (label_cleared), "with no book or
+ *  type"; then each row it keeps, in its own sentence. `others`: a teach
+ *  whose own row is not among them, so they are the other rows. Last, the
+ *  rows kept only because the operator chose their book or type
+ *  (p.flows_chosen, ADR-008), in their own group: each by date, amount and
+ *  wording and what it would become, and the box that moves them too,
+ *  unticked (tickMoveChosen; Apply sends it, sendPreviewed). */
+function flowsLine(p, { others = false } = {}) {
+    const pairs = {};
+    (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}${f.label_cleared ? ', with no book or type' : ''}`; pairs[k] = (pairs[k] || 0) + 1; });
+    const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
+    const hand = p.flows_chosen || [];
+    const one = hand.length === 1;
+    const HAND_SHOWN = 10;   // then "and N more", as a teach's rows are (the box still names and moves them all)
+    const group = hand.length ? `<div class="pv-hand"><p class="cap">You chose these by hand</p>
+        <p class="sub">A rule leaves the ${one ? 'row' : 'rows'} whose book or type you chose as ${one ? 'it is' : 'they are'}. ${one ? 'That choice' : 'Those choices'} may be out of date.</p>
+        <ul class="sub ex-more">${hand.slice(0, HAND_SHOWN).map(k => `<li>${esc([day(k.date), money(k.amount_minor, k.currency), k.description].join(' · '))}: ${esc(k.now)} → <b>${esc(k.would)}</b>${k.label_cleared ? ', with no book or type' : ''}</li>`).join('')}${hand.length > HAND_SHOWN ? `<li>and ${plural(hand.length - HAND_SHOWN, 'more row')}</li>` : ''}</ul>
+        <label class="check"><input type="checkbox" id="pv-move-chosen" data-change="preview-move-chosen"> Also move ${one ? 'this row' : `these ${hand.length} rows`} you chose by hand</label></div>` : '';
+    return (said ? `<p class="sub">What the ${others ? 'other ' : ''}rows are: ${said}.</p>` : '')
+        + keptWords(p).map(k => `<p class="sub">${esc(k)}</p>`).join('') + group;
+}
+/** The rows whose flow is kept, a record of expect back resting on each:
+ *  each named by date, amount and wording, and why, in one plain sentence
+ *  ("6 Feb 2026 · S$ 68.28 · GIRO DEDUCTION AUTO stays spending, because
+ *  S$ 5 of it is expected back (undo that mark to move it)."). Only the
+ *  drawer says them; a toast counts them (flowCounts). */
+function keptWords(p) {
+    // The rows kept only because you chose them are flowsLine's own group.
+    const hand = new Set((p.flows_chosen || []).map(k => k.id));
+    return (p.flows_kept || []).filter(k => !hand.has(k.id)).map(k => {
+        const row = [day(k.date), money(k.amount_minor, k.currency), k.description].join(' · ');
+        return k.because ? `${row} stays ${k.now}, because ${k.because}.` : `${row} stays ${k.now}. ${k.why}`;
+    });
+}
+/** Ask the preview: 'apply', 'only_new', or null when it is closed. Whether
+ *  the box "Also move these rows you chose by hand" was ticked when Apply
+ *  was pressed is kept on the preview, p.moveChosen: the answer sends
+ *  move_chosen with it (sendPreviewed, the drift's Apply). */
 function askPreview(p, parts = previewParts(p)) {
+    previewShown = p;
+    p.moveChosen = false;
     return new Promise(done => {
         openSheet(parts.title, parts.body, { eyebrow: parts.eyebrow, center: true, foot: parts.foot, focusSheet: true });
         pastAnswer = done;
     });
 }
-ACT['preview-answer'] = el => ACT['past-answer'](el);
+let previewShown = null;
+ACT['preview-answer'] = el => {
+    if (previewShown) previewShown.moveChosen = el.dataset.past === 'apply' && !!$('#pv-move-chosen')?.checked;
+    ACT['past-answer'](el);
+};
+/** The box ticked or not: the drawer's count and its Apply say the rows Apply then changes. */
+function tickMoveChosen(el) {
+    const apply = $('#pv-apply'), count = $('#pv-count');
+    const n = d => Number(el.checked ? d.with : d.count);
+    if (apply) apply.textContent = !el.checked && apply.dataset.zero ? apply.dataset.zero : `Apply to ${plural(n(apply.dataset), apply.dataset.unit || 'past row')}`;
+    if (count) count.textContent = !el.checked && count.dataset.zero ? count.dataset.zero : `This changes ${plural(n(count.dataset), 'past row')}`;
+}
+ACT['preview-move-chosen'] = tickMoveChosen;
+
 // See all: the merchant's own page lists every one of its rows, newest first.
 ACT['preview-all'] = el => { closeSheet(); location.hash = `#/books/merchant/${el.dataset.id}`; };
 /** A write that may reach past rows: sent once; when the server answers with
  *  a preview, the drawer asks, and the answer goes back (under `key`) with
  *  the preview's token. `parts` draws the drawer in place of previewParts
- *  (a slot move's). Returns send's result, or {ok: false, cancelled}
+ *  (a slot move's); `taught` names a teach's own row, which the drawer marks. Returns send's result, or {ok: false, cancelled}
  *  when the drawer was closed: nothing was written. */
-async function sendPreviewed(method, url, body, { key = 'past', parts = null } = {}) {
+async function sendPreviewed(method, url, body, { key = 'past', parts = null, taught = null } = {}) {
     const r = await send(method, url, body);
     if (r.status !== 409 || !r.data.preview) return r;
-    const answer = await askPreview(r.data.preview, parts ? parts(r.data.preview) : undefined);
+    const answer = await askPreview(r.data.preview, parts ? parts(r.data.preview) : taught != null ? previewParts(r.data.preview, { taught }) : undefined);
     if (!answer) return { ok: false, cancelled: true, status: 409, data: { error: 'Nothing was saved.' }, change: null };
-    const answered = await send(method, url, { ...body, [key]: answer, token: r.data.preview.token });
-    return { ...answered, answered: { past: answer, count: r.data.preview.count } };
+    const p = r.data.preview;
+    // Apply pressed with the box ticked over rows the preview kept because you chose them.
+    const move = answer === 'apply' && !!p.moveChosen && (p.flows_chosen || []).length > 0;
+    const sent = { ...body, [key]: answer, token: p.token, ...(move ? { move_chosen: true } : {}) };
+    const answered = await send(method, url, sent);
+    // The drawer's flows go with the answer: Apply writes exactly those, and the toast counts them;
+    // with the box ticked, the rows you chose by hand too.
+    const moved = sent.move_chosen ? (p.flows_chosen || []).map(k => ({ ...k, after: k.would })) : [];
+    return { ...answered, answered: { past: answer, count: sent.move_chosen ? p.count_with_chosen : p.count,
+        flows: [...(p.flows || []), ...moved] } };
 }
 /** What a previewed write did, in words, for its toast. */
 function previewedWords(r, done) {
@@ -4783,12 +4968,43 @@ function previewedWords(r, done) {
     if (a.past === 'apply') return `${done}, and ${plural(a.count, 'past row')} changed. One change in Changes, with Undo.`;
     return `${done}. Only new rows take it; the ${plural(a.count, 'past row')} keep theirs, marked checked.`;
 }
+/** What a write did to the rows' flows, in counts only (each row is the
+ *  drawer's): "7 rows are now a movement; 1 row kept as it is". `moved` the
+ *  flow lines it wrote, `kept` the rows whose flow it kept; '' when neither. */
+function flowCounts(moved, kept) {
+    const by = new Map();
+    moved.forEach(f => { const w = String(f.after).split(' · ')[0]; by.set(w, (by.get(w) || 0) + 1); });
+    const each = [...by].map(([w, n], i) => i ? `${n} ${w}` : `${plural(n, 'row')} ${n === 1 ? 'is' : 'are'} now ${w}`);
+    const now = each.length > 1 ? `${each.slice(0, -1).join(', ')} and ${each[each.length - 1]}` : (each[0] || '');
+    const still = kept.length ? `${plural(kept.length, 'row')} kept as ${kept.length === 1 ? 'it is' : 'they are'}` : '';
+    return [now, still].filter(Boolean).join('; ');
+}
+/** A previewed write's toast: what it did (previewedWords), or, where it
+ *  moved or kept a flow, that in counts (flowCounts): the drawer's flows on
+ *  Apply, with `own` (a teach's row taught), and the answer's flows_kept. */
+function doneWords(r, done, own = []) {
+    const a = r.answered || {};
+    const moved = [...own, ...(a.past === 'apply' ? a.flows || [] : [])];
+    const kept = r.data?.flows_kept || [];
+    if (!moved.length && !kept.length) return previewedWords(r, done);
+    const counted = `${sentence(flowCounts(moved, kept))}.`;
+    if (a.past === 'only_new') return `${previewedWords(r, done)} ${counted}`;
+    // Rows relabelled whose flow neither moved nor was kept are counted too.
+    if (a.past === 'apply' && a.count > moved.length + kept.length) return `${done}, and ${plural(a.count, 'past row')} changed. ${counted}`;
+    return `${done}. ${counted}`;
+}
+/** A teach's (resolve's) toast: doneWords, the row taught's own flow (the
+ *  answer's flows) counted with the rest. */
+function resolvedWords(r, done) {
+    return doneWords(r, done, r.data?.flows || []);
+}
 /** A previewed write's end: false when the drawer was closed, or the write
- *  refused (said in a toast); else its toast, with Undo. */
+ *  refused (said in a toast); else its toast, with Undo, counting the rows
+ *  whose flow it moved or kept (doneWords). */
 function previewedDone(r, done) {
     if (r.cancelled) return false;
     if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); return false; }
-    toast(previewedWords(r, done), { undo: r.change });
+    toast(doneWords(r, done), { undo: r.change });
     refreshFrame();
     return true;
 }
@@ -5056,6 +5272,26 @@ ACT['merchant-delete'] = async el => {
     if (r) { closeSheet(); rerender(); }
 };
 
+/** A rule's Sets cell in Lists › Rules: book, type, amount range and the
+ *  flow it states, with the overrides tag. */
+function ruleSets(x, r) {
+    const book = esc(x.book_override || x.book || '');
+    const type = x.type_override_id || x.type_name ? esc(x.type_override_id ? r.typeById.get(x.type_override_id)?.display_name || r.typeById.get(x.type_override_id)?.name : x.display_type || x.type_name) : '';
+    const range = x.min_amount !== null || x.max_amount !== null
+        ? `only ${x.min_amount !== null ? esc(money(toMinor(x.min_amount), 'SGD')) : 'any amount'} to ${x.max_amount !== null ? esc(money(toMinor(x.max_amount), 'SGD')) : 'any amount'}` : '';
+    const states = x.flow ? `${RULE_FLOWS.find(f => f[0] === x.flow)?.[1] || x.flow}${x.other_side_name ? ' · ' + x.other_side_name : ''}` : '';
+    // A flow alone overrides nothing: the tag is for the rule's own book or type.
+    return [book, type, range, esc(states)].filter(Boolean).join(' · ') + (x.book_override || x.type_override_id ? ' ' + tag('yours', 'overrides') : '');
+}
+// What a rule may say its rows are (ADR-009): left at the first, fin works it out.
+// Short words, as the preview lines say them (relabel_preview.FLOW_WORDS); the picker's hint says the two that need it.
+const RULE_FLOWS = [['', 'What fin works out'], ['expense', 'spending'], ['income', 'income'], ['refund', 'a refund'],
+    ['transfer', 'a transfer'], ['payment', 'a card payment'], ['movement', 'a movement']];
+/** A flow in the app's own words ("a movement", "a card payment"), never its stored name. */
+function flowSaid(flow) {
+    const found = RULE_FLOWS.find(([k]) => k && k === flow);
+    return found ? found[1] : String(flow || '').replace(/_/g, ' ');
+}
 ACT.rule = async el => {
     const [r, services] = await Promise.all([refs(), servicesList()]);
     const x = el.dataset.id ? ACT.__rules.get(Number(el.dataset.id)) : null;
@@ -5065,6 +5301,9 @@ ACT.rule = async el => {
         <label class="field"><span>Merchant</span><select id="rl-svc"><option value="">Choose</option>${services.map(s => `<option value="${s.id}"${s.id === x?.service_id ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
         <div class="fields two"><label class="field"><span>Book, in place of the merchant’s</span><select id="rl-book">${bookOptions(r.books, x?.book_override, 'The merchant’s')}</select></label>
             <label class="field"><span>Type, in place of the merchant’s</span><select id="rl-type">${typeOptions(r.types, x?.type_override_id, { blank: 'The merchant’s' })}</select></label></div>
+        <div class="fields two"><label class="field"><span>What its rows are</span><select id="rl-flow">${RULE_FLOWS.map(([v, w]) => `<option value="${v}"${(x?.flow || '') === v ? ' selected' : ''}>${esc(w)}</option>`).join('')}</select></label>
+            <label class="field"><span>Other side</span><select id="rl-side"><option value="">None</option>${r.accounts.filter(a => a.id === x?.other_side_id || (a.owner === 'Household' && a.type !== 'person' && a.status !== 'archived')).map(a => `<option value="${a.id}"${a.id === x?.other_side_id ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label></div>
+        <p class="hint">A movement’s other side is a loan, holding or company.</p>
         <div class="fields two"><label class="field"><span>Only from (S$)</span><input type="text" inputmode="decimal" id="rl-min" value="${x?.min_amount ?? ''}"></label>
             <label class="field"><span>Only up to (S$)</span><input type="text" inputmode="decimal" id="rl-max" value="${x?.max_amount ?? ''}"></label></div></div>
         ${x ? `<p class="small muted">It labels ${plural(x.rows_labelled ?? 0, 'row')} now.</p>` : ''}
@@ -5075,7 +5314,8 @@ ACT['rule-save'] = async el => {
     const v = id => $('#' + id).value.trim();
     if (!v('rl-svc')) { toast('Choose the merchant', { bad: true }); return; }
     const body = { pattern: v('rl-pattern'), match_type: v('rl-match'), service_id: Number(v('rl-svc')), book_override: v('rl-book') || null,
-        type_override_id: v('rl-type') ? Number(v('rl-type')) : null, min_amount: v('rl-min') || null, max_amount: v('rl-max') || null };
+        type_override_id: v('rl-type') ? Number(v('rl-type')) : null, min_amount: v('rl-min') || null, max_amount: v('rl-max') || null,
+        flow: v('rl-flow') || null, other_side_id: v('rl-flow') && v('rl-side') ? Number(v('rl-side')) : null };
     const r = await sendPreviewed(el.dataset.id ? 'PUT' : 'POST', el.dataset.id ? `/api/rules/${el.dataset.id}` : '/api/rules', body);
     if (previewedDone(r, el.dataset.id ? 'Rule saved' : 'Rule added')) { closeSheet(); rerender(); }
 };
@@ -5098,9 +5338,10 @@ function driftLine(d) {
 ACT['rule-drift'] = async () => {
     const p = await get('/api/rules/drift', { fresh: true }).catch(() => null);
     if (!p) { toast('fin could not count the rows just now; nothing was changed', { bad: true }); return; }
-    if (!p.count) { toast('No row differs from its rule now.'); rerender(); return; }
+    if (!p.count && !(p.flows_chosen || []).length) { toast('No row differs from its rule now.'); rerender(); return; }
     if (await askPreview(p) !== 'apply') return;
-    const r = await send('POST', '/api/rules/drift', { past: 'apply', token: p.token });
+    const move = !!p.moveChosen && (p.flows_chosen || []).length > 0;
+    const r = await send('POST', '/api/rules/drift', { past: 'apply', token: p.token, ...(move ? { move_chosen: true } : {}) });
     closeSheet();
     if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); rerender(); return; }
     toast(`${plural(r.data.recategorized, 'row')} relabelled. One change in Changes, with Undo.`, { undo: r.change });
@@ -5108,6 +5349,57 @@ ACT['rule-drift'] = async () => {
     rerender();
 };
 
+/** An amount in whole minor units as an amount field shows it: grouped as
+ *  money() groups it, no sign: "100,000.00". Blank for none. */
+function amountField(minor, cur = 'SGD') {
+    if (minor === null || minor === undefined) return '';
+    return groupFor(cur).format(minor / 10 ** digitsOf(cur));
+}
+/** A loan's hire-purchase terms on its account sheet (loan_terms.py), as
+ *  entered: the flat rate as typed, or the interest over the term. All blank
+ *  is no terms. With them, its statement's total of remaining instalments
+ *  imports as principal owed, and the amount financed is its first figure,
+ *  owed from the day given. `lock` (the account's terms_locked) makes them
+ *  read-only, saying why. data-held keeps what the fields first held, so a
+ *  save sends the terms only when the operator changed them (termsChange). */
+function termsFieldsHTML(t, cur = 'SGD', lock = null) {
+    const held = {
+        financed: amountField(t?.financed_minor, cur), months: t ? String(t.months) : '',
+        flat_rate: t?.flat_rate ?? '',
+        interest: t && (t.flat_rate === null || t.flat_rate === undefined) ? amountField(t.interest_minor, cur) : '',
+        first_instalment: t?.first_instalment ?? '', owed_from: t?.owed_from ?? '',
+    };
+    const off = lock ? ' disabled' : '';
+    const field = (label, id, key, attrs) => `<label class="field"><span>${label}</span><input ${attrs} id="${id}" value="${esc(held[key])}"${off}></label>`;
+    const why = lock ? `Read-only: ${String(lock).replace(/ Nothing was saved\.$/, '')}` : 'With these, a statement’s remaining instalments import as principal owed (Rule of 78). Leave all blank for none.';
+    return `<fieldset class="fields hp-terms" id="ac-hp" data-held="${esc(JSON.stringify(held))}"><legend>Hire-purchase terms</legend>
+        <p class="hint">${esc(why)}</p>
+        ${field('Amount financed', 'ac-hp-financed', 'financed', 'type="text" inputmode="decimal"')}
+        ${field('Months', 'ac-hp-months', 'months', 'type="text" inputmode="numeric"')}
+        <div class="fields two">${field('Flat rate, % a year', 'ac-hp-rate', 'flat_rate', 'type="text" inputmode="decimal"')}
+        ${field('or interest over the term', 'ac-hp-interest', 'interest', 'type="text" inputmode="decimal"')}</div>
+        ${field('First instalment', 'ac-hp-first', 'first_instalment', 'type="date"')}
+        ${field('Amount financed owed from', 'ac-hp-from', 'owed_from', 'type="date"')}
+        ${t ? `<span class="hint">Instalment ${esc(money(t.instalment_minor, cur))}; interest ${esc(money(t.interest_minor, cur))} over the term. The amount financed, owed from ${esc(day(t.owed_from))}, is the loan’s first figure.</span>`
+            : '<span class="hint">Owed from: blank is the day before the first instalment’s month.</span>'}</fieldset>`;
+}
+/** What a save sends for the terms: undefined when the fields say what they
+ *  first held (nothing sent), null when all are cleared, else the terms as
+ *  typed. */
+function termsChange(held, fields) {
+    const keys = ['financed', 'months', 'flat_rate', 'interest', 'first_instalment', 'owed_from'];
+    const val = (o, k) => String(o?.[k] ?? '').trim();
+    if (keys.every(k => val(fields, k) === val(held, k))) return undefined;
+    if (keys.every(k => !val(fields, k))) return null;
+    const months = val(fields, 'months');
+    const out = { financed: val(fields, 'financed').replace(/[, ]/g, ''), months: /^\d+$/.test(months) ? Number(months) : months };
+    if (val(fields, 'flat_rate')) out.flat_rate = val(fields, 'flat_rate').replace(/%$/, '').trim();
+    if (val(fields, 'interest')) out.interest = val(fields, 'interest').replace(/[, ]/g, '');
+    out.first_instalment = val(fields, 'first_instalment');
+    if (val(fields, 'owed_from')) out.owed_from = val(fields, 'owed_from');
+    out.method = 'rule-of-78';
+    return out;
+}
 ACT['account-edit'] = async el => {
     const r = await refs();
     const a = el.dataset.id ? r.accountById.get(Number(el.dataset.id)) : null;
@@ -5121,6 +5413,7 @@ ACT['account-edit'] = async el => {
         <label class="field"><span>Currency</span><select id="ac-cur">${['SGD', 'INR', 'USD'].map(c => `<option>${c}</option>`).join('')}</select></label>`}
         <label class="field"><span>Last four digits</span><input type="text" inputmode="numeric" maxlength="4" id="ac-last4" value="${esc(a?.last_four || '')}"></label>
         ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}</div>
+        ${a && a.type === 'loan' ? termsFieldsHTML(a.terms, a.currency, a.terms_locked) : ''}
         ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`,
     { eyebrow: a ? 'Account' : 'Accounts', foot: `<button class="btn primary" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>` });
     $$('#sheets [data-meaning]').forEach(sel => sel.addEventListener('change', () => {
@@ -5133,7 +5426,16 @@ ACT['account-save'] = async el => {
     if (!name) { toast('Give it a name', { bad: true }); return; }
     let r;
     if (el.dataset.id) {
-        r = await act('PUT', `/api/accounts/${el.dataset.id}`, { name, last_four: $('#ac-last4').value.trim() || null, status: $('#ac-archived').checked ? 'archived' : 'active' }, 'Account saved');
+        const body = { name, last_four: $('#ac-last4').value.trim() || null, status: $('#ac-archived').checked ? 'archived' : 'active' };
+        // A loan's terms go with the save, in the same change, only when the operator changed them.
+        const hp = $('#ac-hp');
+        if (hp && !$('#ac-hp-financed').disabled) {
+            const now = { financed: $('#ac-hp-financed').value, months: $('#ac-hp-months').value, flat_rate: $('#ac-hp-rate').value,
+                interest: $('#ac-hp-interest').value, first_instalment: $('#ac-hp-first').value, owed_from: $('#ac-hp-from').value };
+            const change = termsChange(JSON.parse(hp.dataset.held), now);
+            if (change !== undefined) body.terms = change;
+        }
+        r = await act('PUT', `/api/accounts/${el.dataset.id}`, body, 'Account saved');
     } else {
         r = await act('POST', '/api/accounts', { name, type: $('#ac-kind').value, owner: $('#ac-owner').value, currency: $('#ac-cur').value, last_four: $('#ac-last4').value.trim() || null }, 'Account added');
     }
@@ -5264,6 +5566,22 @@ function stmtSum(s, cur) {
         <tr><td class="op"></td><td>closing it states</td><td class="r">${known ? m(s.closing) : none}</td></tr>
         ${result}</tbody></table>`;
 }
+/** A loan statement's figure as a sum. With the loan's hire-purchase terms
+ *  the statement's figure is the total of its remaining instalments: less the
+ *  interest not yet earned (Rule of 78), it is the principal owed, which is
+ *  what the import writes (loan_terms.py). */
+function loanFigureSum(f) {
+    const m = v => esc(money(v, f.currency));
+    const held = f.held ? ' <span class="muted">(already held)</span>' : '';
+    if (f.printed_minor === undefined || f.printed_minor === null) {
+        return `<table class="sum small"><tbody><tr><td class="op"></td><td>owed${held}</td><td class="r">${m(f.owed_minor)}</td></tr></tbody></table>`;
+    }
+    const schedule = f.left_by_schedule !== f.instalments_left ? `; the terms' dates leave ${f.left_by_schedule}` : '';
+    return `<table class="sum small"><tbody>
+        <tr><td class="op"></td><td>remaining instalments, as printed</td><td class="r">${m(f.printed_minor)}</td></tr>
+        <tr><td class="op">−</td><td>interest not yet earned<div class="small muted">Rule of 78: ${f.instalments_left} of ${f.months} instalments left${schedule}</div></td><td class="r">${m(f.unearned_minor)}</td></tr>
+        <tr class="eq"><td class="op">=</td><td>principal owed${held}</td><td class="r">${m(f.owed_minor)}</td></tr></tbody></table>`;
+}
 function importPreviewHTML(p) {
     const ties = p.groups.filter(g => g.tie === 'ties');
     const unchecked = p.groups.filter(g => g.tie !== 'ties' && g.total);
@@ -5298,13 +5616,13 @@ function importPreviewHTML(p) {
     }).join('') || noneYet;
     const figuresHTML = figures.length ? card('figure', tag('aside', 'Loan figure'), figures.length, figures.map(f => stmtBlock(f.account,
         `loan statement ${esc(day(f.date))}: no rows${f.new_account ? '; the loan account is made' : ''}`,
-        `<table class="sum small"><tbody><tr><td class="op"></td><td>owed${f.held ? ' <span class="muted">(already held)</span>' : ''}</td><td class="r">${esc(money(f.owed_minor, f.currency))}</td></tr></tbody></table>`)).join('')) : '';
+        loanFigureSum(f))).join('')) : '';
     const offered = [rows ? plural(rows, 'row') : '', newFigures ? plural(newFigures, 'figure') : ''].filter(Boolean).join(' and ');
     const groupsHTML = p.groups.filter(g => g.transactions.length).map(g => `<details class="card import-group"><summary><b>${esc(g.account)}</b> · ${plural(g.transactions.length, 'row')} · ${g.typed} with a type, ${g.untyped} without</summary>
         <div class="table-shell" style="margin-top:10px"><table class="t rows acct-rows"><thead><tr><th>Date</th><th>Description</th><th>Labelled</th><th class="r">Money in</th><th class="r">Money out</th></tr></thead><tbody>
         ${g.transactions.map(t => {
             const minor = toMinor(t.amount_sgd, g.currency);
-            return `<tr><td class="num row-date">${esc(day(t.date, { year: false }))}</td><td class="row-desc">${esc(t.description)}</td><td class="row-label">${t.type_name ? esc(t.type_name) : t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.flow_type !== 'expense' ? `<span class="muted">${esc(t.flow_type)}</span>` : tag('nofig', 'no type')}</td>
+            return `<tr><td class="num row-date">${esc(day(t.date, { year: false }))}</td><td class="row-desc">${esc(t.description)}</td><td class="row-label">${t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.type_name ? esc(t.type_name) : t.flow_type !== 'expense' ? `<span class="muted">${esc(flowSaid(t.flow_type))}</span>` : tag('nofig', 'no type')}</td>
             <td class="r num row-in">${minor < 0 ? esc(money(-minor, g.currency)) : ''}</td><td class="r num row-out">${minor >= 0 ? esc(money(minor, g.currency)) : ''}</td></tr>`;
         }).join('')}</tbody></table></div></details>`).join('');
     return `<div class="results">${card('ties', tag('ties', 'Ties'), ties.reduce((a, g) => a + g.statements.length, 0), tiesBody)}${card('off', tag('off', 'Off by'), refused.length, refusedBody)}${card('notchecked', tag('notchecked', 'Not checked'), unchecked.length, uncheckedBody)}</div>
@@ -5385,11 +5703,13 @@ const SKIP_FIELDS = new Set(['id', 'created_at', 'book_source', 'type_source', '
 const FIELD_WORDS = { type_id: 'type', service_id: 'merchant', other_side_id: 'other side', flow_type: 'kind', is_one_off: 'one-off', notes: 'note',
     amount_minor: 'amount', account_id: 'account', type_override_id: 'type (rule)', book_override: 'book (rule)', review_each_time: 'check each row',
     exclude_from_expense_views: 'hidden', match_type: 'match', min_amount_minor: 'from', max_amount_minor: 'up to', amount: 'amount', statement_date: 'statement', covers: 'covers', not_for: 'not for',
-    usual_book: 'usual book', check_each_row: 'Check each row by default', default_one_off: 'one-off by default' };
+    usual_book: 'usual book', check_each_row: 'Check each row by default', default_one_off: 'one-off by default',
+    party_id: 'party', role: 'role' };
 // What fin files through each slot, as the server says it (book_type.SLOTS).
 const SLOT_FILES = { loan_interest: 'loan interest', gift_given: 'gifts given', gift_received: 'gifts received' };
 // An empty old or new value said plainly, never as bad news (C4.2).
-const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty' };
+const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty',
+    party_id: 'no party', role: 'no role' };
 const FLOW_WORDS = { expense: 'money out', income: 'money in', refund: 'a refund', review: 'waiting for a label', transfer: 'a move between own accounts' };
 function isEmpty(v) { return v === null || v === undefined || v === ''; }
 function changedFields(c) {
@@ -5401,7 +5721,8 @@ function valueText(table, field, value, ctx, cur = 'SGD') {
     if (isEmpty(value)) return '';
     if (field === 'type_id' || field === 'type_override_id') return esc(ctx.r.typeById.get(value)?.display_name || 'a type no longer listed');
     if (field === 'other_side_id' || field === 'account_id') return esc(ctx.r.accountById.get(value)?.name || 'an account no longer listed');
-    if (field === 'service_id') {
+    // An account's party is a merchant (fin-redesign 09), named as one.
+    if (field === 'service_id' || field === 'party_id') {
         const gone = ctx.gone?.get(value);
         return esc(ctx.services.find(s => s.id === value)?.name || (gone ? `${gone}, since removed` : 'a merchant no longer listed'));
     }
@@ -5501,6 +5822,12 @@ function changeWords(first, ctx, { rows = 1, subject = null } = {}) {
     const what = c.table === 'merchant_rules' ? `${noun} “${name}”` : c.table === 'rates' ? `${noun} ${name} for ${esc(day((a.date || b.date || '')))}` : `${noun} ${name}`;
     if (c.op === 'insert') return `added ${what}`;
     if (c.op === 'delete') return `deleted ${what}`;
+    // An account joined to a party, or taken off one (fin-redesign 09), short
+    // enough for one line on a phone: "joined Sample Co to Sample Co Health (party)".
+    if (c.table === 'accounts' && changedFields(c).join() === 'party_id') {
+        return isEmpty(a.party_id) ? `took ${name} off ${valueText('accounts', 'party_id', b.party_id, ctx)} (party)`
+            : `joined ${name} to ${valueText('accounts', 'party_id', a.party_id, ctx)} (party)`;
+    }
     if (c.table !== 'rates' && b.name && a.name && b.name !== a.name) return `renamed ${noun} ${esc(b.name)} to ${esc(a.name)}`;
     return `changed ${what}`;
 }
@@ -5529,16 +5856,16 @@ function entryTitle(e, ctx, byId) {
     if (e.undoes) return undoWords(e, ctx, byId);
     return sentence(changeWords(e.first, ctx, { rows: e.rows })) || esc(e.summary || 'A change');
 }
-/** Why an undo is refused, naming who and what (walk C6.2). */
+/** Why an undo is refused, naming who and what (walk C6.2), said as an
+ *  explanation: the later change comes off first, then this one. */
 function refusalWords(e, ctx) {
     const by = e.blocked_by;
     const did = changeWords(by.first, ctx, { rows: 1, subject: 'it' });
-    const yours = by.via === 'chat' ? 'Claude’s' : 'yours';
     const target = e.rows === 1 ? 'this row' : 'the same rows';
     const what = did && by.first && by.first.table === 'transactions' && e.rows === 1
         ? `${whoName(by, { cap: false })} ${did} ${timeWords(by.at)}`
         : `${esc(lowerFirst(String(by.summary || 'a change')))} ${timeWords(by.at)}`;
-    return `${whoName(by)} changed ${target} after it: ${what}. Undo ${yours} first.`;
+    return `${whoName(by)} changed ${target} after it: ${what}. Undo that first, then this one.`;
 }
 function entryState(e) {
     if (e.undone_by) return `<span class="state-word">undone</span>`;
@@ -5635,7 +5962,7 @@ async function viewChanges() {
                 <div class="entry-main">
                     <button class="entry-title" data-act="entry-open" data-entry="${e.id}" aria-expanded="${open}" aria-controls="detail-${e.id}">${icon('caret-right', 'caret')}<span>${entryTitle(e, ctx, byId)}</span></button>
                     <div class="entry-meta">${meta}${e.asked_first ? ' ' + tag('asked', 'asked first, yes in chat') : ''}</div>
-                    ${e.blocked_by ? `<div class="notice bad refusal">${icon('prohibit')}<div><b>Undo refused.</b> ${refusalWords(e, ctx)}
+                    ${e.blocked_by ? `<div class="notice refusal">${icon('info')}<div><b>Waits on a later change.</b> ${refusalWords(e, ctx)}
                         <button class="btn sm" data-act="trace" data-entry="${e.id}" data-blocker="${e.blocked_by.id}">Show where</button></div></div>` : ''}
                 </div>
                 <div class="act">${entryState(e)}</div>

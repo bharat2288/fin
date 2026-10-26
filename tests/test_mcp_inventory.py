@@ -40,6 +40,8 @@ GOLDEN: list[str] = [
     "types", "books", "flows", "coverage", "rates", "history", "change", "expected_back",
     # fin-redesign 12: the Queue's payback suggestions (a read)
     "paybacks",
+    # fin-redesign 10: the bills, with the server's missed-bill rule (a read)
+    "bills",
     # writes
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     # fin-surfaces 51: rerun_rules removed, as Re-run every rule is retired
@@ -49,6 +51,8 @@ GOLDEN: list[str] = [
     "create_account",
     # fin redesign ticket 11: a merchant made over the app's own route
     "create_merchant",
+    # fin-redesign 09: an account joined to a party (a merchant), one change
+    "link_party",
     "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off",

@@ -39,6 +39,8 @@ READS.insert(READS.index("queue") + 1, "queue_summary")
 READS.append("plan_preview")
 # fin-redesign 12: the Queue's payback suggestions, read by the chat.
 READS.insert(READS.index("expected_back") + 1, "paybacks")
+# fin-redesign 10: the bills, with the server's missed-bill rule.
+READS.insert(READS.index("paybacks") + 1, "bills")
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
@@ -47,6 +49,8 @@ WRITES = [
     "create_account",
     # fin redesign ticket 11: a merchant made over the app's own route
     "create_merchant",
+    # fin-redesign 09: an account joined to a party (a merchant), one change
+    "link_party",
     "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off",
@@ -102,9 +106,13 @@ def test_no_tool_reaches_what_the_ruling_keeps_out():
         if "kind" in args:
             args["kind"] = "company"
         paths.add(tool.request(args)[1])
+    # An account's own route changes its name, kind, owner or status: never the
+    # chat's. Joining it to a party (fin-redesign 09) is its own route.
+    joins_a_party = {"/api/accounts/1/party"}
     for forbidden in ("/api/import", "/api/subscriptions", "/api/suggestions", "/api/accounts/1",
                       "/api/services/bulk-rename", "/api/loan-interest"):
-        assert not any(p.startswith(forbidden) for p in paths), forbidden
+        assert not any(p.startswith(forbidden) and p not in joins_a_party for p in paths), forbidden
+    assert joins_a_party <= paths
     # A row's own route, and the three expect-back routes of its (personal-ledger 44).
     reaches_a_row = {"/api/transactions/1", "/api/transactions/1/expectation",
                      "/api/transactions/1/set-offs", "/api/transactions/1/not-a-payback"}

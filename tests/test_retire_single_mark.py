@@ -174,9 +174,9 @@ def not_applied(path: Path) -> list[str]:
 # --- the chain ---------------------------------------------------------------------
 
 
-def test_the_step_runs_last_in_the_chain_right_after_label_source():
+def test_the_step_runs_in_the_chain_right_after_label_source():
     names = [name for name, _ in conversion.CHAIN]
-    assert names[-2:] == [convert_label_source.NAME, NAME]
+    assert names[names.index(NAME) - 1:names.index(NAME) + 1] == [convert_label_source.NAME, NAME]
     assert conversion.chain_step(dict(conversion.CHAIN)[NAME]) is retire_single_mark.STEP
 
 
@@ -460,7 +460,8 @@ def test_a_row_written_with_no_source_after_label_source_does_not_make_it_pendin
 
 
 def test_a_never_converted_book_reads_both_steps_pending_and_fin_names_them(todays, monkeypatch):
-    assert not_applied(todays)[-2:] == [convert_label_source.NAME, NAME]
+    assert [n for n in not_applied(todays) if n in (convert_label_source.NAME, NAME)] == [
+        convert_label_source.NAME, NAME]
     monkeypatch.setattr(db, "DB_PATH", todays)
     with pytest.raises(db.DatabaseNotConverted) as refused:
         db.init_db()

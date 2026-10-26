@@ -137,14 +137,21 @@ def match_pairs(conn) -> int:
         in_rows = [r for r in rows if r["amount_minor"] < 0]
         for out, back in _pairs_among(out_rows, in_rows):
             for row, other in ((out, back), (back, out)):
+                paired = _paired_flow(row, other)
+                # A row that moves into a transfer or payment is no one's
+                # spending: its book and type are emptied with the move
+                # (fin-redesign 05, label_source.fitted); one that keeps its
+                # flow keeps what it holds.
+                emptied = ("" if paired == row["flow_type"] else
+                           ", book = NULL, type_id = NULL, book_source = NULL, type_source = NULL")
                 # The guard is repeated on the write: a row set by hand,
                 # already naming an other side, or carrying a record, is not
                 # changed.
                 conn.execute(
-                    "UPDATE transactions SET flow_type = ?, other_side_id = ? "
+                    f"UPDATE transactions SET flow_type = ?, other_side_id = ?{emptied} "
                     "WHERE id = ? AND COALESCE(flow_type_manual, 0) = 0 AND other_side_id IS NULL "
                     f"AND {_NO_RECORDS.format(row='transactions')}",
-                    (_paired_flow(row, other), other["account_id"], row["id"]),
+                    (paired, other["account_id"], row["id"]),
                 )
             made += 1
     return made

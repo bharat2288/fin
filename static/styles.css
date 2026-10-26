@@ -465,6 +465,12 @@ textarea { min-height: 80px; padding-block: var(--space-2); resize: vertical; }
 ::placeholder { color: var(--text-muted); opacity: 1; }
 .fields { display: grid; gap: 12px; }
 .fields.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+/* A loan's hire-purchase terms on its account sheet: a titled group under the account's own fields. */
+.hp-terms { border: 0; border-top: 1px solid var(--border-subtle); margin: var(--space-2) 0 0; padding: var(--space-3) 0 0; min-width: 0; }
+.hp-terms legend { padding: 0 8px 0 0; font-weight: var(--font-semibold); color: var(--text-primary); }
+.hp-terms .hint { margin: 0; }
+/* A locked loan's terms: still legible (they are information), but plainly not a field to type in. */
+.hp-terms input:disabled { background: transparent; color: var(--text-secondary); cursor: not-allowed; }
 .check { display: flex; align-items: center; gap: 10px; min-height: 40px; cursor: pointer; font-size: var(--t-ui); }
 .check input, input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-primary); width: 18px; height: 18px; flex: none; margin: 0; }
 /* the switch: folio's ds-toggle, camel when on */
@@ -670,6 +676,15 @@ li.empty { list-style: none; margin-top: 8px; }
 .ex-shell .bt td { padding: 7px 10px; }
 .ex-shell .bt td:last-child { white-space: normal; }
 .ex-shell .bt td b { color: var(--text-primary); }
+/* the drawer scrolls as one: the examples' shell keeps its height, never clipped at the drawer's foot (polish) */
+.sheet-body > .ex-shell { flex-shrink: 0; }
+/* a teach's rows the examples leave out, one line each (polish) */
+.ex-more { margin: 0; padding-left: 18px; flex-shrink: 0; overflow-wrap: anywhere; }
+/* the rows kept only because you chose them, their own group with the box that moves them too (ADR-008) */
+.pv-hand { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; padding: 10px 12px; border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl); }
+.pv-hand .sub { margin: 0; }
+.pv-hand .ex-more li + li { margin-top: 2px; }
 .prev-mark { display: inline-block; padding: 1px 6px; border: 1px dashed var(--border-emphasis); border-radius: var(--radius-md);
     font-size: var(--t-cap); font-weight: var(--font-semibold); color: var(--text-secondary); white-space: nowrap; }
 .sheet-body > .link { align-self: flex-start; }
@@ -1568,6 +1583,15 @@ tr.sl-inactive td { color: var(--text-tertiary); }
 .sl-missed { margin-bottom: 4px; }
 .sl-missed b { color: var(--semantic-warning); }
 .sl-missed-acts { margin-top: 10px; }
+/* a bill awaiting its statement and in another currency: the awaiting line short, above the fix (polish) */
+.sl-also { margin: 0 0 8px; padding-bottom: 8px; border-bottom: 1px solid color-mix(in srgb, var(--semantic-warning) 30%, transparent); color: var(--text-secondary); }
+.sl-missed .sl-also b { color: var(--text-primary); font-weight: var(--font-semibold); }
+/* the currency fix's amount and its two answers on one line */
+.sl-cur-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sl-cur-fix .field { flex: 1 1 96px; min-width: 0; margin: 0; }
+.sl-cur-fix input { width: 100%; }
+/* a book's head: its monthly figure, then its counts; a bill's state tags kept together */
+.sl-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; }
 .sl-readonly { min-height: var(--ctl); display: flex; align-items: center; padding: var(--space-1) var(--space-3); border: 1px dashed var(--border-default); border-radius: var(--radius-md);
     color: var(--text-secondary); font-size: var(--t-body); }
 
@@ -1636,6 +1660,23 @@ table.sl-stack td.sl-sub { display: none; }
     table.sl-stack td.sl-name a { min-height: 0; }
     .sl-phone-word { display: inline; font-weight: var(--font-regular); color: var(--text-tertiary); font-size: var(--t-meta); }
     table.sl-stack td.sl-sub .tag { margin-left: 2px; white-space: normal; text-align: left; }
+    /* the preview's examples on a phone: date over amount, now over after (polish) */
+    .ex-after { display: block; }
+    .ex-shell table.ex, .ex-shell table.ex thead, .ex-shell table.ex tbody { display: block; }
+    .ex-shell table.ex tr { display: grid; grid-template-columns: 108px minmax(0, 1fr); align-items: start; }
+    .ex-shell table.ex thead tr { background: var(--bg-raised); border-bottom: 1px solid var(--border-default); }
+    .ex-shell table.ex th { border-bottom: 0; }
+    .ex-shell table.ex tbody tr + tr { border-top: 1px solid var(--border-subtle); }
+    .ex-shell table.ex th:nth-child(2) { display: none; }
+    .ex-shell table.ex td { border-bottom: 0; }
+    .ex-shell table.ex td:nth-child(1), .ex-shell table.ex th:nth-child(1) { grid-column: 1; grid-row: 1; }
+    .ex-shell table.ex td:nth-child(2) { grid-column: 1; grid-row: 2; text-align: left; padding-top: 0; }
+    .ex-shell table.ex td:nth-child(3), .ex-shell table.ex th:nth-child(3) { grid-column: 2; grid-row: 1 / span 2; }
+    /* Bills on a phone: the head's counts on a second, shorter line; the state tags compact, on one line together */
+    table.sl-stack tr.sl-book .sep { display: none; }
+    table.sl-stack tr.sl-book .sl-counts { display: block; font-weight: var(--font-semibold); color: var(--text-secondary); }
+    table.sl-stack td.sl-sub .sl-tags { display: flex; margin-top: 4px; }
+    table.sl-stack td.sl-sub .sl-tags .tag { margin: 0; padding: 0 7px; font-size: var(--t-cap); line-height: 18px; white-space: nowrap; }
     .sl-search { max-width: none; }
     .sl-merge { flex-direction: column; align-items: stretch; }
     table.sl-rows td.r:has(.sl-refund) { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
@@ -1695,8 +1736,12 @@ table.sl-stack td.sl-sub { display: none; }
 /* a change Claude made: its teal "Claude" tag says so; the row takes a faint teal tint, never a stripe */
 .entry.claude > .entry-row { background: color-mix(in srgb, var(--accent-pop) 5%, var(--bg-surface)); border-radius: var(--radius-md); }
 .entry.undone .entry-title span { color: var(--text-tertiary); text-decoration: line-through; }
-/* a refused undo: a whole-border band under the change, naming who and what (C6) */
-.refusal { margin: 8px 0 2px 18px; }
+/* a refused undo: a quiet band under the change, explaining which later change comes off first (C6; polish) */
+.refusal { margin: 8px 0 2px 18px; font-size: var(--t-ui); color: var(--text-secondary); }
+.refusal > svg { color: var(--text-tertiary); }
+.notice.refusal { background: transparent; border-style: dashed; }
+.refusal > div { flex: 1 1 0; min-width: 0; }
+.refusal b { color: var(--text-primary); font-weight: var(--font-semibold); }
 .refusal .btn { margin-left: 6px; vertical-align: middle; }
 /* the "You last looked" divider: a dashed teal rule (C5) */
 .divider { display: flex; align-items: center; gap: 12px; padding: 12px 4px; color: var(--accent-pop); font-weight: var(--font-bold); font-size: var(--t-ui); text-align: center; }

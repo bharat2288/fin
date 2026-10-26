@@ -258,7 +258,8 @@ def preview_html(preview: dict) -> str:
         _function("esc"), _const("SIGNS"), _const("DIGITS"), "const formatters = {};",
         _function("digitsOf"), _function("groupFor"), _function("money"), _function("toMinor"),
         _const("MONTHS"), _function("day"), _function("plural"), _function("tag"),
-        _function("stmtSum"), _function("importPreviewHTML"),
+        _const("RULE_FLOWS"), _function("flowSaid"),
+        _function("stmtSum"), _function("loanFigureSum"), _function("importPreviewHTML"),
         f"console.log(JSON.stringify(importPreviewHTML({json.dumps(preview)})));",
     ])
     out = subprocess.run([NODE, "-"], input=code, capture_output=True, text=True, timeout=30,
@@ -289,3 +290,20 @@ def test_a_figure_already_held_is_shown_as_held_and_not_offered():
     assert "already held" in html
     assert 'data-act="import-confirm"' not in html
     assert "Nothing to import" in html
+
+
+# --- the polish pass (the operator's screen review, ui-review-31 f) ------------------------
+
+
+@needs_node
+def test_polish_a_row_that_is_not_spending_says_what_it_is_in_the_apps_words():
+    rows = [{"date": "2026-04-0%d" % (i + 1), "description": f"SAMPLE ROW {i}", "amount_sgd": 10.0 + i, "flow_type": flow,
+             "type_name": None} for i, flow in enumerate(["movement", "payment", "transfer", "income", "refund"])]
+    group = {"account": "Sample Bank 0002", "currency": "SGD", "tie": "none", "total": 5, "statements": [],
+             "transactions": rows, "typed": 0, "untyped": 5}
+    html = preview_html({"groups": [group], "errors": [], "figures": []})
+    import re
+    labels = re.findall(r'<td class="row-label">(.*?)</td>', html, re.S)
+
+    assert [re.sub(r"<[^>]+>", "", label) for label in labels] == [
+        "a movement", "a card payment", "a transfer", "income", "a refund"]

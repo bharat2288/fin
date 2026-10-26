@@ -49,17 +49,23 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass, field
+from operator import itemgetter
 
 import balance_sheet
 import book_type
 import db
 import expect_back
+import flow
 import label_source
 import loan_interest
+import refund_links
 
 # The answers to "this changes N past rows".
 APPLY, ONLY_NEW = "apply", "only_new"
 ANSWERS = (APPLY, ONLY_NEW)
+# The opt-in an Apply may carry: the rows kept only because their book or
+# type was chosen by hand (Plan.by_hand) move too (with_chosen).
+MOVE_CHOSEN = "move_chosen"
 
 # How many examples the preview carries.
 EXAMPLES = 3
@@ -68,10 +74,13 @@ EXAMPLES = 3
 _OVERRIDE_OF = {"book": "book_override", "type_id": "type_override_id"}
 
 # What the plan reads of a row: the columns app._write_label reads of `held`,
-# then what the summary needs (the account's currency and the row's own part).
-_HELD = ("t.id, t.date, t.description, t.amount_minor, t.book, t.type_id, t.service_id, "
-         "t.book_source, t.type_source, t.flow_type, t.flow_type_manual, t.other_side_id, "
-         "COALESCE(a.currency, 'SGD') AS currency")
+# then what the summary needs (the account's currency and the row's own part)
+# -- _HELD_ROW, all a merchant's own change reads, as it moves no flow --
+# then what the classifier reads of the account the row is on (flow_writes).
+_HELD_ROW = ("t.id, t.date, t.description, t.amount_minor, t.book, t.type_id, t.service_id, "
+             "t.book_source, t.type_source, t.flow_type, t.flow_type_manual, t.other_side_id, "
+             "COALESCE(a.currency, 'SGD') AS currency")
+_HELD = f"{_HELD_ROW}, a.id AS account_id, a.type AS account_kind, a.owner AS account_owner"
 _FROM = ("transactions t LEFT JOIN statements st ON st.id = t.statement_id "
          "LEFT JOIN accounts a ON a.id = st.account_id")
 
@@ -89,12 +98,40 @@ class Gone(LookupError):
 @dataclass
 class Planned:
     """One row the change relabels: `apply` and `only_new` are the label
-    columns each answer writes (app._LABEL_COLUMNS)."""
+    columns each answer writes (app._LABEL_COLUMNS); a rule's and the
+    drift's Apply carries the row's flow and other side where they change
+    (flow_writes)."""
     held: sqlite3.Row
     apply: dict
     only_new: dict
     checked: bool = False              # a field the change reaches is checked
-    reflow: bool = False               # Apply works its flow out again (a rule's new merchant)
+
+
+@dataclass
+class Kept:
+    """A row whose flow Apply would move but keeps: a record of expect back
+    rests on it, or its book or type was chosen (flow_writes)."""
+    held: sqlite3.Row
+    would: dict                        # the flow and other side it would have had
+    why: str                           # the record, in a hand label's refusal's words; or the choice
+    said: str | None = None            # the clause after "because", where it is not because(why)
+    # Kept only because its book or type was chosen (ADR-008): an Apply sent
+    # with MOVE_CHOSEN moves it as any other row, writing `moved` (the
+    # plan's row for it, where the plan writes it: with_chosen).
+    by_hand: bool = False
+    moved: "Planned | None" = None
+
+
+# Why a row whose book or type the operator chose keeps its flow (ADR-008):
+# {the fields chosen: (why, the drawer's clause)}.
+_CHOSEN_WHY = {
+    ("book", "type_id"): ("You chose this row's book and type; Apply with move_chosen moves it too, on your yes.",
+                          "you chose its book and type"),
+    ("type_id",): ("You chose this row's type; Apply with move_chosen moves it too, on your yes.",
+                   "you chose its type"),
+    ("book",): ("You chose this row's book; Apply with move_chosen moves it too, on your yes.",
+                "you chose its book"),
+}
 
 
 @dataclass
@@ -114,10 +151,56 @@ class Plan:
     wording: str | None = None
     moves_to: str | None = None
     names: dict[int, str] = field(default_factory=dict)
+    kept: list[Kept] = field(default_factory=list)     # rows whose flow Apply keeps (flow_writes)
 
     @property
     def count(self) -> int:
         return len(self.rows)
+
+    @property
+    def by_hand(self) -> list[Kept]:
+        """The rows kept only because their book or type was chosen: an
+        Apply sent with MOVE_CHOSEN moves them."""
+        return [k for k in self.kept if k.by_hand]
+
+    @property
+    def count_with_chosen(self) -> int:
+        """The past rows Apply changes when sent with MOVE_CHOSEN."""
+        if not self.by_hand:
+            return self.count
+        rows = {p.held["id"] for p in self.rows}
+        return self.count + len({k.held["id"] for k in self.by_hand} - rows)
+
+
+def checked_move_chosen(value, answer: str | None) -> bool:
+    """MOVE_CHOSEN as a route takes it: true or false (left out, false), and
+    true only with Apply, the one answer that moves a flow."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise Refused(f"{MOVE_CHOSEN} must be true or false")
+    if value and answer != APPLY:
+        raise Refused(f"{MOVE_CHOSEN} goes with {APPLY}: only Apply moves a row's flow")
+    return value
+
+
+def with_chosen(plan: Plan) -> Plan:
+    """The plan as an Apply sent with MOVE_CHOSEN writes it: each row kept
+    only because its book or type was chosen (Plan.by_hand) is written as
+    its `moved` row, in the place of the plan's row for it where it has one,
+    and is no longer kept. The plan unchanged where it keeps none so."""
+    moving = [k for k in plan.by_hand if k.moved is not None]
+    if not moving:
+        return plan
+    moved = {k.held["id"]: k.moved for k in moving}
+    shown = Plan(subject=plan.subject, change=dict(plan.change), chosen=plan.chosen, token=plan.token,
+                 called=plan.called, doing=plan.doing, words=plan.words, others=list(plan.others),
+                 extra=dict(plan.extra), wording=plan.wording, moves_to=plan.moves_to, names=dict(plan.names),
+                 kept=[k for k in plan.kept if k.held["id"] not in moved])
+    rows = {p.held["id"]: p for p in plan.rows}
+    rows.update(moved)
+    shown.rows = sorted(rows.values(), key=lambda p: (p.held["date"] or "", p.held["id"]), reverse=True)
+    return shown
 
 
 def checked_answer(value, key: str = "past") -> str | None:
@@ -131,10 +214,36 @@ def checked_answer(value, key: str = "past") -> str | None:
 
 def _source(held, field_name: str) -> str | None:
     """A field's source as label_source reads it; none for an empty field."""
-    column = label_source.FIELDS[field_name]
-    if held[field_name] is None and held[column] is None:
+    return _held_source(held[field_name], held[label_source.FIELDS[field_name]])
+
+
+def _held_source(value, source: str | None) -> str | None:
+    """_source, of a field's value and its source column as a row holds them."""
+    if value is None and source is None:
         return None
-    return label_source.source_of(held[column])
+    return label_source.source_of(source)
+
+
+def _reached(label: dict, held_label: tuple) -> tuple[dict, bool]:
+    """What a merchant's change (`label`, {field: value}) reaches of a row
+    holding `held_label` (each field's value and source column, in the
+    label's order): {field: (new value, held source)} for each field not
+    chosen, not set by a rule, and whose value differs; and whether a field
+    it sets is chosen (the row is left alone, counted apart)."""
+    reached, kept = {}, False
+    for i, (field_name, value) in enumerate(label.items()):
+        current = held_label[2 * i]
+        source = _held_source(current, held_label[2 * i + 1])
+        if source == label_source.CHOSEN:
+            kept = True
+            continue
+        # A field a rule set is the rule's, not the merchant's default.
+        if source is not None and (not label_source.reachable(source) or source == label_source.RULE):
+            continue
+        if label_source.same(field_name, value, current):
+            continue
+        reached[field_name] = (value, source)
+    return reached, kept
 
 
 def _own_rule(held, service_id: int, conn):
@@ -151,6 +260,25 @@ def _matches(rule, description: str | None) -> bool:
     text, pattern = (description or "").upper(), rule["pattern"].upper()
     return {"exact": text == pattern, "startswith": text.startswith(pattern),
             "contains": pattern in text}.get(rule["match_type"], False)
+
+
+def _any_matches(rules: list[tuple[str, str]], description: str | None) -> bool:
+    """Whether any of `rules` ((upper-cased pattern, match type)) matches a
+    row's wording, as _matches says it of each."""
+    text = (description or "").upper()
+    for pattern, match_type in rules:
+        if match_type == "exact":
+            if text == pattern:
+                return True
+        elif match_type == "startswith":
+            if text.startswith(pattern):
+                return True
+        elif match_type == "contains" and pattern in text:
+            return True
+    return False
+
+
+_CHECKED = label_source.CHECKED
 
 
 def _writes(reached: dict) -> tuple[dict, dict]:
@@ -175,6 +303,12 @@ def _stamp(*parts) -> str:
     return hashlib.sha256(repr(parts).encode()).hexdigest()[:32]
 
 
+def _rows_digest(rows) -> str:
+    """Rows (tuples) as a token stamps them: a hash of each one's values, one
+    row a line, so _stamp hashes a short digest, not the text of every row."""
+    return hashlib.sha256("\n".join(map(repr, rows)).encode()).hexdigest()
+
+
 def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
                     leave_out: set[int] | frozenset = frozenset(), teaching: bool = False) -> Plan:
     """The plan for a merchant's new book or type ({field: value}, the
@@ -189,7 +323,9 @@ def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
     teach labels the rows it matches itself (its backfill, as before the
     preview), and where it asks, the route adds those to the count
     (with_fills), so the count is still the rows the change writes. (An
-    empty book reads as the default book.)"""
+    empty book reads as the default book.) A row that is neither spending
+    nor a refund is not the merchant's to label (fin-redesign 05): it keeps
+    the book and type it holds, and is not counted."""
     merchant = conn.execute(
         "SELECT id, name, book, type_id, review_each_time FROM services WHERE id = ?", (service_id,)
     ).fetchone()
@@ -204,43 +340,68 @@ def merchant_change(conn: sqlite3.Connection, service_id: int, label: dict,
         "SELECT id, pattern, match_type, priority, min_amount_minor, max_amount_minor, book_override,"
         " type_override_id FROM merchant_rules WHERE service_id = ? ORDER BY id", (service_id,)
     ).fetchall()
+    # Its rows as a label write and the summary read them: a merchant's own
+    # change works out no flow (flow_writes), so not the account's kind.
+    # Read as plain values, by position, and made a Row (as every plan's
+    # rows are) only where the change reaches it: a merchant may hold tens
+    # of thousands of rows, and a Row read by name compares the name with
+    # each column's in turn.
+    found = conn.cursor()
+    found.row_factory = None
+    held_rows = found.execute(f"SELECT {_HELD_ROW} FROM {_FROM} WHERE t.service_id = ?", (service_id,)).fetchall()
+    at = {d[0]: i for i, d in enumerate(found.description)}
+    i_id, i_date = at["id"], at["date"]
     # Newest first (the examples are the first three), sorted here: SQLite's
-    # own sort of a merchant's every row is most of the read's time.
-    held_rows = conn.execute(f"SELECT {_HELD} FROM {_FROM} WHERE t.service_id = ?", (service_id,)).fetchall()
-    held_rows.sort(key=lambda r: (r["date"] or "", r["id"]), reverse=True)
+    # own sort of a merchant's every row is most of the read's time. By date,
+    # then id: by id, then (the sort is stable) by date.
+    held_rows.sort(key=itemgetter(i_id), reverse=True)
+    held_rows.sort(key=lambda r: r[i_date] or "", reverse=True)
     # A row's own rule matters only where one of the merchant's rules
     # overrides a field the change sets and its wording matches the row's:
     # the rule that labels the row is read then, once per row that would
     # otherwise change.
-    overriding = [r for r in rules if any(r[_OVERRIDE_OF[f]] is not None for f in label)]
-    for held in held_rows:
-        if held["id"] in leave_out or not label or (teaching and held["type_id"] is None):
+    overriding = [(r["pattern"].upper(), r["match_type"]) for r in rules
+                  if any(r[_OVERRIDE_OF[f]] is not None for f in label)]
+    # What the change does to a row's fields depends only on each field's
+    # value and source as the row holds them: worked out once for each such
+    # set (_reached), then for each set of fields reached, what each answer
+    # writes (_writes).
+    label_of = itemgetter(*(i for f in label for i in (at[f], at[label_source.FIELDS[f]]))) if label else None
+    reached_for: dict[tuple, tuple[dict, bool]] = {}
+    writes_for: dict[tuple, tuple[dict, dict, bool]] = {}
+    i_type, i_flow, i_description = at["type_id"], at["flow_type"], at["description"]
+    carries_label = flow.carries_label
+    rows, chosen = plan.rows, 0
+    for held in held_rows if label else ():
+        if held[i_id] in leave_out or (teaching and held[i_type] is None):
             continue
-        reached, kept = {}, False
-        for field_name, value in label.items():
-            source = _source(held, field_name)
-            if source == label_source.CHOSEN:
-                kept = True
-                continue
-            # A field a rule set is the rule's, not the merchant's default.
-            if source is not None and (not label_source.reachable(source) or source == label_source.RULE):
-                continue
-            if label_source.same(field_name, value, held[field_name]):
-                continue
-            reached[field_name] = (value, source)
-        if reached and overriding and any(_matches(r, held["description"]) for r in overriding):
-            own = _own_rule(held, service_id, conn)
+        # A row that is no one's spending takes no merchant's label
+        # (label_source.fitted): it keeps what it holds, and is not counted.
+        if not carries_label(held[i_flow]):
+            continue
+        held_label = label_of(held)
+        found_reach = reached_for.get(held_label)
+        if found_reach is None:
+            found_reach = reached_for[held_label] = _reached(label, held_label)
+        reached, kept = found_reach
+        if reached and overriding and _any_matches(overriding, held[i_description]):
+            own = _own_rule(sqlite3.Row(found, held), service_id, conn)
             if own is not None:
                 reached = {f: v for f, v in reached.items() if own[_OVERRIDE_OF[f]] is None}
         if reached:
-            checked = any(source == label_source.CHECKED for _, source in reached.values())
-            plan.rows.append(Planned(held, *_writes(reached), checked=checked))
+            reach = tuple(reached.items())
+            writes = writes_for.get(reach)
+            if writes is None:
+                writes = writes_for[reach] = (
+                    *_writes(reached), any(source == _CHECKED for _, source in reached.values()))
+            apply, only_new, checked = writes          # each row its own dicts
+            rows.append(Planned(sqlite3.Row(found, held), dict(apply), dict(only_new), checked=checked))
         elif kept:
-            plan.chosen += 1
+            chosen += 1
+    plan.chosen = chosen
+    stamped = filter(lambda held: held[i_id] not in leave_out, held_rows) if leave_out else held_rows
     plan.token = _stamp(
-        "merchant", dict(merchant), [dict(r) for r in rules],
-        [tuple(held) for held in held_rows if held["id"] not in leave_out],
-        sorted(label.items()),
+        "merchant", dict(merchant), [dict(r) for r in rules], _rows_digest(stamped), sorted(label.items()),
     )
     return plan
 
@@ -397,7 +558,8 @@ def taking(conn: sqlite3.Connection, reach: Reach, name: str, label: dict, sourc
     source as it was, a field fin gave taking `sources`, the rule's); Only
     new rows leaves each with its merchant, the fields fin gave checked. A
     row with a field chosen or worked out stays as it is, counted apart. The
-    merchant's id is the route's to add: a new one has none yet."""
+    merchant's id is the route's to add: a new one has none yet, and so are
+    the rows' flows (app._taken_flows, as a teach's backfill works them out)."""
     plan = Plan(subject={"kind": "merchant", "id": reach.service_id, "name": name}, change={}, called=name)
     plan.wording = reach.pattern
     plan.moves_to = name
@@ -438,36 +600,45 @@ def joined(first: Plan | None, second: Plan | None) -> Plan | None:
         return first or second
     plan = Plan(subject=first.subject, change=dict(first.change), rows=first.rows + second.rows,
                 chosen=first.chosen + second.chosen,
-                called=first.called, doing=first.doing)
+                called=first.called, doing=first.doing, kept=first.kept + second.kept)
     plan.wording, plan.moves_to = second.wording, second.moves_to
     plan.names, plan.others = second.names, second.others
     plan.token = _stamp(first.token, second.token)
     return plan
 
 
-def with_fills(conn: sqlite3.Connection, plan: Plan, fills: dict[int, dict]) -> Plan:
+def with_fills(conn: sqlite3.Connection, plan: Plan, fills: dict[int, dict], flows: dict[int, dict] | None = None,
+               kept: list[Kept] | tuple = ()) -> Plan:
     """A teach's preview (resolve, from the Queue): the plan's rows and the
     merchant's own rows the teach labels itself whatever the answer
     (`fills`, {row id: the label columns its backfill writes}: those its
     wording matches that have no type yet, which merchant_change leaves out
     when teaching). They are written in the same change entry, so the
     preview counts and shows them, as the merchant sheet does, and the count
-    is the past rows the entry writes (spec 24, Deepened; case 13). The token
-    stamps them too. The route writes them, not the plan; with no fills, the
-    plan as it is."""
-    if not fills:
+    is the past rows the entry writes (spec 24, Deepened; case 13). The
+    flow and other side Apply alone writes to a filled row (`flows`, {row
+    id: flow_writes}; Only new rows leaves them) and the rows whose flow it
+    keeps (`kept`) are the preview's flows and flows_kept, as a rule's are.
+    The token stamps them too. The route writes them, not the plan; with no
+    fills and none kept, the plan as it is."""
+    flows = flows or {}
+    if not fills and not kept:
         return plan
     filled = []
     for held in _held_rows(conn, list(fills)):
         sets = fills[held["id"]]
         checked = any(_source(held, f) == label_source.CHECKED for f in label_source.FIELDS if f in sets)
-        filled.append(Planned(held, sets, sets, checked=checked))
+        # Each answer's write fitted to the flow it leaves the row
+        # (label_source.fitted): Apply's with the flow it moves.
+        filled.append(Planned(held, label_source.fitted(held, {**sets, **flows.get(held["id"], {})}),
+                              label_source.fitted(held, sets), checked=checked))
     shown = Plan(subject=plan.subject, change=dict(plan.change), chosen=plan.chosen, called=plan.called,
                  doing=plan.doing, words=plan.words, others=list(plan.others), extra=dict(plan.extra),
-                 wording=plan.wording, moves_to=plan.moves_to, names=dict(plan.names))
+                 wording=plan.wording, moves_to=plan.moves_to, names=dict(plan.names),
+                 kept=[*plan.kept, *kept])
     shown.rows = sorted(plan.rows + filled, key=lambda p: (p.held["date"] or "", p.held["id"]), reverse=True)
     shown.token = _stamp(plan.token, sorted((i, tuple(sorted(s.items()))) for i, s in fills.items()),
-                         [tuple(p.held) for p in filled])
+                         [tuple(p.held) for p in filled], _stamp_flows(shown))
     return shown
 
 
@@ -506,13 +677,20 @@ def merge_change(conn: sqlite3.Connection, source_id: int, target_id: int) -> Pl
 
 # What a rule change may set, as the rule routes take it (merchant_rules' columns).
 RULE_FIELDS = ("pattern", "match_type", "service_id", "book_override", "type_override_id", "priority",
-               "min_amount_minor", "max_amount_minor")
+               "min_amount_minor", "max_amount_minor", "flow", "other_side_id")
 _RULE_WORDS = {"pattern": "Wording", "match_type": "Match", "service_id": "Merchant",
                "book_override": "Book of its own", "type_override_id": "Type of its own",
-               "priority": "Priority", "min_amount_minor": "Only from", "max_amount_minor": "Only up to"}
+               "priority": "Priority", "min_amount_minor": "Only from", "max_amount_minor": "Only up to",
+               "flow": "What its rows are", "other_side_id": "Other side"}
 _MATCH_WORDS = {"contains": "contains", "startswith": "starts with", "exact": "exactly"}
 _NEW_RULE = {"id": None, "pattern": "", "match_type": "contains", "priority": 0, "min_amount_minor": None,
-             "max_amount_minor": None, "service_id": None, "book_override": None, "type_override_id": None}
+             "max_amount_minor": None, "service_id": None, "book_override": None, "type_override_id": None,
+             "flow": None, "other_side_id": None}
+# A row's flow as a preview names it.
+FLOW_WORDS = {"expense": "spending", "income": "income", "transfer": "a transfer", "payment": "a card payment",
+              "refund": "a refund", flow.MOVEMENT: "a movement", flow.REVIEW: "waiting for review"}
+# What a rule that states no flow says of its rows.
+_NO_FLOW = "what fin works out"
 
 
 def _rule_key(rule):
@@ -551,6 +729,11 @@ def _rule_words(conn, field_name: str, value, types: dict[int, str]) -> str:
         return str(value or 0)
     if field_name in ("min_amount_minor", "max_amount_minor"):
         return "none" if value is None else f"S$ {value / 100:,.2f}"
+    if field_name == "flow":
+        return FLOW_WORDS.get(value, value) if value else _NO_FLOW
+    if field_name == "other_side_id":
+        found = conn.execute("SELECT name FROM accounts WHERE id = ?", (value,)).fetchone() if value else None
+        return found["name"] if found else "none"
     return str(value)
 
 
@@ -562,6 +745,128 @@ def _held_rows(conn, ids: list[int]) -> list[sqlite3.Row]:
                               part).fetchall()
     found.sort(key=lambda r: (r["date"] or "", r["id"]), reverse=True)
     return found
+
+
+def held_account(held) -> dict:
+    """The account a held row is on, its kind and owner, as the classifier
+    reads them (none for a row on no account)."""
+    return ({"account_id": held["account_id"], "account_kind": held["account_kind"],
+             "account_owner": held["account_owner"]}
+            if held["account_kind"] is not None else {})
+
+
+def fins_own(held, before, account: dict, ctx: flow.ClassifierContext) -> bool:
+    """Whether a row's stored flow and other side are still what fin worked
+    out for it under the rules before the change: the flow and other side
+    the rule that labelled it then (`before`, or None) states, where it
+    states one; else what the classifier gives the row as it is. Only such a
+    row's flow is worked out again on a rule change (ADR-009). A flow
+    anything else said stays: an older book's refund, a pairing, the linker,
+    and the classifier's flow Only new rows left under a rule that states
+    another."""
+    stored = (held["flow_type"], held["other_side_id"])
+    return flow.worked_out_again(held, held["service_id"], held["type_id"], before, account, ctx) == stored
+
+
+def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: flow.ClassifierContext,
+                account: dict | None = None, keep_chosen: bool = True) -> tuple[dict, Kept | None]:
+    """The flow and other side Apply writes to a row already in the book
+    besides its new label (`sets`), where they change: what
+    flow.worked_out_again gives for the merchant and type the row would have
+    and the rule that would label it (`after`, or None; the flow it states
+    says what the row is). And the row kept, where the change would move its
+    flow but a record of expect back rests on it, or None.
+
+    Never a flow set by hand, nor its other side; nor a flow fin did not
+    work out (fins_own, with the rule that labelled the row before the
+    change, `before`); nor a move a hand label would refuse the row, a
+    record resting on it (expect_back.label_refusal, with the flow, book and
+    other side's kind the row would have): that row is kept, in the
+    refusal's own words. Nor the flow of a row whose book or type the
+    operator chose (ADR-008: a chosen label says the row is spending, as a
+    flow set by hand says what it is, ADR-009): kept too, saying so
+    (Kept.by_hand, which an Apply sent with MOVE_CHOSEN moves), unless the
+    write is the operator's own on that row (`keep_chosen` False: the row a
+    teach is taught for). `account` is the kind and owner of the
+    account the row is on (held_account, by default)."""
+    if held["flow_type_manual"]:
+        return {}, None
+    if account is None:
+        account = held_account(held)
+    worked_out = flow.worked_out_again(held, sets.get("service_id", held["service_id"]),
+                                       sets.get("type_id", held["type_id"]), after, account, ctx)
+    writes = {k: v for k, v in zip(("flow_type", "other_side_id"), worked_out) if held[k] != v}
+    if not writes or not fins_own(held, before, account, ctx):
+        return {}, None
+    flow_name, other_side = worked_out
+    other_kind = (conn.execute("SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone()
+                  or [None])[0] if other_side is not None else None
+    why = move_refusal(conn, held, flow_name, sets.get("book", held["book"]), other_kind)
+    if why is not None:
+        return {}, Kept(held, writes, why)
+    # Kept only because of the choice (by_hand): a record that would refuse
+    # the move keeps the row whatever the operator answers, so it is named.
+    chosen = tuple(f for f, column in label_source.FIELDS.items() if held[column] == label_source.CHOSEN)
+    if keep_chosen and chosen:
+        why, said = _CHOSEN_WHY[chosen]
+        return {}, Kept(held, writes, why, said, by_hand=True)
+    return writes, None
+
+
+def move_refusal(conn: sqlite3.Connection, held, flow_name: str | None, book: str | None,
+                 other_kind: str | None) -> str | None:
+    """Why a hand label would refuse a row the flow a rule gives it (its
+    flow, book and other side's kind after the write), or None, asked as the
+    hand label asks it (app._label_row): a row that stops being a refund
+    first leaves its purchase (refund_links.drop: its link and the set-offs
+    the link placed; refused while the refund is To pay back or its
+    purchase's expectation is let go), then what still rests on it is
+    weighed (expect_back.label_refusal). The drop is tried and taken back:
+    asking writes nothing. The write itself drops the link
+    (app._write_label)."""
+    leaves = (held["flow_type"] == "refund" and flow_name != "refund" and conn.execute(
+        "SELECT 1 FROM refund_link WHERE refund_row_id = ?", (held["id"],)).fetchone() is not None)
+    if not leaves:
+        return expect_back.label_refusal(conn, held["id"], flow_name, book, other_kind)
+    conn.execute("SAVEPOINT move_refusal")
+    try:
+        try:
+            refund_links.drop(conn, held["id"])
+        except (expect_back.Refused, refund_links.Refused) as e:
+            return str(e)
+        return expect_back.label_refusal(conn, held["id"], flow_name, book, other_kind)
+    finally:
+        conn.execute("ROLLBACK TO move_refusal")
+        conn.execute("RELEASE move_refusal")
+
+
+def taught_rules(rules: list[dict], words, match_type: str,
+                 said: tuple[str, int | None] | None = None, service_id: int | None = None) -> list[dict]:
+    """The rules as a teach of `words` onto merchant `service_id` (None: a
+    merchant fin does not hold yet) leaves them, in match order, for which
+    rule wins a row: a wording fin holds a rule for keeps that rule (a teach
+    changes its merchant and overrides, never its match), and the flow it
+    states where it is this merchant's already; one moved here from another
+    merchant states this merchant's stated flow (`said`,
+    flow.merchant_stated) or none, never the old merchant's. A wording fin
+    holds no rule for gains one that states `said`, or none."""
+    held = {r["pattern"].upper() for r in rules}
+    taught = {w.upper() for w in words}
+    flow_name, other_side = said or (None, None)
+    ruled = [{**r, "flow": flow_name, "other_side_id": other_side}
+             if r["pattern"].upper() in taught and (service_id is None or r["service_id"] != service_id) else r
+             for r in rules]
+    added = [{**_NEW_RULE, "pattern": w, "match_type": match_type, "flow": flow_name, "other_side_id": other_side}
+             for w in dict.fromkeys(words) if w.upper() not in held]
+    return sorted(ruled + added, key=db.match_order)
+
+
+def _stamp_flows(plan: Plan) -> list:
+    """What a plan's token stamps of its flows: each row's writes and each
+    row kept, so a preview's list is what its Apply writes."""
+    return [[(p.held["id"], tuple(sorted(p.apply.items()))) for p in plan.rows],
+            [(k.held["id"], k.why, tuple(sorted(k.would.items())),
+              tuple(sorted(k.moved.apply.items())) if k.moved is not None else None) for k in plan.kept]]
 
 
 def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | None) -> Plan:
@@ -615,14 +920,20 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
         plan.words = [{"field": "rule", "label": "Rule", "from": held_rule["pattern"], "to": None}]
 
     # Only a row the rule matches, as it was or as it would be, can have its
-    # winner change; the rest are not read.
+    # winner change; the rest are not read. Transfers and card payments are
+    # not the rules' to label, unless the rule states a flow, as it was or as
+    # it would be: then it says what its rows are, whatever the classifier made
+    # of them.
     versions = [r for r in (held_rule, after_rule) if r is not None]
+    stating = any(flow.stated(v) for v in versions)
     ids = [r["id"] for r in conn.execute(
-        "SELECT id, description FROM transactions WHERE COALESCE(flow_type, 'expense') NOT IN ('transfer', 'payment')")
-        if any(_matches(v, r["description"]) for v in versions)]
+        "SELECT id, description, flow_type FROM transactions")
+        if (stating or (r["flow_type"] or "expense") not in ("transfer", "payment"))
+        and any(_matches(v, r["description"]) for v in versions)]
     held_rows = _held_rows(conn, ids)
     others: dict[int, int] = {}
     labelled = unheld = 0
+    ctx = flow.build_context(conn) if held_rows else None
     for held in held_rows:
         before = db.pick_rule(rules, held["description"] or "", held["amount_minor"])
         after = db.pick_rule(after_rules, held["description"] or "", held["amount_minor"])
@@ -635,48 +946,84 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
         reachable = {f: label_source.reachable(m) for f, m in marks.items()}
         if held_rule is not None and before is not None and before["id"] == rule_id and any(reachable.values()):
             labelled += 1
-        if _rule_key(before) == _rule_key(after):
+        relabels = _rule_key(before) != _rule_key(after)
+        restates = flow.stated(before) != flow.stated(after)
+        if not (relabels or restates):
             continue
-        found = _given(after)
-        sets, reached, kept, chosen = {"service_id": found["service_id"]}, [], False, False
-        for field_name, column in label_source.FIELDS.items():
-            source = sources[field_name]
-            if not reachable[field_name]:
-                kept, chosen = True, chosen or marks[field_name] == label_source.CHOSEN
-                continue
-            if source == label_source.CHECKED and found[field_name] is None:
-                kept = True
-                continue                            # a checked value is not emptied
-            sets[field_name] = found[field_name]
-            sets[column] = label_source.reached(source, found[field_name], found[column])
-            reached.append(field_name)
-        if kept and found["service_id"] is None:
-            del sets["service_id"]                  # a row keeping a field keeps its merchant
-        if not reached:
-            plan.chosen += chosen and (found["service_id"] != held["service_id"]
-                                       or any(found[f] != held[f] for f in label_source.FIELDS))
+        def relabelled(found):
+            """What the winner's label writes to the row (each field a later
+            change may reach), what Only new rows writes, the fields marked,
+            and whether the row is left alone, every field reached chosen."""
+            writes, only_new, marked, chosen = {}, {}, [], False
+            sets, reached, kept = {"service_id": found["service_id"]}, [], False
+            for field_name, column in label_source.FIELDS.items():
+                source = sources[field_name]
+                if not reachable[field_name]:
+                    kept, chosen = True, chosen or marks[field_name] == label_source.CHOSEN
+                    continue
+                if source == label_source.CHECKED and found[field_name] is None:
+                    kept = True
+                    continue                            # a checked value is not emptied
+                sets[field_name] = found[field_name]
+                sets[column] = label_source.reached(source, found[field_name], found[column])
+                reached.append(field_name)
+            if kept and found["service_id"] is None:
+                del sets["service_id"]                  # a row keeping a field keeps its merchant
+            # A row whose every field the change reaches is chosen is left
+            # alone, and counted apart.
+            left = not reached and chosen and (found["service_id"] != held["service_id"]
+                                               or any(found[f] != held[f] for f in label_source.FIELDS))
+            if reached:
+                writes = {k: v for k, v in sets.items() if held[k] != v}
+                moves = "service_id" in writes
+                marked = [f for f in reached if moves or f in writes or label_source.FIELDS[f] in writes]
+                for field_name in marked:
+                    accepted = label_source.accepted(sources[field_name])
+                    if accepted is not None and accepted != held[label_source.FIELDS[field_name]]:
+                        only_new[label_source.FIELDS[field_name]] = accepted
+            return writes, only_new, marked, left
+
+        writes, only_new, marked, left = relabelled(_given(after)) if relabels else ({}, {}, [], False)
+        # The row's flow, worked out again where its label changes or the
+        # flow the rule states does: Apply writes it, Only new rows leaves it.
+        flows, kept = flow_writes(conn, held, writes, before, after, ctx) if writes or restates else ({}, None)
+        if kept is not None:
+            plan.kept.append(kept)
+            if kept.by_hand:
+                # Moved as any other row on MOVE_CHOSEN: the flow the rule
+                # gives, the label write fitted to it.
+                kept.moved = Planned(held, label_source.fitted(held, {**writes, **kept.would}),
+                                     label_source.fitted(held, only_new),
+                                     checked=any(sources[f] == label_source.CHECKED for f in marked))
+        # A row the change moves into spending from a flow that carries no
+        # label takes the label the rule gives it, as a relabelled row does.
+        if not relabels and flow.carries_label(flows.get("flow_type", held["flow_type"])) \
+                and not flow.carries_label(held["flow_type"]):
+            writes, only_new, marked, left = relabelled(_given(after))
+        # Each answer's write fitted to the flow it leaves the row
+        # (label_source.fitted): no label on a row that is no one's
+        # spending, and Apply empties it on a row it moves there.
+        apply = label_source.fitted(held, {**writes, **flows})
+        only_new = label_source.fitted(held, only_new)
+        writes = {k: v for k, v in apply.items() if k not in flows}
+        if not apply:
+            plan.chosen += left
             continue
-        writes = {k: v for k, v in sets.items() if held[k] != v}
+        plan.rows.append(Planned(held, apply, only_new,
+                                 checked=any(sources[f] == label_source.CHECKED for f in marked
+                                             if f in apply or label_source.FIELDS[f] in apply)))
         if not writes:
             continue
-        moves = "service_id" in writes
-        marked = [f for f in reached if moves or f in writes or label_source.FIELDS[f] in writes]
-        only_new = {}
-        for field_name in marked:
-            accepted = label_source.accepted(sources[field_name])
-            if accepted is not None and accepted != held[label_source.FIELDS[field_name]]:
-                only_new[label_source.FIELDS[field_name]] = accepted
-        plan.rows.append(Planned(held, writes, only_new, reflow=True,
-                                 checked=any(sources[f] == label_source.CHECKED for f in marked)))
         if held["service_id"] is None:
             unheld += 1
-        elif moves and held["service_id"] != shown["service_id"]:
+        elif "service_id" in writes and held["service_id"] != shown["service_id"]:
             others[held["service_id"]] = others.get(held["service_id"], 0) + 1
     plan.others = [{"service_id": i, "name": names.get(i), "count": n} for i, n in
                    sorted(others.items(), key=lambda kv: (-kv[1], names.get(kv[0]) or ""))]
     plan.extra = {"unheld": unheld, "labelled": labelled}
     plan.token = _stamp("rule", rule_id, sorted((proposed or {}).items()),
-                        [tuple(sorted(r.items())) for r in rules], [tuple(h) for h in held_rows])
+                        [tuple(sorted(r.items())) for r in rules], [tuple(h) for h in held_rows],
+                        _stamp_flows(plan))
     return plan
 
 
@@ -751,9 +1098,12 @@ def drift(conn: sqlite3.Connection) -> Plan:
     05), and the rows it labelled keep their label and source (its case 20).
     An empty field reads its own source, as the rule preview reads it.
     Apply writes what the rules give, each field taking the source that
-    gives it, its flow worked out again, in one change; there is no Only new
+    gives it, its flow worked out again (flow_writes: the flow the rule
+    states, where it states one), in one change; there is no Only new
     rows (Leave them writes nothing). Transfers and card payments are not
-    the rules' to label."""
+    the rules' to label; nor is any row that is neither spending nor a
+    refund (fin-redesign 05): such a row differs only by its merchant, and
+    keeps the book and type it holds."""
     rules = db.load_rules(conn)
     winner = _Winner(rules)
     plan = Plan(subject={"kind": "drift", "id": None, "name": "the rules"}, change={},
@@ -765,14 +1115,18 @@ def drift(conn: sqlite3.Connection) -> Plan:
     cursor.row_factory = None
     read = cursor.execute(
         "SELECT t.id, t.description, t.amount_minor, t.service_id, t.book, t.book_source, t.type_id,"
-        " t.type_source FROM transactions t"
+        " t.type_source, t.flow_type FROM transactions t"
         " WHERE COALESCE(t.flow_type, 'expense') NOT IN ('transfer', 'payment')"
         f" AND {label_source.from_fin_sql('t')}").fetchall()
     # A field from the wording is kept as a checked one is (case 20 above).
     rerun, source_of = (label_source.MERCHANT, label_source.RULE), label_source.source_of
     by_rule: dict = {}                     # what a rule that gives a type gives every row it wins
     writes_of: dict[int, dict] = {}
-    for tx_id, description, amount_minor, service_id, book, book_source, type_id, type_source in read:
+    rule_of: dict[int, dict | None] = {}   # the rule that wins each of them
+    for tx_id, description, amount_minor, service_id, book, book_source, type_id, type_source, flow_type in read:
+        # A row that is no one's spending differs only by its merchant: its
+        # book and type are not the rules' to give (label_source.fitted).
+        labelled = flow.carries_label(flow_type)
         rule = winner.of(description, amount_minor)
         key = rule["id"] if rule is not None and (rule["type_override_id"] or rule["type_id"]) else None
         found = by_rule.get(key) if key is not None else None
@@ -786,7 +1140,7 @@ def drift(conn: sqlite3.Connection) -> Plan:
             if source_of(source) not in rerun:
                 kept = True
                 continue
-            differs = differs or found[field_name] != value
+            differs = differs or (labelled and found[field_name] != value)
             sets[field_name], sets[column] = found[field_name], found[column]
         if not kept:
             differs = differs or found["service_id"] != service_id
@@ -795,18 +1149,35 @@ def drift(conn: sqlite3.Connection) -> Plan:
         if not kept or found["service_id"] is not None:
             sets["service_id"] = found["service_id"]      # a row keeping a field keeps its merchant
         writes_of[tx_id] = sets
+        rule_of[tx_id] = rule
+    ctx = flow.build_context(conn) if writes_of else None
     for held in _held_rows(conn, list(writes_of)):        # newest first
         writes = {k: v for k, v in writes_of[held["id"]].items() if held[k] != v}
-        plan.rows.append(Planned(held, writes, {}, reflow=True))
-    plan.token = _stamp("drift", [tuple(sorted(r.items())) for r in rules], [tuple(p.held) for p in plan.rows])
+        # The rules are as they were: the rule that wins the row is the one
+        # that labelled it, before and after.
+        rule = rule_of[held["id"]]
+        flows, kept = flow_writes(conn, held, writes, rule, rule, ctx)
+        if kept is not None:
+            plan.kept.append(kept)
+            if kept.by_hand:
+                kept.moved = Planned(held, label_source.fitted(held, {**writes, **kept.would}), {})
+        apply = label_source.fitted(held, {**writes, **flows})
+        if apply:
+            plan.rows.append(Planned(held, apply, {}))
+    plan.token = _stamp("drift", [tuple(sorted(r.items())) for r in rules], [tuple(p.held) for p in plan.rows],
+                        _stamp_flows(plan))
     return plan
 
 
 def drift_asked(plan: Plan) -> str:
     """The refusal the drift's Apply answers with when it was not answered."""
+    by_hand = len(plan.by_hand)
+    chosen = (f" {by_hand} more would move but {'is' if by_hand == 1 else 'are'} kept, the operator having chosen "
+              f"{'its' if by_hand == 1 else 'their'} book or type by hand (flows_chosen); {MOVE_CHOSEN}: true "
+              "with the answer moves them too, on the operator's yes.") if by_hand else ""
     return (f"Nothing was relabelled yet: {plan.count} row{'' if plan.count == 1 else 's'} "
             f"differ from what their rule says now. Send past: {APPLY} to relabel them; "
-            "leaving them as they are writes nothing.")
+            f"leaving them as they are writes nothing.{chosen}")
 
 
 def slot_change(conn: sqlite3.Connection, slot: str, type_id: int) -> Plan:
@@ -858,12 +1229,18 @@ def _label_words(fields: list[str], values: dict, types: dict[int, str]) -> str:
     return " · ".join(_word(f, values.get(f), types) for f in fields)
 
 
-def _parts(conn: sqlite3.Connection, ids: list[int]) -> dict:
-    """The parts (expect_back.parts) of those rows that have any: an
-    expectation on them or a set-off from them. Every other row's own part
-    is its amount."""
-    marked = {r[0] for r in conn.execute(
+def _marked(conn: sqlite3.Connection) -> set[int]:
+    """The rows that may have parts: an expectation on them or a set-off from them."""
+    return {r[0] for r in conn.execute(
         "SELECT row_id FROM expectation WHERE row_id IS NOT NULL UNION SELECT payment_row_id FROM set_off")}
+
+
+def _parts(conn: sqlite3.Connection, ids: list[int], marked: set[int] | None = None) -> dict:
+    """The parts (expect_back.parts) of those rows that have any: an
+    expectation on them or a set-off from them (`marked`, read when not
+    given). Every other row's own part is its amount."""
+    if marked is None:
+        marked = _marked(conn)
     wanted = [i for i in ids if i in marked]
     found: dict = {}
     for i in range(0, len(wanted), 900):
@@ -878,9 +1255,17 @@ def _month_end(month: str) -> str:
 
 def _book_moves(planned: Planned) -> bool:
     """Whether Apply moves the row to another book (an empty book reads as
-    the default book)."""
-    return "book" in planned.apply and not label_source.same("book", planned.apply["book"] or book_type.DEFAULT_BOOK,
-                                                             planned.held["book"])
+    the default book). A row Apply leaves outside spending and refunds is
+    in no book: its book is emptied (label_source.fitted), not moved."""
+    return "book" in planned.apply and _moves_book(planned.apply, planned.held["flow_type"], planned.held["book"])
+
+
+def _moves_book(apply: dict, held_flow, held_book) -> bool:
+    """_book_moves, of a row's flow and book as held and an Apply that sets
+    its book."""
+    if not flow.carries_label(apply.get("flow_type", held_flow)):
+        return False
+    return not label_source.same("book", apply["book"] or book_type.DEFAULT_BOOK, held_book)
 
 
 def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict], dict]:
@@ -889,18 +1274,35 @@ def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict]
     # A row whose book Apply leaves as it is moves no money: a merchant's
     # book change, or a row a taught wording moves to a merchant whose book
     # is its own (fin-surfaces 53).
-    moving = [p for p in plan.rows if _book_moves(p)]
-    own = _parts(conn, [p.held["id"] for p in moving])
-    sums: dict = {}
+    # One pass over the rows, each column read once (a plan may hold tens of
+    # thousands): the months each row whose book moves touches, and the
+    # money of those that are spending or a refund. A row with parts
+    # (expect_back.parts) is summed after, by its own part.
+    default = book_type.DEFAULT_BOOK
+    marked = _marked(conn)
     months: set[str] = set()
-    for p in moving:
-        month = p.held["date"][:7]
-        months.add(month)
-        if (p.held["flow_type"] or "expense") not in ("expense", "refund"):
+    sums: dict = {}
+    with_parts = []                    # (row id, key, amount)
+    for p in plan.rows:
+        apply = p.apply
+        if "book" not in apply:
             continue
-        pair = (p.held["book"] or book_type.DEFAULT_BOOK, p.apply["book"] or book_type.DEFAULT_BOOK)
-        part = own.get(p.held["id"], {}).get("own_minor", p.held["amount_minor"])
-        key = (pair, month, p.held["currency"])
+        held = p.held
+        held_flow, held_book = held["flow_type"], held["book"]
+        if not _moves_book(apply, held_flow, held_book):
+            continue
+        month = held["date"][:7]
+        months.add(month)
+        if (held_flow or "expense") not in ("expense", "refund"):
+            continue
+        key = ((held_book or default, apply["book"] or default), month, held["currency"])
+        if marked and held["id"] in marked:
+            with_parts.append((held["id"], key, held["amount_minor"]))
+            continue
+        sums[key] = sums.get(key, 0) + (held["amount_minor"] or 0)
+    own = _parts(conn, [row_id for row_id, _, _ in with_parts], marked)
+    for row_id, key, amount in with_parts:
+        part = own.get(row_id, {}).get("own_minor", amount)
         sums[key] = sums.get(key, 0) + (part or 0)
     moved: dict = {}
     left_out = []
@@ -917,12 +1319,21 @@ def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict]
     return money_moved, left_out, span
 
 
-def _row_words(merchant: str | None, book, type_id, with_book: bool, types: dict[int, str]) -> str:
+# A row whose book and type a write empties, as a preview says it after
+# (label_source.fitted).
+NO_LABEL = "no book or type"
+
+
+def _row_words(merchant: str | None, book, type_id, with_book: bool, types: dict[int, str],
+               cleared: bool = False) -> str:
     """A row's label as a preview of its merchant names it: its merchant and
     type, with its book where `with_book` ("no merchant" for a row with
-    neither)."""
+    neither); its merchant and NO_LABEL where the write empties its label
+    (`cleared`)."""
     if merchant is None and type_id is None:
         return "no merchant"
+    if cleared:
+        return f"{merchant or 'no merchant'} · {NO_LABEL}"
     parts = [merchant or "no merchant"]
     if with_book:
         parts.append(_word("book", book, types))
@@ -949,28 +1360,198 @@ def _example(conn, plan: Plan, p: Planned, types: dict[int, str], names: dict[in
     held = p.held
     out = {"id": held["id"], "date": held["date"], "amount_minor": held["amount_minor"], "currency": held["currency"]}
     after = {k: p.apply.get(k, held[k]) for k in ("service_id", "book", "type_id")}
+    # A row Apply moves out of spending: its book and type emptied, and the
+    # book it had named before where it was not the default book (a phone
+    # line stays short).
+    cleared = label_source.clears(held, p.apply)
+    with_book = cleared and held["book"] not in (None, book_type.DEFAULT_BOOK)
     if plan.moves_to is not None and (held["service_id"] != plan.subject["id"] or not plan.change):
         return {**out,
                 "now": _row_words(_held_by(plan, held["service_id"]), held["book"],
-                                  held["type_id"], False, types),
-                "after": _row_words(plan.moves_to, after["book"], after["type_id"], False, types),
+                                  held["type_id"], with_book, types),
+                "after": _row_words(plan.moves_to, after["book"], after["type_id"], False, types, cleared),
                 "source": _source(held, "type_id") or _source(held, "book")}
+    if names is None and not plan.change:              # no book or type changes: by merchant and type
+        names = {plan.subject["id"]: plan.called} if plan.subject.get("id") is not None else {}
     if names is None:                                  # a merchant's own book or type, or a merge
         fields = list(plan.change)
         shown = {f: p.apply.get(f, held[f]) for f in fields}
         reached = [f for f in fields if f in p.apply] or fields
         return {**out, "now": _label_words(fields, {f: held[f] for f in fields}, types),
-                "after": _label_words(fields, shown, types), "source": _source(held, reached[0])}
+                "after": NO_LABEL if cleared else _label_words(fields, shown, types),
+                "source": _source(held, reached[0])}
     moves = _book_moves(p)
     name = lambda service_id: names.get(service_id, "no merchant") if service_id is not None else None
     return {**out,
-            "now": _row_words(name(held["service_id"]), held["book"], held["type_id"], moves, types),
-            "after": _row_words(name(after["service_id"]), after["book"], after["type_id"], moves, types),
+            "now": _row_words(name(held["service_id"]), held["book"], held["type_id"], moves or with_book, types),
+            "after": _row_words(name(after["service_id"]), after["book"], after["type_id"], moves, types, cleared),
             "source": _source(held, "type_id") or _source(held, "book")}
 
 
+def moves_flow(planned: Planned) -> bool:
+    """Whether Apply changes the row's flow or its other side."""
+    return "flow_type" in planned.apply or "other_side_id" in planned.apply
+
+
+def leaves_spending(planned: Planned) -> bool:
+    """Whether Apply moves a spending or refund row to a flow that carries no
+    label, emptying its book or type (label_source.fitted): what "leaving
+    spending" counts. A row of another flow that loses a label it held (an
+    older book's income moved to a movement) is not leaving spending."""
+    if "flow_type" not in planned.apply:          # its flow stays: it leaves nothing
+        return False
+    held_flow = planned.held["flow_type"]
+    return (flow.carries_label(held_flow)
+            and not flow.carries_label(planned.apply.get("flow_type", held_flow))
+            and label_source.clears(planned.held, planned.apply))
+
+
+def _said_flow(names: dict[int, str], flow_name, other_side) -> str:
+    """A row's flow and other side in words ("a movement · the loan")."""
+    word = FLOW_WORDS.get(flow_name or "expense", flow_name)
+    return f"{word} · {names.get(other_side, 'an account no longer in fin')}" if other_side else word
+
+
+def _flow_lines(conn: sqlite3.Connection, entries: list[tuple[int, dict]]) -> list[dict]:
+    """Flow lines in their one shape, whatever shape of held row each came
+    from (a preview's, a label write's): each row's date, description,
+    amount and currency read by its id, then the line's own words
+    (`entries`: [(row id, {now, after} or {now, would, why})]), in the
+    order given."""
+    facts = {r["id"]: r for r in _held_rows(conn, [i for i, _ in entries])}
+    return [{"id": i, "date": facts[i]["date"], "description": facts[i]["description"],
+             "amount_minor": facts[i]["amount_minor"], "currency": facts[i]["currency"], **words}
+            for i, words in entries]
+
+
+def _account_names(conn: sqlite3.Connection) -> dict[int, str]:
+    return {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM accounts")}
+
+
+def _type_names(conn: sqlite3.Connection) -> dict[int, str]:
+    """Every type's name as a preview says it, spending types and income kinds."""
+    return {r["id"]: book_type.display_name(r["name"], r["parent"]) for r in conn.execute(
+        "SELECT t.id, t.name, p.name AS parent FROM types t LEFT JOIN types p ON p.id = t.parent_id")}
+
+
+def _cleared(held, writes: dict, types: dict[int, str]) -> str | None:
+    """The book and type a flow move empties, in words ("Household ·
+    Transport"), or None: a write that moves a row's flow out of spending and
+    refunds empties both (label_source.fitted), so a line that moves a flow
+    says what the row stops being as well."""
+    flow_after = writes.get("flow_type", held["flow_type"])
+    if "flow_type" not in writes or flow.carries_label(flow_after) or flow_after == held["flow_type"]:
+        return None
+    if held["book"] is None and held["type_id"] is None:
+        return None
+    return _label_words(["book", "type_id"], {"book": held["book"], "type_id": held["type_id"]}, types)
+
+
+def _moved(names: dict[int, str], held, writes: dict, types: dict[int, str] | None = None) -> dict:
+    """A row's flow and other side now → after `writes`, in words; with
+    `types`, the book and type the move empties (label_cleared, or None)."""
+    after = {k: writes.get(k, held[k]) for k in ("flow_type", "other_side_id")}
+    out = {"now": _said_flow(names, held["flow_type"], held["other_side_id"]),
+           "after": _said_flow(names, after["flow_type"], after["other_side_id"])}
+    if types is not None:
+        out["label_cleared"] = _cleared(held, writes, types)
+    return out
+
+
+def _flows(conn: sqlite3.Connection, plan: Plan) -> list[dict]:
+    """Every row whose flow or other side Apply changes, newest first, now →
+    after in words ("spending" → "a movement · the loan"), and the book and
+    type the move empties (label_cleared): all of them, not examples, so the
+    operator sees each before anything applies (ADR-009; fin-redesign 05)."""
+    moving = [p for p in plan.rows if moves_flow(p)]
+    if not moving:
+        return []
+    names, types = _account_names(conn), _type_names(conn)
+    return _flow_lines(conn, [(p.held["id"], _moved(names, p.held, p.apply, types)) for p in moving])
+
+
+def moved_lines(conn: sqlite3.Connection, moved: list[tuple]) -> list[dict]:
+    """Rows a write moved, as flows lists them, newest first: each `moved`
+    entry is (the row as it was, held or {id, flow_type, other_side_id,
+    book, type_id}, the flow and other side written). A label's answer names
+    its row's flow change so (app._teach), and a plan's preview each row's
+    (app._run_plan)."""
+    if not moved:
+        return []
+    names, types = _account_names(conn), _type_names(conn)
+    shown = _flow_lines(conn, [(held["id"], _moved(names, held, writes, types)) for held, writes in moved])
+    return sorted(shown, key=lambda line: (line["date"] or "", line["id"]), reverse=True)
+
+
+def flows_kept(conn: sqlite3.Connection, plan: Plan) -> list[dict]:
+    """Every row whose flow Apply would change but keeps, a record of expect
+    back resting on it: now, what it would have been, and why, in the words
+    a hand label's refusal uses (flow_writes)."""
+    return kept_lines(conn, plan.kept)
+
+
+def kept_lines(conn: sqlite3.Connection, kept: list[Kept]) -> list[dict]:
+    """Rows kept (flow_writes), as flows_kept names them: why in the
+    refusal's words, and `because`, the same facts as the drawer ends its
+    one sentence with (because())."""
+    if not kept:
+        return []
+    names = _account_names(conn)
+    entries = []
+    for k in kept:
+        moved = _moved(names, k.held, k.would)
+        entries.append((k.held["id"], {"now": moved["now"], "would": moved["after"], "why": k.why,
+                                       "because": k.said or because(k.why)}))
+    return _flow_lines(conn, entries)
+
+
+def chosen_lines(conn: sqlite3.Connection, kept: list[Kept], moves: bool = False) -> list[dict]:
+    """The rows kept only because their book or type was chosen
+    (Kept.by_hand), as their own list beside flows_kept: each by date,
+    amount and wording, its flow now, what it would be on MOVE_CHOSEN, the
+    book and type that move would empty (label_cleared, or None), and why it
+    is kept, in the refusal's words and the drawer's clause. `moves` True:
+    MOVE_CHOSEN was sent, so the write moves them; they are listed still, as
+    a hand choice is never moved unseen (RUL-019)."""
+    by_hand = [k for k in kept if k.by_hand]
+    if not by_hand:
+        return []
+    names, types = _account_names(conn), _type_names(conn)
+    entries = []
+    for k in by_hand:
+        moved = _moved(names, k.held, k.would, types)
+        entries.append((k.held["id"], {"now": moved["now"], "would": moved["after"],
+                                       "label_cleared": moved["label_cleared"], "why": k.why,
+                                       "because": k.said or because(k.why), "moves": moves}))
+    return _flow_lines(conn, entries)
+
+
+def because(why: str) -> str:
+    """A kept row's refusal (flow_writes) as the clause a plain sentence ends
+    with after "because": the refusal's own facts, said of "it", and its fix
+    in brackets. "S$ 5 of this row is expected back; undo the mark first."
+    gives "S$ 5 of it is expected back (undo that mark to move it)"; a
+    refusal with no fix to split off is its facts alone."""
+    said = why.strip().rstrip(".")
+    fact, sep, fix = said.rpartition("; ")
+    if not sep:
+        fact, sep, fix = said.rpartition(". ")
+    if not sep:
+        fact, fix = said, ""
+    fact = fact.replace("This row", "it", 1) if fact.startswith("This row") else fact.replace("this row", "it")
+    first = fact.split(" ", 1)[0]
+    if first[:1].isupper() and first[1:].islower():
+        fact = fact[0].lower() + fact[1:]
+    fix = fix.removesuffix(" first").replace("undo the mark", "undo that mark")
+    if not fix:
+        return fact
+    return f"{fact} ({fix[0].lower()}{fix[1:]} to move it)"
+
+
 def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
-    """The preview: what the drawer shows and chat is told."""
+    """The preview: what the drawer shows and chat is told. `flows` lists
+    every row whose flow or other side Apply changes; `flows_kept` every row
+    whose flow it would change but keeps, and why."""
     types = _names(conn)
     change = plan.words if plan.words is not None else [
         {"field": f, "from": _word(f, was, types), "to": _word(f, now, types)}
@@ -991,6 +1572,11 @@ def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
         "months": None,
         "examples": [_example(conn, plan, p, types, names) for p in plan.rows[:EXAMPLES]],
         "others": list(plan.others),
+        "flows": _flows(conn, plan),
+        "flows_kept": flows_kept(conn, plan),
+        # Apart from the rest: the rows MOVE_CHOSEN moves, and the count then.
+        "flows_chosen": chosen_lines(conn, plan.kept),
+        "count_with_chosen": plan.count_with_chosen,
         **plan.extra,
         "token": plan.token,
     }
@@ -1005,10 +1591,35 @@ def _rows(count: int) -> str:
 
 def asked(plan: Plan, answer_key: str = "past") -> str:
     """The refusal a change that reaches past rows answers with, in words."""
+    by_hand = len(plan.by_hand)
+    if not plan.count and by_hand:
+        # Only rows chosen by hand would move: said as the drawer says it, never "0 past rows".
+        rows = f"{by_hand} row{'' if by_hand == 1 else 's'}"
+        return (f"Nothing was saved yet. No other past rows change; {rows} the operator chose by hand would "
+                f"move only if you send {MOVE_CHOSEN}: true with {answer_key}: {APPLY} and the preview's token, "
+                "on the operator's yes (listed in flows_chosen). "
+                f"Without it, {answer_key}: {APPLY} saves without moving them.")
     if plan.doing:
         said = f"{plan.doing[0].lower()}{plan.doing[1:]} changes {_rows(plan.count)}"
     else:
         said = f"this changes {_rows(plan.count)} of {plan.called}"
+    moving = sum(1 for p in plan.rows if moves_flow(p))
+    if moving:
+        said += f", {moving} of them in what {'it is' if moving == 1 else 'they are'} (their flow; listed in flows)"
+    leaving = sum(1 for p in plan.rows if leaves_spending(p))
+    if leaving:
+        said += (f", {leaving} of them leaving spending, so {'its' if leaving == 1 else 'their'} book and type "
+                 "are emptied (label_cleared in flows)")
+    if plan.kept:
+        said += (f"; {len(plan.kept)} row{' keeps its' if len(plan.kept) == 1 else 's keep their'} flow, "
+                 "a record of expect back resting on it or its book or type chosen by hand "
+                 "(listed in flows_kept, each with why)")
+    if by_hand:
+        said += (f"; {by_hand} of {'it' if len(plan.kept) == 1 else 'them'} only because the operator chose "
+                 f"{'its' if by_hand == 1 else 'their'} book or type by hand (listed apart in flows_chosen): "
+                 f"{APPLY} with {MOVE_CHOSEN}: true moves {'it' if by_hand == 1 else 'them'} too, "
+                 f"{plan.count_with_chosen} past row{'' if plan.count_with_chosen == 1 else 's'} in all; "
+                 "ask the operator, and send it only on their yes")
     return (f"Nothing was saved yet: {said}. "
             f"Say whether they change too ({answer_key}: {APPLY}) or only new rows take it "
             f"({answer_key}: {ONLY_NEW}).")

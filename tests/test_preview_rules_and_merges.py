@@ -24,6 +24,7 @@ wording here is one of fin's seeded rules.
 
 import json
 import re
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -716,7 +717,7 @@ RULE_EDIT = {
 
 def drawer(sample) -> dict:
     return _node("\n".join([PRELUDE, _function("monthName"), _function("bandedTable"), _const("PREVIEW_FIELD"),
-                            _const("PREVIEW_TITLE"), _function("previewParts"),
+                            _const("PREVIEW_TITLE"), _function("keptWords"), _function("flowsLine"), _function("exampleCell"), _function("previewParts"),
                             f"console.log(JSON.stringify(previewParts({json.dumps(sample)})));"]))
 
 
@@ -744,7 +745,7 @@ def test_the_rows_of_several_merchants_are_one_warning_line_for_a_rule_and_a_tau
     """The rule's preview (50) and the taught wording's (53) draw the rows
     another merchant holds one way: one warning line naming each merchant,
     then where the rows would move (the rule's merchant, or the merchant
-    taught). See all stays for a held merchant taught a new default."""
+    taught)."""
     others = [{"service_id": 5, "name": "Air India", "count": 4}, {"service_id": 6, "name": "Vistara", "count": 1}]
     rule = drawer({**RULE_EDIT, "others": others})
     taught = drawer({**RULE_EDIT, "subject": {"kind": "merchant", "id": 4, "name": "IndigoAir"}, "others": others,
@@ -754,7 +755,9 @@ def test_the_rows_of_several_merchants_are_one_warning_line_for_a_rule_and_a_tau
     for got in (rule, taught):
         assert got["body"].count('class="warnline"') == 1 and line in text_of(got["body"])
     assert taught["title"] == "Change IndigoAir’s book and wording?"
-    assert "Recognises: INDIGO" in text_of(taught["body"]) and "See all 5 rows ›" in text_of(taught["body"])
+    # A taught wording's rows are not all on the merchant's page (another's, or none's yet): no See all
+    # there (polish, ui-review-31 e); a merchant's own book or type keeps it (below).
+    assert "Recognises: INDIGO" in text_of(taught["body"]) and "See all" not in text_of(taught["body"])
 
 
 @needs_node
@@ -818,3 +821,63 @@ console.log(JSON.stringify({ fromItsPage, fromLists: [location.hash, drawn] }));
     start = APP_JS.index("ACT['merchant-merge'] =")
     merge = APP_JS[start:APP_JS.index("\n};", start) + 3]       # the handler alone
     assert "afterMerge(" in merge and "rerender()" not in merge
+
+
+# --- the polish pass (the operator's screen review, ui-review-05 and -31) -----------------
+
+
+def drawer_for(sample, opts) -> dict:
+    return _node("\n".join([PRELUDE, _function("monthName"), _function("bandedTable"), _const("PREVIEW_FIELD"),
+                            _const("PREVIEW_TITLE"), _function("keptWords"), _function("flowsLine"),
+                            _function("exampleCell"), _function("previewParts"),
+                            f"console.log(JSON.stringify(previewParts({json.dumps(sample)}, {json.dumps(opts)})));"]))
+
+
+@needs_node
+def test_polish_an_example_says_now_then_after_and_names_a_kept_merchant_once():
+    rows = [{"id": 1, "date": "2026-03-31", "amount_minor": 13731, "currency": "SGD", "now": "Sample Car Loan · Transport",
+             "after": "Sample Car Loan · no book or type", "source": "rule"},
+            {"id": 2, "date": "2026-02-25", "amount_minor": 9486, "currency": "SGD", "now": "Sample Hardware · Home",
+             "after": "Sample Home Loan · no book or type", "source": "merchant"}]
+    got = drawer_for({**RULE_EDIT, "others": [], "examples": rows}, {})
+
+    assert ('<span class="ex-now">Sample Car Loan · Transport</span> <span class="ex-after">→ <b>no book or type</b></span>'
+            in got["body"]), got["body"]
+    assert ('<span class="ex-now">Sample Hardware · Home</span> <span class="ex-after">→ <b>Sample Home Loan · no book or type</b></span>'
+            in got["body"])
+
+
+def test_polish_on_a_phone_an_example_takes_two_lines_and_the_table_is_never_cut():
+    styles = (Path(__file__).resolve().parent.parent / "static" / "styles.css").read_text(encoding="utf-8")
+    phone = styles.split("@media (max-width: 720px)")
+    assert any(".ex-after { display: block" in block.split("\n}\n", 1)[0] for block in phone[1:])
+    # The examples' shell keeps its height in the drawer's column: the drawer scrolls, never the table.
+    assert re.search(r"\.sheet-body > \.ex-shell \{[^}]*flex-shrink: 0", styles)
+
+
+@needs_node
+def test_polish_a_merchants_own_book_or_type_keeps_see_all():
+    own = drawer_for({**RULE_EDIT, "subject": {"kind": "merchant", "id": 4, "name": "IndigoAir"}, "others": [],
+                      "change": [{"field": "type_id", "from": "Travel", "to": "Transport"}]}, {})
+    assert "See all 5 rows ›" in text_of(own["body"])
+
+
+@needs_node
+def test_polish_a_teach_applied_to_rows_with_no_merchant_has_no_see_all():
+    applied = drawer_for({**RULE_EDIT, "subject": {"kind": "merchant", "id": 4, "name": "IndigoAir"}, "others": [],
+                          "change": []}, {"taught": 1})
+    assert "See all" not in text_of(applied["body"])
+
+
+@needs_node
+def test_polish_a_teach_shows_inline_the_rows_its_examples_leave_out():
+    flows = [{"id": i, "date": f"2026-0{i}-01", "description": f"SAMPLE ROW {i}", "amount_minor": 100 * i, "currency": "SGD",
+              "now": "spending", "after": "a movement · Sample home loan", "label_cleared": None} for i in (1, 2, 3, 4)]
+    got = drawer_for({**RULE_EDIT, "subject": {"kind": "merchant", "id": 4, "name": "IndigoAir"}, "others": [],
+                      "change": [{"field": "wording", "from": None, "to": "SAMPLE ROW"}], "flows": flows}, {"taught": 9})
+    text = text_of(got["body"])
+
+    assert "See all" not in text
+    assert "1 Mar 2026 · S$ 3.00 · SAMPLE ROW 3" in text and "1 Apr 2026 · S$ 4.00 · SAMPLE ROW 4" in text, text
+    assert "SAMPLE ROW 1" not in text                  # an example already
+    assert "and 1 more row" in text                    # 5 rows: 2 examples, 2 named here, 1 the preview does not name

@@ -33,6 +33,7 @@ import json
 import re
 
 import book_type
+import flow
 
 MERCHANT, RULE, WORDING, CHECKED, CHOSEN, DERIVED = book_type.SOURCE_NAMES
 
@@ -165,6 +166,40 @@ def reached(held: str | None, value, source: str) -> str | None:
     if value is None:
         return None
     return CHECKED if held == CHECKED else book_type.checked_source(source)
+
+
+# --- Book and type only on spending and refund rows (fin-redesign 05) ---------
+#
+# Every writer that is not the operator's hand (import, a teach and its
+# backfill, a plan, a merchant's change, a rule's change, the drift) fits
+# what it writes to a row to the flow the row has after the write, by this
+# one rule. A spending or refund row takes the label as written. Any other
+# row is no one's spending: a write leaves its book and type as they are
+# (a row already in the book keeps what it holds until a correction clears
+# it), and a write that moves its flow there empties them in the same
+# change, each with no source, as the hand label empties them for a
+# transfer, a card payment or a movement (app._label_row). The merchant
+# link is not a label: it stays on every flow.
+
+# A row's label: the two fields and their sources.
+LABEL_COLUMNS = (*FIELDS, *FIELDS.values())
+
+
+def fitted(held, sets: dict) -> dict:
+    """`sets`, a write to the row `held` (its flow_type and label columns
+    read), fitted to the flow the row has after it (flow.carries_label)."""
+    after = sets.get("flow_type", held["flow_type"])
+    if flow.carries_label(after):
+        return sets
+    out = {k: v for k, v in sets.items() if k not in LABEL_COLUMNS}
+    if "flow_type" in sets and (sets["flow_type"] or "expense") != (held["flow_type"] or "expense"):
+        out.update({column: None for column in LABEL_COLUMNS if held[column] is not None})
+    return out
+
+
+def clears(held, sets: dict) -> bool:
+    """Whether a write (fitted) empties the row's book or type."""
+    return any(column in sets and sets[column] is None and held[column] is not None for column in FIELDS)
 
 
 def rule_sources(rule) -> tuple[str, str]:

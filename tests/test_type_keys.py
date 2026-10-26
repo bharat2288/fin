@@ -17,6 +17,10 @@ import sqlite3
 from pathlib import Path
 
 import book_type
+import convert_statement_periods
+import convert_flow_rules
+import convert_party_link
+import convert_rule_flow
 import db
 import history
 import suggest
@@ -29,16 +33,28 @@ from test_movements_and_review import (  # noqa: F401 (fixtures)
 REPO = Path(__file__).resolve().parent.parent
 BEFORE = Path(__file__).parent / "fixtures" / "book_before_type_keys.sql"
 # The same start makes ticket 02's settings table (tests/test_type_settings.py) and
-# ticket 03's slots table (tests/test_type_slots.py) and ticket 05's marker
-# that the PayNow wordings were made rules (tests/test_paynow_rules.py).
-NEW_TABLES = {"type_keys", "type_settings", "type_slots", "seeded_once"}
+# ticket 03's slots table (tests/test_type_slots.py); the markers' table, which
+# ticket 05's marker that the PayNow wordings were made rules
+# (tests/test_paynow_rules.py) goes in, the flow-rules step made already
+# (fin-redesign 08, book_before).
+NEW_TABLES = {"type_keys", "type_settings", "type_slots", "loan_terms"}
 
 
 def book_before(tmp_path, monkeypatch) -> Path:
-    """The book main made, as a file fin is pointed at."""
+    """The book main made, as a file fin is pointed at: brought through the
+    conversion steps added since (statement-periods, fin-redesign 04;
+    rule-flow, 07; flow-rules, 08; party-link, 09), which add to its shape
+    and its rules and change no row, as the operator's book is before a start
+    (a book from before statement-periods will not start:
+    tests/test_statement_periods.py)."""
     path = tmp_path / "before.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(BEFORE.read_text(encoding="utf-8"))
+    convert_statement_periods.STEP.apply(conn)
+    convert_rule_flow.STEP.apply(conn)
+    convert_flow_rules.STEP.apply(conn)
+    convert_party_link.STEP.apply(conn)
+    conn.commit()
     conn.close()
     monkeypatch.setattr(db, "DB_PATH", path)
     db.invalidate_rules_cache()
@@ -58,10 +74,11 @@ def every_row(path: Path) -> dict[str, list[tuple]]:
 
 def kept_every_row(before: dict, after: dict) -> None:
     """Every row the book held is there unchanged; the start added rows only
-    to merchants and rules (ticket 05's PayNow wording rules)."""
+    to merchants and rules (ticket 05's PayNow wording rules) and the marks
+    of its seeding (the flow-rules step made their table)."""
     for table, rows in before.items():
         assert set(rows) <= set(after[table]), table
-        if table not in ("services", "merchant_rules"):
+        if table not in ("services", "merchant_rules", "seeded_once"):
             assert after[table] == rows, table
 
 
@@ -262,7 +279,11 @@ def test_a_paynow_wording_still_types_a_row_after_its_type_is_renamed(client, le
     bring_in(client, BANK, [(4, "PAYNOW TO LIMITLESS WELLNESS REF 31", 120.00)])
 
     tx = row(client, "PAYNOW TO LIMITLESS WELLNESS REF 31")
-    assert (tx["book"], tx["display_type"]) == ("Household", "Sport")
+    # Waiting for review, it carries its merchant and no type (fin-redesign
+    # 05); the merchant the wording names is typed under the renamed type.
+    assert (tx["flow_type"], tx["service_name"]) == ("review", "Limitless Wellness")
+    merchant = {s["name"]: s for s in client.get("/api/services").get_json()}["Limitless Wellness"]
+    assert (merchant["book"], merchant["display_type"]) == ("Household", "Sport")
 
 
 # --- the sweep: code reads a declared type by its key, through book_type ---------

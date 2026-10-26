@@ -35,10 +35,11 @@ def dump(path: Path) -> str:
 
 
 def old_schema() -> str:
-    """Today's schema without the column this step adds."""
+    """Today's schema without the column this step adds, nor the one the
+    statement-periods step adds after it."""
     lines = history.without_history(db.SCHEMA_PATH.read_text()).splitlines()
-    kept = [line for line in lines if not line.strip().startswith("printed ")]
-    assert len(kept) == len(lines) - 1
+    kept = [line for line in lines if not line.strip().startswith(("printed ", "period_start "))]
+    assert len(kept) == len(lines) - 2
     return "\n".join(kept)
 
 
@@ -91,7 +92,8 @@ def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
     convert(old)
 
     shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('statements')"
-    assert query(old, shape) == query(new, shape)
+    # but the period start, which the statement-periods step adds after this one
+    assert query(old, shape) == query(new, shape + " WHERE name != 'period_start'")
 
 
 def test_run_twice_changes_nothing_and_writes_one_backup(old):

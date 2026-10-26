@@ -57,13 +57,17 @@ Rulings this module carries:
   it and is recorded as asked first.
 - No tool imports a statement, changes or deletes an imported row, changes
   or deletes an account (adding one is create_account, or
-  add_company_or_person), sends merchants to the type-suggestion service,
-  runs a conversion or touches subscriptions.
+  add_company_or_person; joining one to a party is link_party), sends merchants to the type-suggestion service,
+  runs a conversion or changes a bill: bills (fin-redesign 10) reads them,
+  with the missed-bill rule's verdict from bills.py, the one home the app's
+  screens read too.
   Statements reach the hosted fin through the upload command (fin_upload.py).
 - Accounts (fin redesign, design evaluation §4): create_account adds an
   account of any declared kind over the app's Add an account, so the
   statements imported after find it with its right kind. The route refuses a
-  name fin already holds.
+  name fin already holds. A loan may be made with its hire-purchase terms
+  (fin-redesign 14; loan_terms.py), in the same change; terms on an account
+  fin already holds are an account change, the operator's on Lists › Accounts.
 - The chat's relabel reach (fin redesign ticket 11): label_review, on any
   row, also says a refund (keeping its type), a card payment, or a move into
   or out of a holding (review.MORE_CHOICES); a person stays no movement's
@@ -74,6 +78,13 @@ Rulings this module carries:
   rows changed (the preview's changes, refund links too) the call takes
   expected_count as any write, the number the preview shows. create_merchant adds a
   merchant over the app's own route, which refuses a name fin holds.
+- Parties (fin-redesign 09; a link, not a new home): a merchant is the party.
+  create_merchant and change_merchant give it a role (party.ROLES), and
+  link_party joins a person, company, loan, holding or untracked account to
+  it, or takes one off, over the app's own route: one change each, undone
+  whole. Two person accounts may join one party and stay two accounts
+  (RUL-011). This is the one change to an existing account a tool makes; it
+  moves no row and no figure.
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
 the client the chat gate verified, labelled as folio labels it: `chat:<sub>`,
@@ -92,6 +103,8 @@ import account_kind
 import chat_writes
 import db
 import history
+import party
+import loan_terms
 
 MANY_ROWS = 20
 
@@ -162,6 +175,50 @@ _PAST_SAID = (
     "rows take it, unless they already said; then call again with past and the preview's token. "
     "A token from a preview that no longer holds is refused: look again."
 )
+# The opt-in an Apply may carry (ADR-008): rows a rule would move but keeps
+# only because the operator chose their book or type by hand move too. One
+# name on every path that changes a rule, the plan's items among them.
+_MOVE_CHOSEN_SAID = (
+    "move_chosen: true moves too the rows the preview lists apart in flows_chosen, kept only because the "
+    "operator chose their book or type by hand (a choice that may be stale): each takes the flow the rule "
+    "gives, losing its book and type where that is not spending. Send it only with past apply, the preview's "
+    "token and the operator's yes to those rows by name (count_with_chosen is the past rows then); left out, "
+    "they stay as they are. "
+)
+_MOVE_CHOSEN = {
+    "move_chosen": {**_B, "description": "With past apply and the preview's token, on the operator's yes: "
+                                         "also move the rows listed in flows_chosen."},
+}
+# What a rule may say its rows are (ADR-009; fin-redesign 07).
+_RULE_FLOW = {
+    "flow": {"type": "string", "description": "What the rule's rows are: expense, income, refund, transfer, "
+                                              "payment or movement (never review). Left out, the rule labels "
+                                              "only and fin works the flow out."},
+    "other_side_id": {"type": "integer", "description": "With flow: the household account on the other side; "
+                                                        "required for a transfer (a bank, card or untracked "
+                                                        "account) and a movement (a loan, holding or company). "
+                                                        "Never a person or an archived account. A flow changed "
+                                                        "without it keeps the held one only where the new flow "
+                                                        "allows it."},
+}
+_RULE_FLOW_SAID = (
+    "A rule may state what its rows are (flow, other_side_id): it beats what fin works out, never a flow "
+    "the operator set by hand, and the preview lists every past row whose flow would change (flows). "
+    "Only a flow fin worked out under the rules before the change moves (not one Only new rows left); a row "
+    "a record of expect back rests on keeps its flow where a hand label would be refused, and so does a row whose "
+    "book or type the operator chose (flows_kept, with why). "
+    "Book and type go only on spending and refund rows: a row moved to any other flow loses both in the same "
+    "change (each flows line's label_cleared says what it loses). "
+)
+# A merchant's role as a party (party.py); "" says none.
+_ROLE = {
+    "role": {
+        "type": "string", "enum": ["", *party.ROLE_NAMES],
+        "description": "The part the merchant plays as a party, one of: "
+                       + "; ".join(f"{name} ({said})" for name, said in party.ROLES)
+                       + ". \"\" says none. It moves no row.",
+    },
+}
 # The tools that answer with the preview.
 _PREVIEWED = frozenset({"add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants"})
 
@@ -296,8 +353,9 @@ _READS = [
     ),
     Tool(
         "accounts",
-        "Every account: kind, owner, currency, last four digits only, latest anchor, and "
-        "whether it takes a typed figure.",
+        "Every account: kind, owner, currency, last four digits only, latest anchor, "
+        "whether it takes a typed figure, and the party (party_id, party: a merchant) a person, "
+        "company, loan, holding or untracked account is joined to.",
         _schema(),
         False,
         _get("/api/accounts"),
@@ -311,7 +369,8 @@ _READS = [
     ),
     Tool(
         "merchants",
-        "Every merchant with its default book and type, and its row and rule counts.",
+        "Every merchant with its default book and type, its row and rule counts, its role as a "
+        "party (null: none said), and the accounts joined to it as their party (party_accounts).",
         _schema(),
         False,
         _get("/api/services"),
@@ -407,6 +466,28 @@ _READS = [
         False,
         _get("/api/queue/paybacks"),
     ),
+    Tool(
+        "bills",
+        "The bills (what renews, from the rows that pay it), with the missed-bill rule's verdict, "
+        "the same one fin's Bills screen and Queue show: each bill's merchant, book and type, amount and "
+        "currency, how often (every: e.g. monthly, half-yearly, every 2 months), monthly_sgd (the bill spread over the months "
+        "one cycle covers, in S$), the account that pays it and that account's currency "
+        "(currency_mismatch: the bill is held in another currency than its paying account's, a flag for "
+        "the operator to fix in fin's Bills), status, due (the day it was last due), last_paid, "
+        "covered_to (the last day the paying account's statements cover) and next. state is one of "
+        "missed (a due day the statements cover has no payment since; due is that day), "
+        "awaiting_statement (late, but the statement for those days is not imported yet: not missed; "
+        "waiting_due is the oldest due day not checked yet and waiting_on the month, YYYY-MM, of "
+        "the statement that would show it), on_track, unknown_cadence "
+        "(fin cannot read how often it renews), paused or stopped. judged_by is statements, or today "
+        "for a bill paid from no account or from one fin holds no statements for (judged against "
+        "today's date alone). counts says how many are in each, and rule says the rule in words. Filter "
+        "by state. This only reads: no chat tool changes a bill.",
+        _schema({"state": {"type": "string", "enum": ["missed", "awaiting_statement", "on_track", "unknown_cadence",
+                                                      "paused", "stopped"]}}),
+        False,
+        _get("/api/bills", "state"),
+    ),
 ]
 
 
@@ -457,8 +538,9 @@ _WRITES = [
         "type proposes none), gift, own_account (account_id of a bank account, card or untracked "
         "account), company (account_id), "
         "loan_repayment (account_id of a loan), income (income_kind_id), refund (it keeps the row's "
-        "book and type, or takes type_id; it links to its purchase when exactly one fits, and a "
-        "row with no type to keep then takes the purchase's), "
+        "book and type, or takes type_id; a row with no spending type takes its merchant's book and "
+        "type, chosen; it links to its purchase when exactly one fits, and a row with neither a type "
+        "to keep nor a merchant's then takes the purchase's), "
         "card_payment (paying a card's bill or a payment reversed: no book or type), holding "
         "(account_id of a holding: money that bought, or came back from, something owned). A row "
         "that stops being a refund drops its refund link. A person is no "
@@ -504,42 +586,44 @@ _WRITES = [
     _w(
         "add_rule",
         "Add a merchant rule: rows whose description matches the pattern take the merchant "
-        "(service_id) and its book and type, or the rule's own overrides. " + _PAST_SAID,
+        "(service_id) and its book and type, or the rule's own overrides. " + _RULE_FLOW_SAID
+        + _MOVE_CHOSEN_SAID + _PAST_SAID,
         {"pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I, **_PAST},
+         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST, **_MOVE_CHOSEN},
         ("pattern", "service_id"),
         lambda a: ("POST", "/api/rules", _pick(a, "pattern", "service_id", "match_type",
                                               "book_override", "type_override_id", "priority",
-                                              *_PAST)),
+                                              *_RULE_FLOW, *_PAST, *_MOVE_CHOSEN)),
     ),
     _w(
         "change_rule",
-        "Change a merchant rule. " + _PAST_SAID,
+        "Change a merchant rule. " + _RULE_FLOW_SAID + "flow \"\" makes it state none again. "
+        + _MOVE_CHOSEN_SAID + _PAST_SAID,
         {"rule_id": _I, "pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I, **_PAST},
+         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST, **_MOVE_CHOSEN},
         ("rule_id",),
         lambda a: ("PUT", f"/api/rules/{int(a['rule_id'])}",
                    _pick(a, "pattern", "service_id", "match_type", "book_override",
-                         "type_override_id", "priority", *_PAST)),
+                         "type_override_id", "priority", *_RULE_FLOW, *_PAST, *_MOVE_CHOSEN)),
     ),
     _w(
         "delete_rule",
-        "Delete a merchant rule. " + _PAST_SAID,
-        {"rule_id": _I, **_PAST},
+        "Delete a merchant rule. " + _MOVE_CHOSEN_SAID + _PAST_SAID,
+        {"rule_id": _I, **_PAST, **_MOVE_CHOSEN},
         ("rule_id",),
-        lambda a: ("DELETE", f"/api/rules/{int(a['rule_id'])}", _pick(a, *_PAST)),
+        lambda a: ("DELETE", f"/api/rules/{int(a['rule_id'])}", _pick(a, *_PAST, *_MOVE_CHOSEN)),
     ),
     _w(
         "change_merchant",
         "Change a merchant: its name, default book and type, note, one-off, hidden from "
-        "spending views, or review each time. A new book or type reaches its past rows that "
-        "take the default (never one the operator chose). " + _PAST_SAID,
+        "spending views, review each time, or its role as a party. A new book or type reaches "
+        "its past rows that take the default (never one the operator chose). " + _PAST_SAID,
         {"service_id": _I, "name": _S, "book": _S, "type_id": _I, "notes": _S, "is_one_off": _B,
-         "exclude_from_expense_views": _B, "review_each_time": _B, **_PAST},
+         "exclude_from_expense_views": _B, "review_each_time": _B, **_ROLE, **_PAST},
         ("service_id",),
         lambda a: ("PUT", f"/api/services/{int(a['service_id'])}",
                    _pick(a, "name", "book", "type_id", "notes", "is_one_off",
-                         "exclude_from_expense_views", "review_each_time", *_PAST)),
+                         "exclude_from_expense_views", "review_each_time", "role", *_PAST)),
     ),
     _w(
         "merge_merchants",
@@ -563,14 +647,23 @@ _WRITES = [
         "holding is something owned that no statement reports; untracked is the household's own "
         "account fin holds no statements for (a family member's own bank). currency: SGD unless "
         "given; owner: Household unless a company's. Refused when fin already has an account of "
-        "that name, in any case: read accounts first.",
+        "that name, in any case: read accounts first. A loan bought on hire purchase may carry "
+        "its terms, so its statements' total of remaining instalments imports as principal owed: "
+        "terms {financed, months, flat_rate (percent a year) or interest (over the term), "
+        "first_instalment (YYYY-MM-DD), owed_from (YYYY-MM-DD, the day the amount financed is owed "
+        "from; the last day of the month before the first instalment unless given), method rule-of-78}; amounts as text, e.g. \"150000.00\". "
+        "Terms on an account fin holds are the operator's, on Lists › Accounts.",
         {"name": _S, "kind": {"type": "string", "enum": list(account_kind.KIND_NAMES)},
          "currency": _S, "owner": {"type": "string", "enum": list(account_kind.OWNER_NAMES)},
          "last_four": {"type": "string", "pattern": "^[0-9]{4}$",
-                       "description": "four digits: the account's last four, e.g. 3528"}},
+                       "description": "four digits: the account's last four, e.g. 3528"},
+         "terms": {"type": "object", "description": "A loan's hire-purchase terms (kind loan only).",
+                   "properties": {"financed": _S, "months": _I, "flat_rate": _S, "interest": _S,
+                                  "first_instalment": _DAY, "owed_from": _DAY,
+                                  "method": {"type": "string", "enum": list(loan_terms.METHOD_NAMES)}}}},
         ("name", "kind"),
         lambda a: ("POST", "/api/accounts",
-                   {**_account_body(a), **_pick(a, "currency", "owner", "last_four")}),
+                   {**_account_body(a), **_pick(a, "currency", "owner", "last_four", "terms")}),
     ),
     _w(
         "create_merchant",
@@ -578,10 +671,25 @@ _WRITES = [
         "with no book takes the book the type proposes, and one that proposes none needs a book). "
         "It labels no row: add_rule gives it a wording, and plan_preview and plan_apply attach a "
         "card's rows. Refused when fin already holds a merchant of that name, in any case: read "
-        "merchants first.",
-        {"name": _S, "book": _S, "type_id": _I},
+        "merchants first. role: the part it plays as a party (a party for people, say, made to "
+        "join their person accounts with link_party).",
+        {"name": _S, "book": _S, "type_id": _I, **_ROLE},
         ("name",),
-        lambda a: ("POST", "/api/services", _pick(a, "name", "book", "type_id")),
+        lambda a: ("POST", "/api/services", _pick(a, "name", "book", "type_id", "role")),
+    ),
+    _w(
+        "link_party",
+        "Join an account to a party: a merchant (service_id from merchants), so a person's "
+        "accounts, or a company and the merchant its money arrives under, are known as one. "
+        "Only a person, company, loan, holding or untracked account joins one; two accounts "
+        "joined to one party stay two accounts with their own balances (they are linked, not "
+        "merged). Without service_id the account leaves its party. One change; it moves no row "
+        "and no figure.",
+        {"account_id": _I, "service_id": _I},
+        ("account_id",),
+        # service_id left out is sent as null, said: the route refuses a body without it.
+        lambda a: ("PUT", f"/api/accounts/{int(a['account_id'])}/party",
+                   {"service_id": a.get("service_id")}),
     ),
     _w(
         "pair_transfers",
@@ -741,6 +849,9 @@ _PLAN_ITEM = {
                       "description": "The operator's answer for rows another merchant holds that a wording "
                                      "reaches (the preview's overlaps): apply moves them too; unanswered, "
                                      "only new rows take it."},
+        "move_chosen": {**_B, "description": "With past_rows apply, on the operator's yes: also move the rows "
+                                             "the item's flows_chosen lists, kept only because the operator "
+                                             "chose their book or type by hand."},
     },
     "required": ["tx_ids"],
     "additionalProperties": False,
@@ -758,8 +869,11 @@ _PLANS = [
         "batch: the answer gives, per merchant, the rows that would be labelled (a row's was is the "
         "label it holds now, which the batch overwrites: tell the operator), the rows of "
         "another merchant a wording would reach (overlaps: ask whether they move too, past_rows), "
-        "any refusal by merchant, the batch's merchants and rows labelled, the rows only checked "
-        "(rows_checked), and a token (none while "
+        "every row whose flow or other side it would move, a row labelled for itself among them "
+        "(flows: tell the operator), the rows it would move but keeps only because the operator chose their "
+        "book or type by hand (flows_chosen: name them; an item's move_chosen true, with past_rows apply, "
+        "moves them too, on the operator's yes, and is previewed again as part of the items), any refusal by merchant, the batch's merchants and rows labelled, "
+        "the rows only checked (rows_checked), and a token (none while "
         "anything is refused). Show the operator those numbers; call plan_apply only on their yes.",
         _schema({"items": _PLAN_ITEMS}, ("items",)),
         False,
@@ -822,6 +936,7 @@ TITLES = {
     "change": "Read one change, before and after",
     "expected_back": "Read what is expected back",
     "paybacks": "Read the payback suggestions",
+    "bills": "Read your bills",
     "set_label": "Change a row's book or type",
     "set_note": "Change a row's note",
     "label_review": "Say what a row was",
@@ -836,6 +951,7 @@ TITLES = {
     "add_company_or_person": "Add a company or a person",
     "create_account": "Add an account",
     "create_merchant": "Add a merchant",
+    "link_party": "Join an account to a party",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",
     "set_rate": "Enter an exchange rate",
