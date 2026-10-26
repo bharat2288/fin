@@ -900,3 +900,44 @@ def test_the_merchants_row_on_another_account_is_not_the_bills_payment(client, c
 
     got = shown(client, club_paid_by_giro["club"])
     assert (got["tx_last_paid"], got["tx_amount"]) == ("2026-09-25", 689.10)
+
+
+def test_a_refund_or_a_one_off_under_the_merchant_is_no_payment_of_the_bill(client, conn, club_paid_by_giro):
+    conn.execute("UPDATE transactions SET is_one_off = 1 WHERE date = '2026-09-25'")
+    conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type, service_id) "
+                 "VALUES (?, '2026-09-28', 'SAMPLE CLUB LOCKER DEPOSIT BACK', -2500, 'refund', ?)",
+                 (club_paid_by_giro["stmt"]["2026-09"], club_paid_by_giro["service_id"]))
+    conn.commit()
+
+    got = shown(client, club_paid_by_giro["club"])
+    assert (got["tx_last_paid"], got["tx_amount"]) == ("2026-08-25", 167.40)
+
+
+def test_two_bills_on_one_merchant_and_account_are_told_apart_by_wording(client, conn, club_paid_by_giro):
+    # A second running bill on the club's merchant and bank: the PDF rows hold
+    # neither bill's wording, so neither bill takes them.
+    conn.execute("INSERT INTO subscriptions (service_id, account_id, amount, currency, frequency, periods, "
+                 "renewal_date, status, match_pattern) VALUES (?, ?, 40, 'SGD', 'monthly', 1, '2026-03-10', "
+                 "'active', 'SAMPLE CLUB LOCKER')", (club_paid_by_giro["service_id"], club_paid_by_giro["bank"]))
+    conn.commit()
+
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-03-25"
+
+
+def test_a_bill_naming_no_paying_account_reads_its_wording_alone(client, conn, club_paid_by_giro):
+    conn.execute("UPDATE subscriptions SET account_id = NULL WHERE id = ?", (club_paid_by_giro["club"],))
+    conn.commit()
+
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-03-25"
+
+
+def test_refresh_from_rows_never_takes_a_last_payment_back(client, conn, club_paid_by_giro):
+    client.post("/api/subscriptions/enrich", json={})
+    # September's row moves to another book: it is no longer the bill's.
+    conn.execute("INSERT OR IGNORE INTO books (name) VALUES ('Sample Firm')")
+    conn.execute("UPDATE transactions SET book = 'Sample Firm' WHERE date = '2026-09-25'")
+    conn.commit()
+    client.post("/api/subscriptions/enrich", json={})
+
+    assert held(conn, club_paid_by_giro["club"])["last_paid"] == "2026-09-25"
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-08-25"

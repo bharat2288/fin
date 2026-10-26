@@ -8124,8 +8124,11 @@ def api_subscriptions_enrich():
                 )
                 # Update last_paid and renewal only — never overwrite the user's
                 # configured billed amount (amount is the source of truth, set manually)
+                # A last payment held only moves on: a row that leaves the
+                # bill's rows (moved to another book) never takes it back.
                 conn.execute(
-                    "UPDATE subscriptions SET last_paid = ?, renewal_date = ? WHERE id = ?",
+                    "UPDATE subscriptions SET last_paid = MAX(COALESCE(last_paid, ''), ?), renewal_date = ? "
+                    "WHERE id = ?",
                     (tx["tx_date"], new_renewal, s["id"]),
                 )
                 updated += 1

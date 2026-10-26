@@ -311,23 +311,31 @@ def state(bill: dict, on: date, spans: list[tuple[str, str]] | None) -> dict:
 
 # --- the read -----------------------------------------------------------------
 
-# The rows a bill matches: spending or a refund, in its merchant's book, that
-# holds its wording or is under its merchant on the account paying it (any
-# account, for a bill naming none). A bank words one payment differently in
-# its CSV and its PDF, so the wording alone loses the payments a statement
-# prints another way. Over subscriptions s and transactions t.
+# The rows a bill matches, in its merchant's book: spending or a refund that
+# holds its wording, or a payment under its merchant on the account paying it.
+# A bank words one payment differently in its CSV and its PDF, so the wording
+# alone loses the payments a statement prints another way. The merchant counts
+# only for a bill naming its paying account and holding that merchant and
+# account alone among the bills that run, and only spending that is no one-off:
+# a refund or a one-off under the merchant is no payment of the bill, and two
+# bills on one merchant and account are told apart by their wording.
+# Over subscriptions s and transactions t.
 _MATCHED_ROWS = """
     FROM subscriptions s
     JOIN transactions t
-        ON (s.service_id IS NOT NULL AND t.service_id = s.service_id
-            AND (s.account_id IS NULL
-                 OR (SELECT st.account_id FROM statements st WHERE st.id = t.statement_id) = s.account_id))
-        OR (COALESCE(s.match_pattern, '') != ''
+        ON (COALESCE(s.match_pattern, '') != ''
             AND UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%')
+        OR (t.service_id = s.service_id AND s.account_id IS NOT NULL
+            AND COALESCE(t.flow_type, 'expense') = 'expense' AND t.amount_minor > 0
+            AND COALESCE(t.is_one_off, 0) = 0
+            AND (SELECT st.account_id FROM statements st WHERE st.id = t.statement_id) = s.account_id
+            AND NOT EXISTS (SELECT 1 FROM subscriptions o
+                            WHERE o.id != s.id AND o.service_id = s.service_id
+                              AND o.account_id = s.account_id AND o.status IN ('active', 'paused')))
     LEFT JOIN services svc ON s.service_id = svc.id
     {joins}
     WHERE COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
-      AND """ + book_expr("t") + " = " + book_expr("svc")
+      AND """ + book_expr("t") + " = " + book_expr("svc") + "\n"
 
 
 def latest_payments(conn: sqlite3.Connection) -> dict[int, dict]:
