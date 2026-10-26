@@ -169,6 +169,47 @@ def test_a_pair_one_statement_prints_twice_comes_in_twice_whatever_else_the_impo
     assert [r for r in held(conn) if r[1] == "UPI-SAMPLE CAFE"] == [("2026-08-02", "UPI-SAMPLE CAFE", 25000)] * 2
 
 
+def test_both_statements_printing_a_pair_in_their_overlap_bring_the_pair_in_once(client, conn, monkeypatch):
+    aug_sep = _page(
+        "From : 01/08/2026 To : 30/09/2026",
+        ["02/08/26 UPI-SAMPLE GROCER-PAYMENT 0000000000000001 02/08/26 1,500.00 4,98,500.00",
+         "02/09/26 NEFT DR-SAMPLE PAYEE 0000000000000002 02/09/26 1,05,000.00 3,93,500.00",
+         "03/09/26 UPI-SAMPLE CAFE 0000000000000009 03/09/26 250.00 3,93,250.00",
+         "03/09/26 UPI-SAMPLE CAFE 0000000000000009 03/09/26 250.00 3,93,000.00"],
+        "5,00,000.00 4 0 1,07,000.00 0.00 3,93,000.00",
+    )
+    sep_oct = _page(
+        "From : 01/09/2026 To : 26/10/2026",
+        ["02/09/26 NEFT DR-SAMPLE PAYEE 0000000000000002 02/09/26 1,05,000.00 3,93,500.00",
+         "03/09/26 UPI-SAMPLE CAFE 0000000000000009 03/09/26 250.00 3,93,250.00",
+         "03/09/26 UPI-SAMPLE CAFE 0000000000000009 03/09/26 250.00 3,93,000.00"],
+        "4,98,500.00 3 0 1,05,500.00 0.00 3,93,000.00",
+    )
+    bring_in(client, monkeypatch, aug_sep, sep_oct)
+
+    assert [r for r in held(conn) if r[1] == "UPI-SAMPLE CAFE"] == [("2026-09-03", "UPI-SAMPLE CAFE", 25000)] * 2
+
+
+def test_a_row_each_of_two_statements_prints_outside_the_others_period_comes_in_twice(client, conn, monkeypatch):
+    """A card prints a late posting on the next statement under its own
+    date: the same purchase twice, one on each side of the closing day, is
+    two purchases, not one read twice."""
+    aug = _page(
+        "From : 01/08/2026 To : 31/08/2026",
+        ["31/08/26 UPI-SAMPLE CAFE 0000000000000009 31/08/26 250.00 4,99,750.00"],
+        "5,00,000.00 1 0 250.00 0.00 4,99,750.00",
+    )
+    sep = _page(
+        "From : 01/09/2026 To : 30/09/2026",
+        ["31/08/26 UPI-SAMPLE CAFE 0000000000000009 01/09/26 250.00 4,99,500.00"],
+        "4,99,750.00 1 0 250.00 0.00 4,99,500.00",
+    )
+    done = bring_in(client, monkeypatch, aug, sep)
+
+    assert held(conn) == [("2026-08-31", "UPI-SAMPLE CAFE", 25000)] * 2
+    assert done["duplicates_skipped"] == 0
+
+
 # --- taking a twin out ----------------------------------------------------------
 
 ACTOR = "chat:sample-subject"
@@ -313,6 +354,39 @@ def test_a_row_another_record_rests_on_is_refused_naming_it_and_its_twin_may_go(
     assert [bool(r["refusal"]) for r in listed] == [True, False]
 
     assert remove(client, second).status_code == 200
+
+
+@pytest.mark.parametrize("rest", [
+    "INSERT INTO folio_link (subject, subject_id, target, folio_id) VALUES ('row', {row}, 'tx', 7)",
+    "INSERT INTO fx_pair (out_row_id, in_row_id, state) VALUES ({row}, {other}, 'declined')",
+])
+def test_a_row_a_link_names_by_id_is_refused(client, conn, twins, rest):
+    conn.execute(rest.format(row=twins["copy"], other=twins["grocer"]))
+    conn.commit()
+    before = every_row(conn)
+
+    resp = remove(client, twins["copy"])
+    assert resp.status_code == 409 and f"Remove its twin #{twins['payee']} instead" in resp.get_json()["error"]
+    assert every_row(conn) == before
+
+
+def test_rows_fin_worked_out_are_never_twins_and_a_row_with_no_amount_lists_nothing(client, conn, twins):
+    import loan_interest
+
+    loan = client.post("/api/accounts", json={"name": "Sample Loan", "type": "loan"}).get_json()["id"]
+    derived = conn.execute("INSERT INTO statements (account_id, statement_date, filename) VALUES (?, '2026-09-30', ?)",
+                           (loan, loan_interest.DERIVED_STATEMENT)).lastrowid
+    for _ in range(2):
+        conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
+                     "VALUES (?, '2026-09-30', 'Loan interest', 1000, 'expense')", (derived,))
+        conn.execute("INSERT INTO transactions (statement_id, date, description, amount_minor, flow_type) "
+                     "SELECT statement_id, '2026-07-01', 'NO AMOUNT', NULL, 'expense' FROM transactions WHERE id = ?",
+                     (twins["grocer"],))
+    conn.commit()
+
+    listed = client.get("/api/duplicates")
+    assert listed.status_code == 200
+    assert [g["date"] for g in listed.get_json()["twins"]] == ["2026-09-02", "2026-08-02"]
 
 
 def test_an_unknown_row_is_not_found(client, twins):

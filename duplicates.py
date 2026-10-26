@@ -48,7 +48,7 @@ _RESTING = (
     ("set_off", ("payment_row_id",), "is set off against what is expected back"),
     ("refund_link", ("refund_row_id", "purchase_row_id"), "is linked as a refund"),
     ("dismissal", ("row_id", "purchase_row_id"), "was set aside (not a payback, or a refund unlinked)"),
-    ("fx_pair", ("out_row_id", "in_row_id"), "is in a cross-currency pair"),
+    ("fx_pair", ("out_row_id", "in_row_id"), "is in a cross-currency pair, or one said not to be a pair"),
 )
 
 # Rows on an imported statement: fin's own worked-out loan interest is not one.
@@ -168,7 +168,7 @@ def groups(conn: sqlite3.Connection, account_id: int | None = None, tx_id: int |
             return []
         rows = _twin_rows(conn, row["account_id"], row["date"], row["amount_minor"])
         return [_group(conn, rows)] if len(rows) > 1 else []
-    sql = ("SELECT s.account_id, t.date, t.amount_minor " + _IMPORTED
+    sql = ("SELECT s.account_id, t.date, t.amount_minor " + _IMPORTED + "AND t.amount_minor IS NOT NULL "
            + ("AND s.account_id = ? " if account_id is not None else "")
            + "GROUP BY s.account_id, t.date, t.amount_minor HAVING COUNT(*) > 1 "
              "ORDER BY t.date DESC, s.account_id, t.amount_minor DESC")

@@ -6191,20 +6191,30 @@ def api_import_confirm():
                 # Only insert (import_count - existing_count), minimum 0.
                 #
                 # A row is counted by the statement that printed it: two
-                # statements of one account whose periods overlap (HDFC
-                # 3528's Apr–Sep file and a download from 1 Sep, read in one
-                # import) each print the same row once, and it is one row.
-                # The count is the most copies any one statement printed, and
-                # those copies are the ones brought in, as importing the
-                # files one at a time would. Rows from a source that states
-                # no balance are one source together, as before.
+                # statements of one account whose periods both cover its day
+                # (HDFC 3528's Apr–Sep file and a download from 1 Sep, read
+                # in one import) each print the same row once, and it is one
+                # row. Of those statements, the one that printed the most
+                # copies brings them in. A copy printed outside its
+                # statement's period (a card's late posting) and rows from a
+                # source that states no balance count on their own, summed,
+                # as before.
                 from collections import Counter
+
+                def covers(position, day) -> bool:
+                    line = statement_lines[position] if position is not None else {}
+                    return bool(line.get("opening_date") and line.get("closing_date")
+                                and line["opening_date"] <= day <= line["closing_date"])
 
                 by_source = {}  # key -> {statement position or None -> [tx dicts]}
                 for tx in active_txns:
                     key = (account_ids[target_name(tx)], tx["date"], tx["description"], minor_of[id(tx)])
                     by_source.setdefault(key, {}).setdefault(tx.get("statement"), []).append(tx)
-                import_by_key = {key: max(sources.values(), key=len) for key, sources in by_source.items()}
+                import_by_key = {}
+                for key, sources in by_source.items():
+                    overlapping = [txs for position, txs in sources.items() if covers(position, key[1])]
+                    import_by_key[key] = (max(overlapping, key=len) if overlapping else []) + [
+                        tx for position, txs in sources.items() if not covers(position, key[1]) for tx in txs]
                 import_counts = Counter({key: len(txs) for key, txs in import_by_key.items()})
 
                 # A second statement's copies are skipped as duplicates.
