@@ -5124,9 +5124,10 @@ async function viewMerchant(id) {
     // Every read at once, none waiting on another; the page draws once all are in.
     // A merchant gone (deleted in another tab) answers 404 to its own reads.
     const gone = err => { if (err.status === 404) return null; throw err; };
-    const [s, r, list, varies] = await Promise.all([get(`/api/services/${id}`, { fresh: true }).catch(gone), refs(),
+    const [s, r, list, varies, owing] = await Promise.all([get(`/api/services/${id}`, { fresh: true }).catch(gone), refs(),
         get(`/api/transactions?service_id=${id}&expense_only=true&${new URLSearchParams(sortServer('mp', MP_SORT))}&per_page=${MP_PAGE}&page=${mp.page}${monthQuery(mp.month)}`, { fresh: true }),
-        get(`/api/services/${id}/book-varies`, { fresh: true }).catch(gone)]);
+        get(`/api/services/${id}/book-varies`, { fresh: true }).catch(gone),
+        get(`/api/services/${id}/balances`, { fresh: true }).catch(() => null)]);
     if (!s) {
         return `<div class="mp">${mpCrumbs()}<div class="page-head"><div><h1>Merchant</h1></div></div>
             <div class="notice">${icon('info')}<span>This merchant is no longer in fin. <a class="link" href="#/books/lists/merchants">Go to Lists</a></span></div></div>`;
@@ -5163,6 +5164,7 @@ async function viewMerchant(id) {
         <div class="mp-fact"><span class="cap">Rows</span><b class="num">${s.rows || 0}</b>${notChecked ? `<span class="sub">${notChecked} not checked</span>` : ''}</div>
         <div class="mp-fact mp-fact--set"><span class="cap" id="mp-nr">New rows</span>${eachSegHTML(s, 'mp-nr')}</div>
     </div></section>
+    ${partyBalancesHTML(s, owing)}
     <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>${sortOf('mp').key ? '' : 'Newest first. '}What you set is chosen and stays; the rest follows ${esc(s.name)}. Each change is undone in Changes. <a class="link" href="#/books/rows?party=${s.id}&month=all">Its rows on the Rows page</a>, with the rows on accounts linked to it.</p></div>
         ${list.transactions.length ? `<div class="bulk"><span class="bulk__n" id="mp-ticked">${mpTickedWords()}</span>
             <select class="sel" data-change="mp-bulk-book" aria-label="Book for the ticked rows">${bookOptions(r.books, mp.book, 'Choose book')}</select>
@@ -5172,6 +5174,21 @@ async function viewMerchant(id) {
             <thead><tr><th scope="col" class="k"><span class="sr-only">Tick</span></th><th scope="col">${sortHead('mp', 'date', MP_SORT)}</th><th scope="col">${sortHead('mp', 'account', MP_SORT)}</th><th scope="col">${sortHead('mp', 'description', MP_SORT)}</th><th scope="col" class="r">${sortHead('mp', 'amount', MP_SORT)}</th><th scope="col">${sortHead('mp', 'type', MP_SORT)}</th><th scope="col">Book</th><th scope="col"><span class="sr-only">State</span></th></tr></thead>
             <tbody>${rows}</tbody></table>${pager(list, 'mp-page', !!sortOf('mp').key)}`
         : '<p class="card-empty">No spending rows from this merchant yet.</p>'}</section></div>`;
+}
+/** A party's balances with the household and their net (RUL-020): what we
+ *  owe them on a loan joined to them, our money they hold on a shared
+ *  account joined to them. Nothing when no account with a balance is joined. */
+function partyBalancesHTML(s, owing) {
+    if (!owing || !owing.lines.length) return '';
+    const side = { owed: 'we owe them', held: 'ours they hold' };
+    const lines = owing.lines.map(l => `<tr><td>${pageLink('account', l.account_id, l.name)}<div class="small muted">${esc(side[l.side])}</div></td>
+        <td class="r num">${l.balance_minor == null ? tag('nofig', 'no figure') : esc(money(Math.abs(l.balance_minor), l.currency))}</td>
+        <td class="r num">${l.value_minor == null ? (l.balance_minor == null ? '' : tag('nofig', 'no rate')) : esc(money(Math.abs(l.value_minor), 'SGD'))}</td></tr>`).join('');
+    const out = owing.left_out.length ? `<div class="card-head"><p class="card-foot">Left out of the net: ${owing.left_out.map(x => `${esc(x.name)} (${esc(x.why)})`).join('; ')}.</p></div>` : '';
+    return `<section class="card mp-card" aria-labelledby="mp-owing"><div class="card-head"><div><h2 id="mp-owing">Balances with ${esc(s.name)}</h2>
+        <p>At ${esc(day(owing.as_at))}: what we owe them, what of ours they hold, and the net.</p></div></div>
+        <table class="t"><thead><tr><th scope="col">Account</th><th scope="col" class="r">In its currency</th><th scope="col" class="r">In S$</th></tr></thead>
+        <tbody>${lines}</tbody><tfoot><tr><th scope="row" colspan="2">Net</th><td class="r num"><b>${owing.net ? esc(owing.net) : '—'}</b></td></tr></tfoot></table>${out}</section>`;
 }
 /** Where the page sits: Books › Lists › Merchants (folio's crumbs). */
 function mpCrumbs() {

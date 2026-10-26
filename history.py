@@ -425,7 +425,9 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     would leave an expect-back record pointing at nothing or broken
     (expect_back.refusal_to_undo, expect_back.invariant_check), or take out
     a type something still uses (book_type.refusal_to_undo), or change a
-    loan's terms under figures worked out with them (loan_terms.refusal_to_undo).
+    loan's terms under figures worked out with them (loan_terms.refusal_to_undo),
+    or leave a bank account or a card joined to a party unshared
+    (shared.joined_unshared).
     A loan whose terms it puts back has its worked-out interest brought in
     line in the same undo (loan_interest.derive)."""
     r = conn.execute("SELECT * FROM change_entries WHERE id = ?", (entry_id,)).fetchone()
@@ -482,6 +484,14 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     if broken:
         conn.rollback()
         raise UndoRefused(broken)
+    # A bank account or a card joins a party only while shared (fin-redesign
+    # 21): an undo of the mark, or of taking it off its party, cannot part them.
+    import shared
+
+    unshared = shared.joined_unshared(conn, entry_id)
+    if unshared:
+        conn.rollback()
+        raise UndoRefused(unshared)
     conn.execute(
         "UPDATE change_entries SET undoes = ?, summary = ? WHERE id = ?",
         (entry_id, f"Undid: {r['summary'] or 'change ' + str(entry_id)}", undo_entry_id),

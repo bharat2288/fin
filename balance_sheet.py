@@ -810,6 +810,56 @@ def sheet(conn: sqlite3.Connection, month: str, name_of=lambda name: name,
     }
 
 
+def _side(conn: sqlite3.Connection, account, balance_minor) -> str:
+    """Which of a party's two balances a line is: "held" for the household's
+    part of a shared account, whatever its sign (a part below nil is owed to
+    the bank, not to the party); otherwise by the sign of the balance, and
+    by the account's kind when it is nil or there is none."""
+    if shared.is_shared(conn, account["id"]):
+        return "held"
+    if balance_minor:
+        return "owed" if balance_minor < 0 else "held"
+    return "owed" if account["type"] in account_kind.OWED_KINDS else "held"
+
+
+def party_lines(conn: sqlite3.Connection, party_id: int, month: str, name_of=lambda name: name) -> dict:
+    """A party's balances with the household at a month's end (RUL-020): the
+    line of each account joined to it, as the sheet draws it, each marked
+    `side` "owed" (what the household owes them) or "held" (the household's
+    money they hold; _side), and the net in the currency of the totals. Only
+    the household's accounts count: one a company book owns is its own. A line
+    left out of the totals (no figure, no rate) is left out of the net and
+    said. A person account has no line (persons left the sheet). With no
+    line, the net is None. Raises NotShown as `sheet` does."""
+    as_at = month_end(month)
+    lines = []
+    for account in conn.execute(
+        "SELECT id, name, type, currency, status FROM accounts WHERE party_id = ? AND type != 'person' "
+        "AND owner = ? ORDER BY name, id", (party_id, account_kind.HOUSEHOLD),
+    ).fetchall():
+        if account["type"] in COUNTERPARTIES[2]:
+            line = _counterparty_line(conn, account, as_at, month, name_of)
+        else:
+            line = _line(conn, account, as_at, month, name_of)
+        line["side"] = _side(conn, account, line["balance_minor"])
+        lines.append(_marked(line, account))
+    counted = [line["value_minor"] for line in lines if line["in_total"]]
+    net = sum(counted) if counted else None
+    return {
+        "month": month,
+        "as_at": as_at.isoformat(),
+        "currency": TOTAL_CURRENCY,
+        "lines": lines,
+        "net_minor": net,
+        "net": None if net is None else (
+            "square" if net == 0
+            else f"we owe {anchors.format_amount(-net, TOTAL_CURRENCY)}, net" if net < 0
+            else f"ours, {anchors.format_amount(net, TOTAL_CURRENCY)} net"),
+        "left_out": [{"name": line["name"], "why": line["left_out"]}
+                     for line in lines if not line["in_total"] and not line.get("counted_in")],
+    }
+
+
 def tie_lines(conn: sqlite3.Connection, account) -> list[dict]:
     """An account's tie lines, newest first, for its page: for each statement
     balance with an anchor before it, that earlier balance, what the rows
