@@ -206,6 +206,22 @@ def chain_until(path: Path, stop_before: str) -> None:
     raise AssertionError(f"{stop_before} is not in the chain")
 
 
+def chain_after(path: Path, step: str, runner: bool = True) -> None:
+    """Every step the chain runs after `step` (fin-redesign 07, 08, 09 added
+    steps after statement-periods; none changes a statement), so fin starts
+    on the book: through the runner, or applied straight to a book the runner
+    would refuse (one whose statement-periods step was done by hand)."""
+    names = [name for name, _ in conversion.CHAIN]
+    for name, module_name in conversion.CHAIN[names.index(step) + 1:]:
+        if runner:
+            conversion.run_step(path, conversion.chain_step(module_name), today=DAY)
+        else:
+            conn = sqlite3.connect(str(path))
+            conversion.chain_step(module_name).apply(conn)
+            conn.commit()
+            conn.close()
+
+
 @pytest.fixture
 def old(tmp_path: Path) -> Path:
     """A book in the shape from before the step, holding every kind of
@@ -341,9 +357,11 @@ def test_case_11_the_queue_and_the_numbers_read_the_same_after_the_conversion(ol
     conn.execute("ALTER TABLE statements ADD COLUMN period_start TEXT")
     conn.commit()
     conn.close()
+    chain_after(unfilled, convert_statement_periods.STEP.name, runner=False)
 
     before = fin_snapshot.snap(unfilled)
     convert(old)
+    chain_after(old, convert_statement_periods.STEP.name)
     after = fin_snapshot.snap(old)
 
     passed, result = fin_snapshot.diff(before, after)
@@ -571,6 +589,7 @@ def test_a_conversion_records_nothing_into_an_entry_the_book_left_open(old, monk
     conn.close()
 
     convert(old)
+    chain_after(old, convert_statement_periods.STEP.name)
     monkeypatch.setattr(db, "DB_PATH", old)
     db.invalidate_rules_cache()
     db.init_db()

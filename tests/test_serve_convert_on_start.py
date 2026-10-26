@@ -70,6 +70,10 @@ def _converted_book(tmp_path: Path) -> Path:
     path.parent.mkdir()
     conn = sqlite3.connect(path)
     conn.executescript(db.SCHEMA_PATH.read_text())
+    # A new book's first start seeds the flow lists as rules and marks it
+    # (db.seed_flow_rules); a book without the mark reads as unconverted.
+    db.seed_flow_rules(conn)
+    conn.commit()
     conn.close()
     return path
 

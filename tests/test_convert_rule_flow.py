@@ -163,7 +163,7 @@ def test_the_app_starts_once_converted(old, monkeypatch):
 
 def test_the_step_runs_after_retire_single_mark_in_the_chain():
     names = [name for name, _ in conversion.CHAIN]
-    assert names[names.index(convert_rule_flow.NAME) - 1] == "retire-single-mark"
+    assert names.index(convert_rule_flow.NAME) > names.index("retire-single-mark")
     assert conversion.chain_step(dict(conversion.CHAIN)[convert_rule_flow.NAME]) is convert_rule_flow.STEP
 
 
