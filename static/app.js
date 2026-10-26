@@ -1167,18 +1167,22 @@ function homeTile(cards, months, { cls, eyebrow, label, minor, avg, body, values
         ${values.length ? homeBars(values, months, cards.ref_month, cls) : ''}
         <span class="home-tile__foot">${esc(foot)} ${icon('caret-right')}</span></a>`;
 }
+/** A book's income and net on its Home card (income_book.py): the income
+ *  of the kinds that belong to it, and that less its costs (none said in a
+ *  month with no statement); '' when no kind does. Income with no rate is
+ *  named, not guessed. */
+function bookIncomeLine(cards, key) {
+    if (!(`${key}_income` in cards)) return '';
+    const kinds = (cards[`${key}_income_kinds`] || []).join(', ');
+    const net = `${key}_net` in cards ? ` · net <b>${esc(money(toMinor(cards[`${key}_net`]), 'SGD'))}</b> after its costs` : '';
+    const unvalued = cards[`${key}_income_unvalued`] ? ` (${plural(cards[`${key}_income_unvalued`], 'row')} with no rate left out)` : '';
+    return `${esc(kinds)} in <b>${esc(money(toMinor(cards[`${key}_income`]), 'SGD'))}</b>${unvalued}${net}.`;
+}
 /** Home's book tiles, one per declared book, from stat-cards' payload. The
  *  figure is the month net of refunds, as the rest of fin counts it; the chip
  *  names what the refunds came to. A month with no statement in is marked,
  *  not a zero. A company's tile is the part of its costs the household's own
  *  accounts paid, and says so. */
-/** A book's income and net on its Home card (income_book.py): the income
- *  of the kinds that belong to it, and that less its costs; '' when no kind does. */
-function bookIncomeLine(cards, key) {
-    if (!(`${key}_income` in cards)) return '';
-    const kinds = (cards[`${key}_income_kinds`] || []).join(', ');
-    return `${esc(kinds)} in <b>${esc(money(toMinor(cards[`${key}_income`]), 'SGD'))}</b> · net <b>${esc(money(toMinor(cards[`${key}_net`]), 'SGD'))}</b> after its costs.`;
-}
 function homeBookTiles(cards, books) {
     const hist = cards.history || [];
     const months = hist.map(h => h.month);
@@ -1200,8 +1204,9 @@ function homeBookTiles(cards, books) {
             tiles.push(homeTile(cards, months, { cls: 'is-household', eyebrow: 'Household', label: `${b.name} spending`, minor, avg, values, ...go,
                 body: `${plural(outRows, 'row')} out${back ? ` · ${back}` : ''}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
         } else {
+            const income = bookIncomeLine(cards, key);
             tiles.push(homeTile(cards, months, { cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, ...go,
-                body: `Costs paid from household accounts${back ? ` · ${back}` : ''}. Not household spending; it moves ${esc(b.name)}’s company balance.${bookIncomeLine(cards, key) ? ` ${bookIncomeLine(cards, key)}` : ''}` }));
+                body: `Costs paid from household accounts${back ? ` · ${back}` : ''}. Not household spending; it moves ${esc(b.name)}’s company balance.${income ? ` ${income}` : ''}` }));
         }
     });
     return tiles;
@@ -5584,6 +5589,7 @@ ACT['income-kind-book'] = async el => {
     if (!s.ok) { toast(s.data.error || 'That did not work; nothing was changed', { bad: true }); el.value = el.dataset.held; return; }
     el.dataset.held = s.data.book;
     toast(s.data.book === 'Household' ? 'Back to the household’s income' : `Now counts on ${s.data.book}’s card`, { undo: s.change });
+    rerender();
 };
 ACT['account-save'] = async el => {
     const name = $('#ac-name').value.trim();

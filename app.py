@@ -3461,23 +3461,29 @@ def api_dashboard_stat_cards():
         # the household's accounts, in S$: the book's card nets it against its
         # costs. Rows carry no book for it: the kind names the book.
         book_income = {}
+        span = [f"{ref_y:04d}-{ref_m:02d}-01", f"{ref_y:04d}-{ref_m:02d}-{calendar.monthrange(ref_y, ref_m)[1]:02d}"]
         for name, kinds in income_book.kinds_by_book(conn).items():
             if name == book_type.DEFAULT_BOOK or name not in dict(books):
                 continue
-            got = conn.execute(f"""
-                SELECT -COALESCE(SUM(t.amount_minor), 0)
-                FROM {trend_series.counted_from_sgd()}
+            of_kinds = f"""
                 LEFT JOIN services svc ON t.service_id = svc.id
                 LEFT JOIN accounts a ON s.account_id = a.id
                 WHERE t.flow_type = 'income' AND a.owner = ?
                   AND t.type_id IN ({', '.join('?' * len(kinds))})
                   AND t.date >= ? AND t.date <= ?
                   {extra_filters}
-            """, [account_kind.HOUSEHOLD, *kinds, f"{ref_y:04d}-{ref_m:02d}-01",
-                f"{ref_y:04d}-{ref_m:02d}-{calendar.monthrange(ref_y, ref_m)[1]:02d}", *extra_params]).fetchone()[0]
+            """
+            params = [account_kind.HOUSEHOLD, *kinds, *span, *extra_params]
+            got = conn.execute(f"SELECT -COALESCE(SUM(t.amount_minor), 0) FROM {trend_series.counted_from_sgd()}"
+                               + of_kinds, params).fetchone()[0]
+            # Income in another currency the month has no rate for: left out
+            # of the figure, never guessed, and counted so the card says so.
+            unvalued = conn.execute(
+                f"SELECT COUNT(*) FROM {trend_series.counted_from()}" + of_kinds
+                + " AND sgd_value(t.amount_minor, a.currency, t.date, t.id) IS NULL", params).fetchone()[0]
             names = [r[0] for r in conn.execute(
                 f"SELECT name FROM types WHERE id IN ({', '.join('?' * len(kinds))}) ORDER BY id", kinds)]
-            book_income[name] = (got, names)
+            book_income[name] = (got, names, unvalued)
 
         # Query 3 prior months for rolling average
         avg_data = [query_month(y, m) for y, m in avg_months]
@@ -3595,10 +3601,13 @@ def api_dashboard_stat_cards():
         payload[f"avg_{key}_out"] = money.from_minor(averages[f"out_{key}"])
         payload[f"{key}_missing"] = bool(missing.get(key))
         if name in book_income:
-            income_minor, kinds = book_income[name]
+            income_minor, kinds, unvalued = book_income[name]
             payload[f"{key}_income"] = money.from_minor(income_minor)
             payload[f"{key}_income_kinds"] = kinds
-            payload[f"{key}_net"] = money.from_minor(income_minor - ref_data[shown])
+            payload[f"{key}_income_unvalued"] = unvalued
+            # A month with no statement in has no costs to net: no net is said.
+            if not missing.get(key):
+                payload[f"{key}_net"] = money.from_minor(income_minor - ref_data[shown])
     return jsonify(payload)
 
 

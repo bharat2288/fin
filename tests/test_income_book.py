@@ -14,7 +14,8 @@ from __future__ import annotations
 import pytest
 
 import book_type
-from tests.trend_fixtures import account, row, statement
+from test_client_seams import NODE, _function, needs_node
+from tests.trend_fixtures import account, row, seed_rate, statement
 
 GROVE = "Orange Grove"
 KEY = GROVE.lower()
@@ -173,26 +174,74 @@ def test_a_book_an_income_kind_belongs_to_cannot_have_its_add_undone(client, con
     assert resp.get_json()["error"] == "something is filed under the book Orange Grove; change that first"
 
 
+@needs_node
 def test_the_home_card_says_the_income_and_the_net():
     import json
-    import shutil
     import subprocess
 
-    from test_client_seams import _function
-
-    if shutil.which("node") is None:
-        pytest.skip("node is not on PATH")
     code = "\n".join([
-        _function("esc"), _function("bookIncomeLine"),
+        _function("esc"), _function("plural"), _function("bookIncomeLine"),
         "const money = (minor, cur) => 'S$ ' + (minor / 100).toFixed(2);",
         "const toMinor = v => Math.round(Number(v) * 100);",
         "const cards = {'orange grove_income': '10200.00', 'orange grove_net': '8700.00',"
-        " 'orange grove_income_kinds': ['Rental']};",
-        "console.log(JSON.stringify([bookIncomeLine(cards, 'orange grove'), bookIncomeLine(cards, 'moom')]));",
+        " 'orange grove_income_kinds': ['Rental'], 'orange grove_income_unvalued': 0};",
+        "const missing = {'orange grove_income': '10200.00', 'orange grove_income_kinds': ['Rental'],"
+        " 'orange grove_income_unvalued': 1};",
+        "console.log(JSON.stringify([bookIncomeLine(cards, 'orange grove'), bookIncomeLine(cards, 'moom'),"
+        " bookIncomeLine(missing, 'orange grove')]));",
     ])
-    out = subprocess.run(["node", "-"], input=code, capture_output=True, text=True, timeout=30,
+    out = subprocess.run([NODE, "-"], input=code, capture_output=True, text=True, timeout=30,
                          check=True, encoding="utf-8")
-    line, none = json.loads(out.stdout)
+    line, none, no_net = json.loads(out.stdout)
 
     assert line == "Rental in <b>S$ 10200.00</b> · net <b>S$ 8700.00</b> after its costs."
     assert none == ""
+    assert no_net == "Rental in <b>S$ 10200.00</b> (1 row with no rate left out)."
+
+
+# --- review findings -------------------------------------------------------------
+
+
+def test_rent_on_an_account_the_household_does_not_own_is_not_counted(client, conn, grove):
+    """As the card's costs are those the household's own accounts paid."""
+    belong(client, grove["rental"], GROVE)
+    company = statement(conn, account(conn, "Sample Moom Bank 0005", type="bank", owner="Moom"), "2026-09")
+    other = row(conn, company, "SAMPLE TENANT RENT", -RENT, flow="review", day="2026-09-02")
+    assert client.post(f"/api/review/{other}/label",
+                       json={"choice": "income", "income_kind_id": grove["rental"]}).status_code == 200
+
+    assert cents(cards(client)[f"{KEY}_income"]) == RENT
+
+
+def test_rent_in_another_currency_counts_at_its_rate_and_is_named_without_one(client, conn, grove):
+    belong(client, grove["rental"], GROVE)
+    rupees = statement(conn, account(conn, "Sample Rupee Bank 0009", type="bank", currency="INR"), "2026-09")
+    flat = row(conn, rupees, "SAMPLE INDIA TENANT", -5_000_000, flow="review", day="2026-09-10")  # ₹50,000
+    assert client.post(f"/api/review/{flat}/label",
+                       json={"choice": "income", "income_kind_id": grove["rental"]}).status_code == 200
+
+    before = cards(client)
+    assert cents(before[f"{KEY}_income"]) == RENT
+    assert before[f"{KEY}_income_unvalued"] == 1
+
+    seed_rate(conn, "INR/SGD", "2026-09-10", "0.0155")
+    after = cards(client)
+    assert cents(after[f"{KEY}_income"]) == RENT + 77_500   # ₹50,000 at 0.0155 is S$775.00
+    assert after[f"{KEY}_income_unvalued"] == 0
+
+
+def test_a_month_with_no_statement_says_no_net(client, conn, grove):
+    belong(client, grove["rental"], GROVE)
+    # Orange Grove's costs came from a card in June, so July's card, with no
+    # statement in from it, is missing; the rent alone is no net.
+    card = statement(conn, account(conn, "Sample Card 0003", type="card", last_four="0003"), "2026-06")
+    row(conn, card, "SAMPLE MCST", MCST, book=GROVE, type_name="Repairs & maintenance", day="2026-06-05")
+    bank = statement(conn, account(conn, "Sample Bank 0004", type="bank", last_four="0004"), "2026-07")
+    rent = row(conn, bank, "SAMPLE TENANT RENT", -RENT, flow="review", day="2026-07-01")
+    client.post(f"/api/review/{rent}/label", json={"choice": "income", "income_kind_id": grove["rental"]})
+
+    july = cards(client, "2026-07")
+
+    assert july[f"{KEY}_missing"] is True
+    assert cents(july[f"{KEY}_income"]) == RENT
+    assert f"{KEY}_net" not in july
