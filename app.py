@@ -58,6 +58,7 @@ import valuation
 import expect_routes
 import folio_link
 import fx_pair
+import duplicates
 import expectation_api
 import refund_links
 import relabel_preview
@@ -77,6 +78,7 @@ app.register_blueprint(trend_routes.bp)
 app.register_blueprint(expect_routes.bp)
 app.register_blueprint(folio_link.bp)
 app.register_blueprint(fx_pair.bp)
+app.register_blueprint(duplicates.bp)
 
 
 def format_type_display(parent: str | None, child: str | None) -> str:
@@ -922,6 +924,7 @@ _CHANGE_SUMMARIES = {
 _CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
 _CHANGE_SUMMARIES.update({f"{folio_link.bp.name}.{name}": words for name, words in folio_link.SUMMARIES.items()})
 _CHANGE_SUMMARIES.update({f"{fx_pair.bp.name}.{name}": words for name, words in fx_pair.SUMMARIES.items()})
+_CHANGE_SUMMARIES.update({f"{duplicates.bp.name}.{name}": words for name, words in duplicates.SUMMARIES.items()})
 
 
 def _caller() -> tuple[str, str]:
@@ -6230,16 +6233,36 @@ def api_import_confirm():
                 # genuine same-day repeats (e.g. two identical coffees).
                 # For each group, count how many already exist in DB for this account.
                 # Only insert (import_count - existing_count), minimum 0.
+                #
+                # A row is counted by the statement that printed it: two
+                # statements of one account whose periods both cover its day
+                # (HDFC 3528's Apr–Sep file and a download from 1 Sep, read
+                # in one import) each print the same row once, and it is one
+                # row. Of those statements, the one that printed the most
+                # copies brings them in. A copy printed outside its
+                # statement's period (a card's late posting) and rows from a
+                # source that states no balance count on their own, summed,
+                # as before.
                 from collections import Counter
 
-                import_counts = Counter()
-                import_by_key = {}  # key -> [list of tx dicts]
+                def covers(position, day) -> bool:
+                    line = statement_lines[position] if position is not None else {}
+                    return bool(line.get("opening_date") and line.get("closing_date")
+                                and line["opening_date"] <= day <= line["closing_date"])
+
+                by_source = {}  # key -> {statement position or None -> [tx dicts]}
                 for tx in active_txns:
                     key = (account_ids[target_name(tx)], tx["date"], tx["description"], minor_of[id(tx)])
-                    import_counts[key] += 1
-                    import_by_key.setdefault(key, []).append(tx)
+                    by_source.setdefault(key, {}).setdefault(tx.get("statement"), []).append(tx)
+                import_by_key = {}
+                for key, sources in by_source.items():
+                    overlapping = [txs for position, txs in sources.items() if covers(position, key[1])]
+                    import_by_key[key] = (max(overlapping, key=len) if overlapping else []) + [
+                        tx for position, txs in sources.items() if not covers(position, key[1]) for tx in txs]
+                import_counts = Counter({key: len(txs) for key, txs in import_by_key.items()})
 
-                duplicates_skipped = 0
+                # A second statement's copies are skipped as duplicates.
+                duplicates_skipped = len(active_txns) - sum(import_counts.values())
                 # The other accounts the same printed statement carried (a BS
                 # statement: the Multiplier and Home Reno), where an older
                 # read may have filed this account's rows.

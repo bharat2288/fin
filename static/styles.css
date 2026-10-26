@@ -606,6 +606,8 @@ select.sel.need { border-color: var(--semantic-warning); background-color: var(-
 .notice > svg { width: 16px; height: 16px; margin-top: 2px; flex: none; }
 .notice.warn { border-color: var(--semantic-warning); background: color-mix(in srgb, var(--semantic-warning) 8%, var(--bg-surface)); }
 .notice.warn > svg { color: var(--semantic-warning); }
+.twin-notice p { margin: 0 0 var(--space-2); }
+.twin-list { margin: 0 0 var(--space-2); padding-left: 1.2em; }
 .notice.bad { border-color: var(--semantic-error); background: color-mix(in srgb, var(--semantic-error) 7%, var(--bg-surface)); }
 .notice.bad > svg { color: var(--semantic-error); }
 .notice.ok { border-color: var(--semantic-success); background: color-mix(in srgb, var(--semantic-success) 9%, var(--bg-surface)); }
