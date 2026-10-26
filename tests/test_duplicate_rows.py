@@ -98,7 +98,12 @@ class FakePdf:
 
 @pytest.fixture(autouse=True)
 def nothing_reaches_outside(monkeypatch):
-    monkeypatch.setattr(rates, "_http_get", lambda _url: pytest.fail("a test tried to reach the network"))
+    def refuse(_url):
+        # Raised as the network failing would be: an import asks for the
+        # rates of its rows' days, and takes a failure in its stride.
+        raise OSError("a test tried to reach the network")
+
+    monkeypatch.setattr(rates, "_http_get", refuse)
     monkeypatch.delenv(parse_hdfc.PASSWORD_VARIABLE, raising=False)
 
 
