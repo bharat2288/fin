@@ -144,8 +144,9 @@ def test_recurring_internal_ib_ref_classifies_as_transfer():
     assert classify_flow(facts, CTX_WITH_RAILS) == "transfer"
 
 
-def test_local_own_alias_overrides_are_loaded(conn, monkeypatch):
-    """Private aliases stay outside source while still feeding classifier context."""
+def test_local_own_alias_overrides_are_no_longer_loaded(conn, monkeypatch):
+    """The host's private aliases are retired (fin-redesign 08): an own-account
+    name is a rule the operator sees, never a variable (RUL-010)."""
     from flow import build_context
 
     monkeypatch.setenv("FIN_OWN_ALIAS_OVERRIDES", "LOCAL PAYNOW ALIAS;ALT ALIAS")
@@ -155,7 +156,7 @@ def test_local_own_alias_overrides_are_loaded(conn, monkeypatch):
         "description": "Inward PayNow LOCAL PAYNOW ALIAS",
         "amount_minor": -10000,
     }
-    assert classify_flow(facts, ctx) == "transfer"
+    assert classify_flow(facts, ctx) == "income"
 
 
 def test_named_paynow_counterparty_stays_expense():
@@ -301,7 +302,7 @@ def test_backfill_populates_all_rows(conn, tmp_path):
     # are dropped after grep gate (ADR v2 bullet 10) so we no longer seed them.
     seed = [
         "Inward Credit A C J rent",                         # income
-        "TRANSFER OF FUND TRF SURI BHARAT I-BANK",          # transfer
+        "TOP-UP TO PAYLAH! SAMPLE",                         # transfer
         "AMAZON WEB SERVICES",                              # expense
         "BAT Cash Rebate Something",                        # refund
         "DBSC-5420891100884777 : I-BANK REF",               # payment (via linked CC)
@@ -382,8 +383,11 @@ def test_resolve_accepts_flow_type_override_and_sets_manual_flag(client, conn):
     assert row["flow_type_manual"] == 1
 
 
-def test_resolve_recomputes_flow_type_from_the_wording(client, conn):
-    """Resolve without explicit override should refresh classifier-derived flow_type."""
+def test_resolve_keeps_a_flow_the_classifier_no_longer_gives(client, conn):
+    """Resolve without explicit override works a row's flow out again only
+    where it is still what fin works out for the row as it is (ADR-009,
+    relabel_preview.fins_own): a stored income the wording now reads as a
+    refund was not, so it stays."""
     conn.execute("INSERT INTO services (name) VALUES ('Refund Service')")
     svc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -422,7 +426,7 @@ def test_resolve_recomputes_flow_type_from_the_wording(client, conn):
         "SELECT flow_type, flow_type_manual FROM transactions WHERE id = ?",
         (tx_id,),
     ).fetchone()
-    assert row["flow_type"] == "refund"
+    assert row["flow_type"] == "income"
     assert row["flow_type_manual"] == 0
 
 
@@ -446,8 +450,11 @@ def test_the_drift_apply_preserves_flow_type_manual_rows(client, conn):
     assert row["flow_type_manual"] == 1
 
 
-def test_the_drift_apply_recomputes_flow_type_on_the_rows_a_rule_relabels(client, conn):
-    """Relabelling the rows that differ from their rule refreshes derived flow_type on non-manual rows."""
+def test_the_drift_apply_relabels_and_leaves_a_flow_fin_did_not_work_out(client, conn):
+    """Relabelling the rows that differ from their rule works flow out again
+    only where the stored flow is still what fin worked out (ADR-009): this
+    row is held as income though its wording reads as a refund today, so it
+    is relabelled and keeps its flow."""
     shopping = _type_id(conn, "Shopping")
     conn.execute(
         "INSERT INTO services (name, book, type_id) VALUES ('Refund Service', 'Household', ?)",
@@ -488,7 +495,7 @@ def test_the_drift_apply_recomputes_flow_type_on_the_rows_a_rule_relabels(client
     ).fetchone()
     assert (row["book"], row["type_id"]) == ("Household", shopping)
     assert row["service_id"] == svc_id
-    assert row["flow_type"] == "refund"
+    assert row["flow_type"] == "income"
     assert row["flow_type_manual"] == 0
 
 
@@ -691,7 +698,7 @@ def test_parser_post_parse_classification_sets_flow_type(conn):
     # Synthetic parsed txns covering all 5 flow types
     txns = [
         ParsedTransaction(date="2025-04-09", description="Inward Credit-FAST A C J tenant rent", amount_minor=-1020000, is_transfer=True),
-        ParsedTransaction(date="2025-04-10", description="TRANSFER OF FUND TRF SURI BHARAT I-BANK", amount_minor=-100000, is_transfer=True),
+        ParsedTransaction(date="2025-04-10", description="TOP-UP TO PAYLAH! SAMPLE", amount_minor=-100000, is_transfer=True),
         ParsedTransaction(date="2025-04-11", description="BUSINESS ADVANCE CARD TRANSACTION BAT AMAZON WEB SERVICES", amount_minor=8756),
         ParsedTransaction(date="2025-04-12", description="BAT Cash Rebate", amount_minor=-88, is_payment=True),
     ]

@@ -674,7 +674,7 @@ SAMPLE = {
 
 
 def preview_html(sample) -> dict:
-    return _node("\n".join([PRELUDE, _function("monthName"), _function("bandedTable"), _const("PREVIEW_FIELD"), _function("previewParts"),
+    return _node("\n".join([PRELUDE, _function("monthName"), _function("bandedTable"), _const("PREVIEW_FIELD"), _function("keptWords"), _function("flowsLine"), _function("previewParts"),
                             f"console.log(JSON.stringify(previewParts({json.dumps(sample)})));"]))
 
 
@@ -735,7 +735,7 @@ async function askPreview(p) { return answer; }
     assert got["sent"][1] == ["PUT", "/api/services/4", {"book": "Moom", "past": "apply", "token": "T1"}]
     assert len(got["sent"]) == 3                       # the cancelled one sent its preview only
     assert got["one"]["ok"] is True and got["one"]["change"] == 9
-    assert got["one"]["answered"] == {"past": "apply", "count": 3}
+    assert got["one"]["answered"] == {"past": "apply", "count": 3, "flows": []}   # the drawer's flows ride along
     assert got["cancelled"]["ok"] is False and got["cancelled"]["cancelled"] is True
 
 

@@ -324,12 +324,15 @@ def test_in_local_dev_a_configured_backup_still_warns_when_overdue(book):
 
 def _laptop_book(tmp_path, schema: str | None = None) -> tuple[bytes, str]:
     """A book as the laptop holds it once every conversion step has run:
-    schema.sql's shape, the change history's tables and triggers included.
-    `schema` builds an older shape instead."""
+    schema.sql's shape, the change history's tables and triggers included,
+    and the flow-rules step's marker. `schema` builds an older shape instead."""
     path = tmp_path / "laptop" / "fin.db"
     path.parent.mkdir()
     conn = sqlite3.connect(path)
     conn.executescript(schema if schema is not None else db.SCHEMA_PATH.read_text())
+    if schema is None:
+        conn.execute("INSERT INTO seeded_once (seed) VALUES (?)", (db.FLOW_RULES_SEED,))
+        conn.commit()
     conn.close()
     data = path.read_bytes()
     return data, hashlib.sha256(data).hexdigest()
@@ -341,7 +344,10 @@ def test_the_converted_laptop_book_keeps_the_change_history(tmp_path):
     try:
         assert history.has_shape(conn)
         assert "change-history" not in conversion.not_applied(conn)
-        assert conversion.CHAIN[-1][0] == "statement-periods"
+        assert conversion.CHAIN[-1][0] == "flow-rules"
+        assert "statement-periods" not in conversion.not_applied(conn)
+        assert "flow-rules" not in conversion.not_applied(conn)
+        assert "rule-flow" not in conversion.not_applied(conn)
         assert "expect-back" not in conversion.not_applied(conn)
         assert "label-source" not in conversion.not_applied(conn)
         assert "retire-single-mark" not in conversion.not_applied(conn)

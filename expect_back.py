@@ -213,6 +213,68 @@ def refusal_to_mark(conn: sqlite3.Connection, row_id: int, direction: str) -> st
     return _row_refusal(_row(conn, row_id), direction)
 
 
+def records_refusal(conn: sqlite3.Connection, tx_id: int) -> str | None:
+    """What rests on a row, in a refusal's words: its expectation, else what it
+    places as a payment. None when the row carries no record. A hand label
+    that would make the row something the sheet already counts is refused in
+    these words (label_refusal); a rule keeps such a row's flow where that
+    refuses the move, and its preview says why in them
+    (relabel_preview.flow_writes)."""
+    marked = conn.execute(
+        "SELECT direction, amount_minor, currency FROM expectation WHERE row_id = ?", (tx_id,)
+    ).fetchone()
+    if marked is not None:
+        what = "expected back" if marked["direction"] == BACK else "to pay back"
+        return (f"{short(marked['amount_minor'], marked['currency'])} of this row is {what}; "
+                "undo the mark first.")
+    placed = conn.execute(
+        "SELECT so.amount_minor, COALESCE(a.currency, 'SGD') AS currency, so.expectation_id, "
+        "COALESCE(it.description, 'Opening figure · ' || p.name) AS item "
+        "FROM set_off so JOIN transactions t ON t.id = so.payment_row_id "
+        "JOIN statements s ON s.id = t.statement_id JOIN accounts a ON a.id = s.account_id "
+        "LEFT JOIN expectation e ON e.id = so.expectation_id "
+        "LEFT JOIN transactions it ON it.id = e.row_id LEFT JOIN accounts p ON p.id = e.person_id "
+        "WHERE so.payment_row_id = ? ORDER BY so.id",
+        (tx_id,),
+    ).fetchall()
+    if not placed:
+        return None
+
+    def where(p) -> str:
+        return "waiting for its row" if p["expectation_id"] is None else f"set against {p['item']}"
+
+    if len(placed) == 1:
+        p = placed[0]
+        return f"{short(p['amount_minor'], p['currency'])} of this row is {where(p)}; unlink it first."
+    each = [f"{short(p['amount_minor'], p['currency'])} {where(p)}" for p in placed]
+    return f"This row has {', '.join(each[:-1])} and {each[-1]}; unlink those first."
+
+
+def counted_elsewhere(flow_name: str | None, book: str | None, other_kind: str | None) -> bool:
+    """Whether a row with this flow, book and other side's kind is one the
+    sheet already counts whole, so no record may rest on it: a move between
+    the household's own accounts, a company's row, a movement naming a
+    non-person."""
+    if flow_name in ("transfer", "payment"):
+        return True
+    if (book or book_type.DEFAULT_BOOK) != account_kind.HOUSEHOLD:
+        return True
+    return flow_name == flow.MOVEMENT and other_kind != "person"
+
+
+def label_refusal(conn: sqlite3.Connection, tx_id: int, flow_name: str | None, book: str | None,
+                  other_kind: str | None) -> str | None:
+    """Why a label may not make this row what it would then be (its flow, book
+    and other side's kind after the write), or None: a row a record rests on
+    keeps to what the sheet counts once (records_refusal's words). A hand
+    label is refused so (app._label_refusal); a rule keeps such a row's flow
+    where this refuses the move, and its preview says why in these words
+    (relabel_preview.flow_writes)."""
+    if not counted_elsewhere(flow_name, book, other_kind):
+        return None
+    return records_refusal(conn, tx_id)
+
+
 # --- reads ---------------------------------------------------------------------
 
 

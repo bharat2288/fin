@@ -460,8 +460,8 @@ def test_a_row_written_with_no_source_after_label_source_does_not_make_it_pendin
 
 
 def test_a_never_converted_book_reads_both_steps_pending_and_fin_names_them(todays, monkeypatch):
-    waiting = not_applied(todays)
-    assert waiting[waiting.index(NAME) - 1:waiting.index(NAME) + 1] == [convert_label_source.NAME, NAME]
+    assert [n for n in not_applied(todays) if n in (convert_label_source.NAME, NAME)] == [
+        convert_label_source.NAME, NAME]
     monkeypatch.setattr(db, "DB_PATH", todays)
     with pytest.raises(db.DatabaseNotConverted) as refused:
         db.init_db()
