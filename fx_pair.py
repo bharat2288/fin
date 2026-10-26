@@ -150,14 +150,14 @@ def _legs(conn: sqlite3.Connection) -> list[dict]:
     return found
 
 
-def shown_printed(held: tuple | None) -> dict | None:
+def shown_printed(currency: str, printed: str | None) -> dict | None:
     """The bank's rate a row's wording prints, as /api/transactions lists it,
-    from valuation.bank_rates' (currency, rate), or None: shaped as `shown`,
-    with no other row."""
-    if held is None:
+    from the row's currency and its printed_rate (valuation.attach; S$ for
+    one unit, decimal text), or None: shaped as `shown`, with no other row."""
+    if printed is None:
         return None
-    currency, rate = held
-    return {"per_sgd": shown_rate(rate), "currency": currency, "source": FROM_WORDING, "pair_row_id": None}
+    return {"per_sgd": shown_rate(Decimal(printed)), "currency": currency, "source": FROM_WORDING,
+            "pair_row_id": None}
 
 
 def _declined(conn: sqlite3.Connection) -> set[tuple[int, int]]:

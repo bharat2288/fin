@@ -3783,7 +3783,8 @@ def api_transactions():
                 (SELECT json_object('rate', fp.rate, 'currency', fp.currency, 'source', fp.source,
                         'pair_row_id', CASE WHEN fp.out_row_id = t.id THEN fp.in_row_id ELSE fp.out_row_id END)
                  FROM fx_pair fp WHERE fp.state = 'confirmed'
-                   AND (fp.out_row_id = t.id OR fp.in_row_id = t.id)) AS real_rate
+                   AND (fp.out_row_id = t.id OR fp.in_row_id = t.id)) AS real_rate,
+                printed_rate(t.id) AS printed_rate
             FROM transactions t
             {type_joins}
             LEFT JOIN services svc ON t.service_id = svc.id
@@ -3797,8 +3798,6 @@ def api_transactions():
             """,
             params + [per_page, offset],
         ).fetchall()
-        # The bank's rate a row's wording prints, which values it (valuation.py).
-        printed = valuation.bank_rates(conn)
 
     txns = []
     for r in rows:
@@ -3808,7 +3807,8 @@ def api_transactions():
         tx["amount_sgd"] = money.from_minor(tx["amount_minor"], tx["currency"])
         # The real rate a confirmed cross-currency pair holds for it (fx_pair.py).
         # Failing one, the bank's rate its wording prints.
-        tx["real_rate"] = fx_pair.shown(tx["real_rate"]) or fx_pair.shown_printed(printed.get(tx["id"]))
+        printed = tx.pop("printed_rate")
+        tx["real_rate"] = fx_pair.shown(tx["real_rate"]) or fx_pair.shown_printed(tx["currency"], printed)
         # Its parts (spec 23): what is expected and placed on it, and its own
         # part, each in whole minor units with the row's sign. counted_minor
         # is what a sum of rows adds: the own part. The pill words them; the

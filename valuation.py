@@ -48,7 +48,7 @@ def _snapshot(conn: sqlite3.Connection) -> dict:
     """{currency: ([days], [Decimal rates])}, days ascending; under REAL,
     {row id: (currency, Decimal rate)} for the rows a confirmed pair holds;
     and under BANK, the same for the rows whose wording prints the bank's
-    rate (bank_rates)."""
+    rate (_bank_rates)."""
     out: dict = {REAL: _real_rates(conn)}
     for row in conn.execute("SELECT pair, date, rate FROM rates ORDER BY pair, date"):
         currency, _, quote = row[0].partition("/")
@@ -127,12 +127,6 @@ def _bank_rates(conn: sqlite3.Connection, held: dict) -> dict:
     return out
 
 
-def bank_rates(conn: sqlite3.Connection) -> dict:
-    """{row id: (currency, Decimal rate)}: each row valued at the bank's rate
-    its wording prints, as S$ for one unit, over the rates saved now."""
-    return _snapshot(conn)[BANK]
-
-
 def _real_rates(conn: sqlite3.Connection) -> dict:
     """{row id: (currency, Decimal rate)}: the in rows of confirmed pairs. A
     book with no fx_pair table yet holds none."""
@@ -178,7 +172,8 @@ def _value(held: dict, amount_minor, currency, day, row_id=None):
 
 
 def attach(conn: sqlite3.Connection) -> None:
-    """Give the connection `sgd_value(amount_minor, currency, day[, row_id])`,
+    """Give the connection `sgd_value(amount_minor, currency, day[, row_id])`
+    and `printed_rate(row_id)`,
     over the rates saved when it is attached (and the real rates of confirmed
     pairs, read by the row's id when it is given): every connection fin opens is attached
     (db.get_connection). Attach again after saving a rate on the same
@@ -196,6 +191,16 @@ def attach(conn: sqlite3.Connection) -> None:
 
     conn.create_function("sgd_value", 3, sgd_value, deterministic=True)
     conn.create_function("sgd_value", 4, sgd_value, deterministic=True)
+
+    def printed_rate(row_id):
+        if "rates" not in held:
+            held["rates"] = _snapshot(conn)
+        found = held["rates"].get(BANK, {}).get(row_id)
+        return None if found is None else str(found[1])
+
+    # The bank's rate a row's wording prints that values it (_bank_rates), as
+    # decimal text, S$ for one unit; NULL for none.
+    conn.create_function("printed_rate", 1, printed_rate, deterministic=True)
 
 
 def valuer(conn: sqlite3.Connection):
