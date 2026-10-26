@@ -203,6 +203,17 @@ def test_a_rupee_row_with_no_saved_rate_is_named_as_left_out(client, conn, indig
     assert [(x["currency"], x["amount_minor"], x["month"]) for x in p["left_out"]] == [("INR", 1_000_000, "2026-09")]
 
 
+def test_a_rupee_row_moves_at_the_rate_of_its_day_as_the_tiles_count_it(client, conn, indigo):
+    # A rate saved for the rupee row's own day (25 Sep) is the one it moves at,
+    # not the month-end rate (RUL-022): Rs 10,000 at 0.0150 = S$ 150.00.
+    seed_rate(conn, "INR/SGD", "2026-09-25", "0.0150")
+
+    p = preview_of(client, indigo["svc"], {"book": "Moom"})["preview"]
+
+    assert p["money"] == [{"from": "Household", "to": "Moom", "amount_minor": 984000 - 15500 + 15000}]
+    assert p["left_out"] == []
+
+
 # --- case 12: a merchant's type changes ----------------------------------------------------
 
 

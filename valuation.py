@@ -82,22 +82,32 @@ def attach(conn: sqlite3.Connection) -> None:
     conn.create_function("sgd_value", 3, sgd_value, deterministic=True)
 
 
+def valuer(conn: sqlite3.Connection):
+    """`value(amount_minor, currency, day)` by the same rule, over the rates
+    saved now: for a reader in Python that values many rows."""
+    held = _snapshot(conn)
+    return lambda amount_minor, currency, day: _value(held, amount_minor, currency, day)
+
+
 def value_minor(conn: sqlite3.Connection, amount_minor: int, currency: str, day: str) -> int | None:
     """One amount on one day in S$ by the same rule, or None without a rate."""
-    return _value(_snapshot(conn), amount_minor, currency, day)
+    return valuer(conn)(amount_minor, currency, day)
 
 
-def unvalued_count(conn: sqlite3.Connection, start: str, end: str, where: str = "", params=()) -> int:
-    """How many spending lines (expense or refund) from `start` to `end`
+def unvalued_count(conn: sqlite3.Connection, start: str, end: str, where: str = "", params=(),
+                   owner: str | None = None) -> int:
+    """How many spending rows (expense or refund) from `start` to `end`
     (days, inclusive) no saved rate values: left out of every S$ figure.
-    `where` narrows them by the line (t) or its account (s). The connection
-    must be attached."""
+    `where` narrows them by the line (t), its account (s, a) or its merchant
+    (svc); `owner`, to rows on accounts that owner holds, as the Home tiles
+    count. The connection must be attached."""
     row = conn.execute(
-        f"SELECT COUNT(*) FROM {trend_series.counted_from()} JOIN accounts ua ON ua.id = t.account_id"
+        f"SELECT COUNT(DISTINCT t.id) FROM {trend_series.counted_from()} JOIN accounts a ON a.id = t.account_id"
         " LEFT JOIN services svc ON svc.id = t.service_id"
         " WHERE t.flow_type IN ('expense', 'refund') AND t.date >= ? AND t.date <= ?"
-        " AND sgd_value(t.amount_minor, ua.currency, t.date) IS NULL" + where,
-        (start, end, *params),
+        " AND sgd_value(t.amount_minor, a.currency, t.date) IS NULL"
+        + (" AND a.owner = ?" if owner else "") + where,
+        (start, end, *([owner] if owner else []), *params),
     ).fetchone()
     return row[0]
 
@@ -108,7 +118,8 @@ _FOREIGN_DAYS = """
     SELECT DISTINCT a.currency, t.date FROM transactions t
     JOIN statements s ON s.id = t.statement_id
     JOIN accounts a ON a.id = s.account_id
-    WHERE COALESCE(a.currency, 'SGD') <> 'SGD' AND t.date IS NOT NULL
+    WHERE COALESCE(a.currency, 'SGD') <> 'SGD'
+      AND t.date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'
 """
 
 
@@ -118,7 +129,9 @@ def missing_days(conn: sqlite3.Connection) -> dict:
     held = _snapshot(conn)
     out: dict = {}
     for currency, day in conn.execute(_FOREIGN_DAYS + " ORDER BY a.currency, t.date"):
-        if currency in money.MINOR_UNIT_DIGITS and _value(held, 0, currency, day) is None:
+        day = day[:10]
+        if currency in money.MINOR_UNIT_DIGITS and _value(held, 0, currency, day) is None \
+                and day not in out.get(currency, ()):
             out.setdefault(currency, []).append(day)
     return out
 
@@ -126,8 +139,9 @@ def missing_days(conn: sqlite3.Connection) -> dict:
 def fetch_missing(conn: sqlite3.Connection, today: date | None = None) -> dict:
     """Save the ECB rate for every day in missing_days, one request per
     currency for the span of its days. Returns {saved, currencies, failed}:
-    how many rates were saved, and the currencies whose fetch failed (nothing
-    of theirs is saved). Does not commit."""
+    how many rates were saved, the currencies still short of a rate, and
+    those whose fetch failed (nothing of theirs is saved; the others' rates
+    are). Does not commit."""
     saved, failed = 0, []
     for currency, days in missing_days(conn).items():
         try:

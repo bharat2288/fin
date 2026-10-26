@@ -893,6 +893,7 @@ _CHANGE_SUMMARIES = {
     "api_rules_delete": "Deleted a merchant rule",
     "api_rules_drift_apply": "Relabelled the rows that differed from their rule",
     "api_rates_fetch": "Fetched an exchange rate",
+    "api_rates_fetch_missing": "Fetched the missing exchange rates",
     "api_rates_overwrite": "Overwrote an exchange rate",
     # Any row, not only a transfer waiting: "Change what this was…" sends one too.
     "api_review_label": "Said what a row was",
@@ -3224,7 +3225,8 @@ def api_dashboard_stat_cards():
         # out of every figure above (valuation.py), never guessed.
         ref_first = f"{ref_y:04d}-{ref_m:02d}-01"
         ref_last = f"{ref_y:04d}-{ref_m:02d}-{calendar.monthrange(ref_y, ref_m)[1]:02d}"
-        unvalued = valuation.unvalued_count(conn, ref_first, ref_last, extra_filters, extra_params)
+        unvalued = valuation.unvalued_count(conn, ref_first, ref_last, extra_filters, extra_params,
+                                            owner=account_kind.HOUSEHOLD)
 
         # ?history=N (at most 24): each card's figure for the N months ending
         # with the reference month, oldest first, worked out as the card is.
@@ -6805,13 +6807,14 @@ def api_rates_fetch_missing():
     request per currency. A weekend or holiday takes the business day's
     before it, and the saved source says which. A rate already saved is kept.
 
-    Answers {saved, currencies (still short of a rate), failed}. 502 when a
-    currency's fetch failed: nothing of that currency was saved.
+    Answers {saved, currencies (still short of a rate), failed}. A currency
+    whose fetch failed saves nothing; the others' rates are kept. 502 only
+    when a fetch failed and nothing at all was saved.
     """
     with get_db() as conn:
         done = valuation.fetch_missing(conn)
         conn.commit()
-    return jsonify(done), 502 if done["failed"] else 200
+    return jsonify(done), 502 if done["failed"] and not done["saved"] else 200
 
 
 @app.route("/api/rates", methods=["PUT"])

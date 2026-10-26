@@ -111,6 +111,7 @@ RANGE_URL = "https://api.frankfurter.dev/v1/{start}..{end}?base={base}&symbols={
 # How far before the first day a range asks from: a first day after a long
 # holiday still finds the business day before it.
 RANGE_LEAD_DAYS = 7
+RANGE_SPAN_DAYS = 90            # days asked for in one request at most
 
 
 def fetch_reference_range(base: str, quote: str, start: str, end: str) -> dict:
@@ -218,25 +219,40 @@ def ensure(conn: sqlite3.Connection, currency, on, today: date | None = None) ->
     return saved(conn, pair, on), True
 
 
+def _days_between(earlier: str, later: str) -> int:
+    return date.fromisoformat(later).toordinal() - date.fromisoformat(earlier).toordinal()
+
+
 def save_range(conn: sqlite3.Connection, currency, days: list[str], today: date | None = None) -> int:
     """Save a rate for each of `days` that has none saved, from one request
-    for their span: each day's own reference rate, or failing it (a weekend,
-    a holiday) the latest business day's before it, as `ensure` would get.
-    A day that has not come is skipped. Returns how many were saved. Raises
-    FetchFailed when the source gives no usable answer; nothing is saved
-    then. Does not commit."""
+    per span of at most RANGE_SPAN_DAYS: each day's own reference rate, or
+    failing it (a weekend, a holiday) the latest business day's before it,
+    as `ensure` would get, never one more than RANGE_LEAD_DAYS older. A day
+    that has not come is skipped. Returns how many were saved. Raises
+    FetchFailed when the source gives no usable answer; nothing of this
+    currency is saved then. Does not commit."""
     pair = pair_for(currency)
     last_day = (today or date.today()).isoformat()
     wanted = sorted({checked_date(d) for d in days if checked_date(d) <= last_day
                      and saved(conn, pair, d) is None})
     if not wanted:
         return 0
-    lead = date.fromordinal(date.fromisoformat(wanted[0]).toordinal() - RANGE_LEAD_DAYS).isoformat()
-    try:
-        by_day = sorted((checked_date(d), checked_rate(r)) for d, r in
-                        fetch_reference_range(currency, QUOTE, lead, wanted[-1]).items())
-    except Exception:
-        by_day = None
+    spans: list[list[str]] = []
+    for day in wanted:
+        if spans and _days_between(spans[-1][0], day) <= RANGE_SPAN_DAYS:
+            spans[-1].append(day)
+        else:
+            spans.append([day])
+    found: dict = {}
+    for span in spans:
+        lead = date.fromordinal(date.fromisoformat(span[0]).toordinal() - RANGE_LEAD_DAYS).isoformat()
+        try:
+            got = fetch_reference_range(currency, QUOTE, lead, span[-1])
+            found.update((checked_date(d), checked_rate(r)) for d, r in got.items())
+        except Exception:
+            found = {}
+            break
+    by_day = sorted(found.items())
     # Raised outside the except block: what the source said is not carried.
     if not by_day:
         raise FetchFailed("The rates could not be fetched; nothing was saved")
@@ -245,7 +261,7 @@ def save_range(conn: sqlite3.Connection, currency, days: list[str], today: date 
     for day in wanted:
         while at + 1 < len(by_day) and by_day[at + 1][0] <= day:
             at += 1
-        if at < 0:
+        if at < 0 or _days_between(by_day[at][0], day) > RANGE_LEAD_DAYS:
             continue
         effective, rate = by_day[at]
         conn.execute(

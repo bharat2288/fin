@@ -144,3 +144,58 @@ def test_a_failed_fetch_saves_nothing_and_says_so(client, conn, book, monkeypatc
 
     assert resp.status_code == 502
     assert rates.saved(conn, "INR/SGD", "2026-09-03") is None
+
+
+def test_one_currency_failing_keeps_the_rates_of_the_others_and_says_which(client, conn, book, monkeypatch):
+    bring_in(client, "Sample Dollar Savings 0007", [("2026-09-04", "SAMPLE STORE NEW YORK", 5000)], "USD")
+    conn.execute("UPDATE transactions SET flow_type = 'expense', book = 'Household'")
+    conn.commit()
+
+    def served(url):
+        if "base=USD" in url:
+            raise OSError("unreachable")
+        return json.dumps({"rates": {"2026-09-03": {"SGD": 0.0157}}})
+    monkeypatch.setattr(rates, "_http_get", served)
+
+    resp = client.post("/api/rates/fetch-missing")
+
+    # The rupee rate is saved and counts; the dollar one is named as failed.
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["saved"] == 1 and resp.get_json()["failed"] == ["USD"]
+    assert rates.saved(conn, "INR/SGD", "2026-09-03")["rate"] == "0.0157"
+    assert sum(monthly(client)["2026-09"].values()) == pytest.approx(31.40)
+    assert client.get("/api/dashboard/stat-cards?ref_month=2026-09").get_json()["unvalued_count"] == 1
+    # The change list names what was done in words.
+    assert client.get("/api/history").get_json()["entries"][0]["summary"] == "Fetched the missing exchange rates"
+
+
+def test_a_row_dated_oddly_is_not_asked_for(client, conn, book, monkeypatch):
+    conn.execute("UPDATE transactions SET date = '03/09/2026' WHERE amount_minor = 200000")
+    conn.commit()
+    monkeypatch.setattr(rates, "_http_get", lambda url: pytest.fail(f"asked {url}"))
+
+    resp = client.post("/api/rates/fetch-missing")
+
+    assert resp.status_code == 200 and resp.get_json()["saved"] == 0
+
+
+def test_rows_far_apart_are_asked_for_in_spans_and_a_rate_too_old_is_not_used(client, conn, monkeypatch):
+    # ₹ rows on 2 Jan and 10 Aug: two spans, two requests. The source answers
+    # 10 Aug's span with 20 Jul only, three weeks old: no rate for 10 Aug.
+    bring_in(client, RUPEE_BANK, [("2026-01-02", "POS SAMPLE STORE MUMBAI", 100000),
+                                  ("2026-08-10", "POS SAMPLE CAFE MUMBAI", 100000)], "INR")
+    asked = []
+
+    def served(url):
+        asked.append(url)
+        if "2026-08-10" in url:
+            return json.dumps({"rates": {"2026-07-20": {"SGD": 0.0150}}})
+        return json.dumps({"rates": {"2026-01-02": {"SGD": 0.0149}}})
+    monkeypatch.setattr(rates, "_http_get", served)
+
+    resp = client.post("/api/rates/fetch-missing")
+
+    assert len(asked) == 2
+    assert resp.get_json()["saved"] == 1 and resp.get_json()["currencies"] == ["INR"]
+    assert rates.saved(conn, "INR/SGD", "2026-01-02")["rate"] == "0.0149"
+    assert rates.saved(conn, "INR/SGD", "2026-08-10") is None
