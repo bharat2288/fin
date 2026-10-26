@@ -3751,7 +3751,7 @@ async function viewAccount(id) {
 
     return `${booksNav('sheet')}
     <div class="page-head"><div><a class="link small back-link" href="#/books">← Balance sheet</a><span class="eyebrow">Books · ${esc(KIND_WORDS[acct.type] || acct.type)}</span><h1>${esc(acct.name)}${accountMark(id)}</h1>
-        <p>${esc(acct.type)} · ${esc(acct.owner)} · kept in ${esc(cur)}${acct.status === 'archived' ? ' · archived' : ''}</p></div>
+        <p>${esc(acct.type)} · ${esc(acct.owner)} · kept in ${esc(cur)}${acct.status === 'archived' ? ' · archived' : ''}</p>${window.folioSlot?.('account', id) || ''}</div>
         <div class="row page-head__end">${acct.takes_a_figure ? `<button class="btn" data-act="figure" data-account="${id}">${icon('pencil-simple')}Enter a figure</button>` : ''}${monthPicker()}</div></div>
     <div class="acct-top${tieCard ? '' : ' acct-top--one'}">${hero}${tieCard}</div>
     ${refusedHTML ? `<section class="card"><div class="section-header"><h2>Refused at upload</h2><span class="section-header__aside">a statement that does not tie is kept out whole</span></div>${refusedHTML}</section>` : ''}
@@ -3777,7 +3777,7 @@ async function personAccountPage(acct, figures, figureCount) {
         <span class="fig-row__acts"></span></li>`).join('');
     return `${booksNav('sheet')}
     <div class="page-head"><div><a class="link small back-link" href="#/books">← Balance sheet</a><span class="eyebrow">Books · ${esc(KIND_WORDS[acct.type] || acct.type)}</span><h1>${esc(acct.name)}${accountMark(acct.id)}</h1>
-        <p>A person is no balance on Books: what is lent or owed is what is expected back and to pay back, named for them.</p></div>
+        <p>A person is no balance on Books: what is lent or owed is what is expected back and to pay back, named for them.</p>${window.folioSlot?.('account', acct.id) || ''}</div>
         <div class="row page-head__end">${monthPicker()}</div></div>
     <section class="card"><div class="section-header"><h2>Open with ${esc(acct.name)}</h2><span class="section-header__aside">${plural(items.length, 'item')} · oldest first</span></div>
         ${list ? `<ul class="fig-list">${list}</ul>` : `<p class="card-empty">Nothing is open with ${esc(acct.name)}.</p>`}</section>
@@ -5124,7 +5124,7 @@ async function viewMerchant(id) {
     const notChecked = each ? s.rows_to_check : 0;
     return `<div class="mp">${mpCrumbs()}
     <div class="page-head"><div><h1>${esc(s.name)}</h1>
-        <p>${span} · ${plural(s.rule_count, 'rule')}</p></div>
+        <p>${span} · ${plural(s.rule_count, 'rule')}</p>${window.folioSlot?.('party', s.id) || ''}</div>
         <button type="button" class="btn" data-act="merchant" data-id="${s.id}">Edit the merchant</button></div>
     ${varies?.suggest ? `<div class="attn" role="status"><span class="attn__ic">${icon('info')}</span><p>${esc(bookVariesWords(s.name, varies))}</p>
         <div class="attn__act">${bookVariesButtons(s.id)}</div></div>` : ''}
@@ -6482,6 +6482,7 @@ async function openRowSheet(txId, opts = {}) {
             <p class="row-figure-sub">${rowSheetSubHTML(found, minor)}</p></div>
         ${rowFactsHTML(found, label, labelledBy(found, held.details))}
         ${sourceLinesHTML(found)}
+        ${window.folioSlot?.('row', found.id) || ''}
         <label class="check"><input type="checkbox" data-change="row-oneoff" data-tx="${found.id}"${found.is_one_off ? ' checked' : ''}> One-off <span class="muted small">(Spending can leave it out)</span></label>
         <label class="field"><span>Note</span><textarea id="row-note">${esc(found.notes || '')}</textarea></label>
         <div class="row row-actions"><button class="btn" data-act="row-note" data-tx="${found.id}">Save the note</button>${thisWas}${window.expectRowActions?.(found) || ''}</div>

@@ -392,6 +392,22 @@ CREATE TABLE IF NOT EXISTS dismissal (
     CHECK ((kind = 'refund_link') = (purchase_row_id IS NOT NULL))
 );
 
+-- A folio reference (folio_link.py): a row, an account or a party (a
+-- merchant) carries at most one read-only link to its folio record, an LP's
+-- page ('lp') or a row of folio's ledger ('tx'), by folio's own id. Nothing
+-- in folio is read or written. A new table, made empty by CREATE IF NOT
+-- EXISTS on start, its triggers with it (history.ADDED_ON_START); no row is
+-- converted. The subject is named by id, with no foreign key, so taking a
+-- row out (an import undone) is never blocked by its link.
+CREATE TABLE IF NOT EXISTS folio_link (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject TEXT NOT NULL CHECK (subject IN ('row', 'account', 'party')),  -- declared in folio_link.py
+    subject_id INTEGER NOT NULL,      -- transactions.id, accounts.id or services.id
+    target TEXT NOT NULL CHECK (target IN ('lp', 'tx')),  -- declared in folio_link.py
+    folio_id INTEGER NOT NULL CHECK (folio_id > 0),
+    UNIQUE (subject, subject_id)
+);
+
 -- These indexes are made on start (db.init_db), after the tables exist. They
 -- are written with a space before the column list: retire_categories.py puts
 -- back every index written without one, on a database older than these tables.
@@ -921,6 +937,29 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'loan_terms', OLD.id, 'delete',
         json_object('id', OLD.id, 'account_id', OLD.account_id, 'financed_minor', OLD.financed_minor, 'interest_minor', OLD.interest_minor, 'flat_rate', OLD.flat_rate, 'months', OLD.months, 'first_instalment', OLD.first_instalment, 'owed_from', OLD.owed_from, 'method', OLD.method), NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS history_folio_link_insert AFTER INSERT ON folio_link
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'folio_link', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'subject', NEW.subject, 'subject_id', NEW.subject_id, 'target', NEW.target, 'folio_id', NEW.folio_id));
+END;
+CREATE TRIGGER IF NOT EXISTS history_folio_link_update AFTER UPDATE ON folio_link
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'subject', OLD.subject, 'subject_id', OLD.subject_id, 'target', OLD.target, 'folio_id', OLD.folio_id) IS NOT json_object('id', NEW.id, 'subject', NEW.subject, 'subject_id', NEW.subject_id, 'target', NEW.target, 'folio_id', NEW.folio_id)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'folio_link', NEW.id, 'update',
+        json_object('id', OLD.id, 'subject', OLD.subject, 'subject_id', OLD.subject_id, 'target', OLD.target, 'folio_id', OLD.folio_id),
+        json_object('id', NEW.id, 'subject', NEW.subject, 'subject_id', NEW.subject_id, 'target', NEW.target, 'folio_id', NEW.folio_id));
+END;
+CREATE TRIGGER IF NOT EXISTS history_folio_link_delete AFTER DELETE ON folio_link
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'folio_link', OLD.id, 'delete',
+        json_object('id', OLD.id, 'subject', OLD.subject, 'subject_id', OLD.subject_id, 'target', OLD.target, 'folio_id', OLD.folio_id), NULL);
 END;
 -- history:end
 
