@@ -115,16 +115,17 @@ def _parse_statement_date(text: str) -> str:
         day, mon, year = m.group(1), m.group(2).upper()[:3], m.group(3)
         return f"{year}-{MONTH_MAP.get(mon, '01')}-{day}"
 
+    # Wealth Management layout (from Sep 2026): "Statement as of: 30-SEP-2026",
+    # before "as at", which its messages use for rates
+    m = re.search(r"Statement as of:\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})", text)
+    if m:
+        day, mon, year = m.group(1).zfill(2), m.group(2).upper(), m.group(3)
+        return f"{year}-{MONTH_MAP.get(mon, '01')}-{day}"
+
     # Bank format: "as at 30 Apr 2025"
     m = re.search(r"as at\s+(\d{1,2})\s+(\w{3})\s+(\d{4})", text)
     if m:
         day, mon, year = m.group(1).zfill(2), m.group(2).upper()[:3], m.group(3)
-        return f"{year}-{MONTH_MAP.get(mon, '01')}-{day}"
-
-    # Wealth Management layout (from Sep 2026): "Statement as of: 30-SEP-2026"
-    m = re.search(r"Statement as of:\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})", text)
-    if m:
-        day, mon, year = m.group(1).zfill(2), m.group(2).upper(), m.group(3)
         return f"{year}-{MONTH_MAP.get(mon, '01')}-{day}"
 
     return "unknown"
@@ -482,7 +483,7 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     lines = all_text.split("\n")
     i = 0
     current_desc_lines = []
-    # A row's wording ends at the page's or the account's carried-forward
+    # A row's wording stops at the page's or the account's carried-forward
     # line: what follows (the page footer, the bank's messages) is not its.
     row_closed = False
     current_date = None
@@ -500,6 +501,8 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
             r"Balance Brought Forward(?:\s+SGD)?\s+([\d,]+\.\d{2})", line
         )
         if bf_match:
+            # A row that runs over the page goes on after the brought-forward line.
+            row_closed = False
             prev_balance = money.parse_minor(bf_match.group(1))
             if opening is None:
                 opening = prev_balance
@@ -641,8 +644,8 @@ def parse_statement(pdf_path: str) -> ParsedStatement | list[ParsedStatement]:
     # first page is its cover, so the second is read when the first says nothing.
     pdf = pdfplumber.open(str(path))
     stmt_type = _detect_statement_type(pdf.pages[0].extract_text() or "")
-    if stmt_type == "unknown" and len(pdf.pages) > 1:
-        stmt_type = _detect_statement_type(pdf.pages[1].extract_text() or "")
+    if stmt_type == "unknown" and len(pdf.pages) > 1 and WEALTH_LAYOUT in (pdf.pages[1].extract_text() or ""):
+        stmt_type = "bank"
     pdf.close()
 
     # A read that finds nothing it knows is refused, never handed on as an

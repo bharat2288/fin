@@ -159,3 +159,32 @@ def test_a_wealth_layout_loan_total_that_disagrees_with_its_line_is_refused(read
 
     with pytest.raises(ValueError, match="does not add up"):
         read_loan((COVER, page, MESSAGES))
+
+
+def test_a_row_that_runs_over_the_page_keeps_its_wording_from_the_next_page(monkeypatch):
+    page_1 = DETAILS_1.replace("TOP-UP TO PAYLAH! :\n", "")
+    page_2 = DETAILS_2.replace("Balance Brought Forward 1,400.00",
+                               "Balance Brought Forward 1,400.00\nTOP-UP TO PAYLAH! :")
+
+    stmt = read(monkeypatch, (COVER, SUMMARY, page_1, page_2, MESSAGES))
+
+    assert [t.description for t in stmt.transactions] == [
+        "Salary SAMPLE EMPLOYER PTE LTD", "Funds Transfer TOP-UP TO PAYLAH! :", "Interest Earned"]
+
+
+def test_the_statement_date_is_the_statements_not_a_rate_dated_in_its_messages(monkeypatch):
+    messages = MESSAGES + "\nExchange rates quoted are as at 1 Oct 2026."
+
+    stmt = read(monkeypatch, (COVER, SUMMARY, DETAILS_1, DETAILS_2, messages))
+
+    assert (stmt.statement_date, stmt.closing_date) == ("2026-09-30", "2026-09-30")
+
+
+def test_a_car_loan_total_is_never_taken_from_another_loans_section(read_loan):
+    page = LOAN_SUMMARY.replace("Total Outstanding Amount 50,344.00\n", "").replace(
+        "Total Loan Outstanding SGD 50,344.00",
+        "Home Loan\nProperty Account No. Outstanding (SGD)\nSAMPLE HLN000001X 400,000.00\n"
+        "Total Outstanding Amount 400,000.00\nTotal Loan Outstanding SGD 450,344.00")
+
+    with pytest.raises(ValueError, match="not a DBS account statement"):
+        read_loan((COVER, page, MESSAGES))

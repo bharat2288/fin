@@ -46,7 +46,7 @@ _TOTAL = re.compile(r"Auto Loan Total Outstanding:\s*SGD\s*([\d,]+\.\d{2})")
 # The Wealth Management layout (from Sep 2026) prints the auto loan's total
 # under its table: "Auto Loan", the table, "Total Outstanding Amount 137,700.00".
 _WEALTH_TOTAL = re.compile(
-    r"^Auto Loan\nVehicle No\. Account No\. Outstanding \(SGD\)\n(?:.*\n)*?"
+    r"^Auto Loan\nVehicle No\. Account No\. Outstanding \(SGD\)\n(?:\S+ \S+ [\d,]+\.\d{2}\n)*"
     r"Total Outstanding Amount\s+([\d,]+\.\d{2})$",
     re.MULTILINE,
 )
