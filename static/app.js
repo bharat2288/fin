@@ -4850,7 +4850,7 @@ function previewParts(p, { taught = null } = {}) {
         ${warns}${facts}${leftOut}${ruleLines}${flowsLine(p, { others })}${kept ? `<p class="sub">${kept}</p>` : ''}
         ${rows.length ? `<div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>` : ''}
         ${moreHTML}${ownRows ? `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>` : ''}`;
-    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="past row">Apply to ${plural(p.count, 'past row')}</button>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="past row"${zero ? ' data-zero="Save without moving them"' : ''}>${zero ? 'Save without moving them' : `Apply to ${plural(p.count, 'past row')}`}</button>`;
     return { eyebrow, title, body, foot };
 }
 /** The drift's drawer (fin-surfaces 51, mocked as 21's screen 6): the rows
@@ -4858,10 +4858,12 @@ function previewParts(p, { taught = null } = {}) {
  *  Apply relabels them. No Only new rows: nothing new is being taught. */
 function driftParts(p) {
     const one = p.count === 1;
+    // Only rows you chose by hand: Apply moves none of them until the box is ticked (tickMoveChosen).
+    const zero = !p.count && (p.flows_chosen || []).length ? 'Apply without moving them' : '';
     const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${exampleCell(x)}</td></tr>`);
     const body = `<p class="sub">Rows labelled by a rule or a merchant whose label is not what the rules give now. Rows you checked or chose are not counted.</p>${flowsLine(p)}
         <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>`;
-    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="row">Apply to ${plural(p.count, 'row')}</button>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="row"${zero ? ` data-zero="${zero}"` : ''}>${zero || `Apply to ${plural(p.count, 'row')}`}</button>`;
     return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
 }
 /** One example's Now → after, as two parts: on a phone the after takes its
@@ -4931,7 +4933,7 @@ ACT['preview-answer'] = el => {
 function tickMoveChosen(el) {
     const apply = $('#pv-apply'), count = $('#pv-count');
     const n = d => Number(el.checked ? d.with : d.count);
-    if (apply) apply.textContent = `Apply to ${plural(n(apply.dataset), apply.dataset.unit || 'past row')}`;
+    if (apply) apply.textContent = !el.checked && apply.dataset.zero ? apply.dataset.zero : `Apply to ${plural(n(apply.dataset), apply.dataset.unit || 'past row')}`;
     if (count) count.textContent = !el.checked && count.dataset.zero ? count.dataset.zero : `This changes ${plural(n(count.dataset), 'past row')}`;
 }
 ACT['preview-move-chosen'] = tickMoveChosen;

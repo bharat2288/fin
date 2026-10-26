@@ -402,6 +402,13 @@ def test_a_drawer_whose_only_rows_were_chosen_by_hand_never_says_it_changes_0_ro
     assert "0 past rows" not in got["body"]
     # No examples to show: no empty examples table under the group.
     assert "Examples, newest first" not in got["body"]
+    # Nor does Apply say it applies to 0 rows: unticked, it saves without moving them.
+    assert "Save without moving them" in got["foot"] and "0 past rows" not in got["foot"]
+    drift = _node("\n".join([PRELUDE, _function("bandedTable"), _function("keptWords"), _function("flowsLine"),
+                             _function("exampleCell"), _function("driftParts"),
+                             f"console.log(JSON.stringify(driftParts({json.dumps({**ONLY_HAND, 'subject': {'kind': 'drift'}})})));"]))
+    assert "Apply without moving them" in drift["foot"] and "0 rows" not in drift["foot"]
+    assert 'data-with="2"' in drift["foot"]
     one = drawer({**ONLY_HAND, "count_with_chosen": 1, "flows_chosen": DRAWER["flows_chosen"][:1]})
     assert "You chose 1 row below by hand; tick to move it too." in one["body"]
 
@@ -411,17 +418,17 @@ def test_ticking_the_box_over_only_rows_chosen_by_hand_says_the_rows_and_unticki
     zero = "No other past rows change. You chose 2 rows below by hand; tick to move them too."
     code = "\n".join([
         PRELUDE,
-        "const els = { '#pv-apply': { dataset: { count: '0', with: '2', unit: 'past row' }, textContent: '' },",
+        "const els = { '#pv-apply': { dataset: { count: '0', with: '2', unit: 'past row', zero: 'Save without moving them' }, textContent: '' },",
         f"              '#pv-count': {{ dataset: {{ count: '0', with: '2', zero: {json.dumps(zero)} }}, textContent: '' }} }};",
         "const $ = s => els[s] || null;",
         _function("tickMoveChosen"),
         "const out = [];",
-        "tickMoveChosen({ checked: true }); out.push(els['#pv-count'].textContent);",
-        "tickMoveChosen({ checked: false }); out.push(els['#pv-count'].textContent);",
+        "tickMoveChosen({ checked: true }); out.push(els['#pv-count'].textContent, els['#pv-apply'].textContent);",
+        "tickMoveChosen({ checked: false }); out.push(els['#pv-count'].textContent, els['#pv-apply'].textContent);",
         "console.log(JSON.stringify(out));",
     ])
 
-    assert _node(code) == ["This changes 2 past rows", zero]
+    assert _node(code) == ["This changes 2 past rows", "Apply to 2 past rows", zero, "Save without moving them"]
 
 
 @needs_node
