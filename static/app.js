@@ -908,7 +908,7 @@ function restsOnParts(sheet) {
 }
 const REST_LABELS = {
     ties: 'statement that ties', off: 'statement off by', notchecked: 'statement not checked',
-    recent: `your figure, ${STALE_DAYS} days old or newer`, stale: `your figure, over ${STALE_DAYS} days old`, rows: 'worked out from rows (companies, people)',
+    recent: `your figure, ${STALE_DAYS} days old or newer`, stale: `your figure, over ${STALE_DAYS} days old`, rows: 'worked out (companies and people from rows, a car from its depreciation terms)',
 };
 function restsOnHTML(sheet) {
     const { parts, whole, leftOut } = restsOnParts(sheet);
@@ -958,7 +958,7 @@ function homeClaudeLine(settings) {
 /** What net worth rests on, Home's telling: short legend words that never
  *  break, and the old figures named, each opening Enter a figure. */
 const HOME_REST_LABELS = { ties: 'statement ties', off: 'statement off', notchecked: 'not checked',
-    recent: 'your figure, new', stale: 'your figure, old', rows: 'from rows' };
+    recent: 'your figure, new', stale: 'your figure, old', rows: 'worked out' };
 function homeRestsHTML(sheet) {
     const { parts, whole, leftOut } = restsOnParts(sheet);
     const keys = Object.keys(parts).filter(k => parts[k][1]);
