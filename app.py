@@ -409,8 +409,9 @@ def _loan_figure(conn, stmt) -> dict:
 
     A loan with hire-purchase terms (loan_terms.py) reads the statement's
     figure as the total of its remaining instalments: what is owed is the
-    principal, that total less the interest not yet earned, and the figure
-    carries both (printed_minor, unearned_minor, instalments_left)."""
+    principal, that total (plus an instalment it took off ahead of its day)
+    less the interest not yet earned, and the figure carries the working
+    (printed_minor, ahead_minor, unearned_minor, instalments_left)."""
     account = conn.execute(
         "SELECT id, type FROM accounts WHERE name = ?", (stmt.account,)
     ).fetchone()
@@ -448,8 +449,10 @@ def _loan_figure(conn, stmt) -> dict:
 
 def _figure_now(conn, loan_id: int, figure: dict) -> int | None:
     """What a previewed loan figure comes to under the terms the loan holds
-    now: the printed total less the interest not yet earned with terms, the
-    total as printed without; None when the terms refuse it."""
+    now: with terms, principal owed as loan_terms.principal_owed works it
+    (the printed total, plus an instalment taken off ahead of its day, less
+    the interest not yet earned); the total as printed without; None when the
+    terms refuse it."""
     printed = figure.get("printed_minor", figure["owed_minor"])
     terms = loan_terms.held(conn, loan_id)
     if terms is None:

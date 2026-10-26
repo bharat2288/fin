@@ -29,8 +29,17 @@ remaining instalments comes nearest to. A lender's rounding of the
 instalment, a last instalment made to come out even, a small fee or a
 benefit move the total by less than half an instalment. The schedule's own
 count on the statement's day (from the first instalment's date) is shown
-beside it, not used: a statement may already have taken off an instalment
-due later that month.
+beside it.
+
+A statement one instalment ahead of the schedule's count has already taken
+off the next instalment, billed but not yet due on its day (DBS's month-end
+car-loan statement leaves out the instalment due on the 16th of the month
+after). That instalment is still owed on the statement's day, so it is added
+back as one level instalment (`ahead_minor`) and the interest not yet earned
+is the schedule's: the figure is the principal owed after the instalments
+paid by its day, which is what the instalments naming the loan by then are
+checked against (fit). A count further out is read as printed, and the check
+names it.
 
 The terms are also the loan's first figure: the amount financed is owed from
 their start day (`owed_from`, by default the last day before the first
@@ -304,17 +313,22 @@ def left_by_schedule(terms: dict, on: str) -> int:
 
 def principal_owed(terms: dict, printed_minor: int, on: str) -> dict:
     """What a statement's total of remaining instalments, dated `on`, comes to
-    under the terms: the instalments it holds, the interest not yet earned,
-    and the principal owed. Refused (ValueError) when the printed figure is
-    below nothing, or less than the interest it would be less."""
+    under the terms: the instalments left, an instalment it has taken off
+    ahead of its day (`ahead_minor`, 0 or one level instalment), the interest
+    not yet earned, and the principal owed. Refused (ValueError) when the
+    printed figure is below nothing, or less than the interest it would be
+    less."""
     if printed_minor < 0:
         raise ValueError(
             "the statement's total of remaining instalments is below nothing; "
             "nothing was read from this file."
         )
-    left = left_in(terms, printed_minor)
+    left, by_date = left_in(terms, printed_minor), left_by_schedule(terms, on)
+    ahead = 0
+    if left == by_date - 1:
+        left, ahead = by_date, instalment_minor(terms)
     unearned = unearned_minor(terms, left)
-    owed = printed_minor - unearned
+    owed = printed_minor + ahead - unearned
     if owed < 0:
         raise ValueError(
             "the statement's remaining instalments are less than the interest not yet earned "
@@ -324,7 +338,8 @@ def principal_owed(terms: dict, printed_minor: int, on: str) -> dict:
         "printed_minor": printed_minor,
         "instalments_left": left,
         "months": terms["months"],
-        "left_by_schedule": left_by_schedule(terms, on),
+        "left_by_schedule": by_date,
+        "ahead_minor": ahead,
         "unearned_minor": unearned,
         "owed_minor": owed,
         "method": terms["method"],
