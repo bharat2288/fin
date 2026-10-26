@@ -109,3 +109,50 @@ def test_an_account_holding_a_figure_keeps_its_currency_until_the_figure_goes(cl
     assert client.delete(f"/api/anchors/{anchor_id}").status_code == 200
     assert client.put(f"/api/accounts/{company}", json={"currency": "INR"}).status_code == 200
     assert {a["id"]: a for a in client.get("/api/accounts").get_json()}[company]["currency"] == "INR"
+
+
+def test_undoing_a_currency_change_under_a_figure_entered_since_is_refused(client):
+    company = make_account(client, "Sample Mahavir", "company")
+    assert client.put(f"/api/accounts/{company}", json={"currency": "INR"}).status_code == 200
+    changed = client.get("/api/history").get_json()["entries"][0]["id"]
+    assert client.post("/api/anchors", json={"account_id": company, "amount": "50000.00",
+                                             "date": "2026-07-31"}).status_code == 200
+
+    resp = client.post(f"/api/history/{changed}/undo")
+
+    assert resp.status_code != 200
+    assert "figure" in resp.get_json()["error"]
+    assert {a["id"]: a for a in client.get("/api/accounts").get_json()}[company]["currency"] == "INR"
+
+
+def test_undoing_a_figures_delete_after_its_account_changed_currency_is_refused(client):
+    company = make_account(client, "Sample Mahavir", "company")
+    assert client.post("/api/anchors", json={"account_id": company, "amount": "1000.00",
+                                             "date": "2026-07-31"}).status_code == 200
+    anchor = client.get(f"/api/anchors?account_id={company}").get_json()
+    anchor_id = (anchor if isinstance(anchor, list) else anchor["anchors"])[0]["id"]
+    assert client.delete(f"/api/anchors/{anchor_id}").status_code == 200
+    deleted = client.get("/api/history").get_json()["entries"][0]["id"]
+    assert client.put(f"/api/accounts/{company}", json={"currency": "INR"}).status_code == 200
+
+    resp = client.post(f"/api/history/{deleted}/undo")
+
+    assert resp.status_code != 200
+    assert "currency" in resp.get_json()["error"]
+
+
+def test_a_line_moved_from_an_account_left_out_is_counted_as_its_balance_counts_it(client):
+    """An S$ holding named by a rupee account left out of the check: the
+    sheet adds the row to the holding as it stands, and the check counts
+    what the holding moved by, so the two agree."""
+    film_months(client)
+    holding = make_account(client, "Sample Holding", "holding")
+    assert client.post("/api/anchors", json={"account_id": holding, "amount": "1000.00",
+                                             "date": "2026-07-31"}).status_code == 200
+    other = "Sample Second Rupee 0004"
+    make_account(client, other, "bank", currency="INR", last_four="0004")
+    bring_in(client, other, 5_000_000, [
+        ("2026-08-20", "SAMPLE HOLDING BUY", 2_000_000, "movement", {"names": holding}),
+    ], currency="INR")
+
+    assert check(client)["unexplained_minor"] == 0

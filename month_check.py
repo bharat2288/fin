@@ -203,9 +203,11 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
             touched.add(other)
         total -= in_cents(leaving)
 
-    def entering(condition: str, params: tuple) -> None:
+    def entering(condition: str, params: tuple, currency: str) -> None:
+        """Rows on accounts left out that move a line in the check, in the
+        line's currency, as its balance adds them up (balance_sheet)."""
         nonlocal total
-        amounts: dict = {}
+        moved = 0
         for source, amount in conn.execute(
             "SELECT s.account_id, t.amount_minor FROM transactions t "
             "JOIN statements s ON t.statement_id = s.id "
@@ -214,9 +216,9 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
             (*in_check, after, upto, *params),
         ):
             # Money out of the left-out account (positive) moves the line up.
-            amounts[currency_of[source]] = amounts.get(currency_of[source], 0) + amount
+            moved += amount
             touched.add(source)
-        total += in_cents(amounts)
+        total += in_cents({currency: moved})
 
     names = dict(conn.execute("SELECT id, name FROM accounts"))
     # An account that is part of another's balance has no line of its own.
@@ -227,7 +229,7 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
             # Worth what its terms work out: no row moves it.
             continue
         if kind in ("loan", "holding"):
-            entering("t.flow_type = ? AND t.other_side_id = ?", (flow.MOVEMENT, acct))
+            entering("t.flow_type = ? AND t.other_side_id = ?", (flow.MOVEMENT, acct), currency)
         elif kind == "bank" and conn.execute(
             "SELECT 1 FROM statements WHERE account_id = ? LIMIT 1", (acct,)
         ).fetchone() is None:
@@ -236,6 +238,7 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
                 f"t.flow_type IN ({flows}) AND t.other_side_id = ? AND a.owner = ? "
                 "AND COALESCE(a.currency, ?) = ?",
                 (*balance_sheet.INTO_UNSTATED_FLOWS, acct, account_kind.HOUSEHOLD, CURRENCY, currency),
+                currency,
             )
         elif kind == "company":
             # Only a company that is a book has rows paid for it, as its line counts them.
@@ -247,6 +250,7 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
                 f"(t.flow_type IN ({paid}) AND t.book = ?) OR (t.flow_type = ? AND t.other_side_id = ?))",
                 (account_kind.HOUSEHOLD, CURRENCY, currency, *balance_sheet.PAID_FOR_FLOWS, book,
                  flow.MOVEMENT, acct),
+                currency,
             )
     return total, touched
 

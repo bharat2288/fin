@@ -2152,19 +2152,10 @@ def _ruled_account_refusal(conn, acct_id: int, data: dict) -> str | None:
 
 
 def _currency_figures_refusal(conn, acct_id: int, data: dict) -> str | None:
-    """Why an account's currency may not change, or None: a figure or a
-    statement balance it holds is in its currency now, and would be read in
-    the new one (S$ 1,000.00 as Rs 1,000.00). Nothing is written then."""
+    """Why an account update may not change its currency (anchors.currency_refusal), or None."""
     if "currency" not in data:
         return None
-    held = conn.execute("SELECT currency FROM accounts WHERE id = ?", (acct_id,)).fetchone()
-    if held is None or (held["currency"] or "SGD") == data["currency"]:
-        return None
-    if conn.execute("SELECT 1 FROM anchors WHERE account_id = ? LIMIT 1", (acct_id,)).fetchone() is None:
-        return None
-    return (f"This account holds figures in {held['currency'] or 'SGD'}; they would be read in "
-            f"{data['currency']}. Delete its figures first, then enter them again in the new currency. "
-            "Nothing was saved.")
+    return anchors.currency_refusal(conn, acct_id, data["currency"])
 
 
 def _account_records_refusal(conn, acct_id: int) -> str | None:
