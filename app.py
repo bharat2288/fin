@@ -56,6 +56,7 @@ import trend_series
 import valuation
 import expect_routes
 import folio_link
+import fx_pair
 import expectation_api
 import refund_links
 import relabel_preview
@@ -74,6 +75,7 @@ app.wsgi_app = access_gate.RequireGateIdentity(app.wsgi_app, app.config)
 app.register_blueprint(trend_routes.bp)
 app.register_blueprint(expect_routes.bp)
 app.register_blueprint(folio_link.bp)
+app.register_blueprint(fx_pair.bp)
 
 
 def format_type_display(parent: str | None, child: str | None) -> str:
@@ -913,6 +915,7 @@ _CHANGE_SUMMARIES = {
 }
 _CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
 _CHANGE_SUMMARIES.update({f"{folio_link.bp.name}.{name}": words for name, words in folio_link.SUMMARIES.items()})
+_CHANGE_SUMMARIES.update({f"{fx_pair.bp.name}.{name}": words for name, words in fx_pair.SUMMARIES.items()})
 
 
 def _caller() -> tuple[str, str]:
@@ -2977,7 +2980,7 @@ def _waiting_sides(conn, filters: str = "", params: tuple | list = ()) -> dict:
     rows, rows_params = _waiting_rows()
     own = expect_back.own_sql("t")
     # In S$ on the one path (valuation.py): a foreign row with no rate adds nothing.
-    valued = f"sgd_value({own}, (SELECT currency FROM accounts WHERE id = s.account_id), t.date)"
+    valued = f"sgd_value({own}, (SELECT currency FROM accounts WHERE id = s.account_id), t.date, t.id)"
     row = conn.execute(
         "SELECT "
         "SUM(CASE WHEN t.amount_minor < 0 THEN 0 ELSE 1 END), "
@@ -3620,11 +3623,15 @@ def api_transactions():
                 COALESCE(svc.review_each_time, 0) as review_each_time,
                 CASE WHEN {_not_checked_rows()} THEN 1 ELSE 0 END as not_checked,
                 rp.expected_minor, rp.placed_minor, rp.own_minor,
-                sgd_value(rp.own_minor, a.currency, t.date) AS counted_sgd_minor,
-                sgd_value(t.amount_minor, a.currency, t.date) AS sgd_minor,
+                sgd_value(rp.own_minor, a.currency, t.date, t.id) AS counted_sgd_minor,
+                sgd_value(t.amount_minor, a.currency, t.date, t.id) AS sgd_minor,
                 COALESCE(svc.exclude_from_expense_views, 0) AS hidden,
                 (SELECT COALESCE(SUM(so.amount_minor), 0) FROM set_off so
-                 WHERE so.payment_row_id = t.id AND so.expectation_id IS NULL) as waiting_minor
+                 WHERE so.payment_row_id = t.id AND so.expectation_id IS NULL) as waiting_minor,
+                (SELECT json_object('rate', fp.rate, 'currency', fp.currency, 'source', fp.source,
+                        'pair_row_id', CASE WHEN fp.out_row_id = t.id THEN fp.in_row_id ELSE fp.out_row_id END)
+                 FROM fx_pair fp WHERE fp.state = 'confirmed'
+                   AND (fp.out_row_id = t.id OR fp.in_row_id = t.id)) AS real_rate
             FROM transactions t
             {type_joins}
             LEFT JOIN services svc ON t.service_id = svc.id
@@ -3645,6 +3652,8 @@ def api_transactions():
         # The amount in the account's own currency, which `currency` names:
         # the key is the old one, and holds rupees for a rupee account.
         tx["amount_sgd"] = money.from_minor(tx["amount_minor"], tx["currency"])
+        # The real rate a confirmed cross-currency pair holds for it (fx_pair.py).
+        tx["real_rate"] = fx_pair.shown(tx["real_rate"])
         # Its parts (spec 23): what is expected and placed on it, and its own
         # part, each in whole minor units with the row's sign. counted_minor
         # is what a sum of rows adds: the own part. The pill words them; the
@@ -3721,7 +3730,7 @@ def api_rows_summary():
                    COALESCE(SUM(CASE WHEN v < 0 THEN -v ELSE 0 END), 0) AS in_minor,
                    COALESCE(SUM(CASE WHEN v > 0 THEN v ELSE 0 END), 0) AS out_minor,
                    SUM(CASE WHEN v IS NULL THEN 1 ELSE 0 END) AS unvalued
-            FROM (SELECT sgd_value(t.amount_minor, a.currency, t.date) AS v
+            FROM (SELECT sgd_value(t.amount_minor, a.currency, t.date, t.id) AS v
                   {rows_from} WHERE 1=1 {filters})""", params).fetchone()
         # Waiting: the Queue's rows (what its count counts), under the filters
         # other than the flow, so a flow picked never hides them.

@@ -423,6 +423,27 @@ CREATE TABLE IF NOT EXISTS folio_link (
     UNIQUE (subject, subject_id)
 );
 
+-- A cross-currency pair (fx_pair.py; fin-redesign 24, fin RUL-022): an S$ row
+-- out and a row in another currency in, said to be one move by the operator.
+-- A confirmed pair holds the real rate both rows are valued at: S$ for one
+-- unit of the other currency, as decimal text, from the two amounts or from
+-- an RFX rate in the wording ("SGD500.0@74.52"). A declined pair holds no
+-- rate and is not offered again. A new table, made empty by CREATE IF NOT
+-- EXISTS on start, its triggers with it (history.ADDED_ON_START); no row is
+-- converted. Rows are named by id with no foreign key, as folio_link's are.
+CREATE TABLE IF NOT EXISTS fx_pair (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    out_row_id INTEGER NOT NULL,      -- transactions.id: the S$ row out
+    in_row_id INTEGER NOT NULL,       -- transactions.id: the row in, in another currency
+    state TEXT NOT NULL CHECK (state IN ('confirmed', 'declined')),  -- declared in fx_pair.py
+    currency TEXT,                    -- the in row's currency; NULL when declined
+    rate TEXT,                        -- S$ for one unit of `currency`; NULL when declined
+    source TEXT CHECK (source IN ('amounts', 'wording')),  -- where the rate came from; NULL when declined
+    made_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (out_row_id, in_row_id),
+    CHECK ((state = 'confirmed') = (rate IS NOT NULL AND currency IS NOT NULL AND source IS NOT NULL))
+);
+
 -- These indexes are made on start (db.init_db), after the tables exist. They
 -- are written with a space before the column list: retire_categories.py puts
 -- back every index written without one, on a database older than these tables.
@@ -432,6 +453,9 @@ CREATE INDEX IF NOT EXISTS idx_set_off_expectation ON set_off (expectation_id);
 CREATE INDEX IF NOT EXISTS idx_refund_link_purchase ON refund_link (purchase_row_id);
 -- One Not a payback per row: UNIQUE above lets NULL purchases repeat.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dismissal_one ON dismissal(row_id, kind, IFNULL(purchase_row_id, 0));
+-- A row is in one confirmed pair at most.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fx_pair_out ON fx_pair (out_row_id) WHERE state = 'confirmed';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fx_pair_in ON fx_pair (in_row_id) WHERE state = 'confirmed';
 
 -- A row's parts: what is expected on it (back or to pay back), what it places
 -- as a payment, and its own part, the rest. Each carries the row's sign, so
@@ -1000,6 +1024,31 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'books', OLD.id, 'delete',
         json_object('id', OLD.id, 'name', OLD.name, 'description', OLD.description, 'created_at', OLD.created_at), NULL);
+END;
+-- Cross-currency pairs (fin-redesign 24): a new table, so a book gains its
+-- triggers on its next start (history.ADDED_ON_START).
+CREATE TRIGGER IF NOT EXISTS history_fx_pair_insert AFTER INSERT ON fx_pair
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'fx_pair', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'out_row_id', NEW.out_row_id, 'in_row_id', NEW.in_row_id, 'state', NEW.state, 'currency', NEW.currency, 'rate', NEW.rate, 'source', NEW.source, 'made_at', NEW.made_at));
+END;
+CREATE TRIGGER IF NOT EXISTS history_fx_pair_update AFTER UPDATE ON fx_pair
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'out_row_id', OLD.out_row_id, 'in_row_id', OLD.in_row_id, 'state', OLD.state, 'currency', OLD.currency, 'rate', OLD.rate, 'source', OLD.source, 'made_at', OLD.made_at) IS NOT json_object('id', NEW.id, 'out_row_id', NEW.out_row_id, 'in_row_id', NEW.in_row_id, 'state', NEW.state, 'currency', NEW.currency, 'rate', NEW.rate, 'source', NEW.source, 'made_at', NEW.made_at)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'fx_pair', NEW.id, 'update',
+        json_object('id', OLD.id, 'out_row_id', OLD.out_row_id, 'in_row_id', OLD.in_row_id, 'state', OLD.state, 'currency', OLD.currency, 'rate', OLD.rate, 'source', OLD.source, 'made_at', OLD.made_at),
+        json_object('id', NEW.id, 'out_row_id', NEW.out_row_id, 'in_row_id', NEW.in_row_id, 'state', NEW.state, 'currency', NEW.currency, 'rate', NEW.rate, 'source', NEW.source, 'made_at', NEW.made_at));
+END;
+CREATE TRIGGER IF NOT EXISTS history_fx_pair_delete AFTER DELETE ON fx_pair
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'fx_pair', OLD.id, 'delete',
+        json_object('id', OLD.id, 'out_row_id', OLD.out_row_id, 'in_row_id', OLD.in_row_id, 'state', OLD.state, 'currency', OLD.currency, 'rate', OLD.rate, 'source', OLD.source, 'made_at', OLD.made_at), NULL);
 END;
 -- history:end
 

@@ -73,7 +73,7 @@ class Cell(dict):
 
 # A line in S$ on the one path (valuation.py): a row in another currency at
 # the rate of its own day; NULL when no saved rate values it.
-_SGD = "sgd_value(t.amount_minor, a.currency, t.date)"
+_SGD = "sgd_value(t.amount_minor, a.currency, t.date, t.id)"
 
 # Which accounts a book counts: Household only the household's own; a
 # company book every account.
@@ -131,9 +131,9 @@ def counted_from_sgd() -> str:
     is not in it: valuation.unvalued_count counts those."""
     return (
         "(SELECT l.id, l.date, l.book, l.type_id, l.service_id, l.is_one_off, l.flow_type,"
-        " l.account_id, sgd_value(l.amount_minor, la.currency, l.date) AS amount_minor"
+        " l.account_id, sgd_value(l.amount_minor, la.currency, l.date, l.id) AS amount_minor"
         f" FROM {counted_lines()} l JOIN accounts la ON la.id = l.account_id"
-        " WHERE sgd_value(l.amount_minor, la.currency, l.date) IS NOT NULL) t"
+        " WHERE sgd_value(l.amount_minor, la.currency, l.date, l.id) IS NOT NULL) t"
         " JOIN (SELECT id AS account_id FROM accounts) s ON s.account_id = t.account_id"
     )
 
