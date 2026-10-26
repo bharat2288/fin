@@ -213,3 +213,48 @@ def test_a_group_that_fails_keeps_the_rest_and_offers_to_try_again_or_skip():
     """)
 
     assert got == {"offered": True, "queued": 4, "sent": [8, 8], "id": 3}
+
+
+@needs_node
+def test_a_drop_made_while_a_group_is_confirmed_is_not_cut_short_by_that_confirm():
+    got = run("""
+      let release;
+      __answer(s => s.url.includes('confirm') ? new Promise(r => { release = () => r(__reply(200, {transactions_saved: 1})); })
+                  : __reply(200, __preview(s.files.length)));
+      await uploadFiles(__files(12));
+      const confirming = ACT['import-confirm']({ disabled: false });
+      await uploadFiles(__files(3));
+      release(); await confirming;
+      return { sent: __sent.map(s => s.files ? s.files.length : 'confirm'), id: importState.preview.import_id, read: importState.read };
+    """)
+
+    # The confirm went through; the new drop's three files are what is shown, read once.
+    assert got == {"sent": [8, "confirm", 3], "id": 3, "read": 3}
+
+
+@needs_node
+def test_the_failure_notice_offers_start_again_too():
+    got = run("""
+      __answer(() => __reply(500, {error: 'Sample failure'}));
+      await uploadFiles(__files(12));
+      await rerender();
+      ACT['import-clear']();
+      return { offered: __view.html.includes('data-act="import-clear"'), queued: importState.queue.length };
+    """)
+
+    assert got == {"offered": True, "queued": 0}
+
+
+@needs_node
+def test_a_group_too_big_for_the_server_is_read_in_halves():
+    got = run("""
+      __answer(s => !s.files ? __reply(200, {transactions_saved: 2}) : s.files.length > 2 ? __reply(413, 'too large')
+                  : __reply(200, __preview(s.files.length)));
+      await uploadFiles(__files(4));
+      const first = __sent.map(s => s.files.length);
+      await ACT['import-confirm']({ disabled: false });
+      return { first, all: __sent.map(s => s.files ? s.files.length : 'confirm'), read: importState.read };
+    """)
+
+    assert got["first"] == [4, 2]
+    assert got["all"] == [4, 2, "confirm", 2] and got["read"] == 4

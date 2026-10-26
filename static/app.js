@@ -259,13 +259,13 @@ async function send(method, url, body, { keep = false, waitMs = 0, slow = '' } =
     let res;
     try { res = await fetch(url, opts); }
     catch (_) {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         if (stop && stop.signal.aborted && slow) return gaveUp();
         return { ok: false, status: 0, data: { error: 'fin could not be reached; nothing was changed' } };
     }
-    if (res.status === 413) { clearTimeout(timer); return { ok: false, status: 413, data: { error: 'That is more than fin takes in one go (10 MB); nothing was changed. Send fewer files at a time.' } }; }
+    if (res.status === 413) { if (timer) clearTimeout(timer); return { ok: false, status: 413, data: { error: 'That is more than fin takes in one go (10 MB); nothing was changed. Send fewer files at a time.' } }; }
     const data = await res.json().catch(() => ({}));
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     if (stop && stop.signal.aborted && slow) return gaveUp();
     if (!keep) cache.clear();
     const change = res.headers.get('X-Fin-Change');
@@ -5506,7 +5506,7 @@ async function viewImport() {
             <input type="date" id="imp-rows-from" value="${esc(importState.rowsFrom)}" data-change="import-rows-from"></label>
         ${importState.busy ? `<p class="loading">Reading…${groupWords()}</p>` : ''}
         ${importState.failed && !importState.busy ? `<div class="notice warn">${icon('warning')}<span class="grow">${importState.dropped > importState.failed.length ? `Files ${importState.read - importState.failed.length + 1}–${importState.read} of ${importState.dropped}` : 'These files'} could not be read; nothing was written.${laterWords(false)}</span>
-            <button class="btn" data-act="import-retry">Try them again</button>${importState.queue.length ? '<button class="btn" data-act="import-next">Skip to the next files</button>' : ''}</div>` : ''}
+            <button class="btn" data-act="import-retry">Try them again</button>${importState.queue.length ? '<button class="btn" data-act="import-next">Skip to the next files</button><button class="btn" data-act="import-clear">Start again</button>' : ''}</div>` : ''}
     </section>
     ${p ? importPreviewHTML(p) : ''}
     ${importState.done ? `<div class="notice ok import-done">${icon('check-circle')}<span>${esc(importState.done)}</span></div>` : ''}
@@ -5645,6 +5645,13 @@ async function readGroup(files) {
         slow: 'fin took too long to read these files; nothing was written. Send fewer at a time.' });
     if (mine !== importState.seq) return;
     importState.busy = false;
+    if (r.status === 413 && files.length > 1) {
+        // A group over what the server takes after all: read in halves, the second half next.
+        const half = Math.ceil(files.length / 2);
+        importState.queue.unshift(...files.slice(half));
+        importState.read -= files.length - half;
+        return readGroup(files.slice(0, half));
+    }
     if (r.status === 413 && files.length === 1) {
         // One file over what fin takes: named, left out, and the rest read on.
         toast(`${files[0].name} is more than fin takes in one go (10 MB); it was left out.`, { bad: true });
@@ -5763,6 +5770,7 @@ function importChoices(t) {
 ACT['import-clear'] = () => { importState.seq += 1; importState.busy = false; importState.preview = null; importState.done = null; importState.files = null; importState.failed = null; importState.queue = []; importState.dropped = importState.read = 0; rerender(); };
 ACT['import-confirm'] = async el => {
     const p = importState.preview;
+    const at = importState.seq;
     el.disabled = true;
     const r = await send('POST', '/api/import/confirm', {
         import_id: p.import_id,
@@ -5771,6 +5779,8 @@ ACT['import-confirm'] = async el => {
         groups: p.groups.map(g => ({ account: g.account, transactions: g.transactions.map(importChoices) })),
     });
     if (!r.ok) { el.disabled = false; toast(r.data.error || 'Nothing was imported', { bad: true }); return; }
+    // A drop made while it was confirmed has the page now: it was imported, and the page is the new drop's.
+    if (at !== importState.seq) { toast('Imported', { undo: r.change }); return; }
     importState.preview = null; importState.files = null;
     const figuresDone = r.data.figures_written ? ` and ${plural(r.data.figures_written, 'figure')}` : '';
     const held = r.data.duplicates_skipped ? `; ${plural(r.data.duplicates_skipped, 'row')} already held ${r.data.duplicates_skipped === 1 ? 'was' : 'were'} not added again` : '';
