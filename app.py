@@ -8109,28 +8109,24 @@ def api_subscriptions_enrich():
     """
     with get_db() as conn:
         subs = conn.execute(
-            "SELECT id, match_pattern, frequency, periods, renewal_date, currency "
-            "FROM subscriptions WHERE match_pattern IS NOT NULL"
+            "SELECT id, frequency, periods, renewal_date, currency FROM subscriptions"
         ).fetchall()
+        # The rows a bill matches are the bills read's (bills.py), so the
+        # refresh and the screen never disagree on a bill's last payment.
+        latest = bills.latest_payments(conn)
         updated = 0
         renewals_advanced = 0
         for s in subs:
-            tx = conn.execute("""
-                SELECT t.date
-                FROM transactions t
-                WHERE UPPER(t.description) LIKE '%' || ? || '%'
-                  AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
-                ORDER BY t.date DESC LIMIT 1
-            """, (s["match_pattern"].upper(),)).fetchone()
+            tx = latest.get(s["id"])
             if tx:
                 new_renewal = bills.advance_renewal(
-                    s["renewal_date"], tx["date"], s["frequency"], s["periods"]
+                    s["renewal_date"], tx["tx_date"], s["frequency"], s["periods"]
                 )
                 # Update last_paid and renewal only — never overwrite the user's
                 # configured billed amount (amount is the source of truth, set manually)
                 conn.execute(
                     "UPDATE subscriptions SET last_paid = ?, renewal_date = ? WHERE id = ?",
-                    (tx["date"], new_renewal, s["id"]),
+                    (tx["tx_date"], new_renewal, s["id"]),
                 )
                 updated += 1
                 if new_renewal != s["renewal_date"]:
