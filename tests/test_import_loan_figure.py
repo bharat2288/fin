@@ -259,6 +259,7 @@ def preview_html(preview: dict) -> str:
         _function("digitsOf"), _function("groupFor"), _function("money"), _function("toMinor"),
         _const("MONTHS"), _function("day"), _function("plural"), _function("tag"),
         _const("RULE_FLOWS"), _function("flowSaid"),
+        _const("importState"), _const("IMPORT_GROUP_FILES"), _function("groupWords"), _function("laterWords"),
         _function("stmtSum"), _function("loanFigureSum"), _function("importPreviewHTML"),
         f"console.log(JSON.stringify(importPreviewHTML({json.dumps(preview)})));",
     ])
