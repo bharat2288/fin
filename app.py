@@ -1950,6 +1950,7 @@ def api_accounts_delete(acct_id):
 
         # A loan's terms go with it, in the same change.
         loan_terms.write(conn, acct_id, None)
+        folio_link.take_off(conn, "account", acct_id)
         conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
         conn.commit()
     return jsonify({"success": True})
@@ -2863,6 +2864,8 @@ def api_services_merge(svc_id):
             (target_id, svc_id),
         ).rowcount
 
+        # The source's folio link moves to the target, unless it has its own.
+        folio_link.carry(conn, "party", svc_id, target_id)
         # Delete the now-orphaned source service
         conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
         conn.commit()
@@ -2903,6 +2906,7 @@ def api_services_delete(svc_id):
                 f"{'its' if len(joined) == 1 else 'their'} party; take "
                 f"{'it' if len(joined) == 1 else 'them'} off first. Nothing was changed"
             )}), 400
+        folio_link.take_off(conn, "party", svc_id)
         conn.execute("DELETE FROM services WHERE id = ?", (svc_id,))
         conn.commit()
     return jsonify({"success": True})

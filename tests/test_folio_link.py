@@ -143,6 +143,10 @@ def test_a_folio_address_or_an_lp_number_reads_as_its_record(address, target, fo
     (f"{FOLIO}/#/transactions?lp=18", "an LP's page or a row of folio's ledger"),
     (f"{FOLIO}/#/lps/0", "an LP's page or a row of folio's ledger"),
     (f"{FOLIO}/#/lps/abc", "an LP's page or a row of folio's ledger"),
+    (f"{FOLIO}/#/lps/99999999999999999999", "an LP's page or a row of folio's ledger"),
+    ("LP 9223372036854775808", "an LP's page or a row of folio's ledger"),
+    (f"{FOLIO}/#/transactions?tx=\u00b2", "an LP's page or a row of folio's ledger"),
+    (f"{FOLIO}/#/lps/\u0661\u0668", "an LP's page or a row of folio's ledger"),
     ("", "paste the folio address"),
     ("   ", "paste the folio address"),
 ])
@@ -238,6 +242,52 @@ def test_taking_off_a_link_that_is_not_there_is_refused(client, conn, book):
     assert resp.status_code == 404
     assert "Nothing was changed" in resp.get_json()["error"]
     assert counts(conn) == before
+
+
+# --- a link goes with its subject ---------------------------------------------
+
+
+def links(conn):
+    return sorted(tuple(r) for r in conn.execute("SELECT subject, subject_id, target, folio_id FROM folio_link"))
+
+
+def test_deleting_an_account_takes_its_link_in_the_same_change(client, conn, book):
+    link(client, "account", book["person"], "LP 18")
+    assert client.delete(f"/api/accounts/{book['person']}").status_code == 200
+    assert links(conn) == []
+    assert client.post(f"/api/history/{entries(client)[0]['id']}/undo").status_code == 200
+    assert held(client, "account", book["person"])["folio_id"] == 18
+
+
+def test_deleting_a_merchant_takes_its_link_in_the_same_change(client, conn):
+    party = make_party(conn, "Sample Lone Party")
+    link(client, "party", party, "LP 18")
+    assert client.delete(f"/api/services/{party}").status_code == 200
+    assert links(conn) == []
+    assert client.post(f"/api/history/{entries(client)[0]['id']}/undo").status_code == 200
+    assert held(client, "party", party)["folio_id"] == 18
+
+
+def merge(client, source, target):
+    resp = client.post(f"/api/services/{source}/merge", json={"target_id": target, "past": "apply"})
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_merging_a_party_carries_its_link_to_the_target(client, conn, book):
+    source = make_party(conn, "Sample Partner Two")
+    link(client, "party", source, "LP 18")
+    merge(client, source, book["party"])
+    assert links(conn) == [("party", book["party"], "lp", 18)]
+    assert client.post(f"/api/history/{entries(client)[0]['id']}/undo").status_code == 200
+    assert links(conn) == [("party", source, "lp", 18)]
+
+
+def test_merging_into_a_party_with_its_own_link_keeps_the_target_s(client, conn, book):
+    source = make_party(conn, "Sample Partner Two")
+    link(client, "party", source, "LP 19")
+    link(client, "party", book["party"], "LP 18")
+    merge(client, source, book["party"])
+    assert links(conn) == [("party", book["party"], "lp", 18)]
 
 
 # --- nothing in folio changes, no number moves -------------------------------

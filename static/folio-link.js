@@ -73,7 +73,7 @@
         fillAll();
     });
     document.addEventListener('keydown', e => {
-        if (e.key === 'Enter' && e.target.classList?.contains('folio-edit__input')) {
+        if (e.key === 'Enter' && !e.isComposing && e.target.classList?.contains('folio-edit__input')) {
             e.preventDefault();
             ACT['folio-save'](e.target);
         }

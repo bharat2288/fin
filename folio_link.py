@@ -52,8 +52,8 @@ PASTE = f"paste the folio address of an LP's page or a row of folio's ledger, or
 NOT_A_RECORD = (f"that folio address is not an LP's page or a row of folio's ledger "
                 f"(#/lps/<number> or #/transactions?tx=<number>). {NOTHING}")
 
-_LP_WORDS = re.compile(r"lp\s*#?\s*(\d+)", re.I)
-_LP_PATH = re.compile(r"/lps/(\d+)/?")
+_LP_WORDS = re.compile(r"lp\s*#?\s*([0-9]+)", re.I)
+_LP_PATH = re.compile(r"/lps/([0-9]+)/?")
 
 
 class Refused(ValueError):
@@ -65,12 +65,16 @@ def folio_url() -> str:
     return (os.environ.get(FOLIO_URL_VARIABLE, "").strip() or DEFAULT_FOLIO_URL).rstrip("/")
 
 
+# The largest id SQLite holds.
+_MAX_ID = 2**63 - 1
+
+
 def _record_id(text: str | None) -> int | None:
-    """A folio id: digits only, above zero."""
-    if text is None or not text.isdigit():
+    """A folio id: ASCII digits only, above zero and within what SQLite holds."""
+    if text is None or not re.fullmatch(r"[0-9]+", text):
         return None
     value = int(text)
-    return value if value > 0 else None
+    return value if 0 < value <= _MAX_ID else None
 
 
 def parsed(address: str) -> tuple[str, int]:
@@ -116,6 +120,22 @@ def held(conn, subject: str, subject_id: int) -> dict | None:
     r = conn.execute("SELECT target, folio_id FROM folio_link WHERE subject = ? AND subject_id = ?",
                      (subject, subject_id)).fetchone()
     return None if r is None else shown(r["target"], r["folio_id"])
+
+
+def take_off(conn, subject: str, subject_id: int) -> None:
+    """A subject's link goes with it: a caller deleting the subject calls
+    this in the same change, so an Undo puts both back."""
+    conn.execute("DELETE FROM folio_link WHERE subject = ? AND subject_id = ?", (subject, subject_id))
+
+
+def carry(conn, subject: str, from_id: int, to_id: int) -> None:
+    """A merge: the link of the subject merged away moves to the one it
+    joins, unless that one carries its own, which stays."""
+    if held(conn, subject, to_id) is None:
+        conn.execute("UPDATE folio_link SET subject_id = ? WHERE subject = ? AND subject_id = ?",
+                     (to_id, subject, from_id))
+    else:
+        take_off(conn, subject, from_id)
 
 
 def _name(conn, subject: str, subject_id: int) -> str | None:
