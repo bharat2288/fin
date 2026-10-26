@@ -1172,6 +1172,13 @@ function homeTile(cards, months, { cls, eyebrow, label, minor, avg, body, values
  *  names what the refunds came to. A month with no statement in is marked,
  *  not a zero. A company's tile is the part of its costs the household's own
  *  accounts paid, and says so. */
+/** A book's income and net on its Home card (income_book.py): the income
+ *  of the kinds that belong to it, and that less its costs; '' when no kind does. */
+function bookIncomeLine(cards, key) {
+    if (!(`${key}_income` in cards)) return '';
+    const kinds = (cards[`${key}_income_kinds`] || []).join(', ');
+    return `${esc(kinds)} in <b>${esc(money(toMinor(cards[`${key}_income`]), 'SGD'))}</b> · net <b>${esc(money(toMinor(cards[`${key}_net`]), 'SGD'))}</b> after its costs.`;
+}
 function homeBookTiles(cards, books) {
     const hist = cards.history || [];
     const months = hist.map(h => h.month);
@@ -1194,7 +1201,7 @@ function homeBookTiles(cards, books) {
                 body: `${plural(outRows, 'row')} out${back ? ` · ${back}` : ''}. Held out until labelled: out <b>${esc(money(toMinor(cards.held_out_out_total), 'SGD'))}</b> · in <b>${esc(money(toMinor(cards.held_out_in_total), 'SGD'))}</b>.` }));
         } else {
             tiles.push(homeTile(cards, months, { cls: 'is-company', eyebrow: 'Company book', label: `${b.name}, its costs`, minor, avg, values, ...go,
-                body: `Costs paid from household accounts${back ? ` · ${back}` : ''}. Not household spending; it moves ${esc(b.name)}’s company balance.` }));
+                body: `Costs paid from household accounts${back ? ` · ${back}` : ''}. Not household spending; it moves ${esc(b.name)}’s company balance.${bookIncomeLine(cards, key) ? ` ${bookIncomeLine(cards, key)}` : ''}` }));
         }
     });
     return tiles;
@@ -4497,9 +4504,11 @@ async function viewLists(tab) {
         const yes = v => (v ? 'yes' : '');
         const settings = t => t.locked ? 'not placed yet: fixed'
             : [t.usual_book, t.default_one_off ? 'one-off by default' : '', t.check_each_row ? 'Check each row by default' : ''].filter(Boolean).join(', ');
+        // An income kind belongs to a book (income_book.py): that book's Home card nets it against its costs.
+        const kindBook = t => `<select class="sel" data-change="income-kind-book" data-id="${t.id}" data-held="${esc(t.book)}" aria-label="Book ${esc(t.name)} belongs to">${r.books.map(b => `<option value="${esc(b.name)}"${b.name === t.book ? ' selected' : ''}>${esc(b.name)}</option>`).join('')}</select>`;
         const row = t => t.kind === 'income'
             ? `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b></td><td class="small">${esc(plainWords(t.covers))}</td>
-            <td class="small muted">${esc(plainWords(t.not_for || ''))}</td>
+            <td class="small muted">${esc(plainWords(t.not_for || ''))}</td><td class="small sl-fig">${kindBook(t)}</td>
             <td class="sl-sub">${esc(plainWords(t.covers))}${t.not_for ? `<div>Not for: ${esc(plainWords(t.not_for))}</div>` : ''}</td>
             <td class="r sl-end">${fix(t)}</td></tr>`
             : `<tr><td class="sl-name"><b>${esc(t.display_name || t.name)}</b>${t.added_in_fin ? ` ${tag('yours', 'added in fin')}` : ''}</td><td class="small">${esc(plainWords(t.covers))}</td>
@@ -4511,7 +4520,7 @@ async function viewLists(tab) {
             notfor: { label: 'Not for', kind: 'text', of: t => plainWords(t.not_for) } });
         const TYPE_SORT = { ...cols('Type'), book: { label: 'Usual book', kind: 'text', of: t => t.usual_book },
             oneoff: { label: 'One-off', kind: 'text', of: t => yes(t.default_one_off) }, each: { label: 'Check each row', kind: 'text', of: t => yes(t.check_each_row) } };
-        const KIND_SORT = cols('Kind');
+        const KIND_SORT = { ...cols('Kind'), book: { label: 'Book', kind: 'text', of: t => t.book } };
         const heads = (table, c) => Object.keys(c).map(k => `<th>${sortHead(table, k, c)}</th>`).join('');
         return `${head}<section class="card"><div class="section-header"><div><h2>Types</h2><p>One list serves every book. Add a type, or change a type’s name, wording or settings, here. Merging or removing a type is a code change.</p></div>
             <button class="btn" data-act="type-add">${icon('plus')}Add a type</button></div>
@@ -5569,6 +5578,13 @@ function interestBookHTML(books, held) {
     return `<div class="fields"><label class="field"><span>Interest goes to</span><select id="ac-interest-book" data-held="${esc(held)}">${books.map(b => `<option value="${esc(b.name)}"${b.name === held ? ' selected' : ''}>${esc(b.name)}</option>`).join('')}</select>
         <span class="hint">The interest fin works out from your figures is spending in this book. Changing it moves the interest already worked out too.</span></label></div>`;
 }
+ACT['income-kind-book'] = async el => {
+    if (el.value === el.dataset.held) return;
+    const s = await send('PUT', `/api/types/${el.dataset.id}/book`, { book: el.value });
+    if (!s.ok) { toast(s.data.error || 'That did not work; nothing was changed', { bad: true }); el.value = el.dataset.held; return; }
+    el.dataset.held = s.data.book;
+    toast(s.data.book === 'Household' ? 'Back to the household’s income' : `Now counts on ${s.data.book}’s card`, { undo: s.change });
+};
 ACT['account-save'] = async el => {
     const name = $('#ac-name').value.trim();
     if (!name) { toast('Give it a name', { bad: true }); return; }

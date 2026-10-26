@@ -35,6 +35,7 @@ import db
 import expect_back
 import flow
 import history
+import income_book
 import interest_book
 import label_source
 import loan_interest
@@ -883,6 +884,7 @@ _CHANGE_SUMMARIES = {
     # Named by the route: marked shared, or not (shared.MARKED, shared.UNMARKED).
     "api_accounts_shared": "Changed whether an account is shared",
     "api_accounts_interest_book": "Chose the book a loan's interest goes to",
+    "api_types_book": "Chose the book an income kind belongs to",
     "api_accounts_delete": "Deleted an account",
     "api_anchors_create": "Entered a figure",
     "api_anchors_replace": "Corrected a figure",
@@ -1335,10 +1337,11 @@ def index():
 
 _TYPES_SELECT = (
     "SELECT t.id, t.kind, t.name, t.parent_id, p.name as parent_name, "
-    "t.default_one_off, t.covers, t.not_for, k.key, s.usual_book, s.check_each_row "
+    "t.default_one_off, t.covers, t.not_for, k.key, s.usual_book, s.check_each_row, ib.book AS income_book "
     "FROM types t LEFT JOIN types p ON t.parent_id = p.id "
     "LEFT JOIN type_keys k ON k.type_id = t.id "
     "LEFT JOIN type_settings s ON s.type_id = t.id "
+    "LEFT JOIN income_books ib ON ib.type_id = t.id "
 )
 
 
@@ -1369,6 +1372,9 @@ def _type_shown(r) -> dict:
         "locked": (r["key"] == book_type.NOT_PLACED) if spending else True,
         # A spending type with no key is not declared: it was added in fin.
         "added_in_fin": spending and r["key"] is None,
+        # The book an income kind belongs to (income_book.py): Household, or
+        # the book whose Home card nets it. A spending type's is its usual book.
+        "book": None if spending else (r["income_book"] or book_type.DEFAULT_BOOK),
     }
 
 
@@ -1410,6 +1416,36 @@ def api_types_create():
         _name_change(conn, f"Added the type {format_type_display(r['parent_name'], r['name'])}")
         conn.commit()
     return jsonify({"type": _type_shown(r)}), 201
+
+
+@app.route("/api/types/<int:type_id>/book", methods=["PUT"])
+def api_types_book(type_id):
+    """Say which book an income kind belongs to (income_book.py, fin-redesign
+    26). Body: {"book": a book's name, or null (or blank) for Household}. The
+    book's Home card nets the income of its kinds against its costs; no row
+    changes. One change, undone whole; a refusal writes nothing. Answers the
+    book and whether anything changed (`changed`)."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "book" not in data or not (data["book"] is None or isinstance(data["book"], str)):
+        return jsonify({"error": "send book: a book's name, or null for Household; nothing was changed"}), 400
+    with get_db() as conn:
+        held = conn.execute("SELECT kind FROM types WHERE id = ?", (type_id,)).fetchone()
+        if held is None:
+            return jsonify({"error": "This type is no longer in fin; nothing was changed"}), 404
+        if held["kind"] != book_type.INCOME:
+            return jsonify({"error": "only an income kind belongs to a book this way; a spending type's book "
+                                     "is its usual book. Nothing was changed"}), 400
+        # A book's name is held unique ignoring case: the stored name is the one filed.
+        wanted = " ".join((data["book"] or "").split()) or book_type.DEFAULT_BOOK
+        book = next((b for b in book_type.book_names(conn) if b.casefold() == wanted.casefold()), None)
+        if book is None:
+            return jsonify({"error": f"{wanted} is not a book; add it on Lists › Books first. "
+                                     "Nothing was changed"}), 400
+        changed = income_book.choose(conn, type_id, book)
+        if changed:
+            _name_change(conn, income_book.CHOSE)
+            conn.commit()
+    return jsonify({"success": True, "book": book, "changed": changed})
 
 
 def _type_change_words(changed: dict) -> list[str]:
@@ -3421,6 +3457,27 @@ def api_dashboard_stat_cards():
 
         # Query reference month
         ref_data = query_month(ref_y, ref_m)
+        # The income of the kinds that belong to a book (income_book.py), on
+        # the household's accounts, in S$: the book's card nets it against its
+        # costs. Rows carry no book for it: the kind names the book.
+        book_income = {}
+        for name, kinds in income_book.kinds_by_book(conn).items():
+            if name == book_type.DEFAULT_BOOK or name not in dict(books):
+                continue
+            got = conn.execute(f"""
+                SELECT -COALESCE(SUM(t.amount_minor), 0)
+                FROM {trend_series.counted_from_sgd()}
+                LEFT JOIN services svc ON t.service_id = svc.id
+                LEFT JOIN accounts a ON s.account_id = a.id
+                WHERE t.flow_type = 'income' AND a.owner = ?
+                  AND t.type_id IN ({', '.join('?' * len(kinds))})
+                  AND t.date >= ? AND t.date <= ?
+                  {extra_filters}
+            """, [account_kind.HOUSEHOLD, *kinds, f"{ref_y:04d}-{ref_m:02d}-01",
+                f"{ref_y:04d}-{ref_m:02d}-{calendar.monthrange(ref_y, ref_m)[1]:02d}", *extra_params]).fetchone()[0]
+            names = [r[0] for r in conn.execute(
+                f"SELECT name FROM types WHERE id IN ({', '.join('?' * len(kinds))}) ORDER BY id", kinds)]
+            book_income[name] = (got, names)
 
         # Query 3 prior months for rolling average
         avg_data = [query_month(y, m) for y, m in avg_months]
@@ -3537,6 +3594,11 @@ def api_dashboard_stat_cards():
         payload[f"{key}_back_rows"] = ref_data[f"back_rows_{key}"]
         payload[f"avg_{key}_out"] = money.from_minor(averages[f"out_{key}"])
         payload[f"{key}_missing"] = bool(missing.get(key))
+        if name in book_income:
+            income_minor, kinds = book_income[name]
+            payload[f"{key}_income"] = money.from_minor(income_minor)
+            payload[f"{key}_income_kinds"] = kinds
+            payload[f"{key}_net"] = money.from_minor(income_minor - ref_data[shown])
     return jsonify(payload)
 
 

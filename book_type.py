@@ -841,6 +841,7 @@ BOOK_USED_BY = (
     ("let_go", "book"),
     ("accounts", "owner"),
     ("interest_books", "book"),
+    ("income_books", "book"),
 )
 
 BOOK_FIELDS = ("name", "description")
