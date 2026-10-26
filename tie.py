@@ -103,14 +103,18 @@ def from_day(statement, day: str):
     (with `day`, the count of rows left out). None for the statement when it
     ends before the day: none of it comes in.
 
-    A statement that states its balances still ties: its opening is the
+    A bank statement that states its balances still ties: its opening is the
     balance its own rows carry it to by the day before, and its period starts
-    on the day. Check the whole statement first: a statement that does not
-    tie is never cut down into one that seems to."""
+    on the day. A card statement with balances comes in whole or not at all:
+    its rows are the statement's that printed them, and a row posted late
+    keeps its own earlier date. Check the whole statement first: a statement
+    that does not tie is never cut down into one that seems to."""
     ends = statement.closing_date or statement.statement_date
-    before = [tx for tx in statement.transactions if tx.date < day]
     if ends and ends < day:
         return None, len(statement.transactions)
+    if states_balances(statement) and statement.statement_type != "bank":
+        return statement, 0
+    before = [tx for tx in statement.transactions if tx.date < day]
     if not before:
         return statement, 0
     statement.transactions = [tx for tx in statement.transactions if tx.date >= day]

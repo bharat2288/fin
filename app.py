@@ -528,10 +528,10 @@ def _held_for_import(
     one holds the other prints too. Of two rows alike in day and amount, the
     one sharing more words is paired first; a held row that a row of another
     account in the same upload words (`others_rows`: day, size, wording) is
-    left for that account's misfiled pass. Before that, a printed row is one
-    held under another printed statement of its account when the day, the
-    amount and the letters of the wording are the same: two layouts of one
-    bank's statement differ in digits and spacing only."""
+    left for that account's misfiled pass. Before that, a printed row of a
+    bank account is one held under another printed statement of it when the
+    day, the amount and the letters of the wording are the same: two layouts
+    of one bank's statement differ in digits and spacing only."""
     found = {key: [] for key in import_counts}
     claimed: set[int] = set()
     candidates = {}
@@ -582,21 +582,30 @@ def _held_for_import(
                 claimed.add(row["id"])
                 found[key].append((row["id"], row["printed"], row["description"], row["amount_minor"]))
 
-    # Two printed statements of one account over the same days, in different
-    # layouts (a month's statement and a range statement), word a row alike
-    # but for its digits, spacing and punctuation: "NETBANK, 573573 MUM" and
-    # "NETBANK,MUM". A printed row is one held under a printed statement of
-    # its own account with the same day, amount and letters. Each prints
-    # every row of the day, so a held row of the day is one of the rows.
+    # Two printed statements of one bank account over the same days, in
+    # different layouts (a month's statement and a range statement), word a
+    # row alike but for its digits, spacing and punctuation: "NETBANK, 573573
+    # MUM" and "NETBANK,MUM". A printed row is one held under a printed
+    # statement of its own bank account with the same day, amount and
+    # letters. Each prints every row of the day, so a held row of the day is
+    # one of the rows. A card statement does not: a row posted late prints
+    # on the next statement under its own earlier day.
     def letters(text: str) -> str:
         return re.sub(r"[^A-Z]", "", (text or "").upper())
+
+    ids = {key[0] for key in import_counts}
+    banks = {
+        row["id"] for row in conn.execute(
+            f"SELECT id FROM accounts WHERE type = 'bank' AND id IN ({', '.join('?' for _ in ids)})", tuple(ids))
+    } if ids else set()
 
     def printed_alike(key) -> list:
         mine = letters(key[2])
         return [row for row in candidates[(key[0], key[1], key[3])]
                 if mine and row["printed"] and letters(row["description"]) == mine]
 
-    for key in sorted((key for key in import_counts if key in printed_keys), key=lambda k: len(printed_alike(k))):
+    for key in sorted((key for key in import_counts if key in printed_keys and key[0] in banks),
+                      key=lambda k: len(printed_alike(k))):
         for row in printed_alike(key):
             if len(found[key]) >= import_counts[key]:
                 break

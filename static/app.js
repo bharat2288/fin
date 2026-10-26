@@ -5537,10 +5537,15 @@ function wireDrop() {
     zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('over'); uploadFiles(e.dataTransfer.files); });
 }
 ACT['import-files'] = el => uploadFiles(el.files);
-// A range statement that starts before the books do comes in from this day (tie.from_day).
-ACT['import-rows-from'] = el => { importState.rowsFrom = el.value; };
+// A range statement that starts before the books do comes in from this day
+// (tie.from_day). Changed with a preview open, the same files are read again.
+ACT['import-rows-from'] = el => {
+    importState.rowsFrom = el.value;
+    if (importState.preview && importState.files) uploadFiles(importState.files);
+};
 async function uploadFiles(files) {
     if (!files || !files.length) return;
+    importState.files = Array.from(files);
     const form = new FormData();
     Array.from(files).forEach(f => form.append('files', f));
     if (importState.rowsFrom) form.append('rows_from', importState.rowsFrom);
@@ -5649,7 +5654,7 @@ function importChoices(t) {
     IMPORT_CHOICES.forEach(k => { if (k in t) out[k] = t[k]; });
     return out;
 }
-ACT['import-clear'] = () => { importState.preview = null; importState.done = null; rerender(); };
+ACT['import-clear'] = () => { importState.preview = null; importState.done = null; importState.files = null; rerender(); };
 ACT['import-confirm'] = async el => {
     const p = importState.preview;
     el.disabled = true;
@@ -5660,7 +5665,7 @@ ACT['import-confirm'] = async el => {
         groups: p.groups.map(g => ({ account: g.account, transactions: g.transactions.map(importChoices) })),
     });
     if (!r.ok) { el.disabled = false; toast(r.data.error || 'Nothing was imported', { bad: true }); return; }
-    importState.preview = null;
+    importState.preview = null; importState.files = null;
     const figuresDone = r.data.figures_written ? ` and ${plural(r.data.figures_written, 'figure')}` : '';
     const held = r.data.duplicates_skipped ? `; ${plural(r.data.duplicates_skipped, 'row')} already held ${r.data.duplicates_skipped === 1 ? 'was' : 'were'} not added again` : '';
     importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}${figuresDone}${held}. It is one change in Changes, with Undo.`;

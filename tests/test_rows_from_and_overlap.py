@@ -20,7 +20,7 @@ import pytest
 
 from test_import_that_ties import confirm, stand_in, upload  # noqa: F401
 
-BANK = "Sample Savings 0001"
+BANK = "Sample Bank Savings 0001"  # a bank: its name says so (_kind_from_account_name)
 
 RANGE = [
     ("2025-12-20", "UPI-SAMPLE GROCER-OKAXIS", 150000),
@@ -157,3 +157,42 @@ def test_two_rows_alike_but_for_digits_on_one_day_each_claim_their_own_held_row(
 
     assert (body["transactions_saved"], body["duplicates_skipped"]) == (0, 2)
     assert len(held_rows(conn)) == 2
+
+
+CARD = "Sample Card 1234"
+
+
+def test_a_card_row_posted_late_onto_the_next_statement_is_kept(client, conn, stand_in):
+    # A card statement does not print every row of a day: a ride of 13 Sep
+    # that posted on 16 Sep prints on the next statement, alike but for its
+    # digits to one the last statement held.
+    stand_in([("2026-09-13", "GRAB 8812345 SINGAPORE SG", 1500)], 0, -1500, account=CARD,
+             kind="credit_card", opening_date="2026-08-15", closing_date="2026-09-14")
+    confirm(client, upload(client))
+    stand_in([("2026-09-13", "GRAB 8899999 SINGAPORE SG", 1500), ("2026-09-20", "SAMPLE COFFEE", 500)],
+             -1500, -3500, account=CARD, kind="credit_card", opening_date="2026-09-15", closing_date="2026-10-14")
+
+    body = confirm(client, upload(client)).get_json()
+
+    assert (body["transactions_saved"], body["duplicates_skipped"]) == (2, 0)
+
+
+def test_a_card_statement_comes_in_whole_or_not_at_all(client, conn, stand_in):
+    # A card's rows belong to the statement that printed them, whatever their
+    # own date: one closing on or after the day comes in whole, with a row
+    # dated before the day that posted late; one closing before it does not.
+    rows = [("2026-09-13", "SAMPLE SHOP LATE POSTED", 1500), ("2026-09-20", "SAMPLE COFFEE", 500)]
+    stand_in(rows, -1500, -3500, account=CARD, kind="credit_card",
+             opening_date="2026-09-15", closing_date="2026-10-14")
+
+    preview = upload_from(client, "2026-09-15").get_json()
+
+    (group,) = preview["groups"]
+    assert [t["date"] for t in group["transactions"]] == ["2026-09-13", "2026-09-20"]
+    assert group["statements"][0]["opening_minor"] == -1500
+    assert preview["rows_from"] == {"day": "2026-09-15", "rows": 0, "statements": 0}
+
+    preview = upload_from(client, "2026-10-15").get_json()
+
+    assert preview["groups"] == []
+    assert preview["rows_from"] == {"day": "2026-10-15", "rows": 2, "statements": 1}
