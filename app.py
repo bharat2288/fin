@@ -1857,7 +1857,9 @@ def api_accounts_shared(acct_id):
     moves money from one of the household's own accounts. A flow set by hand
     stays; a row a record of expect back rests on is kept, and named under
     `kept`. Answers how many rows moved (`moved`). One change, undone whole;
-    a refusal writes nothing."""
+    a refusal writes nothing. `chosen` counts the rows moved whose book or
+    type the operator chose: a row becoming not ours loses them (undo puts
+    them back)."""
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or not isinstance(data.get("shared"), bool):
         return jsonify({"error": "send shared: true or false; nothing was changed"}), 400
@@ -1869,26 +1871,34 @@ def api_accounts_shared(acct_id):
             why = shared.kind_refusal(held["type"])
             if why:
                 return jsonify({"error": f"{why}. Nothing was changed"}), 400
+            # A card held as one balance with its cardholders' (card_balance.py)
+            # has one balance; its parts are never shared apart.
+            if acct_id in card_balance.part_of_ids(conn) or len(card_balance.members(conn, acct_id)) > 1:
+                return jsonify({"error": "this card is held as one balance with its cardholders' cards, "
+                                         "so it cannot be shared. Nothing was changed"}), 400
         before = flow.build_context(conn)
         if not shared.mark(conn, acct_id, data["shared"]):
-            return jsonify({"success": True, "shared": data["shared"], "moved": 0, "kept": []})
-        moved, kept = _reflow_shared(conn, acct_id, before, flow.build_context(conn))
+            return jsonify({"success": True, "shared": data["shared"], "moved": 0, "kept": [], "chosen": 0})
+        moved, kept, chosen = _reflow_shared(conn, acct_id, before, flow.build_context(conn))
         _name_change(conn, shared.MARKED if data["shared"] else shared.UNMARKED)
         conn.commit()
-    return jsonify({"success": True, "shared": data["shared"], "moved": moved, "kept": kept})
+    return jsonify({"success": True, "shared": data["shared"], "moved": moved, "kept": kept, "chosen": chosen})
 
 
 def _reflow_shared(conn, acct_id: int, before: "flow.ClassifierContext",
-                   after: "flow.ClassifierContext") -> tuple[int, list[dict]]:
+                   after: "flow.ClassifierContext") -> tuple[int, list[dict], int]:
     """Work out again the flow of each row on the account that fin worked
     out under `before`, under `after` (the account marked shared, or not).
     Never a flow set by hand, nor one fin did not give (a pairing, a refund
     link); a row a hand label would refuse the move (a record of expect back
     resting on it, relabel_preview.move_refusal) is kept. A row leaving
     spending loses its book and type (label_source.fitted); one coming back
-    takes the label its rules give it. Returns (rows moved, rows kept)."""
+    takes the label its rules give it. A book or type the operator chose
+    goes too: marking the account shared says what its rows are, and Undo
+    puts the choice back. Returns (rows moved, rows kept, rows moved whose
+    book or type was chosen)."""
     rules = db.load_rules(conn)
-    moved, kept = 0, []
+    moved, kept, chosen = 0, [], 0
     for held in conn.execute(
         f"SELECT {relabel_preview._HELD} FROM {relabel_preview._FROM} "
         "WHERE st.account_id = ? AND COALESCE(t.flow_type_manual, 0) = 0 ORDER BY t.id", (acct_id,),
@@ -1914,9 +1924,12 @@ def _reflow_shared(conn, acct_id: int, before: "flow.ClassifierContext",
             found = _label_for(conn, held["description"] or "", held["amount_minor"])
             if found["service_id"] is not None and found["service_id"] == held["service_id"]:
                 sets.update({k: found[k] for k in ("book", "type_id", "book_source", "type_source")})
-        if _write_label(conn, held, label_source.fitted(held, sets)):
+        fitted = label_source.fitted(held, sets)
+        if _write_label(conn, held, fitted):
             moved += 1
-    return moved, kept
+            chosen += label_source.clears(held, fitted) and label_source.CHOSEN in (
+                held["book_source"], held["type_source"])
+    return moved, kept, chosen
 
 
 def _ruled_account_refusal(conn, acct_id: int, data: dict) -> str | None:
@@ -2161,6 +2174,8 @@ def api_anchors_create():
         try:
             amount_minor = _typed_figure(account, data.get("amount"))
             on = anchors.checked_date(data.get("date"))
+            if shared.is_shared(conn, account_id):
+                _shared_figure_day(conn, account_id, on)
             held, created = anchors.record(
                 conn, account_id, on, amount_minor, anchors.SUPPLIED, note
             )
@@ -2212,6 +2227,9 @@ def _figure_date_allowed(conn, account, on: str) -> None:
     one, a corrected one may only sit before its first statement."""
     if account["type"] not in account_kind.SUPPLIED_UNTIL_STATEMENT_KINDS:
         return
+    if shared.is_shared(conn, account["id"]):
+        _shared_figure_day(conn, account["id"], on)
+        return
     first = conn.execute(
         "SELECT MIN(d) FROM (SELECT statement_date AS d FROM statements WHERE account_id = ? "
         "UNION ALL SELECT date FROM anchors WHERE account_id = ? AND source = ?)",
@@ -2221,6 +2239,18 @@ def _figure_date_allowed(conn, account, on: str) -> None:
         raise anchors.InvalidAnchor(
             f"a {account['type']} account rests on its statements from {first}; "
             "a figure you entered can only be dated before that"
+        )
+
+
+def _shared_figure_day(conn, account_id: int, on: str) -> None:
+    """Refuse the household's part of a shared account on a day a statement
+    balance holds: an account keeps one balance a day, and the two are
+    different facts (shared.py)."""
+    if conn.execute("SELECT 1 FROM anchors WHERE account_id = ? AND date = ? AND source = ?",
+                    (account_id, on, anchors.STATEMENT)).fetchone():
+        raise anchors.InvalidAnchor(
+            f"{on} holds this shared account's statement balance, the whole account's; "
+            "enter the household's part on another day, such as the day after. Nothing was saved"
         )
 
 
@@ -6249,6 +6279,16 @@ def api_import_confirm():
                 # Each statement that tied anchors the account at its closing
                 # balance. The same balance again is no second anchor.
                 for line in statement_lines:
+                    # On a shared account a figure on this day is the household's
+                    # part, never the statement's balance (shared.py).
+                    if shared.is_shared(conn, account_id) and conn.execute(
+                            "SELECT 1 FROM anchors WHERE account_id = ? AND date = ? AND source = ?",
+                            (account_id, line["closing_date"], anchors.SUPPLIED)).fetchone():
+                        raise AnchorRefused(
+                            f"{mask_card_number(account_name)} is shared and holds your figure for the "
+                            f"household's part on {line['closing_date']}, the day this statement closes. "
+                            "Move that figure to another day and import again; nothing was imported."
+                        )
                     try:
                         _, written = anchors.record(
                             conn, account_id, line["closing_date"], line["closing_minor"],

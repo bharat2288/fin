@@ -133,7 +133,7 @@
     // what is to pay back). Moves between own accounts never pay anything.
     Expect.fill('rowActions', row => {
         const amount = Number(row.amount_sgd);
-        const offered = (amount < 0 && !['transfer', 'payment'].includes(row.flow_type))
+        const offered = (amount < 0 && !['transfer', 'payment', 'not_ours'].includes(row.flow_type))
             || (amount > 0 && row.flow_type === 'movement');
         return offered ? `<button class="btn" data-act="back-for" data-tx="${Number(row.id)}">Back for…</button>` : '';
     });

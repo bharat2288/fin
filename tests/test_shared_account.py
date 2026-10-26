@@ -322,3 +322,102 @@ def test_an_import_cannot_say_a_row_is_not_ours_on_an_account_that_is_not_shared
 
     assert resp.status_code == 400 and "shared" in resp.get_json()["error"]
     assert conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == 0
+
+
+# --- review fixes -------------------------------------------------------------------
+
+
+def test_a_row_a_record_of_expect_back_rests_on_is_kept_and_named(client, conn, accounts):
+    bring_in(client, SEPTEMBER, AUG_CLOSING, SEP_CLOSING, "2026-09-30")
+    rid = conn.execute("SELECT id FROM transactions WHERE description = ?", (EMI[1],)).fetchone()[0]
+    conn.execute("INSERT INTO expectation (row_id, direction, amount_minor, currency) VALUES (?, 'back', 100000, 'INR')", (rid,))
+    conn.commit()
+
+    got = share(client, accounts["shared"]).get_json()
+
+    assert [k["id"] for k in got["kept"]] == [rid] and got["moved"] == 2
+    assert flows(conn)[EMI[1]] == "expense"
+
+
+def test_a_transfer_waiting_for_a_label_waits_again_once_the_account_is_not_shared(client, conn, accounts):
+    from test_movements_and_review import spending_type
+    svc = client.post("/api/services", json={"name": "Sample Aunt", "book": "Household",
+                                              "type_id": spending_type(client, "Shopping")}).get_json()["id"]
+    assert client.post("/api/rules", json={"pattern": "SAMPLE AUNT", "service_id": svc}).status_code == 200
+    row = ("2026-09-15", "PAYNOW TRANSFER SAMPLE AUNT", 300000)
+    bring_in(client, [row], AUG_CLOSING, AUG_CLOSING - 300000, "2026-09-30")
+    assert flows(conn)[row[1]] == "review"
+
+    share(client, accounts["shared"])
+    assert flows(conn)[row[1]] == "not_ours"
+    share(client, accounts["shared"], False)
+
+    assert flows(conn)[row[1]] == "review"
+
+
+def test_our_part_never_shares_a_day_with_a_statement_balance(client, conn, accounts):
+    share(client, accounts["shared"])
+    bring_in(client, SEPTEMBER, AUG_CLOSING, SEP_CLOSING, "2026-09-30")
+
+    on_closing = client.post("/api/anchors", json={"account_id": accounts["shared"], "amount": "1000",
+                                                   "date": "2026-09-30"})
+    made = client.post("/api/anchors", json={"account_id": accounts["shared"], "amount": "1000", "date": "2026-10-02"})
+    moved = client.put(f"/api/anchors/{made.get_json()['anchor']['id']}", json={"date": "2026-10-05"})
+    onto_closing = client.put(f"/api/anchors/{made.get_json()['anchor']['id']}", json={"date": "2026-09-30"})
+
+    assert on_closing.status_code == 400 and "statement balance" in on_closing.get_json()["error"]
+    # A figure on a shared account may be dated after its statements, on a day none closes.
+    assert moved.status_code == 200, moved.get_json()
+    assert onto_closing.status_code == 400
+
+
+def test_a_statement_closing_on_the_day_of_our_part_is_refused_whole(client, conn, accounts):
+    share(client, accounts["shared"])
+    assert client.post("/api/anchors", json={"account_id": accounts["shared"], "amount": "1000",
+                                             "date": "2026-09-30"}).status_code == 200
+    def parse(_path):
+        return [ParsedStatement(
+            statement_type="bank", statement_date="2026-09-30", accounts=[SHARED], filename="sample.csv",
+            currency="INR", transactions=[ParsedTransaction(date=EMI[0], description=EMI[1], amount_minor=EMI[2],
+                                                             card_info=SHARED)],
+            opening_minor=AUG_CLOSING, closing_minor=AUG_CLOSING - EMI[2],
+            opening_date="2026-09-01", closing_date="2026-09-30")]
+    parsers._PARSERS.insert(0, {"name": "Stand-in", "ext": ".csv", "detect_fn": lambda _p: True, "parse_fn": parse})
+    try:
+        preview = client.post("/api/import/upload", data={"files": (io.BytesIO(b"x"), "sample.csv")},
+                              content_type="multipart/form-data").get_json()
+    finally:
+        parsers._PARSERS = [p for p in parsers._PARSERS if p["name"] != "Stand-in"]
+
+    resp = client.post("/api/import/confirm", json={
+        "import_id": preview["import_id"],
+        "groups": [{"account": g["account"], "transactions": g["transactions"],
+                    "statements": g.get("statements", [])} for g in preview["groups"]],
+    })
+
+    assert resp.status_code != 200 and "household's part" in resp.get_json()["error"]
+    assert conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == 0
+
+
+def test_a_label_chosen_by_hand_moves_and_the_answer_says_so(client, conn, accounts):
+    from test_movements_and_review import spending_type
+    bring_in(client, SEPTEMBER, AUG_CLOSING, SEP_CLOSING, "2026-09-30")
+    conn.execute("UPDATE transactions SET book = 'Household', type_id = ?, book_source = 'chosen', type_source = 'chosen' "
+                 "WHERE description = ?", (spending_type(client, "Shopping"), FD[1]))
+    conn.commit()
+
+    got = share(client, accounts["shared"]).get_json()
+
+    assert got["moved"] == 3 and got["chosen"] == 1
+    assert flows(conn)[FD[1]] == "not_ours"
+
+
+def test_a_card_held_as_one_balance_with_its_cardholders_cannot_be_shared(client, conn, accounts, monkeypatch):
+    import card_balance
+    card = make_account(client, "Sample Card 0011", "card")
+    monkeypatch.setattr(card_balance, "members", lambda _conn, account_id: [account_id, account_id + 100]
+                        if account_id == card else [account_id])
+
+    resp = share(client, card)
+
+    assert resp.status_code == 400 and "one balance" in resp.get_json()["error"]

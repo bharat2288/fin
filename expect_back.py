@@ -202,6 +202,8 @@ def _row_refusal(row, direction: str) -> str | None:
         return "money out can only be expected back"
     if row["flow_type"] in ("transfer", "payment"):
         return "a move between your own accounts"
+    if row["flow_type"] == flow.NOT_OURS:
+        return "someone else's money on a shared account"
     if row["book"] != account_kind.HOUSEHOLD or row["owner"] != account_kind.HOUSEHOLD:
         if direction == PAY:
             return "only Household money can be expected to pay back: this row is the company's"
@@ -263,8 +265,8 @@ def counted_elsewhere(flow_name: str | None, book: str | None, other_kind: str |
     """Whether a row with this flow, book and other side's kind is one the
     sheet already counts whole, so no record may rest on it: a move between
     the household's own accounts, a company's row, a movement naming a
-    non-person."""
-    if flow_name in ("transfer", "payment"):
+    non-person; and someone else's row on a shared account, counted nowhere."""
+    if flow_name in ("transfer", "payment", flow.NOT_OURS):
         return True
     if (book or book_type.DEFAULT_BOOK) != account_kind.HOUSEHOLD:
         return True

@@ -5517,7 +5517,8 @@ ACT['account-save'] = async el => {
             if (!s.ok) { toast(s.data.error || 'That did not work; nothing was changed', { bad: true }); r = null; }
             else {
                 const kept = s.data.kept.length ? `; ${plural(s.data.kept.length, 'row')} kept by what rests on them` : '';
-                toast(`${shared.checked ? 'Marked shared' : 'Marked not shared'}: ${plural(s.data.moved, 'row')} moved${kept}`, { undo: s.change });
+                const chosen = s.data.chosen ? `; ${plural(s.data.chosen, 'row')} lost the label you chose (Undo puts it back)` : '';
+                toast(`${shared.checked ? 'Marked shared' : 'Marked not shared'}: ${plural(s.data.moved, 'row')} moved${kept}${chosen}`, { undo: s.change });
                 refreshFrame();
             }
         }

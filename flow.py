@@ -457,7 +457,9 @@ def worked_out_again(held, service_id, type_id, rule, account: dict, ctx: Classi
         "description": held["description"],
         "amount_minor": held["amount_minor"],
         "service_id": service_id,
-        "labelled": held["flow_type"] != REVIEW and bool(service_id or type_id),
+        # A row that is not ours was never labelled: off a shared account it
+        # is worked out as it was first imported.
+        "labelled": held["flow_type"] not in (REVIEW, NOT_OURS) and bool(service_id or type_id),
         **account,
         **rule_facts(rule),
     }, ctx)
