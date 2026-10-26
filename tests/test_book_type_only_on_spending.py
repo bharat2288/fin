@@ -409,6 +409,13 @@ def test_case_20_a_credit_that_came_in_as_income_relabelled_a_refund_takes_its_m
     assert resp.status_code == 200, resp.get_json()
     add_rule(client, "SAMPLE AIR", resp.get_json()["id"])
     bring_in(client, CARD, [(3, AIR, -948.00)], kind="card")
+    # As the book holds such a credit: imported as income, with no label,
+    # before money back on a card came in as a refund.
+    conn = db.get_connection()
+    conn.execute("UPDATE transactions SET flow_type = 'income', book = NULL, type_id = NULL,"
+                 " book_source = NULL, type_source = NULL WHERE id = ?", (stored(AIR)["id"],))
+    conn.commit()
+    conn.close()
     assert stored(AIR)["flow_type"] == "income" and label_of(AIR) == (None, None, None, None)
 
     said = client.post(f"/api/review/{stored(AIR)['id']}/label", json={"choice": "refund"})

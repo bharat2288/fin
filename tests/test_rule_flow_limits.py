@@ -204,11 +204,12 @@ SHOP_BACK = "SAMPLE SHOP CREDIT 0002"
 @pytest.fixture
 def older_refund(client, ledger) -> dict:
     """Sample Shop's rule; a purchase on the card and money back from the
-    shop on the card, which an older book holds as a refund (the classifier
-    today makes such a credit income)."""
+    shop into the bank account, which an older book holds as a refund (the
+    classifier makes such a credit income; one on the card it makes a refund)."""
     shop = make_merchant(client, "Sample Shop")
     rule_id = add_rule(client, "SAMPLE SHOP", shop)
-    bring_in(client, CARD, [(3, SHOP, 40.00), (4, SHOP_BACK, -25.00)], kind="card")
+    bring_in(client, CARD, [(3, SHOP, 40.00)], kind="card")
+    bring_in(client, BANK, [(4, SHOP_BACK, -25.00)])
     assert what(client, SHOP_BACK)[0] == "income"
     as_an_older_book("UPDATE transactions SET flow_type = 'refund' WHERE description = ?", SHOP_BACK)
     return {"shop": shop, "rule": rule_id, "other": make_merchant(client, "Sample Shop Two"),

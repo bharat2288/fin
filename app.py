@@ -463,6 +463,67 @@ def _figure_now(conn, loan_id: int, figure: dict) -> int | None:
         return None
 
 
+def _wording_key(description: str) -> str:
+    return " ".join((description or "").upper().split())
+
+
+def _begins_with(longer: str, shorter: str) -> bool:
+    """One wording is the other with more words after it."""
+    return bool(shorter) and longer.startswith(shorter) and (
+        len(longer) == len(shorter) or longer[len(shorter)] == " ")
+
+
+def _held_for_import(conn, import_counts) -> dict:
+    """The rows already held that each of an import's rows is, by key
+    (account, date, description, amount): [(id, printed)], oldest first, as
+    many as the import brings of that key at most.
+
+    A row held with the same account, day and amount is the same row when
+    its wording is the same, or when one wording begins with the other: a
+    bank's CSV export and its PDF statement print one card purchase as
+    "SHOPEE SINGAPORE MP SINGAPORE SG" and "SHOPEE SINGAPORE MP" ("SHOP" is
+    not "SHOPEE"). Rows the same in wording are claimed first, and of the
+    rest the row with fewest held rows it could be goes first, so a held row
+    is never two rows' and a row that could only be one is not left out."""
+    found = {key: [] for key in import_counts}
+    claimed: set[int] = set()
+    candidates = {}
+    for key in import_counts:
+        account_id, day, _description, amount = key
+        if (account_id, day, amount) not in candidates:
+            candidates[(account_id, day, amount)] = conn.execute(
+                """SELECT t.id, t.description, s.printed FROM transactions t
+                   JOIN statements s ON t.statement_id = s.id
+                   WHERE s.account_id = ? AND t.date = ? AND t.amount_minor = ?
+                   ORDER BY t.id""",
+                (account_id, day, amount),
+            ).fetchall()
+    def same(mine: str, theirs: str, loose: bool) -> bool:
+        if not loose:
+            return theirs == mine
+        return _begins_with(theirs, mine) or _begins_with(mine, theirs)
+
+    def could_be(key, loose: bool) -> list:
+        account_id, day, description, amount = key
+        mine = _wording_key(description)
+        return [row for row in candidates[(account_id, day, amount)]
+                if same(mine, _wording_key(row["description"]), loose)]
+
+    for loose in (False, True):
+        keys = list(import_counts)
+        if loose:
+            keys.sort(key=lambda key: len(could_be(key, True)))
+        for key in keys:
+            for row in could_be(key, loose):
+                if len(found[key]) >= import_counts[key]:
+                    break
+                if row["id"] in claimed:
+                    continue
+                claimed.add(row["id"])
+                found[key].append((row["id"], row["printed"]))
+    return {key: [{"id": i, "printed": p} for i, p in sorted(rows)] for key, rows in found.items()}
+
+
 def _kind_from_account_name(account_name: str) -> str:
     """The kind an import gives an account it has to create, from its name."""
     name = account_name.lower()
@@ -5624,19 +5685,13 @@ def api_import_confirm():
                     import_by_key.setdefault(key, []).append(tx)
 
                 duplicates_skipped = 0
+                held_by_key = _held_for_import(conn, import_counts)
                 for key, import_count in import_counts.items():
                     row_account_id, date_val, desc_val, amount_val = key
 
                     # Existing matches for this account, and whether each is
                     # already filed under a printed statement.
-                    held_rows = conn.execute(
-                        """SELECT t.id, s.printed FROM transactions t
-                           JOIN statements s ON t.statement_id = s.id
-                           WHERE s.account_id = ?
-                             AND t.date = ? AND t.description = ? AND t.amount_minor = ?
-                           ORDER BY t.id""",
-                        (row_account_id, date_val, desc_val, amount_val),
-                    ).fetchall()
+                    held_rows = held_by_key[key]
                     existing = len(held_rows)
 
                     # Only insert the net-new ones

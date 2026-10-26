@@ -98,13 +98,17 @@ def trip(client):
     t.credit = row_id(client, "SAMPLE AIR BOOKING", -94800)
     t.reversal = row_id(client, "PAYMENT REVERSAL", 1342415)
     t.payout = row_id(client, "SAMPLE EXCHANGE", -2645500)
-    # The credit as the book holds case 20's row: imported before income
-    # stopped taking a merchant's label (fin-redesign 05), it carries the
-    # airline's book and type, as its purchase does.
+    # The credit as the book holds case 20's row: imported as income before
+    # money back on a card came in as a refund, and before income stopped
+    # taking a merchant's label (fin-redesign 05), it carries the airline's
+    # book and type, as its purchase does.
     conn = db.get_connection()
-    conn.execute("UPDATE transactions SET book = p.book, type_id = p.type_id, book_source = p.book_source,"
+    conn.execute("UPDATE transactions SET flow_type = 'income', book = p.book, type_id = p.type_id,"
+                 " book_source = p.book_source,"
                  " type_source = p.type_source FROM (SELECT book, type_id, book_source, type_source"
                  " FROM transactions WHERE id = ?) AS p WHERE id = ?", (t.purchase, t.credit))
+    # An income row is linked to no purchase.
+    conn.execute("DELETE FROM refund_link WHERE refund_row_id = ?", (t.credit,))
     conn.commit()
     conn.close()
     return t
@@ -276,6 +280,10 @@ def test_refunds_labelled_together_link_oldest_first_whatever_order_they_are_nam
     later = [r["id"] for r in trip.client.get("/api/transactions", query_string={
         "search": "SAMPLE AIR BOOKING", "per_page": 50}).get_json()["transactions"]
         if r["amount_minor"] == -94800 and r["id"] != trip.credit][0]
+    # Held as the first credit is: income, linked to no purchase.
+    conn.execute("UPDATE transactions SET flow_type = 'income' WHERE id = ?", (later,))
+    conn.execute("DELETE FROM refund_link WHERE refund_row_id = ?", (later,))
+    conn.commit()
     named = [trip.credit, later] if order == "oldest first" else [later, trip.credit]
     token = call("label_review", tx_id=named[0], tx_ids=named[1:], choice="refund")["preview"]["token"]
 
@@ -290,6 +298,12 @@ def test_the_preview_shows_the_count_the_chat_is_asked_for(trip, conn):
     bring_in(trip.client, CARD, [("2026-08-06", "SAMPLE AIR SEAT 2210", 12000),
                                  ("2026-08-22", "SAMPLE AIR SEAT 2210", -12000)], kind="card")
     seat = row_id(trip.client, "SAMPLE AIR SEAT", -12000)
+    # The seat's credit as the book holds one imported before money back on a
+    # card came in as a refund: income, linked to no purchase.
+    conn.execute("UPDATE transactions SET flow_type = 'income', book = NULL, type_id = NULL,"
+                 " book_source = NULL, type_source = NULL WHERE id = ?", (seat,))
+    conn.execute("DELETE FROM refund_link WHERE refund_row_id = ?", (seat,))
+    conn.commit()
     preview = call("label_review", tx_id=trip.credit, tx_ids=[seat], choice="refund")["preview"]
 
     answer = call("label_review", tx_id=trip.credit, tx_ids=[seat], choice="refund", token=preview["token"])
@@ -375,10 +389,12 @@ def credits(client):
     bring_in(client, CARD, [(f"2026-08-{n:02d}", f"SAMPLE SHOP CREDIT {n:02d}", -(1000 + n)) for n in range(1, 28)],
              kind="card")
     ids = [row_id(client, f"SAMPLE SHOP CREDIT {n:02d}", -(1000 + n)) for n in range(1, 28)]
-    # As the book holds such credits: imported before income stopped taking
-    # a merchant's label (fin-redesign 05), each carries the shop's type.
+    # As the book holds such credits: imported as income before money back
+    # on a card came in as a refund, and before income stopped taking a
+    # merchant's label (fin-redesign 05), each carries the shop's type.
     conn = db.get_connection()
-    conn.executemany("UPDATE transactions SET book = 'Household', type_id = ?, book_source = 'merchant',"
+    conn.executemany("UPDATE transactions SET flow_type = 'income', book = 'Household', type_id = ?,"
+                     " book_source = 'merchant',"
                      " type_source = 'merchant' WHERE id = ?", [(shopping, i) for i in ids])
     conn.commit()
     conn.close()

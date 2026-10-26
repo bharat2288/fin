@@ -82,6 +82,11 @@ ROWS = [
     ((22, 1, "PAYNOW TO SAMPLE PAYEE REF 9934", 75.00, "transfer", 0, None, False, None), ("transfer", None)),
     ((23, 1, "INTEREST EARNED", -12.34, "income", 0, None, False, None), ("income", None)),
     ((24, 1, "POINT-OF-SALE SAMPLE CARD SHOP 0042", 61.10, "expense", 0, None, False, None), ("expense", None)),
+    # Money back on a card or a debit card, held as income from before fin
+    # read it as a refund: the operator relabels it, the step does not.
+    ((25, 2, "SAMPLE AIR 0042", -948.00, "income", 0, None, False, None), ("income", None)),
+    ((26, 1, "DEBIT CARD TRANSACTION SAMPLE FASHION 0042", -916.80, "income", 0, None, False, None), ("income", None)),
+    ((27, 2, "INTER ACCOUNT TRANSFER", -100.00, "income", 0, None, False, None), ("income", None)),
 ]
 
 
@@ -216,11 +221,11 @@ def test_no_row_is_lost_and_every_account_total_is_the_same_to_the_cent(old):
 
     report = convert(old)
 
-    assert before == [(1, 20, -23691619), (2, 2, 96540), (3, 2, 42000)]
+    assert before == [(1, 21, -23783299), (2, 4, -8260), (3, 2, 42000)]
     assert query(old, totals) == before
     assert report["before"] == report["after"]
     assert report["after"]["rows"]["transactions"] == len(ROWS)
-    assert report["after"]["account_totals_cents"] == {1: -23691619, 2: 96540, 3: 42000}
+    assert report["after"]["account_totals_cents"] == {1: -23783299, 2: -8260, 3: 42000}
 
 
 def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
