@@ -145,6 +145,13 @@ def _name(conn, subject: str, subject_id: int) -> str | None:
     return None if r is None else r[0]
 
 
+def _no_subject(subject: str):
+    """None for a subject fin links, else the 404 answer."""
+    if subject in SUBJECTS:
+        return None
+    return jsonify({"error": f"fin links a row, an account or a party, not {subject!r}. {NOTHING}"}), 404
+
+
 def _gone(subject: str):
     return jsonify({"error": f"This {subject} is no longer in fin. {NOTHING}"}), 404
 
@@ -165,11 +172,15 @@ SUMMARIES: dict[str, str] = {
     "folio_link_off": "Took a folio link off",
 }
 
-_ROUTE = "/api/folio-links/<any(row, account, party):subject>/<int:subject_id>"
+# <subject> is checked in each route, not by a converter, so the route
+# builds from any value (tests/test_no_fetch_on_get.py walks every GET).
+_ROUTE = "/api/folio-links/<subject>/<int:subject_id>"
 
 
 @bp.route(_ROUTE)
 def folio_link_get(subject, subject_id):
+    if (refused := _no_subject(subject)) is not None:
+        return refused
     with get_db() as conn:
         if _name(conn, subject, subject_id) is None:
             return _gone(subject)
@@ -179,6 +190,8 @@ def folio_link_get(subject, subject_id):
 @bp.route(_ROUTE, methods=["PUT"])
 def folio_link_set(subject, subject_id):
     """Set the subject's folio link, or replace the one it carries."""
+    if (refused := _no_subject(subject)) is not None:
+        return refused
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or not isinstance(data.get("link"), str):
         return jsonify({"error": f"send {{\"link\": the folio address}}. {NOTHING}"}), 400
@@ -204,6 +217,8 @@ def folio_link_set(subject, subject_id):
 @bp.route(_ROUTE, methods=["DELETE"])
 def folio_link_off(subject, subject_id):
     """Take the subject's folio link off."""
+    if (refused := _no_subject(subject)) is not None:
+        return refused
     with get_db() as conn:
         name = _name(conn, subject, subject_id)
         if name is None:
