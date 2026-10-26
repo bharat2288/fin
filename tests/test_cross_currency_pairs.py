@@ -309,3 +309,14 @@ def test_a_leg_carrying_an_expectation_is_not_offered(client, conn, book):
                  (out_id,))
     conn.commit()
     assert all(o != out_id for o, _ in offered(client))
+
+
+def test_a_waiting_leg_paired_with_a_not_ours_leg_stays_waiting_for_its_label(client, book):
+    # #2124 unlabelled: the money landed as hers on the shared 6324, so the S$
+    # leg is no move between our own accounts; it keeps waiting for its label.
+    out_id, in_id = book["legs"]["2124"]
+    assert confirm(client, out_id, in_id).status_code == 200
+    out_row = listed(client, out_id)
+    assert out_row["flow_type"] == "review" and out_row["other_side_id"] is None
+    assert out_row["real_rate"]["per_sgd"] == "74.44"
+    assert listed(client, in_id)["flow_type"] == "not_ours"

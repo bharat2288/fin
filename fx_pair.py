@@ -13,7 +13,9 @@ nothing is offered, never guessed.
 Confirming writes one fx_pair row holding the real rate for both rows; from
 then on every S$ reader values the in row at it (valuation.py). A leg still
 waiting (review) becomes a transfer naming the other's account, as pairing
-names it; a leg already labelled keeps its label. Not a pair writes a
+names it, unless the other leg is someone else's money on a shared account
+(not ours): then it keeps waiting for its label. A leg already labelled keeps
+its label. Not a pair writes a
 declined fx_pair row, and that pair is not offered again. Each is one change
 in Changes, and its Undo takes the pair (and so its rate) away.
 
@@ -303,8 +305,12 @@ def fx_pair_confirm():
         conn.execute(
             "INSERT INTO fx_pair (out_row_id, in_row_id, state, currency, rate, source) VALUES (?, ?, ?, ?, ?, ?)",
             (out["id"], back["id"], CONFIRMED, offer["currency"], offer["rate"], offer["source"]))
-        _pair_waiting_leg(conn, out["id"], back["account_id"])
-        _pair_waiting_leg(conn, back["id"], out["account_id"])
+        # A move between our own accounts only when neither leg is someone
+        # else's money: a waiting leg paired with a not-ours one keeps waiting
+        # for its label (a payment to them, not a transfer).
+        if flow.NOT_OURS not in (out["flow_type"], back["flow_type"]):
+            _pair_waiting_leg(conn, out["id"], back["account_id"])
+            _pair_waiting_leg(conn, back["id"], out["account_id"])
         sent, came = _pair_words(offer)
         sign = expect_back.SIGNS.get(offer["currency"], offer["currency"])
         _name_change(conn, f"Paired {sent} with {came} at {sign} {offer['per_sgd']} a dollar")
