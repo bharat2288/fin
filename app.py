@@ -32,6 +32,7 @@ import book_type
 import card_balance
 import chat_writes
 import db
+import depreciation
 import expect_back
 import flow
 import history
@@ -1646,12 +1647,14 @@ def api_accounts():
     which the dialog can correct or delete; `party_id` and `party` are the
     merchant it is joined to as its party (party.py), or null; `terms` is a
     loan's hire-purchase terms (loan_terms.shown), or null, and
-    `terms_locked` why they cannot change now, or null; `shared` whether it
-    is marked shared (shared.py); `interest_book` the book a loan's
-    worked-out interest goes to (interest_book.py), or null on any other
-    account."""
+    `terms_locked` why they cannot change now, or null; `depreciation` is a
+    holding's depreciation terms (depreciation.shown), or null: a holding
+    with them takes no figure; `shared` whether it is marked shared
+    (shared.py); `interest_book` the book a loan's worked-out interest goes
+    to (interest_book.py), or null on any other account."""
     with get_db() as conn:
         terms = loan_terms.all_held(conn)
+        depreciating = depreciation.all_held(conn)
         rows = conn.execute(
             "SELECT a.id, a.name, a.short_name, a.type, a.last_four, a.currency, a.status, a.owner,"
             " a.party_id, s.name AS party FROM accounts a LEFT JOIN services s ON s.id = a.party_id"
@@ -1679,13 +1682,16 @@ def api_accounts():
         d["name"] = mask_card_number(d["name"])
         d["short_name"] = mask_card_number(d["short_name"])
         d["anchor"] = latest.get(d["id"])
-        d["takes_a_figure"] = account_kind.takes_a_figure(
+        # A holding with depreciation terms is worth what they work out.
+        d["takes_a_figure"] = (account_kind.takes_a_figure(
             d["type"], statement_counts.get(d["id"], 0)
-        ) or d["id"] in shared_ids
+        ) or d["id"] in shared_ids) and not (d["type"] == depreciation.HOLDING and d["id"] in depreciating)
         # Figures typed for it, which can be corrected or deleted even once
         # the account no longer takes a new one.
         d["supplied_figures"] = supplied_counts.get(d["id"], 0)
         d["terms"] = loan_terms.shown(terms.get(d["id"]))
+        d["depreciation"] = (depreciation.shown(depreciating.get(d["id"]))
+                             if d["type"] == depreciation.HOLDING else None)
         # Marked shared (shared.py): its rows are not ours unless a rule says so.
         d["shared"] = d["id"] in shared_ids
         # A loan's interest goes to Household or the book chosen for it (interest_book.py).
@@ -1781,8 +1787,15 @@ def _account_terms(name: str, kind: str, currency: str, value) -> dict | None:
 @app.route("/api/accounts/<int:acct_id>", methods=["PUT"])
 def api_accounts_update(acct_id):
     """Update an account. `terms` sets a loan's hire-purchase terms, or null
-    takes them off (loan_terms.write), in the same change as the rest."""
+    takes them off (loan_terms.write), in the same change as the rest;
+    `depreciation` a holding's depreciation terms the same way
+    (depreciation.write)."""
     data = request.get_json()
+    if data and "terms" in data and "depreciation" in data:
+        return jsonify({"error": "hire-purchase terms and depreciation terms go on different accounts; "
+                                 "nothing was saved"}), 400
+    if data and "depreciation" in data:
+        return _account_update_with_depreciation(acct_id, data)
     if data and "terms" in data:
         return _account_update_with_terms(acct_id, data)
     try:
@@ -1804,6 +1817,9 @@ def api_accounts_update(acct_id):
             if loan_terms.held(conn, acct_id) is not None:
                 why = ("This loan holds hire-purchase terms; take them off before making it a "
                        f"{data['type']} account. Nothing was saved.")
+    if not why and data:
+        with get_db() as conn:
+            why = _depreciation_kind_refusal(conn, acct_id, data)
     if why:
         return jsonify({"error": why}), 400
     return _crud_update("accounts", acct_id, data, _ACCOUNT_FIELDS)
@@ -1833,7 +1849,7 @@ def _account_update_with_terms(acct_id: int, data: dict):
         except loan_terms.TermsRefused as e:
             return jsonify({"error": str(e)}), 400
         why = (_ruled_account_refusal(conn, acct_id, fields) or _party_kind_refusal(conn, acct_id, fields)
-               or _shared_kind_refusal(conn, acct_id, fields)
+               or _shared_kind_refusal(conn, acct_id, fields) or _depreciation_kind_refusal(conn, acct_id, fields)
                or _interest_book_refusal(conn, acct_id, fields))
         if why:
             return jsonify({"error": why}), 400
@@ -1866,6 +1882,72 @@ def _interest_book_refusal(conn, acct_id: int, data: dict) -> str | None:
         return (f"This loan's interest goes to {book}; set it back to {book_type.DEFAULT_BOOK} first. "
                 "Nothing was changed")
     return None
+
+
+def _depreciation_kind_refusal(conn, acct_id: int, data: dict) -> str | None:
+    """Why an update would leave a holding's depreciation terms on an
+    account that is no holding, or kept in a currency other than S$, or None."""
+    if depreciation.held(conn, acct_id) is None:
+        return None
+    if "type" in data and data["type"] != depreciation.HOLDING:
+        return ("This holding has depreciation terms; take them off before making it a "
+                f"{data['type']} account. Nothing was saved.")
+    if "currency" in data and data["currency"] != depreciation.CURRENCY:
+        return ("This holding has depreciation terms, held in S$ only; take them off before "
+                f"keeping it in {data['currency']}. Nothing was saved.")
+    return None
+
+
+def _account_update_with_depreciation(acct_id: int, data: dict):
+    """An account update that carries `depreciation`: the account's fields
+    and its depreciation terms checked, then written together, or nothing.
+    The car's value and the month check read the terms (depreciation.py):
+    nothing else is written."""
+    fields = {k: data[k] for k in _ACCOUNT_FIELDS if k in data}
+    try:
+        if "type" in fields:
+            account_kind.checked_kind(fields["type"])
+        if "owner" in fields:
+            with get_db() as conn:
+                account_kind.checked_owner(conn, fields["owner"])
+        if "currency" in fields:
+            _checked_currency(fields["currency"])
+    except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
+        return jsonify({"error": str(e)}), 400
+    with get_db() as conn:
+        held = conn.execute("SELECT name, type, currency FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+        if held is None:
+            return jsonify({"error": "No such account"}), 404
+        account = {**dict(held), **fields}
+        value = data["depreciation"]
+        terms = None
+        if value is not None:
+            if account["type"] != depreciation.HOLDING:
+                return jsonify({"error": (
+                    f"{mask_card_number(account['name'])} is a {account['type']} account; depreciation "
+                    "terms go on a holding. Nothing was saved."
+                )}), 400
+            try:
+                terms = depreciation.checked(value, account["currency"] or depreciation.CURRENCY)
+            except depreciation.TermsRefused as e:
+                return jsonify({"error": str(e)}), 400
+        why = (_ruled_account_refusal(conn, acct_id, fields) or _party_kind_refusal(conn, acct_id, fields)
+               or _shared_kind_refusal(conn, acct_id, fields) or _interest_book_refusal(conn, acct_id, fields))
+        # Hire-purchase terms stay on a loan.
+        if not why and "type" in fields and fields["type"] != loan_terms.LOAN \
+                and loan_terms.held(conn, acct_id) is not None:
+            why = ("This loan holds hire-purchase terms; take them off before making it a "
+                   f"{fields['type']} account. Nothing was saved.")
+        if why:
+            return jsonify({"error": why}), 400
+        if fields:
+            conn.execute(
+                f"UPDATE accounts SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+                (*fields.values(), acct_id),
+            )
+        depreciation.write(conn, acct_id, terms)
+        conn.commit()
+    return jsonify({"success": True})
 
 
 def _shared_kind_refusal(conn, acct_id: int, data: dict) -> str | None:
@@ -2191,8 +2273,9 @@ def api_accounts_delete(acct_id):
             return jsonify({"error": f"Cannot delete: the rules {', '.join(ruled[:-1])} and {ruled[-1]} name "
                                      "this account as their other side"}), 400
 
-        # A loan's terms go with it, in the same change.
+        # A loan's terms, and a holding's depreciation terms, go with it, in the same change.
         loan_terms.write(conn, acct_id, None)
+        depreciation.write(conn, acct_id, None)
         folio_link.take_off(conn, "account", acct_id)
         shared.mark(conn, acct_id, False)
         interest_book.choose(conn, acct_id, book_type.DEFAULT_BOOK)
@@ -2284,6 +2367,11 @@ def api_anchors_create():
                 "error": f"a {kind} account rests on its statement; a figure can be entered "
                          "for a loan, a holding, a company, a person, a shared account (the "
                          "household's part), or a bank account that has no statement"
+            }), 400
+        if kind == depreciation.HOLDING and depreciation.held(conn, account_id) is not None:
+            return jsonify({
+                "error": f"{mask_card_number(account['name'])}'s value is worked out from its "
+                         "depreciation terms; change the terms on its account instead. Nothing was saved."
             }), 400
         try:
             amount_minor = _typed_figure(account, data.get("amount"))

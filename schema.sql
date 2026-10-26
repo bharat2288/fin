@@ -58,6 +58,22 @@ CREATE TABLE IF NOT EXISTS loan_terms (
     method TEXT NOT NULL              -- how the interest is spread over the instalments (declared in loan_terms.py)
 );
 
+-- Depreciation terms on a holding (depreciation.py, fin RUL-029): a car's
+-- cost, the day it was had from, its life in whole years and its value at
+-- the end of it. Its monthly depreciation and its value are worked out from
+-- them on read; nothing else is stored. At most one row per holding. A new
+-- table, made empty by CREATE IF NOT EXISTS on start, its triggers with it
+-- (history.ADDED_ON_START); no row is converted.
+CREATE TABLE IF NOT EXISTS depreciation_terms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL UNIQUE REFERENCES accounts(id),
+    asset TEXT NOT NULL,              -- what it is (declared in depreciation.py): car
+    cost_minor INTEGER NOT NULL,      -- what it cost, whole minor units of the holding's currency
+    start TEXT NOT NULL,              -- YYYY-MM-DD, the day it was had from: its first day of depreciation
+    years INTEGER NOT NULL,           -- its life, in whole years
+    residual_minor INTEGER NOT NULL   -- what it is worth at the end of its life; 0 = nil
+);
+
 -- An anchor: one account's balance on one date, from a statement or supplied
 -- by the operator. One per account and date. An existing database gains this
 -- table, and the owner column above, through convert_account_kinds.py.
@@ -1009,6 +1025,29 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'loan_terms', OLD.id, 'delete',
         json_object('id', OLD.id, 'account_id', OLD.account_id, 'financed_minor', OLD.financed_minor, 'interest_minor', OLD.interest_minor, 'flat_rate', OLD.flat_rate, 'months', OLD.months, 'first_instalment', OLD.first_instalment, 'owed_from', OLD.owed_from, 'method', OLD.method), NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS history_depreciation_terms_insert AFTER INSERT ON depreciation_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'depreciation_terms', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'asset', NEW.asset, 'cost_minor', NEW.cost_minor, 'start', NEW.start, 'years', NEW.years, 'residual_minor', NEW.residual_minor));
+END;
+CREATE TRIGGER IF NOT EXISTS history_depreciation_terms_update AFTER UPDATE ON depreciation_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'account_id', OLD.account_id, 'asset', OLD.asset, 'cost_minor', OLD.cost_minor, 'start', OLD.start, 'years', OLD.years, 'residual_minor', OLD.residual_minor) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id, 'asset', NEW.asset, 'cost_minor', NEW.cost_minor, 'start', NEW.start, 'years', NEW.years, 'residual_minor', NEW.residual_minor)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'depreciation_terms', NEW.id, 'update',
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'asset', OLD.asset, 'cost_minor', OLD.cost_minor, 'start', OLD.start, 'years', OLD.years, 'residual_minor', OLD.residual_minor),
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'asset', NEW.asset, 'cost_minor', NEW.cost_minor, 'start', NEW.start, 'years', NEW.years, 'residual_minor', NEW.residual_minor));
+END;
+CREATE TRIGGER IF NOT EXISTS history_depreciation_terms_delete AFTER DELETE ON depreciation_terms
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'depreciation_terms', OLD.id, 'delete',
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'asset', OLD.asset, 'cost_minor', OLD.cost_minor, 'start', OLD.start, 'years', OLD.years, 'residual_minor', OLD.residual_minor), NULL);
 END;
 CREATE TRIGGER IF NOT EXISTS history_folio_link_insert AFTER INSERT ON folio_link
 WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)

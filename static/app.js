@@ -410,6 +410,8 @@ function restsOn(line, { short = false } = {}) {
         return '<span class="muted">nothing to rest on yet</span>';     // the "no figure" marker sits where the amount would
     }
     const date = day(r.date, { year: !short && !r.date.startsWith(S.month.slice(0, 4)) });
+    // A car worth what its depreciation terms work out (depreciation.py): never stale.
+    if (r.source === 'terms') return `its depreciation terms from ${esc(day(r.date))}`;
     if (r.source === 'supplied') {
         const stale = r.age_days > STALE_DAYS;
         const age = `${r.age_days} days old`;
@@ -436,7 +438,7 @@ function fixFor(line, asAt) {
 }
 function checkMarker(line) {
     const c = line.check;
-    if (!c) return `<span class="muted">${line.rests_on && line.rests_on.source === 'supplied' ? 'no check: your figure is the fact' : 'no check possible'}</span>`;
+    if (!c) return `<span class="muted">${line.rests_on && line.rests_on.source === 'supplied' ? 'no check: your figure is the fact' : line.rests_on?.source === 'terms' ? 'worked out from its terms' : 'no check possible'}</span>`;
     const href = `#/books/account/${line.account_id}`;
     if (c.status === 'ties') return tag('ties', 'ties', { href, title: 'See the tie line' });
     if (c.status === 'off') return tag('off', `off by ${money(Math.abs(c.difference_minor), line.currency)}`, { href, title: 'See the tie line' });
@@ -449,6 +451,7 @@ function tickOf(line) {
     if (line.check?.status === 'off') return t('off', icon('prohibit'), 'off by');
     if (line.check?.status === 'not_checked') return t('notchecked', icon('circle-dashed'), 'not checked');
     if (line.rests_on?.source === 'supplied') return t('yours', icon('user-circle'), 'your figure');
+    if (line.rests_on?.source === 'terms') return t('rows', '=', 'worked out from its depreciation terms');
     if (line.made_of || line.since_label) return t('rows', '=', 'worked out from rows');
     return '';
 }
@@ -895,7 +898,7 @@ function restsOnParts(sheet) {
         if (!line.in_total) { leftOut.push(line); return; }
         const w = Math.abs(line.value_minor || 0);
         let k;
-        if (!line.rests_on) k = 'rows';
+        if (!line.rests_on || line.rests_on.source === 'terms') k = 'rows';
         else if (line.rests_on.source === 'supplied') k = line.rests_on.age_days > STALE_DAYS ? 'stale' : 'recent';
         else k = line.check?.status === 'ties' ? 'ties' : line.check?.status === 'off' ? 'off' : 'notchecked';
         parts[k][0] += w; parts[k][1] += 1;
@@ -905,7 +908,7 @@ function restsOnParts(sheet) {
 }
 const REST_LABELS = {
     ties: 'statement that ties', off: 'statement off by', notchecked: 'statement not checked',
-    recent: `your figure, ${STALE_DAYS} days old or newer`, stale: `your figure, over ${STALE_DAYS} days old`, rows: 'worked out from rows (companies, people)',
+    recent: `your figure, ${STALE_DAYS} days old or newer`, stale: `your figure, over ${STALE_DAYS} days old`, rows: 'worked out (companies and people from rows, a car from its depreciation terms)',
 };
 function restsOnHTML(sheet) {
     const { parts, whole, leftOut } = restsOnParts(sheet);
@@ -955,7 +958,7 @@ function homeClaudeLine(settings) {
 /** What net worth rests on, Home's telling: short legend words that never
  *  break, and the old figures named, each opening Enter a figure. */
 const HOME_REST_LABELS = { ties: 'statement ties', off: 'statement off', notchecked: 'not checked',
-    recent: 'your figure, new', stale: 'your figure, old', rows: 'from rows' };
+    recent: 'your figure, new', stale: 'your figure, old', rows: 'worked out' };
 function homeRestsHTML(sheet) {
     const { parts, whole, leftOut } = restsOnParts(sheet);
     const keys = Object.keys(parts).filter(k => parts[k][1]);
@@ -3501,7 +3504,7 @@ ACT['needs-look'] = el => { S.needsLook = el.dataset.on === '1'; rerender(); };
 /** Nothing moved in the month: no income, spending, currency change or money
  *  moved to accounts left out. */
 function monthStill(mc) {
-    return !mc.income_minor && !mc.spending_minor && !mc.currency_change_minor && !mc.outside_minor;
+    return !mc.income_minor && !mc.spending_minor && !mc.depreciation_minor && !mc.currency_change_minor && !mc.outside_minor;
 }
 /** Why the month check does not add up, or what is still worth a look: one
  *  row per account, its marker under its name, How much holding money only. */
@@ -3549,6 +3552,7 @@ function monthCheckHTML(sheet) {
         ${line('', `Net worth at ${esc(dateWords(mc.from))} <span class="muted small">(${inCheck != null ? plural(inCheck, 'account') : 'the accounts'} in the check)</span>`, mc.opening_minor)}
         ${line('+', 'income', mc.income_minor)}
         ${line('−', `household spending${mc.interest_minor ? `, with ${esc(money(mc.interest_minor, 'SGD'))} loan interest` : ''}`, mc.spending_minor)}
+        ${mc.depreciation_minor ? line('−', `depreciation <span class="muted small">(${esc((mc.depreciation_lines || []).map(d => d.name).join(', '))}, worked out from ${(mc.depreciation_lines || []).length === 1 ? 'its terms' : 'their terms'})</span>`, mc.depreciation_minor) : ''}
         ${line(signOp(mc.currency_change_minor), 'currency change', Math.abs(mc.currency_change_minor))}
         ${mc.outside_minor ? line(signOp(mc.outside_minor), 'money moved to or from accounts left out', Math.abs(mc.outside_minor)) : ''}
         ${line('=', `what it should be at ${esc(dateWords(mc.to))}`, mc.expected_minor, 'eq')}
@@ -3585,6 +3589,7 @@ function drawBridge(sheet) {
         [day(mc.from, { year: false }), mc.opening_minor, 'base'], ['Income', mc.income_minor, 'in'], ['Spending', -mc.spending_minor, 'out'],
         ['Currency', mc.currency_change_minor, 'move'],
     ];
+    if (mc.depreciation_minor) steps.splice(3, 0, ['Depreciation', -mc.depreciation_minor, 'out']);
     if (mc.outside_minor) steps.push(['Outside', mc.outside_minor, 'move']);
     steps.push(['Should be', mc.expected_minor, 'base']);
     if (mc.unexplained_minor) steps.push(['Unexplained', mc.unexplained_minor, 'gap']);
@@ -3709,7 +3714,15 @@ async function viewAccount(id) {
 
     // The balance as a sum, in tiles: what it rests on, the rows since, the balance.
     let tiles = '';
-    if (line && line.rests_on && line.balance_minor !== null) {
+    if (line && line.depreciation && line.balance_minor !== null) {
+        // A car under its depreciation terms: its cost, less what is written off to date.
+        const d = line.depreciation;
+        tiles = `<div class="stat-tiles acct-tiles">
+            <div class="stat-tile"><span class="stat-tile__label">Cost ${esc(day(d.start))}</span><span class="stat-tile__figure">${esc(money(d.cost_minor, cur))}</span></div>
+            <div class="stat-tile"><span class="stat-tile__label">− depreciation to date</span><span class="stat-tile__figure">${esc(money(d.to_date_minor, cur))}</span><span class="stat-tile__sub">${esc(money(d.month_minor, cur))} this month</span></div>
+            <div class="stat-tile"><span class="stat-tile__label">= Value ${esc(asAtShort)}</span><span class="stat-tile__figure">${esc(money(line.balance_minor, cur))}</span></div>
+            </div>`;
+    } else if (line && line.rests_on && line.balance_minor !== null) {
         const anchor = anchorsList.find(a => a.date === line.rests_on.date);
         const base = anchor ? anchor.amount_minor : null;
         const change = base !== null ? line.balance_minor - base : null;
@@ -3723,7 +3736,7 @@ async function viewAccount(id) {
         tiles = `<p class="acct-made">${esc(madeOfSum(line))}</p>`;
     }
     // One marker, never the symbol and the pill both.
-    const marker = !line ? '' : line.check ? checkMarker(line) : line.rests_on?.source === 'supplied' ? tag('yours', 'your figure') : `<span class="muted small">${line.made_of ? 'worked out from rows' : 'no check possible'}</span>`;
+    const marker = !line ? '' : line.check ? checkMarker(line) : line.rests_on?.source === 'supplied' ? tag('yours', 'your figure') : `<span class="muted small">${line.made_of ? 'worked out from rows' : line.rests_on?.source === 'terms' ? 'worked out from its depreciation terms' : 'no check possible'}</span>`;
     const hero = `<section class="hero-card acct-hero">
         <div class="hero-card__head"><div><span class="eyebrow">Balance at ${esc(day(sheet.as_at))}</span>
             <div class="hero-figure">${line && line.balance_minor !== null ? heroFigure(line.balance_minor, cur) : ''}</div></div>
@@ -3735,7 +3748,13 @@ async function viewAccount(id) {
     // account that rests on your figures, what moved between them instead.
     const onFigures = ties.ties.length > 0 && ties.ties.every(t => t.status === 'your figure');
     let tieCard;
-    if (onFigures) {
+    if (acct.depreciation) {
+        const d = acct.depreciation;
+        const kept = ties.ties.length ? ` ${plural(ties.ties.length, 'figure')} typed for it ${ties.ties.length === 1 ? 'is' : 'are'} kept and not read while it holds them.` : '';
+        tieCard = `<section class="card"><div class="section-header"><h2>Depreciation</h2></div>
+            <p>${esc(money(d.cost_minor, cur))} from ${esc(day(d.start))}, written off evenly over ${esc(plural(d.years, 'year'))} to ${esc(money(d.residual_minor, cur))}: ${esc(money(d.monthly_minor, cur))} a month, dated each month’s last day, the first month by the days held. The last month, ending ${esc(day(d.ends))}, takes what is left.</p>
+            <p class="card-foot">Worked out from its terms each month; nothing is typed. The month check counts it on its own line, outside household spending.${esc(kept)} Change the terms on its account in Lists.</p></section>`;
+    } else if (onFigures) {
         const pairs = ties.ties.filter(t => t.opening_minor !== null && t.opening_minor !== undefined);
         // One figure alone has nothing to set it against: no card.
         tieCard = pairs.length ? `<section class="card"><div class="section-header"><h2>Between your figures</h2>${tag('yours', 'your figure')}</div>
@@ -4566,6 +4585,7 @@ async function viewLists(tab) {
         const restsCell = a => {
             const line = lineOf.get(a.id);
             const enter = a.takes_a_figure ? `<button type="button" class="link sl-enter" data-act="figure" data-account="${a.id}">Enter a figure</button>` : '';
+            if (a.depreciation) return `its depreciation terms from ${esc(day(a.depreciation.start))}, ${esc(money(a.depreciation.monthly_minor, a.currency || 'SGD'))} a month`;
             if (!a.anchor) {
                 if (a.type === 'untracked') return 'untracked: no statement or figure';
                 return a.takes_a_figure ? tag('nofig', 'no figure: enter one', { act: 'figure', data: { account: a.id }, title: 'Enter a figure' })
@@ -5536,6 +5556,37 @@ function termsFieldsHTML(t, cur = 'SGD', lock = null) {
         ${t ? `<span class="hint">Instalment ${esc(money(t.instalment_minor, cur))}; interest ${esc(money(t.interest_minor, cur))} over the term. The amount financed, owed from ${esc(day(t.owed_from))}, is the loan’s first figure.</span>`
             : '<span class="hint">Owed from: blank is the day before the first instalment’s month.</span>'}</fieldset>`;
 }
+/** A car's depreciation terms on its account sheet (depreciation.py): its
+ *  cost, the day it was had from, its life in years and its value at the end
+ *  (blank is nil). All blank is no terms. data-held keeps what the fields
+ *  first held, so a save sends them only when the operator changed them
+ *  (depChange). */
+function depFieldsHTML(d, cur = 'SGD') {
+    const held = {
+        cost: amountField(d?.cost_minor, cur), start: d?.start ?? '', years: d ? String(d.years) : '',
+        residual: d && d.residual_minor ? amountField(d.residual_minor, cur) : '',
+    };
+    const field = (label, id, key, attrs) => `<label class="field"><span>${label}</span><input ${attrs} id="${id}" value="${esc(held[key])}"></label>`;
+    return `<fieldset class="fields hp-terms" id="ac-dep" data-held="${esc(JSON.stringify(held))}"><legend>Depreciation (a car)</legend>
+        <p class="hint">With these, its value is its cost less a month’s depreciation at each month’s end, worked out for you; no figure is typed. Leave all blank for none.</p>
+        ${field('What it cost', 'ac-dep-cost', 'cost', 'type="text" inputmode="decimal"')}
+        ${field('Had from', 'ac-dep-start', 'start', 'type="date"')}
+        <div class="fields two">${field('Life, in years', 'ac-dep-years', 'years', 'type="text" inputmode="numeric"')}
+        ${field('Worth at the end', 'ac-dep-residual', 'residual', 'type="text" inputmode="decimal" placeholder="0.00"')}</div>
+        ${d ? `<span class="hint">${esc(money(d.monthly_minor, cur))} a month until ${esc(day(d.ends))}; the first month by the days held.</span>` : ''}</fieldset>`;
+}
+/** What a save sends for a car's depreciation terms: undefined when the
+ *  fields say what they first held (nothing sent), null when all are
+ *  cleared, else the terms as typed, a blank end value nil. */
+function depChange(held, fields) {
+    const keys = ['cost', 'start', 'years', 'residual'];
+    const val = (o, k) => String(o?.[k] ?? '').trim();
+    if (keys.every(k => val(fields, k) === val(held, k))) return undefined;
+    if (keys.every(k => !val(fields, k))) return null;
+    const years = val(fields, 'years');
+    return { asset: 'car', cost: val(fields, 'cost').replace(/[, ]/g, ''), start: val(fields, 'start'),
+        years: /^\d+$/.test(years) ? Number(years) : years, residual: val(fields, 'residual').replace(/[, ]/g, '') || '0' };
+}
 /** What a save sends for the terms: undefined when the fields say what they
  *  first held (nothing sent), null when all are cleared, else the terms as
  *  typed. */
@@ -5570,6 +5621,7 @@ ACT['account-edit'] = async el => {
         <span class="hint">A shared account’s rows are not ours unless a rule says what they are, or the money came from one of our own accounts. Its balance is our part, from a figure you enter; its statements still tie every row.</span>` : ''}</div>
         ${a && a.type === 'loan' ? termsFieldsHTML(a.terms, a.currency, a.terms_locked) : ''}
         ${a && a.interest_book ? interestBookHTML(r.books, a.interest_book) : ''}
+        ${a && a.type === 'holding' ? depFieldsHTML(a.depreciation, a.currency) : ''}
         ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`,
     { eyebrow: a ? 'Account' : 'Accounts', foot: `<button class="btn primary" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>` });
     $$('#sheets [data-meaning]').forEach(sel => sel.addEventListener('change', () => {
@@ -5604,6 +5656,13 @@ ACT['account-save'] = async el => {
                 interest: $('#ac-hp-interest').value, first_instalment: $('#ac-hp-first').value, owed_from: $('#ac-hp-from').value };
             const change = termsChange(JSON.parse(hp.dataset.held), now);
             if (change !== undefined) body.terms = change;
+        }
+        // A car's depreciation terms the same way.
+        const dep = $('#ac-dep');
+        if (dep) {
+            const now = { cost: $('#ac-dep-cost').value, start: $('#ac-dep-start').value, years: $('#ac-dep-years').value, residual: $('#ac-dep-residual').value };
+            const change = depChange(JSON.parse(dep.dataset.held), now);
+            if (change !== undefined) body.depreciation = change;
         }
         r = await act('PUT', `/api/accounts/${el.dataset.id}`, body, 'Account saved');
         // Shared or not is its own change: the rows on the account move with it.
