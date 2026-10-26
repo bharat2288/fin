@@ -1,0 +1,12 @@
+/* A folio reference (fin-redesign 25): the link under a page's heading and on the row sheet.
+   Every class here is prefixed .folio- so no rule reaches a page it was not written for. */
+
+.folio-slot { margin-top: var(--space-1); }
+.folio-slot:empty { display: none; }
+.folio-ref { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); font-size: var(--t-ui); }
+.folio-ref .ph { margin-left: 2px; }
+.folio-edit { display: grid; gap: var(--space-2); max-width: 32rem; }
+.folio-edit .field { margin: 0; }
+.folio-edit__input { width: 100%; min-width: 0; }
+.folio-slot > .link .ph { margin-right: 2px; }
+.folio-edit .field { display: grid; gap: var(--space-1); }

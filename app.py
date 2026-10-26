@@ -55,6 +55,7 @@ import expect_back
 import trend_series
 import valuation
 import expect_routes
+import folio_link
 import expectation_api
 import refund_links
 import relabel_preview
@@ -72,6 +73,7 @@ app.config.update(LOCAL_DEV=False, BACKUP_STORE=None)
 app.wsgi_app = access_gate.RequireGateIdentity(app.wsgi_app, app.config)
 app.register_blueprint(trend_routes.bp)
 app.register_blueprint(expect_routes.bp)
+app.register_blueprint(folio_link.bp)
 
 
 def format_type_display(parent: str | None, child: str | None) -> str:
@@ -910,6 +912,7 @@ _CHANGE_SUMMARIES = {
     "api_type_slots_move": "Moved one of fin's own filings",
 }
 _CHANGE_SUMMARIES.update(expect_routes.SUMMARIES)
+_CHANGE_SUMMARIES.update({f"{folio_link.bp.name}.{name}": words for name, words in folio_link.SUMMARIES.items()})
 
 
 def _caller() -> tuple[str, str]:
