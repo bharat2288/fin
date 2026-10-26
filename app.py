@@ -1811,7 +1811,8 @@ def api_accounts_update(acct_id):
     with get_db() as conn:
         why = (_ruled_account_refusal(conn, acct_id, data or {}) or _party_kind_refusal(conn, acct_id, data or {})
                or _shared_kind_refusal(conn, acct_id, data or {})
-               or _interest_book_refusal(conn, acct_id, data or {}))
+               or _interest_book_refusal(conn, acct_id, data or {})
+               or _currency_figures_refusal(conn, acct_id, data or {}))
     if not why and data and "type" in data and data["type"] != loan_terms.LOAN:
         with get_db() as conn:
             if loan_terms.held(conn, acct_id) is not None:
@@ -1850,7 +1851,7 @@ def _account_update_with_terms(acct_id: int, data: dict):
             return jsonify({"error": str(e)}), 400
         why = (_ruled_account_refusal(conn, acct_id, fields) or _party_kind_refusal(conn, acct_id, fields)
                or _shared_kind_refusal(conn, acct_id, fields) or _depreciation_kind_refusal(conn, acct_id, fields)
-               or _interest_book_refusal(conn, acct_id, fields))
+               or _interest_book_refusal(conn, acct_id, fields) or _currency_figures_refusal(conn, acct_id, fields))
         if why:
             return jsonify({"error": why}), 400
         try:
@@ -1932,7 +1933,8 @@ def _account_update_with_depreciation(acct_id: int, data: dict):
             except depreciation.TermsRefused as e:
                 return jsonify({"error": str(e)}), 400
         why = (_ruled_account_refusal(conn, acct_id, fields) or _party_kind_refusal(conn, acct_id, fields)
-               or _shared_kind_refusal(conn, acct_id, fields) or _interest_book_refusal(conn, acct_id, fields))
+               or _shared_kind_refusal(conn, acct_id, fields) or _interest_book_refusal(conn, acct_id, fields)
+               or _currency_figures_refusal(conn, acct_id, fields))
         # Hire-purchase terms stay on a loan.
         if not why and "type" in fields and fields["type"] != loan_terms.LOAN \
                 and loan_terms.held(conn, acct_id) is not None:
@@ -2147,6 +2149,22 @@ def _ruled_account_refusal(conn, acct_id: int, data: dict) -> str | None:
     named = (f"The rule {patterns[0]} names" if len(patterns) == 1
              else f"The rules {', '.join(patterns[:-1])} and {patterns[-1]} name")
     return f"{named} this account as its other side. {why[0].upper()}{why[1:]}{'' if why.endswith('.') else '.'}"
+
+
+def _currency_figures_refusal(conn, acct_id: int, data: dict) -> str | None:
+    """Why an account's currency may not change, or None: a figure or a
+    statement balance it holds is in its currency now, and would be read in
+    the new one (S$ 1,000.00 as Rs 1,000.00). Nothing is written then."""
+    if "currency" not in data:
+        return None
+    held = conn.execute("SELECT currency FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+    if held is None or (held["currency"] or "SGD") == data["currency"]:
+        return None
+    if conn.execute("SELECT 1 FROM anchors WHERE account_id = ? LIMIT 1", (acct_id,)).fetchone() is None:
+        return None
+    return (f"This account holds figures in {held['currency'] or 'SGD'}; they would be read in "
+            f"{data['currency']}. Delete its figures first, then enter them again in the new currency. "
+            "Nothing was saved.")
 
 
 def _account_records_refusal(conn, acct_id: int) -> str | None:

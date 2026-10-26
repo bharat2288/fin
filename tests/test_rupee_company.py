@@ -87,3 +87,25 @@ def test_rupees_paid_in_from_an_account_left_out_of_the_check_cross_its_edge_at_
     # Rs 20,000.00 at 0.01534.
     assert shown["outside_minor"] == 30_680
     assert shown["unexplained_minor"] == 0
+
+
+def test_an_account_holding_a_figure_keeps_its_currency_until_the_figure_goes(client):
+    """A figure is held in its account's currency: switching an S$ company
+    holding one to rupees would read S$ 1,000.00 as Rs 1,000.00. Refused,
+    with what to do; with the figure deleted the switch is made."""
+    company = make_account(client, "Sample Mahavir", "company")
+    resp = client.post("/api/anchors", json={"account_id": company, "amount": "1000.00", "date": "2026-07-31"})
+    assert resp.status_code == 200, resp.get_json()
+
+    refused = client.put(f"/api/accounts/{company}", json={"currency": "INR"})
+
+    assert refused.status_code == 400
+    assert "figure" in refused.get_json()["error"]
+    accounts = {a["id"]: a for a in client.get("/api/accounts").get_json()}
+    assert accounts[company]["currency"] == "SGD"
+
+    anchor = client.get(f"/api/anchors?account_id={company}").get_json()
+    anchor_id = (anchor if isinstance(anchor, list) else anchor["anchors"])[0]["id"]
+    assert client.delete(f"/api/anchors/{anchor_id}").status_code == 200
+    assert client.put(f"/api/accounts/{company}", json={"currency": "INR"}).status_code == 200
+    assert {a["id"]: a for a in client.get("/api/accounts").get_json()}[company]["currency"] == "INR"
