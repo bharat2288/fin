@@ -1837,7 +1837,8 @@ def api_accounts_party(acct_id):
         if held is None:
             return jsonify({"error": "This account is no longer in fin; nothing was changed"}), 404
         if service_id is not None:
-            why = party.kind_refusal(held["type"])
+            # A shared account joins the party it is shared with (RUL-020).
+            why = None if shared.is_shared(conn, acct_id) else party.kind_refusal(held["type"])
             if why:
                 return jsonify({"error": f"{why}. Nothing was changed"}), 400
             if conn.execute("SELECT 1 FROM services WHERE id = ?", (service_id,)).fetchone() is None:
@@ -1864,9 +1865,12 @@ def api_accounts_shared(acct_id):
     if not isinstance(data, dict) or not isinstance(data.get("shared"), bool):
         return jsonify({"error": "send shared: true or false; nothing was changed"}), 400
     with get_db() as conn:
-        held = conn.execute("SELECT type FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+        held = conn.execute("SELECT type, party_id FROM accounts WHERE id = ?", (acct_id,)).fetchone()
         if held is None:
             return jsonify({"error": "This account is no longer in fin; nothing was changed"}), 404
+        if not data["shared"] and held["party_id"] is not None and held["type"] in shared.KINDS:
+            return jsonify({"error": "this account is joined to a party as the account shared with them; "
+                                     "take it off its party first. Nothing was changed"}), 400
         if data["shared"]:
             why = shared.kind_refusal(held["type"])
             if why:
@@ -2584,6 +2588,23 @@ def api_services():
     """List all services with their book, type and transaction/rule counts."""
     with get_db() as conn:
         return jsonify(_merchants(conn))
+
+
+@app.route("/api/services/<int:svc_id>/balances")
+def api_service_balances(svc_id):
+    """A party's balances with the household at a month's end (`month`,
+    YYYY-MM; the current month when left out), and their net
+    (balance_sheet.party_lines, RUL-020): what the household owes them, on a
+    loan joined to them, and its money they hold, on a shared account joined
+    to them."""
+    month = request.args.get("month") or date.today().strftime("%Y-%m")
+    with get_db() as conn:
+        if conn.execute("SELECT 1 FROM services WHERE id = ?", (svc_id,)).fetchone() is None:
+            return jsonify({"error": "This merchant is no longer in fin"}), 404
+        try:
+            return jsonify(balance_sheet.party_lines(conn, svc_id, month, name_of=mask_card_number))
+        except balance_sheet.NotShown as e:
+            return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/services/<int:svc_id>")
