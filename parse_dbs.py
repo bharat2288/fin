@@ -509,7 +509,9 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     while i < len(lines):
         line = lines[i].strip()
 
-        heading = re.search(r"Account No\.\s*([\d-]+)", line)
+        # A section's heading ends with its number; a row's own wording may
+        # name another account's number mid-line ("TO Account No. ... :IB").
+        heading = re.search(r"Account No\.\s*([\d-]+)\s*$", line) if not current_desc_lines or row_closed else None
         if heading:
             account = heading.group(1)
         section = sections.setdefault(account, {"account": account, "opening": None, "closing": None})
@@ -635,6 +637,9 @@ def by_account(statement: ParsedStatement) -> ParsedStatement | list[ParsedState
     except (TypeError, ValueError):
         closing_date = None
     balances = {s["account"]: s for s in statement.account_sections}
+    # Every account the statement printed, rows or none: an older read filed
+    # all of them on the first.
+    printed = list(dict.fromkeys([*statement.accounts, *balances]))
     split = []
     for account in with_rows:
         own = balances.get(account, {})
@@ -649,7 +654,7 @@ def by_account(statement: ParsedStatement) -> ParsedStatement | list[ParsedState
             closing_minor=own["closing"] if stated else None,
             closing_date=closing_date if stated else None,
             currency=statement.currency,
-            siblings=[other for other in with_rows if other != account],
+            siblings=[other for other in printed if other != account],
         ))
     return split
 

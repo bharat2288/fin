@@ -5736,6 +5736,11 @@ def api_import_confirm():
                     for line in statement_lines for name in line.get("siblings") or []
                 } - {None, account_id}
                 held_by_key = _held_for_import(conn, import_counts, siblings)
+                # The page junk an older read left is a DBS bank statement's.
+                account_kinds = {
+                    i: conn.execute("SELECT type FROM accounts WHERE id = ?", (i,)).fetchone()["type"]
+                    for i in {key[0] for key in import_counts}
+                }
                 for key, import_count in import_counts.items():
                     row_account_id, date_val, desc_val, amount_val = key
 
@@ -5766,7 +5771,7 @@ def api_import_confirm():
 
                     # A held row an older read gave the page's junk after its
                     # own wording takes the wording printed.
-                    for held in held_rows:
+                    for held in held_rows if account_kinds.get(row_account_id) == "bank" else []:
                         tidied = _tidied_wording(held["description"], desc_val)
                         if tidied is not None:
                             conn.execute(

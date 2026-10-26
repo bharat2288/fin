@@ -25,7 +25,7 @@ import tie
 from test_import_that_ties import confirm, stand_in, upload  # noqa: F401
 from test_parse_hdfc import fake_open
 
-PERSONAL = "Sample Personal 100-000001-1"
+PERSONAL = "Sample Bank Personal 100-000001-1"
 HOME_RENO = "Sample Home Reno"
 
 PAGE = "\n".join([
@@ -69,7 +69,8 @@ def test_each_account_with_rows_is_its_own_statement_with_its_own_balances(monke
     assert (home_reno.opening_minor, home_reno.closing_minor, home_reno.closing_date) == (
         500000, 600120, "2026-08-31")
     assert all(tie.check(s)["difference_minor"] == 0 for s in (multiplier, home_reno))
-    assert (multiplier.siblings, home_reno.siblings) == (["200-000002-2"], ["100-000001-1"])
+    assert (multiplier.siblings, home_reno.siblings) == (
+        ["200-000002-2", "0120-000000-0-000"], ["100-000001-1", "0120-000000-0-000"])
 
 
 def test_one_account_with_rows_beside_one_without_states_its_balances(monkeypatch):
@@ -159,3 +160,33 @@ def test_a_csv_wording_longer_than_the_statements_keeps_its_own(client, conn, st
     assert (body["duplicates_skipped"], body["wordings_tidied"]) == (1, 0)
     assert [r["description"] for r in conn.execute("SELECT description FROM transactions")] == [
         "SAMPLE GROCER SINGAPORE SG"]
+
+
+def test_an_account_number_in_a_rows_wording_is_not_a_heading(monkeypatch):
+    page = PAGE.replace("BY :SAMPLE OWNER", "BY :SAMPLE OWNER\nTO Account No. 300-000003-3")
+
+    multiplier, home_reno = read(monkeypatch, (page,))
+
+    assert [t.description for t in home_reno.transactions] == [
+        "GIRO Standing Instruction BY :SAMPLE OWNER TO Account No. 300-000003-3", "Interest Earned"]
+    assert tie.check(home_reno)["difference_minor"] == 0
+
+
+def test_a_month_only_the_second_account_has_rows_in_moves_them_off_the_first(client, conn, stand_in, monkeypatch):
+    stand_in([("2026-08-07", "GIRO Standing Instruction BY :SAMPLE OWNER", -100000)], account=PERSONAL)
+    confirm(client, upload(client))
+    parsers._PARSERS = [p for p in parsers._PARSERS if p["name"] != "Stand-in"]
+    conn.execute("INSERT INTO accounts (name, short_name, type, last_four) VALUES (?, ?, 'bank', '0022')",
+                 (HOME_RENO, HOME_RENO))
+    conn.commit()
+    page = PAGE.replace("31/08/2026 Interest Earned 0.95 1,000.95\n", "").replace(
+        "Total Balance Carried Forward in SGD: 0.00 0.95 1,000.95", "Total Balance Carried Forward in SGD: 0.00 0.00 1,000.00")
+    monkeypatch.setattr(pdfplumber, "open", fake_open([page]))
+
+    body = confirm(client, upload(client, "2026-08.pdf")).get_json()
+
+    assert (body["transactions_saved"], body["duplicates_skipped"], body["rows_refiled"]) == (1, 1, 1)
+    assert rows_by_account(conn) == {
+        HOME_RENO: [("2026-08-07", "GIRO Standing Instruction BY :SAMPLE OWNER", -100000),
+                    ("2026-08-31", "Interest Earned", -120)],
+    }
