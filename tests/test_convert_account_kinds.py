@@ -18,6 +18,7 @@ import book_type
 import conversion
 import convert_change_history
 import convert_flow_rules
+import convert_party_link
 import convert_account_kinds
 import db
 import history
@@ -75,6 +76,7 @@ def old(tmp_path: Path) -> Path:
     conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
     conn.executescript("""
         DROP TABLE anchors;
+        ALTER TABLE accounts DROP COLUMN party_id;
         ALTER TABLE accounts DROP COLUMN owner;
         INSERT INTO accounts (id, name, short_name, type, last_four, currency, status) VALUES
             (1, 'Sample Card 0001', 'Sample-0001', 'credit_card', '0001', 'SGD', 'active'),
@@ -164,6 +166,11 @@ def test_an_account_already_there_is_not_created_a_second_time(old):
 
 def test_a_converted_database_has_the_shape_of_a_new_one(old, tmp_path):
     convert(old)
+    # And the step that adds an account's party, later in the chain (fin-redesign 09).
+    conn = sqlite3.connect(str(old))
+    convert_party_link.STEP.apply(conn)
+    conn.commit()
+    conn.close()
     fresh = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(fresh))
     conn.executescript(history.without_history(db.SCHEMA_PATH.read_text()))
@@ -369,6 +376,7 @@ def test_the_app_serves_a_converted_database_and_takes_a_figure(old, started_on)
     # And the change history, the last step of the chain.
     conversion.run_step(old, convert_change_history.STEP)
     conversion.run_step(old, convert_flow_rules.STEP)
+    conversion.run_step(old, convert_party_link.STEP)
     client = started_on(old)
 
     listed = {a["name"]: a for a in client.get("/api/accounts").get_json()}
@@ -400,6 +408,7 @@ def test_the_bank_accounts_with_no_statement_take_a_figure_on_a_converted_databa
     # And the change history, the last step of the chain.
     conversion.run_step(old, convert_change_history.STEP)
     conversion.run_step(old, convert_flow_rules.STEP)
+    conversion.run_step(old, convert_party_link.STEP)
     client = started_on(old)
     listed = {a["name"]: a for a in client.get("/api/accounts").get_json()}
     figures = {

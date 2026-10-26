@@ -25,6 +25,7 @@ import convert_label_source
 import convert_printed_statements
 import convert_statement_periods
 import convert_flow_rules
+import convert_party_link
 import convert_rule_flow
 import db
 import history
@@ -565,6 +566,7 @@ def test_the_app_shows_a_converted_database_the_figures_its_floats_stated(old, s
     conversion.run_step(old, convert_statement_periods.STEP)
     conversion.run_step(old, convert_rule_flow.STEP)
     conversion.run_step(old, convert_flow_rules.STEP)
+    conversion.run_step(old, convert_party_link.STEP)
     client = started_on(old)
 
     rows = {
