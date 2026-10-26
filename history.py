@@ -62,6 +62,8 @@ TRACKED = (
     "fx_pair",
     # The book a loan's worked-out interest goes to (fin-redesign 26; interest_book.py).
     "interest_books",
+    # The book an income kind belongs to (fin-redesign 26; income_book.py).
+    "income_books",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was
@@ -70,7 +72,8 @@ TRACKED = (
 # start and no conversion step is owed; so are a new table's, made by the
 # same start. has_shape does not ask for them.
 ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms", "folio_link", "books",
-                  "shared_accounts", "fx_pair", "depreciation_terms", "interest_books")
+                  "shared_accounts", "fx_pair", "depreciation_terms", "interest_books",
+                  "income_books")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens

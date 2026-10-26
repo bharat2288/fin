@@ -142,7 +142,7 @@ def home_tile(cards: dict) -> str:
         "const icon = n => `<i ${n}></i>`;",
         *[_const(c) for c in ("SIGNS", "DIGITS", "formatters", "MONTHS", "LONG_MONTHS")],
         *[_function(f) for f in ("esc", "digitsOf", "groupFor", "money", "toMinor", "monthName", "plural",
-                                 "homeBars", "homeVsAverage", "homeTile", "homeBookTiles")],
+                                 "homeBars", "homeVsAverage", "homeTile", "bookIncomeLine", "homeBookTiles")],
         f"const cards = {json.dumps(cards)};",
         f"const books = {json.dumps([{'name': HOUSEHOLD}, {'name': 'Moom'}])};",
         "process.stdout.write(JSON.stringify(homeBookTiles(cards, books)));",

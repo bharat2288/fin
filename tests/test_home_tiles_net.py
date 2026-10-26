@@ -94,7 +94,7 @@ def tiles(cards):
         "const icon = n => `<i ${n}></i>`;",
         *[_const(c) for c in ("SIGNS", "DIGITS", "formatters", "MONTHS", "LONG_MONTHS")],
         *[_function(f) for f in ("esc", "digitsOf", "groupFor", "money", "toMinor", "monthName", "plural",
-                                 "homeBars", "homeVsAverage", "homeTile", "homeBookTiles")],
+                                 "homeBars", "homeVsAverage", "homeTile", "bookIncomeLine", "homeBookTiles")],
         "const { cards, books } = JSON.parse(require('fs').readFileSync(0, 'utf8'));",
         "console.log(JSON.stringify(homeBookTiles(cards, books)));",
     ])
@@ -211,7 +211,7 @@ def test_the_old_words_are_not_in_either_tile(cards):
 
 
 def test_the_old_words_are_not_in_the_home_tile_code():
-    code = "\n".join(_function(f) for f in ("homeTile", "homeBookTiles", "homeBars", "homeVsAverage"))
+    code = "\n".join(_function(f) for f in ("homeTile", "homeBookTiles", "bookIncomeLine", "homeBars", "homeVsAverage"))
     assert not [w for w in OLD_WORDS if w in code.lower()]
 
 
