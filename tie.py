@@ -96,3 +96,25 @@ def check(statement) -> dict | None:
         statement.closing_minor,
         [tx.amount_minor for tx in statement.transactions],
     )
+
+
+def from_day(statement, day: str):
+    """The statement from `day` on: its rows before that day left out, and
+    (with `day`, the count of rows left out). None for the statement when it
+    ends before the day: none of it comes in.
+
+    A statement that states its balances still ties: its opening is the
+    balance its own rows carry it to by the day before, and its period starts
+    on the day. Check the whole statement first: a statement that does not
+    tie is never cut down into one that seems to."""
+    ends = statement.closing_date or statement.statement_date
+    before = [tx for tx in statement.transactions if tx.date < day]
+    if ends and ends < day:
+        return None, len(statement.transactions)
+    if not before:
+        return statement, 0
+    statement.transactions = [tx for tx in statement.transactions if tx.date >= day]
+    if statement.opening_minor is not None:
+        statement.opening_minor -= sum(tx.amount_minor for tx in before)
+        statement.opening_date = day
+    return statement, len(before)

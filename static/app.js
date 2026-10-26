@@ -5446,7 +5446,7 @@ ACT['account-save'] = async el => {
 // Import: three results, each drawn as a sum; a drop strip on the desk
 // ---------------------------------------------------------------------------
 
-const importState = { preview: null, done: null, busy: false, showEmpty: false };
+const importState = { preview: null, done: null, busy: false, showEmpty: false, rowsFrom: '' };
 async function viewImport() {
     // refs() beside the page's reads: the coverage grid names each account from window.__accountById, which refs() fills.
     const [, past, coverage] = await Promise.all([refs(), get('/api/import/history').catch(() => []), get('/api/statements/coverage?months=6').catch(() => null)]);
@@ -5459,6 +5459,8 @@ async function viewImport() {
             <span>or <label class="link" for="imp-files">choose them</label>. Each goes through the same tie check.</span></div>
         <div class="phone-only"><label class="btn block" for="imp-files">${icon('upload-simple')}Choose statement files</label></div>
         <input type="file" id="imp-files" multiple hidden data-change="import-files">
+        <label class="field import-from"><span>Leave out rows before <span class="muted">(optional)</span></span>
+            <input type="date" id="imp-rows-from" value="${esc(importState.rowsFrom)}" data-change="import-rows-from"></label>
         ${importState.busy ? '<p class="loading">Reading…</p>' : ''}
     </section>
     ${p ? importPreviewHTML(p) : ''}
@@ -5535,10 +5537,13 @@ function wireDrop() {
     zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('over'); uploadFiles(e.dataTransfer.files); });
 }
 ACT['import-files'] = el => uploadFiles(el.files);
+// A range statement that starts before the books do comes in from this day (tie.from_day).
+ACT['import-rows-from'] = el => { importState.rowsFrom = el.value; };
 async function uploadFiles(files) {
     if (!files || !files.length) return;
     const form = new FormData();
     Array.from(files).forEach(f => form.append('files', f));
+    if (importState.rowsFrom) form.append('rows_from', importState.rowsFrom);
     importState.busy = true; importState.done = null; rerender();
     const r = await send('POST', '/api/import/upload', form);
     importState.busy = false;
@@ -5594,6 +5599,8 @@ function importPreviewHTML(p) {
     const figures = p.figures || [];
     const newFigures = figures.filter(f => !f.held).length;
     const count = (list, test) => list.filter(test).length;
+    const lo = p.rows_from;
+    const leftOut = lo ? `<div class="notice">Rows before ${esc(day(lo.day))} are left out: ${plural(lo.rows, 'row')}${lo.statements ? `, ${plural(lo.statements, 'statement')} wholly before it` : ''}. A statement over the day comes in from it, opening on the balance of the day before.</div>` : '';
     const card = (kind, pill, n, body) => `<section class="card result result--${kind}"><div class="result__head">${pill}<span class="result__n">${n}</span></div>${body}</section>`;
     const stmtBlock = (account, sub, sum) => `<div class="result-stmt"><div class="result-stmt__name">${esc(account)}</div><div class="small muted">${sub}</div>${sum}</div>`;
     const noneYet = '<p class="small muted result-none">None.</p>';
@@ -5627,7 +5634,7 @@ function importPreviewHTML(p) {
             return `<tr><td class="num row-date">${esc(day(t.date, { year: false }))}</td><td class="row-desc">${esc(t.description)}</td><td class="row-label">${t.flow_type === 'review' ? tag('nofig', 'will wait for a label') : t.type_name ? esc(t.type_name) : t.flow_type !== 'expense' ? `<span class="muted">${esc(flowSaid(t.flow_type))}</span>` : tag('nofig', 'no type')}</td>
             <td class="r num row-in">${minor < 0 ? esc(money(-minor, g.currency)) : ''}</td><td class="r num row-out">${minor >= 0 ? esc(money(minor, g.currency)) : ''}</td></tr>`;
         }).join('')}</tbody></table></div></details>`).join('');
-    return `<div class="results">${card('ties', tag('ties', 'Ties'), ties.reduce((a, g) => a + g.statements.length, 0), tiesBody)}${card('off', tag('off', 'Off by'), refused.length, refusedBody)}${card('notchecked', tag('notchecked', 'Not checked'), unchecked.length, uncheckedBody)}</div>
+    return `${leftOut}<div class="results">${card('ties', tag('ties', 'Ties'), ties.reduce((a, g) => a + g.statements.length, 0), tiesBody)}${card('off', tag('off', 'Off by'), refused.length, refusedBody)}${card('notchecked', tag('notchecked', 'Not checked'), unchecked.length, uncheckedBody)}</div>
         ${figuresHTML}
         ${unread.length ? `<div class="notice bad import-unread">${icon('warning-circle')}<span>${unread.map(e => `${esc(e.file)}: ${esc(e.error)}`).join('<br>')}</span></div>` : ''}
         ${offered ? `<section class="card import-bar"><p>${offered} ready. A refused statement stays in the queue until a file that ties is imported.</p>
@@ -5655,7 +5662,8 @@ ACT['import-confirm'] = async el => {
     if (!r.ok) { el.disabled = false; toast(r.data.error || 'Nothing was imported', { bad: true }); return; }
     importState.preview = null;
     const figuresDone = r.data.figures_written ? ` and ${plural(r.data.figures_written, 'figure')}` : '';
-    importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}${figuresDone}. It is one change in Changes, with Undo.`;
+    const held = r.data.duplicates_skipped ? `; ${plural(r.data.duplicates_skipped, 'row')} already held ${r.data.duplicates_skipped === 1 ? 'was' : 'were'} not added again` : '';
+    importState.done = `Imported ${plural(r.data.transactions_saved || 0, 'row')}${figuresDone}${held}. It is one change in Changes, with Undo.`;
     toast('Imported', { undo: r.change });
     rerender();
 };

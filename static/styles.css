@@ -1423,6 +1423,7 @@ table.t.reasons td:first-child { font-weight: var(--font-regular); color: var(--
 .drop .link { cursor: pointer; }
 .drop.over { border-color: var(--accent-primary); background: var(--accent-primary-subtle); }
 .import-drop label.btn svg { width: 18px; height: 18px; }
+.import-drop .import-from { margin-top: var(--space-3); max-width: 260px; }
 .results { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 16px 0; }
 .result__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
 .result__n { font-family: var(--font-display); font-size: var(--t-page); font-weight: var(--font-bold); letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; }
