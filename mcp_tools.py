@@ -40,7 +40,8 @@ Rulings this module carries:
 - Paybacks over chat (fin-redesign 12; RUL-016, no per-person shares): paybacks
   reads the Queue's payback suggestions as the Money in lane shows them;
   mark_expect_back given a book or type_id labels the row in the same change
-  as the mark (set_label's route, carrying the mark); set_off_payments sets
+  as the mark (set_label's route, carrying the mark), and with flow_type
+  expense says a row waiting for a label was spending; set_off_payments sets
   several payments off against one expectation, all or none, as one change,
   under MANY_ROWS like any write.
 - The Queue (chat-queue-read 02): queue reads the Queue's labelling work
@@ -54,7 +55,9 @@ Rulings this module carries:
   previewed batch as one change entry on that preview's token, refused when
   the book moved since (a replay included). Both stop with the switch off. The
   token stands in for expected_count: a batch over MANY_ROWS rows applies on
-  it and is recorded as asked first.
+  it and is recorded as asked first. An item may state its rows' flow
+  (flow_type): a waiting row the operator calls spending becomes spending,
+  which a merchant and type alone leave waiting (ADR-009).
 - Duplicate rows (fin RUL-026): duplicate_rows reads the rows that have a
   twin (same account, day and amount) and remove_duplicate takes one out, as
   one change, over the app's own route; a row with no twin, or one a record
@@ -81,7 +84,8 @@ Rulings this module carries:
   that still holds. The token is not the operator's count: over MANY_ROWS
   rows changed (the preview's changes, refund links too) the call takes
   expected_count as any write, the number the preview shows. create_merchant adds a
-  merchant over the app's own route, which refuses a name fin holds.
+  merchant over the app's own route, which refuses a name fin holds; add_book
+  adds a book as Lists › Books does (RUL-021).
 - Parties (fin-redesign 09; a link, not a new home): a merchant is the party.
   create_merchant and change_merchant give it a role (party.ROLES), and
   link_party joins a person, company, loan, holding or untracked account to
@@ -518,7 +522,7 @@ def _mark_request(a: dict) -> tuple[str, str, dict | None]:
     """A mark on its own goes to the mark route; with a book or type it goes
     to the row's own route, carrying the mark, so both are one change."""
     tx_id = int(a["tx_id"])
-    label = _pick(a, "book", "type_id")
+    label = _pick(a, "book", "type_id", "flow_type")
     if not label:
         return "POST", f"/api/transactions/{tx_id}/expectation", _pick(a, *_MARK)
     return "PUT", f"/api/transactions/{tx_id}", {**label, "expectation": _pick(a, *_MARK)}
@@ -698,6 +702,16 @@ _WRITES = [
         lambda a: ("POST", "/api/services", _pick(a, "name", "book", "type_id", "role")),
     ),
     _w(
+        "add_book",
+        "Add a book, as Lists › Books does: a name (letters, digits, spaces, & and -) and description, "
+        "what its costs are (\"costs of the film, whichever account paid them\"). Refused, in fin's words, "
+        "when a book of that name is held already in any case: read books first. Renaming or removing a "
+        "book is not a chat tool.",
+        {"name": _S, "description": _S},
+        ("name",),
+        lambda a: ("POST", "/api/books", _pick(a, "name", "description")),
+    ),
+    _w(
         "link_party",
         "Join an account to a party: a merchant (service_id from merchants), so a person's "
         "accounts, or a company and the merchant its money arrives under, are known as one. "
@@ -744,10 +758,13 @@ _WRITES = [
         "removes it (this is not the undo tool). book and/or type_id (from the types tool) label "
         "the row in the same change, as set_label does (each marked chosen): a group order with "
         "no type yet is labelled and marked at once, and a mark the label makes impossible (a "
-        "company's book) writes neither.",
+        "company's book) writes neither. A row waiting for a label (review) is expected back only as "
+        "spending: send flow_type expense with it, and it is labelled spending in the same change.",
         {"tx_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]}, "all": _B,
          "amount": _S, "names": {"type": "array", "items": _I},
-         "new_names": {"type": "array", "items": _S}, "note": _S, "book": _S, "type_id": _I},
+         "new_names": {"type": "array", "items": _S}, "note": _S, "book": _S, "type_id": _I,
+         "flow_type": {"type": "string", "enum": ["expense"],
+                       "description": "expense, with direction back: label a waiting row spending with the mark."}},
         ("tx_id", "direction"),
         lambda a: _mark_request(a),
     ),
@@ -883,6 +900,13 @@ _PLAN_ITEM = {
         "move_chosen": {**_B, "description": "With past_rows apply, on the operator's yes: also move the rows "
                                              "the item's flows_chosen lists, kept only because the operator "
                                              "chose their book or type by hand."},
+        "flow_type": {"type": "string", "enum": ["expense"],
+                      "description": "expense, when the operator says the card's waiting (review) rows were "
+                                     "spending: they become spending, which a merchant and type alone do not "
+                                     "do. The rule its wording makes does not state it, so a later row of that "
+                                     "wording still waits unless add_rule or change_rule states flow expense. "
+                                     "Rows labelled already keep their labels. Left out, a waiting row stays "
+                                     "waiting."},
     },
     "required": ["tx_ids"],
     "additionalProperties": False,
@@ -983,6 +1007,7 @@ TITLES = {
     "add_company_or_person": "Add a company or a person",
     "create_account": "Add an account",
     "create_merchant": "Add a merchant",
+    "add_book": "Add a book",
     "link_party": "Join an account to a party",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",

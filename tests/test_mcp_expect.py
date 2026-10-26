@@ -125,6 +125,37 @@ def test_case_46_chat_marks_part_of_a_dinner_as_the_app_does(client, conn, story
     assert entries(conn) == start + 1
 
 
+
+def test_chat_marks_a_waiting_row_as_spending_and_expected_back_in_one_change(client, conn, story):
+    """A transfer-shaped row waiting for a label (chat's brief, E): flow
+    expense, a type and the mark go in together, one change, undone whole."""
+    waiting = row(conn, story.book, story.book.savings, "2026-10-08", "PAYNOW TO SAMPLE FRIEND REF 1201", 45000,
+                  flow="review")
+    before = snapshot(conn)
+    kind = conn.execute("SELECT type_id FROM transactions WHERE id = ?", (story.harbour,)).fetchone()[0]
+
+    done = chat("mark_expect_back", tx_id=waiting, direction="back", amount="300.00",
+                names=[story.people["Jay"]], flow_type="expense", type_id=kind)
+
+    assert done["ok"], done
+    assert conn.execute("SELECT flow_type, type_id FROM transactions WHERE id = ?", (waiting,)).fetchone()[:] == (
+        "expense", kind)
+    assert expectation_of(conn, waiting)["amount_minor"] == 30000
+    assert chat("undo", entry_id=done["change"]["entry_id"])["ok"]
+    assert snapshot(conn)["expectation"] == before["expectation"]
+    assert conn.execute("SELECT flow_type FROM transactions WHERE id = ?", (waiting,)).fetchone()[0] == "review"
+
+
+def test_a_waiting_row_without_a_flow_is_still_refused_in_fins_words(client, conn, story):
+    waiting = row(conn, story.book, story.book.savings, "2026-10-08", "PAYNOW TO SAMPLE FRIEND REF 1201", 45000,
+                  flow="review")
+    before = snapshot(conn)
+
+    answer = chat("mark_expect_back", tx_id=waiting, direction="back", all=True)
+
+    refused(conn, answer, before=before)
+    assert "review" in answer["error"]
+
 def test_case_46_the_chat_mark_gives_the_apps_own_figures(client, conn, story):
     chat("mark_expect_back", tx_id=story.harbour, direction="back", amount="200.00",
          names=[story.people["Jay"]])
@@ -567,3 +598,13 @@ def test_a_read_writes_nothing(client, conn, story):
 
     assert snapshot(conn) == before
     assert last_entry(conn) == before["change_entries"][-1][0]
+
+
+
+def test_money_in_waiting_is_not_said_spending_to_be_marked(client, conn, story):
+    before = snapshot(conn)
+
+    answer = chat("mark_expect_back", tx_id=story.jay_0412, direction="pay", all=True, flow_type="expense")
+
+    refused(conn, answer, before=before)
+    assert "money out" in answer["error"]

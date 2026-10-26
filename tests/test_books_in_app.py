@@ -323,3 +323,20 @@ def test_the_rows_page_filters_by_an_added_book(client, conn):
     row(conn, card, "SAMPLE GROCER", 4550, book="Household", type_name="Groceries", day="2026-09-05")
     listed = client.get("/api/transactions?every=true&month=2026-09&book=Film").get_json()
     assert [r["description"] for r in listed["transactions"]] == ["SAMPLE PROPS HIRE"]
+
+
+
+def test_chat_adds_a_book_as_the_app_does_in_one_change_it_can_undo(client):
+    done = mcp_tools.call("add_book", dict(FILM), actor="chat:sample-subject")
+
+    assert done["ok"], done
+    assert [b["name"] for b in books(client)] == SEEDED + ["Film"]
+    assert entries(client)[0]["summary"] == "Added the book Film"
+    assert mcp_tools.call("undo", {"entry_id": done["change"]["entry_id"]}, actor="chat:sample-subject")["ok"]
+    assert [b["name"] for b in books(client)] == SEEDED
+
+
+def test_chat_is_refused_a_book_in_the_apps_words(client):
+    answer = mcp_tools.call("add_book", {"name": "Film"}, actor="chat:sample-subject")
+
+    assert answer["ok"] is False and answer["error"] == "say what the book is for"
