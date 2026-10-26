@@ -116,10 +116,11 @@ def planned(conn: sqlite3.Connection) -> list[tuple[int, str, str, int | None]]:
         # classifies the same way is left with the flow it has.
         if new == (flow.classify_flow(wording, ctx), None) or new == held:
             continue
-        # Money back on a card or a debit card comes in as a refund from the
-        # day fin read it so (rule 4a); a row held from before keeps its flow
-        # until the operator relabels it.
-        if new[0] == "refund":
+        # Money back on a card or a debit card comes in as a refund, and a
+        # card credit moved from another card waits, from the day fin read
+        # them so (rule 4a); a row held from before keeps its flow until the
+        # operator relabels it.
+        if new[0] == "refund" or (new[0] == flow.REVIEW and r["account_kind"] == "card"):
             continue
         if new[0] == flow.REVIEW and held[0] not in _COUNTED_TODAY:
             continue
