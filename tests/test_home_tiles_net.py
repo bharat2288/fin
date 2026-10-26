@@ -98,7 +98,7 @@ def tiles(cards):
         "const { cards, books } = JSON.parse(require('fs').readFileSync(0, 'utf8'));",
         "console.log(JSON.stringify(homeBookTiles(cards, books)));",
     ])
-    books = [{"name": name} for name in book_type.BOOK_NAMES]
+    books = [{"name": name} for name, _ in book_type.BOOKS]
     out = subprocess.run([NODE, "-e", code], input=json.dumps({"cards": cards, "books": books}),
                          capture_output=True, text=True, timeout=30, check=True, encoding="utf-8")
     return json.loads(out.stdout)

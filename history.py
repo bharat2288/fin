@@ -52,6 +52,8 @@ TRACKED = (
     "loan_terms",
     # A folio reference on a row, an account or a party (fin-redesign 25; folio_link.py).
     "folio_link",
+    # The books the operator creates (fin RUL-021; book_type.add_book).
+    "books",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was
@@ -59,7 +61,7 @@ TRACKED = (
 # schema.sql's CREATE TRIGGER IF NOT EXISTS gives a book them on its next
 # start and no conversion step is owed; so are a new table's, made by the
 # same start. has_shape does not ask for them.
-ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms", "folio_link")
+ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms", "folio_link", "books")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens

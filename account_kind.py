@@ -2,7 +2,8 @@
 
 Both vocabularies are declared here, once, with a plain description for each
 member. Every writer of an account validates against this declaration through
-`checked_kind` and `checked_owner`. The kind is stored in the accounts
+`checked_kind` and `checked_owner`; the owners are Household and the company
+books, read from the book. The kind is stored in the accounts
 table's `type` column.
 """
 
@@ -40,17 +41,21 @@ OWED_KINDS = ("loan",)
 # Kinds off the sheet: no statement, no figure; money moved there leaves the check.
 UNTRACKED_KINDS = ("untracked",)
 
-# (name, description). The owner says whose sheet the account is on: the
-# household's, or a company's. The companies are the company books, so a new
-# book is a new owner.
+# The owner says whose sheet the account is on: the household's, or a
+# company's. The companies are the company books, read from the book (fin
+# RUL-021), so a book the operator adds is a new owner.
 HOUSEHOLD = book_type.DEFAULT_BOOK
-OWNERS = ((HOUSEHOLD, "the household's own; on the household's balance sheet"),) + tuple(
-    (name, f"owned by the company {name}; not on the household's balance sheet")
-    for name in book_type.BOOK_NAMES
-    if name != HOUSEHOLD
-)
+HOUSEHOLD_OWNS = "the household's own; on the household's balance sheet"
 
-OWNER_NAMES = tuple(name for name, _ in OWNERS)
+
+def owners(conn) -> list[tuple[str, str]]:
+    """Every owner as (name, description): Household, then each company book."""
+    return [(HOUSEHOLD, HOUSEHOLD_OWNS)] + [
+        (name, f"owned by the company {name}; not on the household's balance sheet")
+        for name in book_type.company_books(conn)
+    ]
+
+
 DEFAULT_OWNER = HOUSEHOLD
 
 
@@ -73,8 +78,10 @@ def checked_kind(value) -> str:
     return value
 
 
-def checked_owner(value) -> str:
-    """An owner as a writer may store it: one of the declared owners."""
-    if not isinstance(value, str) or value not in OWNER_NAMES:
-        raise UnknownAccountValue(f"unknown account owner: {value!r}")
+def checked_owner(conn, value) -> str:
+    """An owner as a writer may store it: Household or one of the book's companies."""
+    if not isinstance(value, str) or value not in {name for name, _ in owners(conn)}:
+        raise UnknownAccountValue(
+            f"unknown account owner: {value!r}; owner must be one of "
+            f"{', '.join(name for name, _ in owners(conn))}")
     return value

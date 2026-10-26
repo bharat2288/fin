@@ -558,6 +558,7 @@ def init_db() -> None:
     # The type list, from its one declaration, and each declared type's
     # settings where it has none yet (type-relationships 02), and the type
     # each of fin's own filings goes under (type-relationships 03).
+    book_type.seed_books(conn)
     book_type.seed_types(conn)
     book_type.seed_settings(conn)
     book_type.seed_slots(conn)
