@@ -59,3 +59,29 @@ def test_a_figure_typed_in_the_old_currency_stops_the_change_in_the_servers_word
     [toast] = out["toasts"]
     assert toast["bad"] and "Delete its figures first" in words(toast["words"])
     assert currency(api, acct) == "SGD"
+
+
+def test_a_rename_on_the_sheet_sends_no_currency(server, api):
+    acct = company(api)
+
+    out = run(server, SAVE_AS.replace("'Sample Mahavir'", "'Sample Mahavir Films'") + f"return await pick({acct}, 'SGD');")
+
+    assert [words(t["words"]) for t in out["toasts"]] == ["Account saved"]
+    entry = api.get("/api/history").get_json()["entries"][0]
+    assert entry["summary"] == "Changed an account"
+    assert currency(api, acct) == "SGD"
+
+
+def test_a_loans_terms_are_typed_figures_too(api):
+    """S$ 100,000.00 financed would be read as Rs 100,000.00: the terms are
+    sent again in the new currency with it, or the change is refused."""
+    resp = api.post("/api/accounts", json={"name": "Sample Car Loan", "type": "loan", "terms": {
+        "financed": "100000.00", "months": 60, "flat_rate": "2.5", "first_instalment": "2026-02-01"}})
+    assert resp.status_code == 200, resp.get_json()
+    loan = resp.get_json()["id"]
+
+    refused = api.put(f"/api/accounts/{loan}", json={"currency": "INR"})
+
+    assert refused.status_code == 400
+    assert "terms" in refused.get_json()["error"]
+    assert currency(api, loan) == "SGD"

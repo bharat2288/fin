@@ -1851,7 +1851,8 @@ def _account_update_with_terms(acct_id: int, data: dict):
             return jsonify({"error": str(e)}), 400
         why = (_ruled_account_refusal(conn, acct_id, fields) or _party_kind_refusal(conn, acct_id, fields)
                or _shared_kind_refusal(conn, acct_id, fields) or _depreciation_kind_refusal(conn, acct_id, fields)
-               or _interest_book_refusal(conn, acct_id, fields) or _currency_figures_refusal(conn, acct_id, fields))
+               or _interest_book_refusal(conn, acct_id, fields)
+               or _currency_figures_refusal(conn, acct_id, fields, terms_sent=data.get("terms") is not None))
         if why:
             return jsonify({"error": why}), 400
         try:
@@ -2151,11 +2152,12 @@ def _ruled_account_refusal(conn, acct_id: int, data: dict) -> str | None:
     return f"{named} this account as its other side. {why[0].upper()}{why[1:]}{'' if why.endswith('.') else '.'}"
 
 
-def _currency_figures_refusal(conn, acct_id: int, data: dict) -> str | None:
-    """Why an account update may not change its currency (anchors.currency_refusal), or None."""
+def _currency_figures_refusal(conn, acct_id: int, data: dict, terms_sent: bool = False) -> str | None:
+    """Why an account update may not change its currency (anchors.currency_refusal), or None.
+    A loan's terms sent in the same save are read in the new currency."""
     if "currency" not in data:
         return None
-    return anchors.currency_refusal(conn, acct_id, data["currency"])
+    return anchors.currency_refusal(conn, acct_id, data["currency"], terms_sent=terms_sent)
 
 
 def _account_records_refusal(conn, acct_id: int) -> str | None:
