@@ -471,6 +471,17 @@ CREATE TABLE IF NOT EXISTS shared_accounts (
     account_id INTEGER NOT NULL UNIQUE
 );
 
+-- The book a loan's worked-out interest goes to (interest_book.py,
+-- fin-redesign 26): one row per loan whose interest is not Household's. A
+-- new table, made empty by CREATE IF NOT EXISTS on start, its triggers with
+-- it (history.ADDED_ON_START); no row is converted. The loan is named by id
+-- and the book by name, as a row names its book.
+CREATE TABLE IF NOT EXISTS interest_books (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL UNIQUE,
+    book TEXT NOT NULL
+);
+
 -- These indexes are made on start (db.init_db), after the tables exist. They
 -- are written with a space before the column list: retire_categories.py puts
 -- back every index written without one, on a database older than these tables.
@@ -1122,6 +1133,29 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'shared_accounts', OLD.id, 'delete',
         json_object('id', OLD.id, 'account_id', OLD.account_id), NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS history_interest_books_insert AFTER INSERT ON interest_books
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'interest_books', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'book', NEW.book));
+END;
+CREATE TRIGGER IF NOT EXISTS history_interest_books_update AFTER UPDATE ON interest_books
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'account_id', OLD.account_id, 'book', OLD.book) IS NOT json_object('id', NEW.id, 'account_id', NEW.account_id, 'book', NEW.book)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'interest_books', NEW.id, 'update',
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'book', OLD.book),
+        json_object('id', NEW.id, 'account_id', NEW.account_id, 'book', NEW.book));
+END;
+CREATE TRIGGER IF NOT EXISTS history_interest_books_delete AFTER DELETE ON interest_books
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'interest_books', OLD.id, 'delete',
+        json_object('id', OLD.id, 'account_id', OLD.account_id, 'book', OLD.book), NULL);
 END;
 -- history:end
 

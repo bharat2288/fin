@@ -5606,6 +5606,7 @@ ACT['account-edit'] = async el => {
         ${a && ['bank', 'card'].includes(a.type) ? `<label class="check"><input type="checkbox" id="ac-shared"${a.shared ? ' checked' : ''}> Shared: someone else’s money is on it too</label>
         <span class="hint">A shared account’s rows are not ours unless a rule says what they are, or the money came from one of our own accounts. Its balance is our part, from a figure you enter; its statements still tie every row.</span>` : ''}</div>
         ${a && a.type === 'loan' ? termsFieldsHTML(a.terms, a.currency, a.terms_locked) : ''}
+        ${a && a.interest_book ? interestBookHTML(r.books, a.interest_book) : ''}
         ${a && a.type === 'holding' ? depFieldsHTML(a.depreciation, a.currency) : ''}
         ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`,
     { eyebrow: a ? 'Account' : 'Accounts', foot: `<button class="btn primary" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>` });
@@ -5614,6 +5615,12 @@ ACT['account-edit'] = async el => {
         $('#' + sel.dataset.meaning).textContent = list.find(x => x.name === sel.value)?.description || '';
     }));
 };
+/** A loan's choice of the book its worked-out interest goes to
+ *  (interest_book.py): Household, or a book of its own such as a property's. */
+function interestBookHTML(books, held) {
+    return `<div class="fields"><label class="field"><span>Interest goes to</span><select id="ac-interest-book" data-held="${esc(held)}">${books.map(b => `<option value="${esc(b.name)}"${b.name === held ? ' selected' : ''}>${esc(b.name)}</option>`).join('')}</select>
+        <span class="hint">The interest fin works out from your figures is spending in this book. Changing it moves the interest already worked out too.</span></label></div>`;
+}
 ACT['account-save'] = async el => {
     const name = $('#ac-name').value.trim();
     if (!name) { toast('Give it a name', { bad: true }); return; }
@@ -5648,6 +5655,13 @@ ACT['account-save'] = async el => {
                 toast(`${shared.checked ? 'Marked shared' : 'Marked not shared'}: ${plural(s.data.moved, 'row')} moved${kept}${chosen}`, { undo: s.change });
                 refreshFrame();
             }
+        }
+        // The book a loan's interest goes to is its own change: the interest rows move with it.
+        const ib = $('#ac-interest-book');
+        if (r && ib && ib.value !== ib.dataset.held) {
+            const s = await send('PUT', `/api/accounts/${el.dataset.id}/interest-book`, { book: ib.value });
+            if (!s.ok) { toast(s.data.error || 'That did not work; nothing was changed', { bad: true }); r = null; }
+            else { toast(`Interest now goes to ${s.data.book}`, { undo: s.change }); refreshFrame(); }
         }
     } else {
         r = await act('POST', '/api/accounts', { name, type: $('#ac-kind').value, owner: $('#ac-owner').value, currency: $('#ac-cur').value, last_four: $('#ac-last4').value.trim() || null }, 'Account added');

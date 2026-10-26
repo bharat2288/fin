@@ -91,8 +91,11 @@ Rulings this module carries:
   link_party joins a person, company, loan, holding or untracked account to
   it, or takes one off, over the app's own route: one change each, undone
   whole. Two person accounts may join one party and stay two accounts
-  (RUL-011). This is the one change to an existing account a tool makes; it
-  moves no row and no figure.
+  (RUL-011). It moves no row and no figure.
+- A loan's interest (fin-redesign 26): set_interest_book chooses the book a
+  household loan's worked-out interest goes to, over the app's own route,
+  moving the interest already worked out in the same change. It and
+  link_party are the only changes to an existing account a tool makes.
 
 The MCP server (mcp_server.py) registers TOOLS and calls call(); the actor is
 the client the chat gate verified, labelled as folio labels it: `chat:<sub>`,
@@ -726,6 +729,17 @@ _WRITES = [
                    {"service_id": a.get("service_id")}),
     ),
     _w(
+        "set_interest_book",
+        "Choose the book a loan's worked-out interest goes to, as the loan's sheet on Lists › Accounts "
+        "does: a book's name (read books), or book left out for Household. Only the household's own "
+        "loans. One change: the interest already worked out moves to the book with it, and undo puts "
+        "it back.",
+        {"account_id": _I, "book": _S},
+        ("account_id",),
+        # book left out is sent as null, said: the route refuses a body without it.
+        lambda a: ("PUT", f"/api/accounts/{int(a['account_id'])}/interest-book", {"book": a.get("book")}),
+    ),
+    _w(
         "pair_transfers",
         "Pair moves between household accounts (same amount, opposite sign, within three "
         "days). Never changes a row set by hand.",
@@ -1009,6 +1023,7 @@ TITLES = {
     "create_merchant": "Add a merchant",
     "add_book": "Add a book",
     "link_party": "Join an account to a party",
+    "set_interest_book": "Choose the book a loan's interest goes to",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",
     "set_rate": "Enter an exchange rate",

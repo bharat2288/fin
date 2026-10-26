@@ -840,6 +840,7 @@ BOOK_USED_BY = (
     ("type_settings", "usual_book"),
     ("let_go", "book"),
     ("accounts", "owner"),
+    ("interest_books", "book"),
 )
 
 BOOK_FIELDS = ("name", "description")

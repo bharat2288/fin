@@ -2,8 +2,9 @@
 
 When a figure for a loan follows an earlier one, the interest for the period
 between them is the instalments paid in it less the fall in what is owed. It
-is recorded as household spending, spread evenly across the calendar months
-of the period, in whole minor units whose parts add up exactly to the whole.
+is recorded as spending, in Household or in the book the operator chose for
+the loan (interest_book.py), spread evenly across the calendar months of the
+period, in whole minor units whose parts add up exactly to the whole.
 
 Where the derived rows live: on the loan account itself, under a statement
 record named DERIVED_STATEMENT, dated the period's closing figure and starting
@@ -39,13 +40,13 @@ import account_kind
 import anchors
 import book_type
 import flow
+import interest_book
 import label_source
 import loan_terms
 
 LOAN = "loan"
 # The name of the statement record derived rows sit under.
 DERIVED_STATEMENT = "derived: loan interest"
-BOOK = book_type.DEFAULT_BOOK
 FLOW = "expense"
 
 _INSTALMENTS_FROM = (
@@ -173,13 +174,16 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
     changed = 0
     for loan in loans:
         wanted = _wanted(conn, loan)
+        # Household, or the book the operator chose for it (interest_book.py):
+        # rows in another book are replaced.
+        book = interest_book.book_of(conn, loan)
         held = sorted(
             tuple(r) for r in conn.execute(
                 "SELECT s.statement_date, t.date, t.amount_minor, t.description "
                 + _DERIVED_FROM
                 + "AND l.id = ? AND t.book_source = ? AND t.type_source = ? AND t.flow_type = ? "
                 "AND t.book = ? AND t.type_id IS NOT NULL",
-                (*_DERIVED_PARAMS, loan, label_source.DERIVED, label_source.DERIVED, FLOW, BOOK),
+                (*_DERIVED_PARAMS, loan, label_source.DERIVED, label_source.DERIVED, FLOW, book),
             )
         )
         total_held = conn.execute(
@@ -227,7 +231,7 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
                 "INSERT INTO transactions (statement_id, date, description, amount_minor, "
                 "flow_type, book, type_id, book_source, type_source)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (statement_ids[period_end], day, description, amount, FLOW, BOOK,
+                (statement_ids[period_end], day, description, amount, FLOW, book,
                  filed.get((period_end, day), type_id), label_source.DERIVED, label_source.DERIVED),
             )
         changed += 1

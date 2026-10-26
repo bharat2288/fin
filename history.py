@@ -60,6 +60,8 @@ TRACKED = (
     "shared_accounts",
     # A cross-currency pair and its real rate (fin-redesign 24; fx_pair.py).
     "fx_pair",
+    # The book a loan's worked-out interest goes to (fin-redesign 26; interest_book.py).
+    "interest_books",
 )
 
 # Tracked tables whose triggers a start puts in place itself: the table was
@@ -68,7 +70,7 @@ TRACKED = (
 # start and no conversion step is owed; so are a new table's, made by the
 # same start. has_shape does not ask for them.
 ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms", "folio_link", "books",
-                  "shared_accounts", "fx_pair", "depreciation_terms")
+                  "shared_accounts", "fx_pair", "depreciation_terms", "interest_books")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens
@@ -432,8 +434,9 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     loan's terms under figures worked out with them (loan_terms.refusal_to_undo),
     or leave a bank account or a card joined to a party unshared
     (shared.joined_unshared).
-    A loan whose terms it puts back has its worked-out interest brought in
-    line in the same undo (loan_interest.derive)."""
+    A loan whose terms, or whose choice of book for its interest, it puts
+    back has its worked-out interest brought in line in the same undo
+    (loan_interest.derive)."""
     r = conn.execute("SELECT * FROM change_entries WHERE id = ?", (entry_id,)).fetchone()
     if r is None or r["open"]:
         raise UndoRefused("no such change")
@@ -468,15 +471,19 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     locked = loan_terms.refusal_to_undo(conn, entry_id)
     if locked:
         raise UndoRefused(locked)
-    loans = loan_terms.loans_in_entry(conn, entry_id)
+    # So does a loan whose choice of book for its interest it puts back
+    # (interest_book.py): rows worked out since, in a later change, follow it.
+    import interest_book
+
+    loans = loan_terms.loans_in_entry(conn, entry_id) | interest_book.loans_in_entry(conn, entry_id)
     try:
         _write_back(conn, entry_id)
     except sqlite3.IntegrityError:
         conn.rollback()
         raise UndoRefused("undoing this change would break a link between rows; nothing was changed") from None
     if loans:
-        # The terms are a loan's first figure: its worked-out interest follows
-        # them back, in this undo. Imported here: loan_interest reads the books.
+        # The terms are a loan's first figure, and the choice its book: its
+        # worked-out interest follows them back, in this undo. Imported here: loan_interest reads the books.
         import loan_interest
 
         for loan in sorted(loans):
