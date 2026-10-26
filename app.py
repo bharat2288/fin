@@ -449,8 +449,10 @@ def _loan_figure(conn, stmt) -> dict:
 
 def _figure_now(conn, loan_id: int, figure: dict) -> int | None:
     """What a previewed loan figure comes to under the terms the loan holds
-    now: the printed total less the interest not yet earned with terms, the
-    total as printed without; None when the terms refuse it."""
+    now: with terms, principal owed as loan_terms.principal_owed works it
+    (the printed total, plus an instalment taken off ahead of its day, less
+    the interest not yet earned); the total as printed without; None when the
+    terms refuse it."""
     printed = figure.get("printed_minor", figure["owed_minor"])
     terms = loan_terms.held(conn, loan_id)
     if terms is None:
