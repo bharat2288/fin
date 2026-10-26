@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 
 import account_kind
+import shared
 
 # The flow list: what a row is, economically. Declared here, once, with a
 # plain description for each member; every writer of a flow validates against
@@ -22,11 +23,17 @@ FLOWS = (
     ("movement", "money that became, or came from, something the household owns or is owed "
                  "outside its bank and card accounts: a loan, a holding, a company, a person"),
     ("review", "a bank transfer nobody has labelled yet; held out of spending until it is"),
+    ("not_ours", "someone else's money on an account the household shares: counted in no "
+                 "spending, income or balance; the statement tie still checks it"),
 )
 
 FLOW_TYPES = tuple(name for name, _ in FLOWS)
 MOVEMENT = "movement"
 REVIEW = "review"
+NOT_OURS = "not_ours"
+# What a row on a shared account keeps of the classifier's say: money moved
+# from or to one of the household's own accounts is ours (shared.py).
+OURS_ON_SHARED = ("transfer", "payment")
 # The flows whose rows may name their other side: an account of any kind.
 NAMES_OTHER_SIDE = ("movement", "transfer", "payment")
 
@@ -159,6 +166,8 @@ class ClassifierContext:
     owned_bank_refs: tuple[str, ...] = field(default_factory=tuple)
     # Household accounts a rule may name as an other side: {account name: id}.
     other_sides: dict = field(default_factory=dict)
+    # The accounts marked shared (shared.py).
+    shared_accounts: frozenset = field(default_factory=frozenset)
 
 
 def _extract_bank_refs(text: str | None) -> tuple[str, ...]:
@@ -208,6 +217,7 @@ def build_context(conn) -> ClassifierContext:
         linked_cc_patterns=tuple(linked),
         owned_bank_refs=tuple(sorted(bank_refs)),
         other_sides=other_sides,
+        shared_accounts=shared.ids(conn),
     )
 
 
@@ -419,10 +429,17 @@ def classify_row(facts: dict, ctx: ClassifierContext) -> tuple[str, int | None]:
     rule_facts); then the classifier, whose own rules include the account
     numbers a description names (rule 4). A rule whose other side is the
     account the row is on (`account_id`) does not say what that row is: no
-    row moves money to its own account, so the next say does."""
+    row moves money to its own account, so the next say does.
+
+    On a shared account (shared.py) a row is not ours unless a rule says
+    what it is or the classifier finds money moved from or to one of the
+    household's own accounts (OURS_ON_SHARED): a rule that labels but states
+    no flow does not make someone else's row ours."""
     if facts.get("rule_flow") and not _names_own_account(facts):
         return facts["rule_flow"], facts.get("rule_other_side")
     flow = classify_flow(facts, ctx)
+    if facts.get("account_id") in ctx.shared_accounts and flow not in OURS_ON_SHARED:
+        return NOT_OURS, None
     return flow, (_named_other_side(facts, ctx) if flow == MOVEMENT else None)
 
 
@@ -440,7 +457,9 @@ def worked_out_again(held, service_id, type_id, rule, account: dict, ctx: Classi
         "description": held["description"],
         "amount_minor": held["amount_minor"],
         "service_id": service_id,
-        "labelled": held["flow_type"] != REVIEW and bool(service_id or type_id),
+        # A row that is not ours was never labelled: off a shared account it
+        # is worked out as it was first imported.
+        "labelled": held["flow_type"] not in (REVIEW, NOT_OURS) and bool(service_id or type_id),
         **account,
         **rule_facts(rule),
     }, ctx)

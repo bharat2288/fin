@@ -13,6 +13,11 @@ owed negative. A row's amount is positive for money out.
                  cardholder's account since. A cardholder's account that is
                  part of it shows no balance of its own and is not left out:
                  its line says which balance counts it, once
+    shared       (shared.py: HDFC 6324) the household's part: the latest figure
+                 supplied less the account's rows since that are not "not
+                 ours". Its statement balances are the whole account's: they
+                 are tied against every row and never carried. With no figure
+                 there is no balance, and the line says why
     bank with    (Home Reno, a fixed deposit: no statement fin imports) the
     no statement supplied figure plus the transfer and movement rows naming
                  it since, on the household's accounts in its currency: money
@@ -73,6 +78,7 @@ import flow
 import loan_interest
 import money
 import rates
+import shared
 import statement_period
 
 # No balance and no net worth is shown for a date before this.
@@ -136,6 +142,8 @@ OWN_ROW_KINDS = account_kind.STATEMENT_KINDS
 SOURCE_LABELS = {anchors.STATEMENT: "statement", anchors.SUPPLIED: "your figure"}
 
 NO_FIGURE = "no figure"
+SHARED_NO_FIGURE = ("shared: no figure for the household's part; its statement balance "
+                    "is the whole account's")
 
 _MONTH = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
 
@@ -160,26 +168,53 @@ def month_end(month) -> date:
     return end
 
 
-def _anchor_before(conn: sqlite3.Connection, account_id: int, on: str, inclusive: bool):
-    """The account's latest anchor on or before a day, or strictly before it."""
+def _anchor_before(conn: sqlite3.Connection, account_id: int, on: str, inclusive: bool,
+                   source: str | None = None):
+    """The account's latest anchor on or before a day, or strictly before it;
+    of one source only, where `source` is given."""
     return conn.execute(
         "SELECT date, amount, source FROM anchors WHERE account_id = ? AND "
         + ("date <= ?" if inclusive else "date < ?")
+        + (" AND source = ?" if source else "")
         + " ORDER BY date DESC LIMIT 1",
-        (account_id, on),
+        (account_id, on, *((source,) if source else ())),
     ).fetchone()
 
 
-def _own_rows(conn: sqlite3.Connection, account_id: int, after: str, upto: str) -> tuple[int, int]:
+def _balance_anchor(conn: sqlite3.Connection, account_id: int, on: str):
+    """The anchor a balance on a day rests on: the latest on or before it;
+    on a shared account the latest figure supplied, the household's part (a
+    statement balance there is the whole account's)."""
+    source = anchors.SUPPLIED if shared.is_shared(conn, account_id) else None
+    return _anchor_before(conn, account_id, on, inclusive=True, source=source)
+
+
+def _tie_source(conn: sqlite3.Connection, account_id: int) -> str | None:
+    """The anchors a statement balance ties against: any, or on a shared
+    account only the statement balances (a figure there is the household's
+    part, not the account's)."""
+    return anchors.STATEMENT if shared.is_shared(conn, account_id) else None
+
+
+# A row the household's part of a shared account is not moved by, as SQL
+# over the row `t`.
+OURS_ONLY = f"COALESCE(t.flow_type, 'expense') != '{flow.NOT_OURS}'"
+
+
+def _own_rows(conn: sqlite3.Connection, account_id: int, after: str, upto: str,
+              ours_only: bool = False) -> tuple[int, int]:
     """How many rows move the account's balance that count after one day up
     to another (ROW_DAY), and what they add up to: its own, and on a card
-    split by cardholder every cardholder's account's (card_balance.py)."""
+    split by cardholder every cardholder's account's (card_balance.py).
+    `ours_only` leaves out the rows that are not ours (a shared account's
+    part); a tie counts every row."""
     members = card_balance.members(conn, account_id)
     held = ", ".join("?" for _ in members)
     row = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(t.amount_minor), 0) FROM transactions t "
         "JOIN statements s ON t.statement_id = s.id "
-        f"WHERE s.account_id IN ({held}) AND {ROW_DAY} > ? AND {ROW_DAY} <= ?",
+        f"WHERE s.account_id IN ({held}) AND {ROW_DAY} > ? AND {ROW_DAY} <= ?"
+        + (f" AND {OURS_ONLY}" if ours_only else ""),
         (*members, after, upto),
     ).fetchone()
     return row[0], row[1]
@@ -269,7 +304,8 @@ def _check(conn: sqlite3.Connection, account_id: int, kind: str, currency: str, 
         return not_checked("no statement balance held")
     if anchor["source"] != anchors.STATEMENT:
         return None
-    earlier = _anchor_before(conn, account_id, anchor["date"], inclusive=False)
+    earlier = _anchor_before(conn, account_id, anchor["date"], inclusive=False,
+                             source=_tie_source(conn, account_id))
     if earlier is None:
         return not_checked("no earlier balance to check against")
     _, between = _own_rows(conn, account_id, earlier["date"], anchor["date"])
@@ -292,8 +328,9 @@ def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: s
         count, total = _moves_into(conn, account_id, currency, anchor["date"], upto)
         return anchor["amount"] + total, count, f"+ {_counted(count, 'transfer', 'transfers')}"
     if kind in OWN_ROW_KINDS:
-        count, total = _own_rows(conn, account_id, anchor["date"], upto)
-        return anchor["amount"] - total, count, f"+ {_counted(count, 'row', 'rows')}"
+        ours = shared.is_shared(conn, account_id)
+        count, total = _own_rows(conn, account_id, anchor["date"], upto, ours_only=ours)
+        return anchor["amount"] - total, count, f"+ {_counted(count, 'row of ours', 'rows of ours') if ours else _counted(count, 'row', 'rows')}"
     count, total, money_in = _naming_rows(conn, account_id, anchor["date"], upto)
     if kind == "loan":
         since = _counted(count, "instalment", "instalments")
@@ -313,7 +350,7 @@ def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: s
 def balance_on(conn: sqlite3.Connection, account, on: str) -> int | None:
     """An account's balance on a day, in whole minor units of its currency,
     or None when it has no anchor on or before the day."""
-    anchor = _anchor_before(conn, account["id"], on, inclusive=True)
+    anchor = _balance_anchor(conn, account["id"], on)
     if anchor is None:
         return None
     return _moved(conn, account["id"], account["type"], anchor, on, account["currency"])[0]
@@ -401,7 +438,12 @@ def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -
     whole = card_balance.part_of_ids(conn).get(account["id"])
     if whole is not None:
         return _part_line(conn, account, whole, currency, name_of)
-    anchor = _anchor_before(conn, account["id"], upto, inclusive=True)
+    is_shared = shared.is_shared(conn, account["id"])
+    anchor = _balance_anchor(conn, account["id"], upto)
+    # On a shared account the tie is the statement's, whatever figure the
+    # balance rests on.
+    tied = (_anchor_before(conn, account["id"], upto, inclusive=True, source=anchors.STATEMENT)
+            if is_shared else anchor)
     line = {
         "account_id": account["id"],
         "name": name_of(account["name"]),
@@ -417,9 +459,11 @@ def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -
         "rests_on": None,
         "rows_since": 0,
         "since": None,
-        "check": _check(conn, account["id"], kind, currency, anchor),
+        "check": _check(conn, account["id"], kind, currency, tied),
         "in_total": False,
-        "left_out": NO_FIGURE,
+        "left_out": SHARED_NO_FIGURE if is_shared else NO_FIGURE,
+        # A shared account's balance is the household's part (shared.py).
+        "shared": is_shared,
     }
     if anchor is None:
         return line
@@ -774,8 +818,12 @@ def tie_lines(conn: sqlite3.Connection, account) -> list[dict]:
     balance stated and the difference, worked out as _check works it out,
     with money in and money out apart and the ids of the rows between.
     A supplied figure is the fact and is never checked; it is listed with
-    `status` "your figure". The first statement balance is "not checked"."""
+    `status` "your figure". The first statement balance is "not checked".
+    On a shared account (shared.py) a figure is the household's part, listed
+    with `part` and never tied against: each statement balance ties to the
+    one before it."""
     kind = account["type"]
+    is_shared = shared.is_shared(conn, account["id"])
     held = conn.execute(
         "SELECT date, amount, source FROM anchors WHERE account_id = ? ORDER BY date",
         (account["id"],),
@@ -797,6 +845,13 @@ def tie_lines(conn: sqlite3.Connection, account) -> list[dict]:
             "out_minor": None,
             "row_ids": [],
         }
+        if anchor["source"] == anchors.SUPPLIED and is_shared:
+            # The household's part of a shared account: a figure beside the
+            # statements, never tied to them nor they to it.
+            line["status"] = "your figure"
+            line["part"] = True
+            lines.append(line)
+            continue
         if anchor["source"] == anchors.SUPPLIED and earlier is not None and kind in OWN_ROW_KINDS:
             # A figure is the fact and is never checked; what the rows since
             # the balance before it moved is shown beside it, and what moved

@@ -18,7 +18,7 @@
 
     // The flows as the page words them, in the chips' order (flow.py declares them).
     const FLOWS = [['expense', 'Spending'], ['refund', 'Refund'], ['income', 'Income'], ['transfer', 'Transfer'],
-        ['payment', 'Card payment'], ['movement', 'Movement'], ['review', 'Waiting for a label']];
+        ['payment', 'Card payment'], ['movement', 'Movement'], ['review', 'Waiting for a label'], ['not_ours', 'Not ours']];
     const FLOW_WORD = Object.fromEntries(FLOWS);
     // The columns the server can sort by (its allowlist reaches SQL).
     const SORT = { date: { label: 'Date', kind: 'date' }, description: { label: 'Row', kind: 'text' },
@@ -77,6 +77,7 @@
     function whereTo(row) {
         const f = row.flow_type || 'expense';
         if (f === 'review') return '<span class="muted">not labelled yet</span>';
+        if (f === 'not_ours') return '<span class="muted">someone else’s, on a shared account</span>';
         if (f === 'expense' || f === 'refund') {
             const type = row.display_type ? esc(row.display_type) : tag('nofig', 'no type');
             return `${esc(row.book || 'Household')} · ${type}`;
