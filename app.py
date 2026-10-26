@@ -2352,17 +2352,18 @@ def _previewed_answer(conn, plan, answer: str | None, token, answer_key: str = "
     return None
 
 
-def _kept_said(conn, plan) -> dict:
+def _kept_said(conn, plan, moved=()) -> dict:
     """What a rule route says, once written, of the rows whose flow the rule
     would move but keeps, a record of expect back resting on each: none
     where there are none. A change that moves no other row asks nothing, so
     this is where they are named (relabel_preview.flow_writes); those kept
     only because their book or type was chosen by hand also apart
-    (flows_chosen), as the preview lists them."""
-    if not plan.kept:
-        return {}
-    by_hand = relabel_preview.chosen_lines(conn, plan.kept)
-    return {"flows_kept": relabel_preview.flows_kept(conn, plan), **({"flows_chosen": by_hand} if by_hand else {})}
+    (flows_chosen), as the preview lists them, with those `move_chosen`
+    moved (`moved`, each saying so: never moved unseen, RUL-019)."""
+    by_hand = [*relabel_preview.chosen_lines(conn, plan.kept),
+               *relabel_preview.chosen_lines(conn, list(moved), moves=True)]
+    return {**({"flows_kept": relabel_preview.flows_kept(conn, plan)} if plan.kept else {}),
+            **({"flows_chosen": by_hand} if by_hand else {})}
 
 
 def _write_plan(conn, plan, answer: str | None) -> tuple[int, int]:
@@ -3842,11 +3843,14 @@ def _teach(conn, data: dict, *, record_choice: bool = True,
                                         move_chosen and not plan_token)
             if refused is not None:
                 raise TeachRefused(refused[0].get_json(), refused[1])
+        hand_moved = []
         if move_chosen:
             # Answered with move_chosen on the preview's token: the rows kept
             # only because their book or type was chosen move as the others
             # do, the backfill's with the flow it would have written, the
             # rows a wording takes as their moved write (_taken_flows).
+            # Listed still, as moving (flows_chosen): never moved unseen (RUL-019).
+            hand_moved = [*fill_by_hand, *(taken_plan.by_hand if taken_plan is not None else ())]
             for k in fill_by_hand:
                 fill_flows[k.held["id"]] = k.would
             fill_kept = [k for k in fill_kept if not k.by_hand]
@@ -4011,7 +4015,9 @@ def _teach(conn, data: dict, *, record_choice: bool = True,
             "backfilled_ids": backfilled_ids,
             "flows": relabel_preview.moved_lines(conn, moved_lines),
             **({"flows_kept": relabel_preview.kept_lines(conn, kept)} if kept else {}),
-            **({"flows_chosen": relabel_preview.chosen_lines(conn, kept)} if any(k.by_hand for k in kept) else {}),
+            **({"flows_chosen": [*relabel_preview.chosen_lines(conn, kept),
+                                 *relabel_preview.chosen_lines(conn, hand_moved, moves=True)]}
+               if hand_moved or any(k.by_hand for k in kept) else {}),
         }, plan
     except TeachRefused:
         raise
@@ -6226,6 +6232,7 @@ def api_rules_create():
         refused = _previewed_answer(conn, plan, past, data.get("token"), move_chosen=move_chosen)
         if refused is not None:
             return refused
+        moved = plan.by_hand if move_chosen else []
         if move_chosen:
             plan = relabel_preview.with_chosen(plan)
         try:
@@ -6237,7 +6244,7 @@ def api_rules_create():
                  proposed["match_type"], proposed["priority"], min_minor, max_minor, rule_flow, other_side),
             ).lastrowid
             recategorized, checked = _write_plan(conn, plan, past)
-            kept = _kept_said(conn, plan)
+            kept = _kept_said(conn, plan, moved)
             conn.commit()
         except Exception as e:
             app.logger.warning("Failed to create rule: %s", e)
@@ -6336,6 +6343,7 @@ def api_rules_update(rule_id):
         refused = _previewed_answer(conn, plan, past, data.get("token"), move_chosen=move_chosen)
         if refused is not None:
             return refused
+        moved = plan.by_hand if move_chosen else []
         if move_chosen:
             plan = relabel_preview.with_chosen(plan)
         try:
@@ -6344,7 +6352,7 @@ def api_rules_update(rule_id):
                 (*proposed.values(), rule_id),
             )
             recategorized, checked = _write_plan(conn, plan, past)
-            kept = _kept_said(conn, plan)
+            kept = _kept_said(conn, plan, moved)
             conn.commit()
         finally:
             invalidate_rules_cache()
@@ -6373,12 +6381,13 @@ def api_rules_delete(rule_id):
         refused = _previewed_answer(conn, plan, past, data.get("token"), move_chosen=move_chosen)
         if refused is not None:
             return refused
+        moved = plan.by_hand if move_chosen else []
         if move_chosen:
             plan = relabel_preview.with_chosen(plan)
         try:
             conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
             recategorized, checked = _write_plan(conn, plan, past)
-            kept = _kept_said(conn, plan)
+            kept = _kept_said(conn, plan, moved)
             conn.commit()
         finally:
             invalidate_rules_cache()

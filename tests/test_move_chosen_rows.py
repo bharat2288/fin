@@ -86,7 +86,11 @@ def test_a_rule_changes_preview_lists_the_rows_chosen_by_hand_apart_from_those_a
     assert {k["id"]: k["why"] for k in preview["flows_kept"]}[mixed["six"]] == EXPECTED
     assert mixed["six"] not in [k["id"] for k in preview["flows_chosen"]]
     assert (preview["count"], preview["count_with_chosen"]) == (1, 2)
+    assert preview["flows_chosen"][0]["moves"] is False
     assert "move_chosen" in asked["error"]
+    # Its reason names the opt-in, not a hand label.
+    why = {k["id"]: k["why"] for k in preview["flows_kept"]}[mixed["seven"]]
+    assert "move_chosen" in why and "say what it is by hand" not in why
 
 
 def test_a_rule_change_that_would_move_only_rows_chosen_by_hand_asks_first(client, car):
@@ -100,6 +104,10 @@ def test_a_rule_change_that_would_move_only_rows_chosen_by_hand_asks_first(clien
     preview = asked.get_json()["preview"]
     assert (preview["count"], preview["count_with_chosen"]) == (0, 2)
     assert [k["id"] for k in preview["flows_chosen"]] == [seven, six]
+    said = asked.get_json()["error"]
+    assert "0 past rows" not in said
+    assert ("No other past rows change; 2 rows the operator chose by hand would move only if you send "
+            "move_chosen") in said
     assert book_rows() == before
     assert rule_of(client, car["rule"])["flow"] is None
 
@@ -137,7 +145,8 @@ def test_apply_with_the_opt_in_moves_them_and_empties_their_book_and_type(client
     answer = resp.get_json()
     assert answer["recategorized"] == 2
     assert [k["id"] for k in answer["flows_kept"]] == [mixed["six"]]
-    assert answer.get("flows_chosen", []) == []
+    # Never moved unseen (RUL-019): the answer still names the row chosen by hand, as moved.
+    assert [(k["id"], k["moves"]) for k in answer["flows_chosen"]] == [(mixed["seven"], True)]
 
 
 def test_the_opt_in_is_one_change_and_undo_puts_every_row_back_sources_too(client, mixed):
@@ -274,7 +283,7 @@ def test_a_chat_plan_lists_a_row_chosen_by_hand_and_moves_it_only_with_the_opt_i
 
     assert shown["ok"], shown
     [item] = shown["result"]["items"]
-    assert [k["id"] for k in item["flows_chosen"]] == [backfill["second"]]
+    assert [(k["id"], k["moves"]) for k in item["flows_chosen"]] == [(backfill["second"], False)]
     assert backfill["second"] not in [f["id"] for f in item["flows"]]
     # A token for the items without the opt-in is not one for the items with it.
     opted = [{**items[0], "move_chosen": True}]
@@ -286,7 +295,8 @@ def test_a_chat_plan_lists_a_row_chosen_by_hand_and_moves_it_only_with_the_opt_i
     assert moving["ok"], moving
     [item] = moving["result"]["items"]
     assert backfill["second"] in [f["id"] for f in item["flows"]]
-    assert item.get("flows_chosen", []) == []
+    # Still listed apart, saying it moves because the opt-in was sent (RUL-019).
+    assert [(k["id"], k["moves"]) for k in item["flows_chosen"]] == [(backfill["second"], True)]
     applied = call("plan_apply", items=opted, token=moving["result"]["token"])
 
     assert applied["ok"], applied
