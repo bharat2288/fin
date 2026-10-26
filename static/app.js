@@ -3248,6 +3248,8 @@ function figureLabel(a) {
     if (OWED_KINDS.includes(a.type)) {
         return a.terms ? `Principal owed now, in ${sign} (not the statement's total of remaining instalments)` : `What is owed now, in ${sign}`;
     }
+    // A shared account's figure is the household's part (shared.py), not its statement balance.
+    if (a.shared) return `Our part now, in ${sign} (the household's money in it, not the account's balance)`;
     return a.type === 'holding' ? `What it is worth now, in ${sign}` : `The balance now, in ${sign}`;
 }
 /** What Enter a figure says of an account with no figure yet. A loan with
@@ -3257,6 +3259,7 @@ function figureEmptyLine(a) {
     if (OWED_KINDS.includes(a.type) && a.terms) {
         return 'No figure yet. Its interest is worked out from its terms; it joins net worth when its first statement comes in, or when you enter the principal owed.';
     }
+    if (a.shared) return 'No figure yet: our part is left out of net worth until you enter it. Date it on the day it was true; our own rows after it carry it forward.';
     return 'No figure yet: it is left out of net worth until it has one.';
 }
 /** The dialog's closing line. On a loan with terms the next statement import
