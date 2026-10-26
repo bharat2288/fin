@@ -510,6 +510,9 @@ def get_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Every S$ figure values a foreign row on one path (valuation.py).
+    import valuation
+    valuation.attach(conn)
     return conn
 
 

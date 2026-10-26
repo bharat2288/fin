@@ -63,6 +63,18 @@ _SUBJECT = {
     "book": (f"{book_expr('t')} = :subject", None),
 }
 
+class Cell(dict):
+    """A series cell, {spent, back, net} in its currency, that also carries
+    `in_sgd`: (spent, back) in S$ on the one path and how many of its rows no
+    saved rate values. A plain dict to every reader that does not ask."""
+
+    in_sgd: tuple | None = None
+
+
+# A line in S$ on the one path (valuation.py): a row in another currency at
+# the rate of its own day; NULL when no saved rate values it.
+_SGD = "sgd_value(t.amount_minor, a.currency, t.date)"
+
 # Which accounts a book counts: Household only the household's own; a
 # company book every account.
 _ACCOUNTS_COUNTED = (
@@ -110,6 +122,20 @@ def counted_from() -> str:
     as the line's account, so the shared filters' `s.account_id` (scope.py,
     app._build_filters) read as they do on rows."""
     return f"{counted_lines()} t JOIN (SELECT id AS account_id FROM accounts) s ON s.account_id = t.account_id"
+
+
+def counted_from_sgd() -> str:
+    """counted_from with every line's amount_minor in S$ cents, valued on the
+    one path (valuation.py; the connection must be attached): a line in
+    another currency at the rate of its own day. A line no saved rate values
+    is not in it: valuation.unvalued_count counts those."""
+    return (
+        "(SELECT l.id, l.date, l.book, l.type_id, l.service_id, l.is_one_off, l.flow_type,"
+        " l.account_id, sgd_value(l.amount_minor, la.currency, l.date) AS amount_minor"
+        f" FROM {counted_lines()} l JOIN accounts la ON la.id = l.account_id"
+        " WHERE sgd_value(l.amount_minor, la.currency, l.date) IS NOT NULL) t"
+        " JOIN (SELECT id AS account_id FROM accounts) s ON s.account_id = t.account_id"
+    )
 
 
 def _months(start: str, end: str) -> list[str]:
@@ -169,7 +195,10 @@ def series(conn: sqlite3.Connection, subject, start: str, end: str,
                {part} AS row_part,
                COALESCE(a.currency, 'SGD') AS row_currency,
                SUM(CASE WHEN t.amount_minor > 0 THEN t.amount_minor ELSE 0 END) AS spent,
-               SUM(CASE WHEN t.amount_minor < 0 THEN -t.amount_minor ELSE 0 END) AS back
+               SUM(CASE WHEN t.amount_minor < 0 THEN -t.amount_minor ELSE 0 END) AS back,
+               SUM(CASE WHEN t.amount_minor > 0 THEN {_SGD} ELSE 0 END) AS spent_sgd,
+               SUM(CASE WHEN t.amount_minor < 0 THEN -{_SGD} ELSE 0 END) AS back_sgd,
+               SUM(CASE WHEN {_SGD} IS NULL THEN 1 ELSE 0 END) AS unvalued
         FROM {counted_from()}
         JOIN accounts a ON a.id = s.account_id
         LEFT JOIN services svc ON svc.id = t.service_id
@@ -194,29 +223,41 @@ def series(conn: sqlite3.Connection, subject, start: str, end: str,
         cells = out[r["row_month"]].setdefault(r["row_book"], {}).setdefault(r["row_key"], {})
         if split_by is not None:
             cells = cells.setdefault(r["row_part"], {})
-        cells[r["row_currency"]] = {"spent": spent, "back": back, "net": spent - back}
+        cells[r["row_currency"]] = Cell(spent=spent, back=back, net=spent - back)
+        cells[r["row_currency"]].in_sgd = (r["spent_sgd"] or 0, r["back_sgd"] or 0, r["unvalued"])
     return {"subject": named, "start": months[0], "end": months[-1],
             "stack_by": stack_by, "series": out}
 
 
 def valued(conn: sqlite3.Connection, cell: dict, currency: str, month: str) -> dict:
     """One cell of the series ({spent, back, net} in `currency`, month
-    'YYYY-MM') in S$, through balance_sheet.valued at the latest saved rate
-    on or before the month's last day and not before its first (ruling 4).
-    Spent and back are valued apart, so net stays spent less back to the
-    cent.
+    'YYYY-MM') in S$. Each row of the cell is valued on the one path
+    (valuation.py, RUL-022): at the rate of its own day, the latest saved on
+    or before it and not before its month's first day. A cell with a row no
+    saved rate values is left out whole, and left_out says why. Spent and
+    back are valued apart, so net stays spent less back to the cent.
 
     Answers {spent, back, net, rate, left_out}: spent, back and net are None
-    when the cell cannot be valued, and left_out says why; rate is the rate
-    used, None for S$."""
+    when the cell cannot be valued; rate is the month's latest rate, as a
+    line shows it, None for S$."""
+    if currency == balance_sheet.rates.QUOTE:
+        return {"spent": cell["spent"], "back": cell["back"], "net": cell["spent"] - cell["back"],
+                "rate": None, "left_out": None}
     year, mon = int(month[:4]), int(month[5:7])
     first_day = f"{month}-01"
     last_day = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
-    spent = balance_sheet.valued(conn, cell["spent"], currency, last_day, not_before=first_day)
-    if spent["value_minor"] is None:
+    shown = balance_sheet.valued(conn, cell["spent"], currency, last_day, not_before=first_day)
+    in_sgd = getattr(cell, "in_sgd", None)
+    if in_sgd is None:
+        # A cell not from series(): valued whole at the month's rate.
+        if shown["value_minor"] is None:
+            return {"spent": None, "back": None, "net": None, "rate": None, "left_out": shown["left_out"]}
+        back = balance_sheet.valued(conn, cell["back"], currency, last_day, not_before=first_day)
+        return {"spent": shown["value_minor"], "back": back["value_minor"],
+                "net": shown["value_minor"] - back["value_minor"], "rate": shown["rate"], "left_out": None}
+    spent, back, unvalued = in_sgd
+    if unvalued:
         return {"spent": None, "back": None, "net": None, "rate": None,
-                "left_out": spent["left_out"]}
-    back = balance_sheet.valued(conn, cell["back"], currency, last_day, not_before=first_day)
-    return {"spent": spent["value_minor"], "back": back["value_minor"],
-            "net": spent["value_minor"] - back["value_minor"], "rate": spent["rate"],
-            "left_out": None}
+                "left_out": shown["left_out"] or f"no saved {currency}/SGD rate on or before the day "
+                                                  f"of {unvalued} row(s) in {month}"}
+    return {"spent": spent, "back": back, "net": spent - back, "rate": shown["rate"], "left_out": None}

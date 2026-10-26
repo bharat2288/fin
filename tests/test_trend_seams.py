@@ -18,7 +18,6 @@ LANE_MODULES = ("trend_api", "trend_types_api", "account_balances_api")
 
 def test_app_reads_the_scope_names_from_scope():
     assert fin_app.book_expr is scope.book_expr
-    assert fin_app._SGD_ACCOUNT is scope._SGD_ACCOUNT
     assert fin_app._HOUSEHOLD_ACCOUNT is scope._HOUSEHOLD_ACCOUNT
     assert fin_app._TYPE_JOINS is scope._TYPE_JOINS
     assert fin_app.get_db is db.get_db

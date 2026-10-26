@@ -20,15 +20,6 @@ def book_expr(alias: str = "t") -> str:
     return f"COALESCE({alias}.book, '{book_type.DEFAULT_BOOK}')"
 
 
-# Rows on an account kept in the currency the dashboard's figures are in. A
-# row on an account in another currency (the rupee account) is whole minor
-# units of that currency, and is never added to SGD cents as if it were SGD:
-# it is held out of these sums. `s` is the row's statement.
-_SGD_ACCOUNT = (
-    "s.account_id IN (SELECT id FROM accounts WHERE COALESCE(currency, 'SGD') = 'SGD')"
-)
-
-
 # Rows on an account the household owns: what household spending is counted
 # on (ruling 6). Takes the owner as its parameter.
 _HOUSEHOLD_ACCOUNT = "s.account_id IN (SELECT id FROM accounts WHERE owner = ?)"

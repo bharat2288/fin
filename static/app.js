@@ -1177,13 +1177,23 @@ async function viewHome() {
         body: `What the loans fell by: instalments ${esc(money(toMinor(cards.loan_instalments), 'SGD'))} less interest ${esc(money(toMinor(cards.loan_interest), 'SGD'))}. Still the household’s money.` }));
     const tilesCard = `<section class="card home-tiles">
         <div class="section-header"><h2>${esc(monthName(cards.ref_month))}: ${tiles.length} figures, never added</h2><a class="link" href="#/books/spending">Spending</a></div>
-        <div class="home-tiles__grid">${tiles.join('')}</div>
+        <div class="home-tiles__grid">${tiles.join('')}</div>${cards.unvalued_count ? `<div class="notice warn">${icon('warning')}<span class="grow">${plural(cards.unvalued_count, 'row')} in another currency ${cards.unvalued_count === 1 ? 'has' : 'have'} no saved rate for ${esc(monthName(cards.ref_month))} and ${cards.unvalued_count === 1 ? 'is' : 'are'} not in these figures.</span><button class="btn" data-act="fetch-missing-rates">Fetch the rates</button></div>` : ''}
         <p class="card-foot">Each book is its own figure, drawn three different ways so they never read as one sum. Each small chart has its own scale. No total is shown between them.</p></section>`;
 
     const mcCard = before ? monthCheckMini(before) : '';
     return `<div class="home">${homeClaudeLine(settings)}${homeHero(now, before, prev)}${mcCard}${waits}${tilesCard}</div>`;
 }
 
+// The ECB rate for every day a row in another currency has none (valuation.py).
+ACT['fetch-missing-rates'] = async el => {
+    el.disabled = true;
+    const r = await send('POST', '/api/rates/fetch-missing');
+    if (!r.ok) { el.disabled = false; toast('The rates could not be fetched; nothing was saved', { bad: true }); return; }
+    const failed = (r.data.failed || []).map(c => SIGNS[c] || c);
+    toast([r.data.saved ? `${plural(r.data.saved, 'rate')} saved` : 'No rate was missing',
+        failed.length ? `${failed.join(' and ')} could not be fetched` : ''].filter(Boolean).join('; '), { bad: failed.length > 0 });
+    rerender();
+};
 ACT['tile-book'] = el => {
     S.spending.book = el.dataset.book; S.spending.span = 'month';
     store.set('spending', S.spending);
@@ -3816,6 +3826,19 @@ function totalsByCurrency(rows) {
     rows.forEach(row => { const c = row.currency || 'SGD'; by[c] = (by[c] || 0) + countedMinor(row); });
     return by;
 }
+/** What rows count in S$ on the one path (valuation.py): each row's counted part at the rate of its day. */
+/** A row's counted part in S$ at the rate of its day, or null when no saved rate values it. */
+function sgdOf(row) {
+    return Number.isInteger(row.counted_sgd_minor) ? row.counted_sgd_minor
+        : (row.currency || 'SGD') === 'SGD' ? countedMinor(row) : null;
+}
+function totalSgd(rows) {
+    return rows.reduce((a, row) => a + (sgdOf(row) ?? 0), 0);
+}
+/** Per currency, what rows in another currency count with no rate to put them in S$ by. */
+function unvaluedBy(rows) {
+    return totalsByCurrency(rows.filter(row => (row.currency || 'SGD') !== 'SGD' && !Number.isInteger(row.counted_sgd_minor)));
+}
 function totalsText(by) {
     const parts = Object.entries(by).map(([c, m]) => money(m, c));
     return parts.length ? parts.join(' and ') : money(0, 'SGD');
@@ -3828,7 +3851,7 @@ function groupRows(rows, keyOf) {
         if (!groups.has(k)) groups.set(k, []);
         groups.get(k).push(row);
     });
-    return [...groups.entries()].map(([name, list]) => { const by = totalsByCurrency(list); return { name, list, by, sgd: by.SGD || 0 }; })
+    return [...groups.entries()].map(([name, list]) => { const by = totalsByCurrency(list); return { name, list, by, sgd: totalSgd(list) }; })
         .sort((a, b) => b.sgd - a.sgd);
 }
 /** A refund: money back on a spending row (a negative amount). */
@@ -3905,10 +3928,10 @@ function spendGroupNameCell(g, view, fold, types) {
     return id ? pageLink('type', id, g.name) : esc(g.name);
 }
 
-/** Spending's Every row columns. Amount sorts by the row's counted S$ part; a row on an
- *  account in another currency has none, and goes last. */
+/** Spending's Every row columns. Amount sorts by the row's counted S$ part; a row in
+ *  another currency with no saved rate for its month has none, and goes last. */
 const SPEND_ROW_SORT = { date: { label: 'Date', kind: 'date', of: x => x.date }, description: { label: 'Description', kind: 'text', of: x => x.description },
-    type: { label: 'Type', kind: 'text', of: x => x.display_type }, amount: { label: 'Amount', kind: 'money', of: x => (x.currency || 'SGD') === 'SGD' ? x.counted_minor ?? x.amount_minor : null } };
+    type: { label: 'Type', kind: 'text', of: x => x.display_type }, amount: { label: 'Amount', kind: 'money', of: sgdOf } };
 async function viewSpending() {
     const sp = spendState();
     const r = await refs();
@@ -3942,7 +3965,8 @@ async function viewSpending() {
         const back = net.filter(isRefund);
         const others = [...new Set(counted.map(row => row.currency || 'SGD').filter(c => c !== 'SGD'))];
         return { book, year, counted, all: inSpan(year), net, spent, back, by: totalsByCurrency(net), spentBy: totalsByCurrency(spent),
-            backBy: totalsByCurrency(back), short: shownOf(counts[i]) || shownOf(lists[i]), others };
+            backBy: totalsByCurrency(back), sgdNet: totalSgd(net), sgdSpent: totalSgd(spent), sgdBack: totalSgd(back),
+            unvalued: unvaluedBy(net), short: shownOf(counts[i]) || shownOf(lists[i]), others };
     });
     ACT.__rows = new Map(perBook.flatMap(b => b.all).map(x => [x.id, x]));
     const spanWords = span.length === 1 ? `${monthName(S.month)}${S.month === currentMonth() ? ' so far' : ''}` : `12 months to ${monthName(S.month, { short: true })}`;
@@ -3957,23 +3981,25 @@ async function viewSpending() {
             ${latest ? `<button class="btn" data-act="spend-month" data-m="${latest.slice(0, 7)}">Look at ${esc(LONG_MONTHS[Number(latest.slice(5, 7)) - 1])}</button>` : ''}</div>`;
     }
 
-    // P1.1, P1.2: one tile per book; its figure is net of refunds, S$ accounts only.
-    const sgd = by => by.SGD || 0;
+    // P1.1, P1.2: one tile per book; its figure is net of refunds in S$, a row in
+    // another currency at the rate of its own day (valuation.py, RUL-022).
     const otherNote = b => {
-        const parts = Object.entries(b.by).filter(([c, m]) => c !== 'SGD' && m).map(([c, m]) => money(m, c));
-        return parts.length ? `<p class="small muted sl-other">${esc(parts.join(' and '))} on accounts in another currency is not in this figure.</p>` : '';
+        const left = Object.entries(b.unvalued).filter(([, m]) => m).map(([c, m]) => money(m, c));
+        const valued = Object.entries(b.by).filter(([c, m]) => c !== 'SGD' && m - (b.unvalued[c] || 0)).map(([c, m]) => money(m - (b.unvalued[c] || 0), c));
+        return [valued.length ? `<p class="small muted sl-other">Includes ${esc(valued.join(' and '))}, each row at the saved rate of its day.</p>` : '',
+            left.length ? `<p class="small muted sl-other">${esc(left.join(' and '))} has no saved rate for its month and is not in this figure.</p>` : ''].join('');
     };
     const tiles = `<div class="stat-tiles sl-tiles">${perBook.map(b => {
         const isHouse = b.book === household;
         return `<div class="stat-tile${isHouse ? '' : ' hatch'}">
             <div class="sl-tile-head"><span class="stat-tile__label">${isHouse ? 'Household spending' : `${esc(b.book)} · its costs`}</span>${isHouse ? '' : '<span class="outside-tag">not household</span>'}</div>
-            <div class="stat-tile__figure">${esc(money(sgd(b.by), 'SGD'))}</div>
+            <div class="stat-tile__figure">${esc(money(b.sgdNet, 'SGD'))}</div>
             <div class="stat-tile__sub">${plural(b.spent.length, 'row')} out · ${esc(spanWords)}</div>
-            ${sgd(b.backBy) ? `<div class="sl-back-line"><span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}after ${esc(money(-sgd(b.backBy), 'SGD'))} refunds</span></div>` : ''}
+            ${b.sgdBack ? `<div class="sl-back-line"><span class="delta-chip delta-chip--up">${icon('arrow-circle-down')}after ${esc(money(-b.sgdBack, 'SGD'))} refunds</span></div>` : ''}
             ${otherNote(b)}
             ${b.short ? `<p class="small sl-short">${icon('warning')}Short: too many rows to read at once (${esc(b.short)} over 12 months). Narrow the filters.</p>` : ''}</div>`;
     }).join('')}</div>
-        <p class="card-foot">${perBook.length > 1 ? 'Each book has its own total. They are never added together. ' : ''}Net of refunds: a refund counts in the month it arrives. S$ accounts only.</p>`;
+        <p class="card-foot">${perBook.length > 1 ? 'Each book has its own total. They are never added together. ' : ''}Net of refunds: a refund counts in the month it arrives. In S$, a row in another currency at the saved rate of its day.</p>`;
 
     // P3.1: a month with no statement in for this book's accounts is marked, not drawn as nothing spent.
     const missingFor = b => {
@@ -4010,7 +4036,7 @@ async function viewSpending() {
             const groups = groupRows(b.all, keyOf);
             const noun = sp.view === 'type' ? 'Type' : 'Merchant';
             const nameCell = g => spendGroupNameCell(g, sp.view, fold, r.types);
-            const whole = sgd(b.by);   // the tile's figure: every share is of it
+            const whole = b.sgdNet;   // the tile's figure: every share is of it
             // Net and Share sort by the S$ part, which every share is of.
             const cols = { name: { label: noun, kind: 'text', of: g => g.name }, rows: { label: 'Rows', kind: 'number', of: g => g.list.length },
                 net: { label: 'Net', kind: 'money', of: g => g.sgd }, share: { label: 'Share', kind: 'money', of: g => g.sgd } };
@@ -4024,10 +4050,10 @@ async function viewSpending() {
         }
         const missingWords = b.missing.size ? ` A hatched month has no statement in for some of this book’s accounts; <a class="link" href="#/books/import">import it</a>.` : '';
         return `<section class="card"><div class="section-header"><h2>${esc(b.book)}</h2>
-                <span class="section-header__aside">net <b class="num">${esc(money(sgd(b.by), 'SGD'))}</b> · spent <b class="num">${esc(money(sgd(b.spentBy), 'SGD'))}</b>${sgd(b.backBy) ? ` · refunded <b class="num">${esc(money(-sgd(b.backBy), 'SGD'))}</b>` : ''}</span></div>
+                <span class="section-header__aside">net <b class="num">${esc(money(b.sgdNet, 'SGD'))}</b> · spent <b class="num">${esc(money(b.sgdSpent, 'SGD'))}</b>${b.sgdBack ? ` · refunded <b class="num">${esc(money(-b.sgdBack, 'SGD'))}</b>` : ''}</span></div>
             <div class="chart-box small sl-chart"><canvas id="chart-${esc(b.book)}" aria-label="${esc(b.book)}, net spending by month"></canvas></div>
             <p class="small muted sl-chart-note">Net of refunds by month, 12 months to ${esc(monthName(S.month, { short: true }))}, on its own scale; a month with more refunded than spent falls below the axis. Tap a month to look at it.
-                ${b.others.length ? `<b>S$ accounts only</b>; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows are shown in the tables, not in the figures or the chart.` : 'In S$.'}${missingWords}</p>
+                In S$${b.others.length ? `; ${esc(b.others.map(c => SIGNS[c] || c).join(' and '))} rows at the saved rate of their day, and a row with no rate for its month is left out` : ''}.${missingWords}</p>
             ${content}</section>`;
     }).join('');
 
@@ -4118,11 +4144,11 @@ function drawSpendingCharts(perBook, months) {
         const canvas = document.getElementById(`chart-${b.book}`);
         if (!canvas) return;
         const missing = b.missing || new Set();
-        // Per month, S$ accounts only, hidden merchants counted: spent, refunded and their net.
+        // Per month in S$, each row at the rate of its day (sgdOf; one with no rate left out), hidden merchants counted: spent, refunded and their net.
         const monthly = months.map(m => {
-            const inMonth = b.counted.filter(row => row.date.startsWith(m) && (row.currency || 'SGD') === 'SGD');
-            const spentMinor = inMonth.filter(row => !isRefund(row)).reduce((a, row) => a + countedMinor(row), 0);
-            const backMinor = -inMonth.filter(isRefund).reduce((a, row) => a + countedMinor(row), 0);
+            const inMonth = b.counted.filter(row => row.date.startsWith(m) && sgdOf(row) != null);
+            const spentMinor = inMonth.filter(row => !isRefund(row)).reduce((a, row) => a + sgdOf(row), 0);
+            const backMinor = -inMonth.filter(isRefund).reduce((a, row) => a + sgdOf(row), 0);
             return { spent: spentMinor, back: backMinor, net: spentMinor - backMinor };
         });
         const sums = monthly.map(x => x.net / 100);

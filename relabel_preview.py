@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from operator import itemgetter
 
 import balance_sheet
+import valuation
 import book_type
 import db
 import expect_back
@@ -1269,8 +1270,9 @@ def _moves_book(apply: dict, held_flow, held_book) -> bool:
 
 
 def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict], dict]:
-    """The money moved per book pair, in S$ at the saved month-end rates;
-    what could not be valued; the months touched."""
+    """The money moved per book pair, in S$, each row at the saved rate of
+    its day (valuation.py, the tiles' own rule); what could not be valued,
+    per book pair, month and currency; the months touched."""
     # A row whose book Apply leaves as it is moves no money: a merchant's
     # book change, or a row a taught wording moves to a merchant whose book
     # is its own (fin-surfaces 53).
@@ -1281,8 +1283,8 @@ def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict]
     default = book_type.DEFAULT_BOOK
     marked = _marked(conn)
     months: set[str] = set()
-    sums: dict = {}
-    with_parts = []                    # (row id, key, amount)
+    lines = []                         # (key, amount, day)
+    with_parts = []                    # (row id, key, amount, day)
     for p in plan.rows:
         apply = p.apply
         if "book" not in apply:
@@ -1297,23 +1299,27 @@ def _money(conn: sqlite3.Connection, plan: Plan) -> tuple[list[dict], list[dict]
             continue
         key = ((held_book or default, apply["book"] or default), month, held["currency"])
         if marked and held["id"] in marked:
-            with_parts.append((held["id"], key, held["amount_minor"]))
+            with_parts.append((held["id"], key, held["amount_minor"], held["date"]))
             continue
-        sums[key] = sums.get(key, 0) + (held["amount_minor"] or 0)
-    own = _parts(conn, [row_id for row_id, _, _ in with_parts], marked)
-    for row_id, key, amount in with_parts:
+        lines.append((key, held["amount_minor"] or 0, held["date"]))
+    own = _parts(conn, [row_id for row_id, _, _, _ in with_parts], marked)
+    for row_id, key, amount, day in with_parts:
         part = own.get(row_id, {}).get("own_minor", amount)
-        sums[key] = sums.get(key, 0) + (part or 0)
+        lines.append((key, part or 0, day))
+    value = valuation.valuer(conn)
     moved: dict = {}
+    short: dict = {}                   # (pair, month, currency) -> what no rate values
+    for key, amount, day in lines:
+        (pair, month, currency) = key
+        in_sgd = value(amount, currency, day)
+        moved[pair] = moved.get(pair, 0) + (in_sgd or 0)
+        if in_sgd is None:
+            short[key] = short.get(key, 0) + amount
     left_out = []
-    for (pair, month, currency), amount in sorted(sums.items()):
-        valued = balance_sheet.valued(conn, amount, currency, _month_end(month), not_before=f"{month}-01")
-        if valued["value_minor"] is None:
-            left_out.append({"from": pair[0], "to": pair[1], "currency": currency, "amount_minor": amount,
-                             "month": month, "reason": valued["left_out"]})
-            moved.setdefault(pair, 0)
-            continue
-        moved[pair] = moved.get(pair, 0) + valued["value_minor"]
+    for (pair, month, currency), amount in sorted(short.items()):
+        reason = balance_sheet.valued(conn, amount, currency, _month_end(month), not_before=f"{month}-01")["left_out"]
+        left_out.append({"from": pair[0], "to": pair[1], "currency": currency, "amount_minor": amount,
+                         "month": month, "reason": reason or f"no saved {currency}/SGD rate for a row's day in {month}"})
     money_moved = [{"from": a, "to": b, "amount_minor": n} for (a, b), n in sorted(moved.items())]
     span = {"count": len(months), "first": min(months), "last": max(months)} if months else None
     return money_moved, left_out, span

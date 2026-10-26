@@ -5,8 +5,7 @@ on Books -> Spending's tile, and in the S$-account part of every type's
 Household September on Types over time (R2) and on the trend (R1). The seed
 puts a merchant hidden from expense views inside it (Tidy Storage, S$ 45.00)
 and a rupee row beside it (Swiggy, Rs 3,450 at 0.0155 = S$ 53.48): the trend
-pages read S$ 3,953.48 and name the rupee part; Home and Spending stay S$
-accounts only.
+pages, Home and Spending read S$ 3,953.48 (RUL-022), and name the rupee part.
 
 Case 52. A company book counts every account: the trend, Spending and Types
 over time read the company's S$ 1,480.00 net (S$ 1,160.00 on its own card,
@@ -145,8 +144,8 @@ def test_case_11_the_trend_pages_read_the_s_dollar_figure_and_name_the_rupees(cl
     assert {name: bar["inr_minor"] for name, bar in bars.items() if bar["inr_minor"]} == {"Dining": RUPEES}
     assert bars["Dining"]["rate"]["text"] == "0.0155"
     assert lines["Dining"] - RUPEES_IN_SGD == HOUSEHOLD_SEP["Dining"][0]
-    # Take the rupees off and every page states Home's figure, hidden merchant inside.
-    assert sum(lines.values()) - RUPEES_IN_SGD == home == 390_000
+    # Every page states Home's figure, hidden merchant and rupees inside (RUL-022).
+    assert sum(lines.values()) == home == 395_348
     for name, (spent, back) in HOUSEHOLD_SEP.items():
         if name != "Dining":
             assert (bars[name]["spent"], bars[name]["back"], bars[name]["net"]) == (spent, back, spent - back)
@@ -156,13 +155,19 @@ def test_case_11_the_trend_pages_read_the_s_dollar_figure_and_name_the_rupees(cl
 def test_case_11_home_and_spending_draw_the_same_s_dollar_figure(client, conn, server):
     seed(conn)
     home_tile = words(household(stat_cards(client)))
-    spending = tile(page(server)["html"])
+    drawn = page(server)
+    spending = tile(drawn["html"])
 
-    assert "S$ 3,900.00" in home_tile and "after S$ 312.50 refunds" in home_tile
-    assert spending["figure"] == "S$ 3,900.00"
-    # Spending stays on S$ accounts: the rupees are named beside the figure, not in it.
-    assert spending["other"] and "₹ 3,450.00" in spending["other"]
-    assert sum(types_over_time(client, HOUSEHOLD).values()) - RUPEES_IN_SGD == money.to_minor("3900.00")
+    assert "S$ 3,953.48" in home_tile and "after S$ 312.50 refunds" in home_tile
+    assert spending["figure"] == "S$ 3,953.48"
+    # The rupees are in the figure at their rate (RUL-022), and named beside it.
+    assert spending["other"] and "Includes ₹ 3,450.00" in spending["other"]
+    # Its chart's September bar is the same figure, rupees in at their rate.
+    chart = drawn["charts"][0]
+    assert chart["labels"][-1] == "Sep" and chart["net"][-1] == 3953.48
+    assert "Net S$ 3,953.48" in chart["hover"][-1]
+    assert "S$ accounts only" not in drawn["html"]
+    assert sum(types_over_time(client, HOUSEHOLD).values()) == money.to_minor("3953.48")
 
 
 def test_rupees_are_valued_per_merchant_so_the_type_page_and_types_over_time_agree_to_the_cent(
