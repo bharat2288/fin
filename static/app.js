@@ -643,12 +643,17 @@ document.addEventListener('change', e => {
 ACT['close-sheet'] = () => closeSheet();
 ACT.scrim = () => closeSheet();
 
-// New pages push [key, href, label, icon] here (#/books/types, #/books/type), so a tab exists only once its page does.
+// New pages push [key, href, label, icon] here (#/books/types, #/books/type), so a tab exists only once its page does;
+// a fifth item names the tab it goes after (Rows after Spending), else it goes last.
 const booksNavExtra = [];
 window.booksNavExtra = booksNavExtra;
 function booksNav(current) {
     const items = [['sheet', '#/books', 'Balance sheet', 'scales'], ['spending', '#/books/spending', 'Spending', 'chart-pie-slice'],
-        ['bills', '#/books/bills', 'Bills', 'receipt'], ['lists', '#/books/lists', 'Lists', 'list-bullets'], ['import', '#/books/import', 'Import', 'upload-simple'], ...booksNavExtra];
+        ['bills', '#/books/bills', 'Bills', 'receipt'], ['lists', '#/books/lists', 'Lists', 'list-bullets'], ['import', '#/books/import', 'Import', 'upload-simple']];
+    for (const extra of booksNavExtra) {
+        const at = items.findIndex(([k]) => k === extra[4]);
+        items.splice(at < 0 ? items.length : at + 1, 0, extra);
+    }
     return `<nav class="seg subnav" aria-label="Books">${items.map(([k, href, label, ic]) =>
         `<a href="${href}"${k === current ? ' aria-current="page"' : ''}>${icon(ic)}${label}</a>`).join('')}</nav>`;
 }
@@ -1176,7 +1181,7 @@ async function viewHome() {
         avg: toMinor(cards.loan_instalments) ? '' : '<span class="home-vs">no instalment seen this month</span>',
         body: `What the loans fell by: instalments ${esc(money(toMinor(cards.loan_instalments), 'SGD'))} less interest ${esc(money(toMinor(cards.loan_interest), 'SGD'))}. Still the household’s money.` }));
     const tilesCard = `<section class="card home-tiles">
-        <div class="section-header"><h2>${esc(monthName(cards.ref_month))}: ${tiles.length} figures, never added</h2><a class="link" href="#/books/spending">Spending</a></div>
+        <div class="section-header"><h2>${esc(monthName(cards.ref_month))}: ${tiles.length} figures, never added</h2><span class="row"><a class="link" href="#/books/rows?month=${esc(cards.ref_month)}">Every row</a><a class="link" href="#/books/spending">Spending</a></span></div>
         <div class="home-tiles__grid">${tiles.join('')}</div>${cards.unvalued_count ? `<div class="notice warn">${icon('warning')}<span class="grow">${plural(cards.unvalued_count, 'row')} in another currency ${cards.unvalued_count === 1 ? 'has' : 'have'} no saved rate for ${esc(monthName(cards.ref_month))} and ${cards.unvalued_count === 1 ? 'is' : 'are'} not in these figures.</span><button class="btn" data-act="fetch-missing-rates">Fetch the rates</button></div>` : ''}
         <p class="card-foot">Each book is its own figure, drawn three different ways so they never read as one sum. Each small chart has its own scale. No total is shown between them.</p></section>`;
 
@@ -3740,7 +3745,7 @@ async function viewAccount(id) {
     <div class="acct-top${tieCard ? '' : ' acct-top--one'}">${hero}${tieCard}</div>
     ${refusedHTML ? `<section class="card"><div class="section-header"><h2>Refused at upload</h2><span class="section-header__aside">a statement that does not tie is kept out whole</span></div>${refusedHTML}</section>` : ''}
     ${figures ? `<section class="card"><div class="section-header"><h2>Your figures</h2><span class="section-header__aside">${plural(supplied.length, 'figure')} · each the fact</span></div><ul class="fig-list">${figures}</ul></section>` : ''}
-    <section class="card"><div class="section-header"><h2>Rows</h2><span class="section-header__aside">${plural(rows.total, 'row')} · tap a row for its note, one-off and history</span></div>
+    <section class="card"><div class="section-header"><h2>Rows</h2><span class="section-header__aside">${plural(rows.total, 'row')} · tap a row for its note, one-off and history · <a class="link" href="#/books/rows?account=${id}&month=all">Open in Rows</a></span></div>
         ${sortPicker('acct-rows', ACCT_ROW_SORT, { own: 'Newest first' })}<div class="table-shell"><table class="t rows acct-rows"><thead><tr>${Object.keys(ACCT_ROW_SORT).map(k =>
             `<th${ACCT_ROW_SORT[k].kind === 'money' ? ' class="r"' : ''}>${sortHead('acct-rows', k, ACCT_ROW_SORT)}</th>`).join('')}</tr></thead><tbody>${rowList || '<tr><td colspan="5" class="empty">No rows.</td></tr>'}</tbody></table></div>
         ${pager(rows, 'account-page', !!order)}</section>`;
@@ -5118,7 +5123,7 @@ async function viewMerchant(id) {
         <div class="mp-fact"><span class="cap">Rows</span><b class="num">${s.rows || 0}</b>${notChecked ? `<span class="sub">${notChecked} not checked</span>` : ''}</div>
         <div class="mp-fact mp-fact--set"><span class="cap" id="mp-nr">New rows</span>${eachSegHTML(s, 'mp-nr')}</div>
     </div></section>
-    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>${sortOf('mp').key ? '' : 'Newest first. '}What you set is chosen and stays; the rest follows ${esc(s.name)}. Each change is undone in Changes.</p></div>
+    <section class="card mp-card" aria-labelledby="mp-rows"><div class="card-head"><div><h2 id="mp-rows">Rows</h2><p>${sortOf('mp').key ? '' : 'Newest first. '}What you set is chosen and stays; the rest follows ${esc(s.name)}. Each change is undone in Changes. <a class="link" href="#/books/rows?party=${s.id}&month=all">Its rows on the Rows page</a>, with the rows on accounts linked to it.</p></div>
         ${list.transactions.length ? `<div class="bulk"><span class="bulk__n" id="mp-ticked">${mpTickedWords()}</span>
             <select class="sel" data-change="mp-bulk-book" aria-label="Book for the ticked rows">${bookOptions(r.books, mp.book, 'Choose book')}</select>
             <button type="button" class="btn sm primary" data-act="mp-apply" id="mp-apply"${mpCanApply() ? '' : ' disabled'}>Set book for ticked rows</button></div>` : ''}</div>
