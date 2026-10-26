@@ -50,6 +50,8 @@ TRACKED = (
     "type_slots",
     # A loan's hire-purchase terms (fin-redesign 14; loan_terms.py).
     "loan_terms",
+    # A car's depreciation terms (fin RUL-029; depreciation.py).
+    "depreciation_terms",
     # A folio reference on a row, an account or a party (fin-redesign 25; folio_link.py).
     "folio_link",
     # The books the operator creates (fin RUL-021; book_type.add_book).
@@ -66,7 +68,7 @@ TRACKED = (
 # start and no conversion step is owed; so are a new table's, made by the
 # same start. has_shape does not ask for them.
 ADDED_ON_START = ("types", "type_keys", "type_settings", "type_slots", "loan_terms", "folio_link", "books",
-                  "shared_accounts", "fx_pair")
+                  "shared_accounts", "fx_pair", "depreciation_terms")
 
 # Where a change came from.
 VIA_APP = "app"    # the operator, in fin's own screens

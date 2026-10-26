@@ -30,6 +30,10 @@ owed negative. A row's amount is positive for money out.
                  repaid, and after the latest by the instalments in full
     holding      the supplied figure plus the movement rows naming the holding
                  since (a sale is money in to the bank, and reduces it)
+    car with     (depreciation.py, RUL-029) its cost less the depreciation
+    terms        dated to the day, worked out from its terms; before the day
+                 it was had from it has no value. A figure typed for it is
+                 kept and not read, and neither are rows naming it
     company      the household's money in it: its opening figure if it has
                  one, plus, on accounts the household owns and dated after the
                  figure: the spending and refund rows in the company's book
@@ -74,6 +78,7 @@ import account_kind
 import anchors
 import book_type
 import card_balance
+import depreciation
 import flow
 import loan_interest
 import money
@@ -349,7 +354,11 @@ def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: s
 
 def balance_on(conn: sqlite3.Connection, account, on: str) -> int | None:
     """An account's balance on a day, in whole minor units of its currency,
-    or None when it has no anchor on or before the day."""
+    or None when it has no anchor on or before the day. A holding with
+    depreciation terms is worth what they work out (depreciation.value_on)."""
+    terms = _depreciating(conn, account)
+    if terms is not None:
+        return depreciation.value_on(terms, on)
     anchor = _balance_anchor(conn, account["id"], on)
     if anchor is None:
         return None
@@ -431,6 +440,47 @@ def _rate_shown(currency: str, rate: dict) -> dict:
     }
 
 
+def _depreciating(conn: sqlite3.Connection, account) -> dict | None:
+    """A holding's depreciation terms, or None."""
+    if account["type"] != depreciation.HOLDING:
+        return None
+    return depreciation.held(conn, account["id"])
+
+
+def _depreciated(conn: sqlite3.Connection, line: dict, terms: dict, as_at: date, month: str) -> dict:
+    """A car's line under its depreciation terms: its cost less the
+    depreciation dated to the month's end, resting on the terms."""
+    upto = as_at.isoformat()
+    value = depreciation.value_on(terms, upto)
+    line["check"] = None
+    if value is None:
+        line["left_out"] = (f"no value before {depreciation.day_shown(terms['start'])}, "
+                            "the day its depreciation terms start")
+        return line
+    written_off = terms["cost_minor"] - value
+    line.update(
+        _valued(conn, value, line["currency"], upto),
+        rests_on={
+            "date": terms["start"],
+            "source": depreciation.SOURCE,
+            "label": "its depreciation terms",
+            "age_days": (as_at - date.fromisoformat(terms["start"])).days,
+            "in_month": terms["start"][:7] == month,
+        },
+        since=(f"less {anchors.format_amount(written_off, line['currency'])} depreciation since "
+               f"{depreciation.day_shown(terms['start'])}") if written_off else None,
+        depreciation={
+            "cost_minor": terms["cost_minor"],
+            "start": terms["start"],
+            "to_date_minor": written_off,
+            "month_minor": depreciation.between(
+                terms, (as_at.replace(day=1) - timedelta(days=1)).isoformat(), upto),
+            "monthly_minor": depreciation.monthly_minor(terms),
+        },
+    )
+    return line
+
+
 def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -> dict:
     kind = account["type"]
     currency = account["currency"] or TOTAL_CURRENCY
@@ -465,6 +515,9 @@ def _line(conn: sqlite3.Connection, account, as_at: date, month: str, name_of) -
         # A shared account's balance is the household's part (shared.py).
         "shared": is_shared,
     }
+    terms = _depreciating(conn, account)
+    if terms is not None:
+        return _depreciated(conn, line, terms, as_at, month)
     if anchor is None:
         return line
 

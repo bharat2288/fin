@@ -1,8 +1,8 @@
 """The month check: do the month's rows account for the change in net worth?
 
 For a month: net worth at the previous month-end, plus income, less spending
-(with the loan interest worked out for the month), plus currency change, is
-what net worth should be at the month-end. The balance sheet says what it is.
+(with the loan interest worked out for the month), less depreciation, plus
+currency change, is what net worth should be at the month-end. The balance sheet says what it is.
 The difference is unexplained: a row missing or mislabelled, a transfer still
 waiting for review, a figure that moved. Beside it stand the month's
 transfers waiting on the review list and the lines whose check is not "ties",
@@ -22,6 +22,11 @@ comes out at exactly nothing unexplained:
                   costs paid from a household card are not household spending:
                   they move the company's balance, which is inside net worth,
                   so subtracting them again would count them twice.
+    depreciation  the month's depreciation of each car in the check, worked out
+                  from its terms (depreciation.py, RUL-029): on its own line,
+                  never Household spending. A car with terms is worth what
+                  they work out, so a movement naming it moves only the
+                  other side and shows as unexplained.
     other rows    a transfer or card payoff between two household accounts,
                   a movement naming a loan, a holding or a company, moves
                   money between two lines of net worth and is neither. A
@@ -83,6 +88,7 @@ import balance_sheet
 import book_type
 import books_expect
 import card_balance
+import depreciation
 import expect_back
 import flow
 import loan_interest
@@ -199,6 +205,9 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
     for acct in sorted(a for a in in_check if a in lines):
         line = lines[acct]
         kind, currency = line["kind"], line["currency"]
+        if kind == depreciation.HOLDING and depreciation.held(conn, acct) is not None:
+            # Worth what its terms work out: no row moves it.
+            continue
         if kind in ("loan", "holding"):
             entering("t.flow_type = ? AND t.other_side_id = ?", (flow.MOVEMENT, acct))
         elif kind == "bank" and conn.execute(
@@ -535,6 +544,19 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
     )
     spending += interest
 
+    # Each car in the check falls by its month's depreciation (RUL-029), on
+    # its own line: not Household spending.
+    depreciation_lines = []
+    for acct, line in sorted(end_lines.items(), key=lambda item: item[1]["name"]):
+        if line["kind"] != depreciation.HOLDING or acct not in in_check:
+            continue
+        terms = depreciation.held(conn, acct)
+        amount = 0 if terms is None else depreciation.between(terms, after, upto)
+        if amount:
+            depreciation_lines.append({"account_id": acct, "name": line["name"],
+                                       "amount_minor": amount, "amount": _shown(amount)})
+    depreciated = sum(d["amount_minor"] for d in depreciation_lines)
+
     # Money moved between an account in the check and one left out of it:
     # it changes the checked net worth and is neither income nor spending.
     # An untracked account has no line on the sheet: money moved to it leaves
@@ -644,7 +666,7 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
             line = start_keyed.get(key)
             if line is not None and line["in_total"]:
                 opening_worth -= line["value_minor"]
-        expected = opening_worth + income - spending + currency_change + outside
+        expected = opening_worth + income - spending - depreciated + currency_change + outside
         unexplained = actual - expected
         why = None
 
@@ -678,6 +700,10 @@ def check(conn: sqlite3.Connection, month: str, end_sheet: dict, name_of=lambda 
         "spending": _shown(spending),
         "interest_minor": interest,
         "interest": _shown(interest),
+        # The month's depreciation of the cars in the check, and each car's.
+        "depreciation_minor": depreciated,
+        "depreciation": _shown(depreciated),
+        "depreciation_lines": depreciation_lines,
         "currency_change_minor": currency_change,
         "currency_change": _shown(currency_change),
         # Each account in another currency's part of the currency change:
