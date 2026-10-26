@@ -1814,6 +1814,9 @@ def _party_kind_refusal(conn, acct_id: int, data: dict) -> str | None:
     held = conn.execute("SELECT party_id FROM accounts WHERE id = ?", (acct_id,)).fetchone()
     if held is None or held["party_id"] is None:
         return None
+    # A shared account joins its party as a bank account or a card (RUL-020).
+    if shared.is_shared(conn, acct_id) and data["type"] in shared.KINDS:
+        return None
     why = party.kind_refusal(data["type"])
     return f"{why}; take this account off its party first. Nothing was changed" if why else None
 
