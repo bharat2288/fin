@@ -17,6 +17,8 @@
                and the card's balance account itself, chart the whole card
                (card_balance.part_of_ids and members): its one balance, and the
                rows of every cardholder's account. The answer says so.
+    shared     (shared.py) the household's part: the balance rests on a figure
+               supplied, and in and out leave out the rows that are not ours.
 
 The month-end value in S$ (S2), missing months and estimates (S3), and the
 month under way are not decided here: the /balances route composes them.
@@ -29,11 +31,15 @@ import calendar
 import sqlite3
 
 import account_kind
+import anchors
 import balance_sheet
 import card_balance
+import shared
 
 START_NOTE = "Balances start on 1 Jan 2026, as on the balance sheet"
 NO_BALANCE = "No balance yet: import a statement or add an anchor"
+SHARED_NO_BALANCE = ("Shared: no balance yet. Add a figure for the household's part; "
+                     "its statements are the whole account's")
 UNTRACKED_NOTE = "Untracked: fin holds no statement or figure for it; money moved here leaves fin's sight"
 
 
@@ -49,9 +55,11 @@ def _day_before(month: str) -> str:
     return _month_end(f"{year:04d}-{number:02d}")
 
 
-def _in_and_out(conn: sqlite3.Connection, members: list[int], months: list[str]) -> dict:
+def _in_and_out(conn: sqlite3.Connection, members: list[int], months: list[str],
+                ours_only: bool = False) -> dict:
     """{month: (in, out)} over the rows of these accounts, by the month each
-    row counts in, in one grouped read."""
+    row counts in, in one grouped read; only the household's rows where
+    `ours_only` (a shared account's part)."""
     if not months:
         return {}
     held = ", ".join("?" for _ in members)
@@ -61,7 +69,8 @@ def _in_and_out(conn: sqlite3.Connection, members: list[int], months: list[str])
         "COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) "
         f"FROM (SELECT {balance_sheet.ROW_DAY} AS day, t.amount_minor AS amount "
         "FROM transactions t JOIN statements s ON t.statement_id = s.id "
-        f"WHERE s.account_id IN ({held})) "
+        f"WHERE s.account_id IN ({held})"
+        + (f" AND {balance_sheet.OURS_ONLY}" if ours_only else "") + ") "
         "WHERE day > ? AND day <= ? GROUP BY 1",
         (*members, _day_before(min(months)), _month_end(max(months))),
     ).fetchall()
@@ -106,10 +115,13 @@ def balances(conn: sqlite3.Connection, account, months: list[str]) -> dict:
         "SELECT id, type, currency FROM accounts WHERE id = ?", (whole,)
     ).fetchone()
     members = card_balance.members(conn, whole)
+    is_shared = shared.is_shared(conn, whole)
+    # A shared account's balance rests only on a figure for the household's part.
     anchored = conn.execute(
-        "SELECT 1 FROM anchors WHERE account_id = ? LIMIT 1", (whole,)
+        "SELECT 1 FROM anchors WHERE account_id = ?" + (" AND source = ?" if is_shared else "") + " LIMIT 1",
+        (whole, *((anchors.SUPPLIED,) if is_shared else ())),
     ).fetchone() is not None
-    flows = _in_and_out(conn, members, months)
+    flows = _in_and_out(conn, members, months, ours_only=is_shared)
     start = balance_sheet.START.isoformat()
 
     series = []
@@ -129,7 +141,9 @@ def balances(conn: sqlite3.Connection, account, months: list[str]) -> dict:
     return {
         "charted_id": whole,
         "card": _card(conn, members),
+        "shared": is_shared,
         "no_balance": None if anchored
+        else SHARED_NO_BALANCE if is_shared
         else UNTRACKED_NOTE if charted["type"] in account_kind.UNTRACKED_KINDS else NO_BALANCE,
         "months": series,
     }

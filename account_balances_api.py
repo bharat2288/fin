@@ -182,7 +182,9 @@ def read(conn, account_id: int, *, span: str | None, to: str | None,
             if known else {"balance": None, "date": None})
     return {
         "account": {"id": account["id"], "name": account["name"], "currency": currency,
-                    "type": account["type"], "part_of": charted["card"]},
+                    "type": account["type"], "part_of": charted["card"],
+                    # Its balance and its in and out are the household's part (shared.py).
+                    "shared": charted["shared"]},
         "span": plan["span"],
         "to": plan["end"],
         "cur": shown_in,

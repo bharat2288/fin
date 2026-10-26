@@ -47,6 +47,7 @@ import party
 import rates
 import review
 import screens
+import shared
 import statement_period
 import suggest
 import tie
@@ -746,6 +747,9 @@ def _checked_rule_flow(conn, flow_name, other_side) -> tuple[str | None, int | N
         flow.checked_flow(flow_name)
     except flow.UnknownFlow as e:
         raise UnknownLabel(str(e)) from None
+    if flow_name == flow.NOT_OURS:
+        raise UnknownLabel("a rule cannot say its rows are not ours: that is what a row on a shared "
+                           "account is while no rule says what it is (mark the account shared)")
     if flow_name not in flow.RULE_FLOWS:
         raise UnknownLabel("a rule cannot say a row waits for review: that is what a transfer is "
                            "while nothing says what it was")
@@ -873,6 +877,8 @@ _CHANGE_SUMMARIES = {
     "api_accounts_update": "Changed an account",
     # Named by the route: joined to a party, or taken off one (party.JOINED, party.LEFT).
     "api_accounts_party": "Changed an account's party",
+    # Named by the route: marked shared, or not (shared.MARKED, shared.UNMARKED).
+    "api_accounts_shared": "Changed whether an account is shared",
     "api_accounts_delete": "Deleted an account",
     "api_anchors_create": "Entered a figure",
     "api_anchors_replace": "Corrected a figure",
@@ -1570,7 +1576,8 @@ def api_accounts():
     which the dialog can correct or delete; `party_id` and `party` are the
     merchant it is joined to as its party (party.py), or null; `terms` is a
     loan's hire-purchase terms (loan_terms.shown), or null, and
-    `terms_locked` why they cannot change now, or null."""
+    `terms_locked` why they cannot change now, or null; `shared` whether it
+    is marked shared (shared.py)."""
     with get_db() as conn:
         terms = loan_terms.all_held(conn)
         rows = conn.execute(
@@ -1585,6 +1592,7 @@ def api_accounts():
             "SELECT account_id, COUNT(*) FROM anchors WHERE source = ? GROUP BY account_id",
             (anchors.SUPPLIED,),
         ).fetchall())
+        shared_ids = shared.ids(conn)
         latest = {
             r["account_id"]: {"date": r["date"], "amount_minor": r["amount"], "source": r["source"]}
             for r in conn.execute(
@@ -1600,11 +1608,13 @@ def api_accounts():
         d["anchor"] = latest.get(d["id"])
         d["takes_a_figure"] = account_kind.takes_a_figure(
             d["type"], statement_counts.get(d["id"], 0)
-        )
+        ) or d["id"] in shared_ids
         # Figures typed for it, which can be corrected or deleted even once
         # the account no longer takes a new one.
         d["supplied_figures"] = supplied_counts.get(d["id"], 0)
         d["terms"] = loan_terms.shown(terms.get(d["id"]))
+        # Marked shared (shared.py): its rows are not ours unless a rule says so.
+        d["shared"] = d["id"] in shared_ids
         result.append(d)
     with get_db() as conn:
         # Why a loan's terms cannot change now (loan_terms.lock_refusal), or null.
@@ -1707,7 +1717,8 @@ def api_accounts_update(acct_id):
     except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
         return jsonify({"error": str(e)}), 400
     with get_db() as conn:
-        why = _ruled_account_refusal(conn, acct_id, data or {}) or _party_kind_refusal(conn, acct_id, data or {})
+        why = (_ruled_account_refusal(conn, acct_id, data or {}) or _party_kind_refusal(conn, acct_id, data or {})
+               or _shared_kind_refusal(conn, acct_id, data or {}))
     if not why and data and "type" in data and data["type"] != loan_terms.LOAN:
         with get_db() as conn:
             if loan_terms.held(conn, acct_id) is not None:
@@ -1740,7 +1751,8 @@ def _account_update_with_terms(acct_id: int, data: dict):
             terms = _account_terms(account["name"], account["type"], account["currency"], data["terms"])
         except loan_terms.TermsRefused as e:
             return jsonify({"error": str(e)}), 400
-        why = _ruled_account_refusal(conn, acct_id, fields) or _party_kind_refusal(conn, acct_id, fields)
+        why = (_ruled_account_refusal(conn, acct_id, fields) or _party_kind_refusal(conn, acct_id, fields)
+               or _shared_kind_refusal(conn, acct_id, fields))
         if why:
             return jsonify({"error": why}), 400
         try:
@@ -1758,6 +1770,15 @@ def _account_update_with_terms(acct_id: int, data: dict):
             return jsonify({"error": str(e)}), 400
         conn.commit()
     return jsonify({"success": True})
+
+
+def _shared_kind_refusal(conn, acct_id: int, data: dict) -> str | None:
+    """Why an account update would leave a shared account in a kind that
+    cannot be shared (shared.kind_refusal), or None."""
+    if "type" not in data or not shared.is_shared(conn, acct_id):
+        return None
+    why = shared.kind_refusal(data["type"])
+    return f"This account is shared and {why}; mark it not shared first. Nothing was changed" if why else None
 
 
 def _party_kind_refusal(conn, acct_id: int, data: dict) -> str | None:
@@ -1800,6 +1821,77 @@ def api_accounts_party(acct_id):
         _name_change(conn, party.JOINED if service_id is not None else party.LEFT)
         conn.commit()
     return jsonify({"success": True, "party_id": service_id})
+
+
+@app.route("/api/accounts/<int:acct_id>/shared", methods=["PUT"])
+def api_accounts_shared(acct_id):
+    """Mark a bank account or a card shared, or not (shared.py, fin-redesign
+    20). Body: {"shared": true or false}. In the same change the rows on it
+    whose flow fin worked out are worked out again (_reflow_shared): on a
+    shared account a row is not ours unless a rule says what it is or it
+    moves money from one of the household's own accounts. A flow set by hand
+    stays; a row a record of expect back rests on is kept, and named under
+    `kept`. Answers how many rows moved (`moved`). One change, undone whole;
+    a refusal writes nothing."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("shared"), bool):
+        return jsonify({"error": "send shared: true or false; nothing was changed"}), 400
+    with get_db() as conn:
+        held = conn.execute("SELECT type FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+        if held is None:
+            return jsonify({"error": "This account is no longer in fin; nothing was changed"}), 404
+        if data["shared"]:
+            why = shared.kind_refusal(held["type"])
+            if why:
+                return jsonify({"error": f"{why}. Nothing was changed"}), 400
+        before = flow.build_context(conn)
+        if not shared.mark(conn, acct_id, data["shared"]):
+            return jsonify({"success": True, "shared": data["shared"], "moved": 0, "kept": []})
+        moved, kept = _reflow_shared(conn, acct_id, before, flow.build_context(conn))
+        _name_change(conn, shared.MARKED if data["shared"] else shared.UNMARKED)
+        conn.commit()
+    return jsonify({"success": True, "shared": data["shared"], "moved": moved, "kept": kept})
+
+
+def _reflow_shared(conn, acct_id: int, before: "flow.ClassifierContext",
+                   after: "flow.ClassifierContext") -> tuple[int, list[dict]]:
+    """Work out again the flow of each row on the account that fin worked
+    out under `before`, under `after` (the account marked shared, or not).
+    Never a flow set by hand, nor one fin did not give (a pairing, a refund
+    link); a row a hand label would refuse the move (a record of expect back
+    resting on it, relabel_preview.move_refusal) is kept. A row leaving
+    spending loses its book and type (label_source.fitted); one coming back
+    takes the label its rules give it. Returns (rows moved, rows kept)."""
+    rules = db.load_rules(conn)
+    moved, kept = 0, []
+    for held in conn.execute(
+        f"SELECT {relabel_preview._HELD} FROM {relabel_preview._FROM} "
+        "WHERE st.account_id = ? AND COALESCE(t.flow_type_manual, 0) = 0 ORDER BY t.id", (acct_id,),
+    ).fetchall():
+        rule = db.pick_rule(rules, held["description"] or "", held["amount_minor"])
+        account = relabel_preview.held_account(held)
+        was = flow.worked_out_again(held, held["service_id"], held["type_id"], rule, account, before)
+        if (held["flow_type"], held["other_side_id"]) != was:
+            continue
+        now = flow.worked_out_again(held, held["service_id"], held["type_id"], rule, account, after)
+        if now == was:
+            continue
+        flow_name, other_side = now
+        other_kind = (conn.execute("SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone()
+                      or [None])[0] if other_side is not None else None
+        why = relabel_preview.move_refusal(
+            conn, held, flow_name, held["book"] if flow.carries_label(flow_name) else None, other_kind)
+        if why is not None:
+            kept.append({"id": held["id"], "description": held["description"], "why": why})
+            continue
+        sets = {"flow_type": flow_name, "other_side_id": other_side}
+        if flow.carries_label(flow_name) and not flow.carries_label(held["flow_type"]):
+            found = _label_for(conn, held["description"] or "", held["amount_minor"])
+            if found["service_id"] is not None and found["service_id"] == held["service_id"]:
+                sets.update({k: found[k] for k in ("book", "type_id", "book_source", "type_source")})
+        if _write_label(conn, held, label_source.fitted(held, sets)):
+            moved += 1
+    return moved, kept
 
 
 def _ruled_account_refusal(conn, acct_id: int, data: dict) -> str | None:
@@ -1951,6 +2043,7 @@ def api_accounts_delete(acct_id):
         # A loan's terms go with it, in the same change.
         loan_terms.write(conn, acct_id, None)
         folio_link.take_off(conn, "account", acct_id)
+        shared.mark(conn, acct_id, False)
         conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
         conn.commit()
     return jsonify({"success": True})
@@ -2033,11 +2126,12 @@ def api_anchors_create():
         statement_count = conn.execute(
             "SELECT COUNT(*) FROM statements WHERE account_id = ?", (account_id,)
         ).fetchone()[0]
-        if not account_kind.takes_a_figure(kind, statement_count):
+        # A shared account's figure is the household's part (shared.py).
+        if not (account_kind.takes_a_figure(kind, statement_count) or shared.is_shared(conn, account_id)):
             return jsonify({
                 "error": f"a {kind} account rests on its statement; a figure can be entered "
-                         "for a loan, a holding, a company, a person, or a bank account "
-                         "that has no statement"
+                         "for a loan, a holding, a company, a person, a shared account (the "
+                         "household's part), or a bank account that has no statement"
             }), 400
         try:
             amount_minor = _typed_figure(account, data.get("amount"))
@@ -4031,6 +4125,9 @@ def _teach(conn, data: dict, *, record_choice: bool = True,
             flow.checked_flow(flow_type)
         except flow.UnknownFlow as e:
             raise TeachRefused({"error": str(e)})
+        why = shared.not_ours_refusal(conn, _account_facts(conn, tx_id).get("account_id"), flow_type)
+        if why:
+            raise TeachRefused({"error": why})
 
     try:
         book = _checked_book(data.get("book"))
@@ -5818,10 +5915,19 @@ def api_import_confirm():
         try:
             for labelled in [tx for g in groups for tx in g.get("transactions", [])] + new_services:
                 _checked_labels(conn, labelled)
-            for tx in [tx for g in groups for tx in g.get("transactions", [])]:
-                if tx.get("flow_type") is not None:
-                    flow.checked_flow(tx["flow_type"])
-                _checked_other_side(conn, tx.get("other_side_id"), tx.get("flow_type"))
+            for g in groups:
+                for tx in g.get("transactions", []):
+                    if tx.get("flow_type") is not None:
+                        flow.checked_flow(tx["flow_type"])
+                    _checked_other_side(conn, tx.get("other_side_id"), tx.get("flow_type"))
+                    # Not ours only on a shared account (shared.py): a new account is none.
+                    if tx.get("flow_type") == flow.NOT_OURS:
+                        import ingest
+                        why = shared.not_ours_refusal(
+                            conn, ingest.find_account(conn, tx.get("account") or g.get("account") or "", g.get("currency")),
+                            flow.NOT_OURS)
+                        if why:
+                            raise UnknownLabel(why)
             # The currency each group's account is kept in, by the group
             # itself: the account's own, or for a new account the one the
             # upload stated.

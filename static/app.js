@@ -405,6 +405,7 @@ function restsOn(line, { short = false } = {}) {
     const r = line.rests_on;
     if (line.counted_in) return `<span class="muted">${esc(line.balance)}</span>`;
     if (!r) {
+        if (line.shared) return '<span class="muted">shared: enter a figure for our part</span>';
         if (line.since_label) return `<span class="muted">worked out from rows ${esc(line.since_label)}</span>`;
         return '<span class="muted">nothing to rest on yet</span>';     // the "no figure" marker sits where the amount would
     }
@@ -412,7 +413,7 @@ function restsOn(line, { short = false } = {}) {
     if (r.source === 'supplied') {
         const stale = r.age_days > STALE_DAYS;
         const age = `${r.age_days} days old`;
-        return `your figure ${esc(date)}${r.age_days > 0 ? `, <b>${esc(age)}</b>` : ''} ${stale ? tag('stale', 'stale', { act: 'figure', data: { account: line.account_id }, title: 'Enter a newer figure' }) : ''}`;
+        return `${line.shared ? 'our part, ' : ''}your figure ${esc(date)}${r.age_days > 0 ? `, <b>${esc(age)}</b>` : ''} ${stale ? tag('stale', 'stale', { act: 'figure', data: { account: line.account_id }, title: 'Enter a newer figure' }) : ''}`;
     }
     return `statement ${esc(date)}`;
 }
@@ -5454,7 +5455,9 @@ ACT['account-edit'] = async el => {
         <label class="field"><span>Whose</span><select id="ac-owner" data-meaning="ac-owner-hint">${opt(r.kinds.owners, 'Household')}</select><span class="hint" id="ac-owner-hint">${meaning(r.kinds.owners, 'Household')}</span></label>
         <label class="field"><span>Currency</span><select id="ac-cur">${['SGD', 'INR', 'USD'].map(c => `<option>${c}</option>`).join('')}</select></label>`}
         <label class="field"><span>Last four digits</span><input type="text" inputmode="numeric" maxlength="4" id="ac-last4" value="${esc(a?.last_four || '')}"></label>
-        ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}</div>
+        ${a ? `<label class="check"><input type="checkbox" id="ac-archived"${a.status === 'archived' ? ' checked' : ''}> Archived: shown apart, still counted</label>` : ''}
+        ${a && ['bank', 'card'].includes(a.type) ? `<label class="check"><input type="checkbox" id="ac-shared"${a.shared ? ' checked' : ''}> Shared: someone else’s money is on it too</label>
+        <span class="hint">A shared account’s rows are not ours unless a rule says what they are, or the money came from one of our own accounts. Its balance is our part, from a figure you enter; its statements still tie every row.</span>` : ''}</div>
         ${a && a.type === 'loan' ? termsFieldsHTML(a.terms, a.currency, a.terms_locked) : ''}
         ${a && a.takes_a_figure ? `<button class="btn block" data-act="figure" data-account="${a.id}">Enter a figure</button>` : ''}`,
     { eyebrow: a ? 'Account' : 'Accounts', foot: `<button class="btn primary" data-act="account-save" data-id="${a ? a.id : ''}">Save</button>` });
@@ -5478,6 +5481,18 @@ ACT['account-save'] = async el => {
             if (change !== undefined) body.terms = change;
         }
         r = await act('PUT', `/api/accounts/${el.dataset.id}`, body, 'Account saved');
+        // Shared or not is its own change: the rows on the account move with it.
+        const shared = $('#ac-shared');
+        const held = (await refs()).accountById.get(Number(el.dataset.id));
+        if (r && shared && shared.checked !== !!held?.shared) {
+            const s = await send('PUT', `/api/accounts/${el.dataset.id}/shared`, { shared: shared.checked });
+            if (!s.ok) { toast(s.data.error || 'That did not work; nothing was changed', { bad: true }); r = null; }
+            else {
+                const kept = s.data.kept.length ? `; ${plural(s.data.kept.length, 'row')} kept by what rests on them` : '';
+                toast(`${shared.checked ? 'Marked shared' : 'Marked not shared'}: ${plural(s.data.moved, 'row')} moved${kept}`, { undo: s.change });
+                refreshFrame();
+            }
+        }
     } else {
         r = await act('POST', '/api/accounts', { name, type: $('#ac-kind').value, owner: $('#ac-owner').value, currency: $('#ac-cur').value, last_four: $('#ac-last4').value.trim() || null }, 'Account added');
     }
@@ -5847,7 +5862,7 @@ const SLOT_FILES = { loan_interest: 'loan interest', gift_given: 'gifts given', 
 // An empty old or new value said plainly, never as bad news (C4.2).
 const EMPTY_WORDS = { type_id: 'no type', type_override_id: 'no type', service_id: 'no merchant', other_side_id: 'none', notes: 'empty',
     party_id: 'no party', role: 'no role' };
-const FLOW_WORDS = { expense: 'money out', income: 'money in', refund: 'a refund', review: 'waiting for a label', transfer: 'a move between own accounts' };
+const FLOW_WORDS = { expense: 'money out', income: 'money in', refund: 'a refund', review: 'waiting for a label', transfer: 'a move between own accounts', not_ours: 'not ours' };
 function isEmpty(v) { return v === null || v === undefined || v === ''; }
 function changedFields(c) {
     const b = c.before || {}, a = c.after || {};
