@@ -288,3 +288,20 @@ def test_a_start_changes_no_stored_row(conn, book):
     db.init_db()
     assert stored(conn) == before
     assert conn.execute("SELECT COUNT(*) FROM fx_pair").fetchone()[0] == 0
+
+
+def test_a_row_pairing_already_matched_in_sgd_is_not_offered(client, conn, book):
+    uob = make_account(conn, "Sample UOB")
+    out_id = make_row(conn, book["dbs"], "2026-08-12", "TO SAMPLE UOB", 1_000_000,
+                      flow_type="transfer", other_side=uob)
+    in_id = make_row(conn, book["hdfc"], "2026-08-12", "INWARD UNRELATED", -73_800_000)
+    assert all(o != out_id and i != in_id for o, i in offered(client))
+
+
+def test_a_leg_carrying_an_expectation_is_not_offered(client, conn, book):
+    out_id, in_id = book["legs"]["2116"]
+    # As the reviewer found it: an expectation on the S$ leg, written direct.
+    conn.execute("INSERT INTO expectation (row_id, direction, amount_minor, currency) VALUES (?, 'back', 100000, 'SGD')",
+                 (out_id,))
+    conn.commit()
+    assert all(o != out_id for o, _ in offered(client))

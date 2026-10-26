@@ -132,18 +132,22 @@ _NO_RECORDS = (
 
 def _legs(conn: sqlite3.Connection) -> list[dict]:
     """Every row that may be a leg: on a household bank account, moving
-    money, with an amount, in no confirmed pair."""
+    money, with an amount, in no confirmed pair. A row pairing.py matched
+    already (an other side it named, not set by hand) has its S$ counterpart,
+    and a row an expectation or a set-off rests on has its money placed
+    (pairing.py's rule): neither is a leg."""
     rows = conn.execute(
         "SELECT t.id, t.date, t.description, t.amount_minor, t.flow_type, "
         "       COALESCE(t.flow_type_manual, 0) AS manual, "
-        "       a.id AS account_id, a.name AS account_name, COALESCE(a.currency, 'SGD') AS currency, "
-        f"      CASE WHEN {_NO_RECORDS.format(row='t')} THEN 0 ELSE 1 END AS on_record "
+        "       a.id AS account_id, a.name AS account_name, COALESCE(a.currency, 'SGD') AS currency "
         "FROM transactions t "
         "JOIN statements s ON t.statement_id = s.id "
         "JOIN accounts a ON s.account_id = a.id "
         "WHERE a.owner = ? AND a.type = 'bank' "
         f"  AND t.flow_type IN ({','.join('?' * len(PAIRABLE_FLOWS))}) "
         "  AND t.amount_minor IS NOT NULL AND t.amount_minor != 0 "
+        "  AND NOT (t.other_side_id IS NOT NULL AND COALESCE(t.flow_type_manual, 0) = 0) "
+        f"  AND {_NO_RECORDS.format(row='t')} "
         "  AND NOT EXISTS (SELECT 1 FROM fx_pair p WHERE p.state = 'confirmed' "
         "                  AND (p.out_row_id = t.id OR p.in_row_id = t.id)) "
         "ORDER BY t.date, t.id",
@@ -217,7 +221,7 @@ def offers(conn: sqlite3.Connection) -> list[dict]:
             "out": _leg(out), "in": _leg(back), "currency": back["currency"],
             "rate": str(rate), "per_sgd": shown_rate(rate), "source": source,
             "ecb_rate": str(ecb), "ecb_per_sgd": shown_rate(ecb),
-            "off_percent": str((abs(rate - ecb) / ecb * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_EVEN)),
+            "off_percent": str((off * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_EVEN)),
         })
     made.sort(key=lambda o: (-o["out"]["amount_minor"], o["out"]["date"], o["out"]["id"]))
     return made
@@ -233,11 +237,12 @@ def _pair_words(offer: dict) -> tuple[str, str]:
 
 def _pair_waiting_leg(conn: sqlite3.Connection, leg_id: int, other_account: int) -> None:
     """A leg still waiting becomes a transfer naming the other's account, set
-    by hand; one labelled already, or carrying a record, keeps what it holds."""
+    by hand, its book and type emptied with the move (as pairing.py empties
+    them); a leg of any other flow keeps its flow, other side and label."""
     conn.execute(
         "UPDATE transactions SET flow_type = ?, other_side_id = ?, flow_type_manual = 1, "
         "book = NULL, type_id = NULL, book_source = NULL, type_source = NULL "
-        f"WHERE id = ? AND flow_type = ? AND {_NO_RECORDS.format(row='transactions')}",
+        "WHERE id = ? AND flow_type = ?",
         (flow.checked_flow(PAIRED_FLOW), other_account, leg_id, flow.REVIEW),
     )
 
