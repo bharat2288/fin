@@ -313,7 +313,9 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
     name, last, once the shape it reads is there; and rows with no book or
     type source columns read as needing the label-source step
     (convert_label_source.py), and rows still holding the one mark those two
-    replaced as needing its retirement (retire_single_mark.py). Each is read
+    replaced as needing its retirement (retire_single_mark.py), and statements
+    with no period start as needing the statement-periods step
+    (convert_statement_periods.py). Each is read
     from the book's shape, never from what its rows hold, but expect-back's,
     which reads its record first: nothing the operator does afterwards reads
     as a conversion still to run."""
@@ -331,7 +333,7 @@ def _needs_converting(conn: sqlite3.Connection) -> bool:
         or "max_amount" in rule_cols
         or "owner" not in {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
         or "other_side_id" not in tx_cols
-        or "printed" not in {r[1] for r in conn.execute("PRAGMA table_info(statements)")}
+        or not {"printed", "period_start"} <= {r[1] for r in conn.execute("PRAGMA table_info(statements)")}
         or conn.execute("SELECT 1 FROM transactions WHERE flow_type IS NULL LIMIT 1").fetchone()
         is not None
         or not history.has_shape(conn)

@@ -6,7 +6,8 @@ is recorded as household spending, spread evenly across the calendar months
 of the period, in whole minor units whose parts add up exactly to the whole.
 
 Where the derived rows live: on the loan account itself, under a statement
-record named DERIVED_STATEMENT and dated the period's closing figure. They are
+record named DERIVED_STATEMENT, dated the period's closing figure and starting
+the day after the figure before (its period_start). They are
 on no bank account or card, so they are in no statement's tie and no bank
 balance. They are not rows of the loan's own statement either: every row under
 a DERIVED_STATEMENT record has its book and its type worked out
@@ -187,12 +188,16 @@ def derive(conn: sqlite3.Connection, loan_id: int | None = None) -> int:
             "AND account_id IN (SELECT id FROM accounts WHERE type = ?)",
             (DERIVED_STATEMENT, loan, LOAN),
         )
+        # Each record covers its period: from the day after the figure before.
+        starts = {p["to"]: (date.fromisoformat(p["from"]) + timedelta(days=1)).isoformat()
+                  for p in periods(conn, loan)}
         statement_ids: dict[str, int] = {}
         for period_end, day, amount, description in wanted:
             if period_end not in statement_ids:
                 statement_ids[period_end] = conn.execute(
-                    "INSERT INTO statements (account_id, statement_date, filename) VALUES (?, ?, ?)",
-                    (loan, period_end, DERIVED_STATEMENT),
+                    "INSERT INTO statements (account_id, statement_date, filename, period_start)"
+                    " VALUES (?, ?, ?, ?)",
+                    (loan, period_end, DERIVED_STATEMENT, starts[period_end]),
                 ).lastrowid
             # Worked out, in both fields (label_source): nothing later reaches it.
             conn.execute(
