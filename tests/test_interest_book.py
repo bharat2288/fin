@@ -220,3 +220,71 @@ def test_chat_leaving_the_book_out_puts_the_interest_back_in_household(client, c
 
     assert done["ok"], done
     assert books_of_derived(client) == ["Household", "Household"]
+
+
+# --- review findings -------------------------------------------------------------
+
+
+def test_undoing_the_choice_moves_interest_worked_out_since_back_to_household(client, conn):
+    made = setup(client, conn)
+    add_grove(client)
+    choose(client, made["loan"], GROVE)
+    chose = latest_entry(client)
+    enter(client, made["loan"], OWED_AUG, "2026-08-31")
+    assert books_of_derived(client) == [GROVE, GROVE]
+
+    assert client.post(f"/api/history/{chose['id']}/undo").status_code == 200
+
+    assert books_of_derived(client) == ["Household", "Household"]
+    assert cents(cards(client, "2026-07")["household"]) == JULY_INTEREST
+
+
+def test_deleting_a_loan_takes_its_choice_with_it(client, conn):
+    loan = make_account(client, "Sample Spare Loan", "loan")
+    add_grove(client)
+    added = latest_entry(client)
+    choose(client, loan, GROVE)
+
+    assert client.delete(f"/api/accounts/{loan}").status_code == 200
+
+    assert conn.execute("SELECT COUNT(*) FROM interest_books").fetchone()[0] == 0
+    # Nothing is left filed under the book, so its add can be undone.
+    assert client.post(f"/api/history/{added['id']}/undo").status_code == 200
+
+
+@pytest.mark.parametrize("change", [{"type": "bank"}, {"owner": "Moom"}])
+def test_a_loan_whose_interest_goes_to_a_book_keeps_its_kind_and_owner(client, conn, change):
+    made = setup(client, conn)
+    add_grove(client)
+    choose(client, made["loan"], GROVE)
+    before = stored(conn)
+
+    resp = client.put(f"/api/accounts/{made['loan']}", json=change)
+
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == (
+        "This loan's interest goes to Orange Grove; set it back to Household first. Nothing was changed")
+    assert stored(conn) == before
+    assert tuple(conn.execute("SELECT type, owner FROM accounts WHERE id = ?", (made["loan"],)).fetchone()) == (
+        "loan", "Household")
+
+
+def test_only_the_households_own_loans_offer_the_choice(client, conn):
+    ours = make_account(client, "Sample Home Loan", "loan")
+    theirs = make_account(client, "Sample Company Loan", "loan", owner="Moom")
+    listed = {a["id"]: a["interest_book"] for a in client.get("/api/accounts").get_json()}
+
+    assert listed[ours] == "Household"
+    assert listed[theirs] is None
+
+
+def test_a_blank_book_is_household(client, conn):
+    made = setup(client, conn)
+    enter(client, made["loan"], OWED_AUG, "2026-08-31")
+    add_grove(client)
+    choose(client, made["loan"], GROVE)
+
+    resp = choose(client, made["loan"], "  ")
+
+    assert resp.status_code == 200 and resp.get_json()["book"] == "Household"
+    assert books_of_derived(client) == ["Household", "Household"]

@@ -1647,7 +1647,8 @@ def api_accounts():
         d["shared"] = d["id"] in shared_ids
         # A loan's interest goes to Household or the book chosen for it (interest_book.py).
         d["interest_book"] = (interest_books.get(d["id"], book_type.DEFAULT_BOOK)
-                              if d["type"] == loan_interest.LOAN else None)
+                              if d["type"] == loan_interest.LOAN and d["owner"] == account_kind.HOUSEHOLD
+                              else None)
         result.append(d)
     with get_db() as conn:
         # Why a loan's terms cannot change now (loan_terms.lock_refusal), or null.
@@ -1753,7 +1754,8 @@ def api_accounts_update(acct_id):
         return jsonify({"error": str(e)}), 400
     with get_db() as conn:
         why = (_ruled_account_refusal(conn, acct_id, data or {}) or _party_kind_refusal(conn, acct_id, data or {})
-               or _shared_kind_refusal(conn, acct_id, data or {}))
+               or _shared_kind_refusal(conn, acct_id, data or {})
+               or _interest_book_refusal(conn, acct_id, data or {}))
     if not why and data and "type" in data and data["type"] != loan_terms.LOAN:
         with get_db() as conn:
             if loan_terms.held(conn, acct_id) is not None:
@@ -1788,7 +1790,8 @@ def _account_update_with_terms(acct_id: int, data: dict):
         except loan_terms.TermsRefused as e:
             return jsonify({"error": str(e)}), 400
         why = (_ruled_account_refusal(conn, acct_id, fields) or _party_kind_refusal(conn, acct_id, fields)
-               or _shared_kind_refusal(conn, acct_id, fields))
+               or _shared_kind_refusal(conn, acct_id, fields)
+               or _interest_book_refusal(conn, acct_id, fields))
         if why:
             return jsonify({"error": why}), 400
         try:
@@ -1806,6 +1809,20 @@ def _account_update_with_terms(acct_id: int, data: dict):
             return jsonify({"error": str(e)}), 400
         conn.commit()
     return jsonify({"success": True})
+
+
+def _interest_book_refusal(conn, acct_id: int, data: dict) -> str | None:
+    """Why an account update would take a loan whose interest goes to a book
+    other than Household out of the household's loans (interest_book.py), or
+    None: the choice would be left where nothing shows it."""
+    book = interest_book.held(conn).get(acct_id)
+    if book is None:
+        return None
+    if ("type" in data and data["type"] != loan_interest.LOAN) or (
+            "owner" in data and data["owner"] != account_kind.HOUSEHOLD):
+        return (f"This loan's interest goes to {book}; set it back to {book_type.DEFAULT_BOOK} first. "
+                "Nothing was changed")
+    return None
 
 
 def _shared_kind_refusal(conn, acct_id: int, data: dict) -> str | None:
@@ -1906,7 +1923,8 @@ def api_accounts_shared(acct_id):
 @app.route("/api/accounts/<int:acct_id>/interest-book", methods=["PUT"])
 def api_accounts_interest_book(acct_id):
     """Choose the book a loan's worked-out interest goes to (interest_book.py,
-    fin-redesign 26). Body: {"book": a book's name, or null for Household}.
+    fin-redesign 26). Body: {"book": a book's name, or null (or blank) for
+    Household}.
     In the same change the loan's interest rows move to it
     (loan_interest.derive); one change, undone whole, and a refusal writes
     nothing. Answers the book and whether anything changed (`changed`)."""
@@ -1924,7 +1942,7 @@ def api_accounts_interest_book(acct_id):
             return jsonify({"error": "only the household's own loans have interest worked out. "
                                      "Nothing was changed"}), 400
         # A book's name is held unique ignoring case: the stored name is the one filed.
-        wanted = book_type.DEFAULT_BOOK if data["book"] is None else " ".join(data["book"].split())
+        wanted = " ".join((data["book"] or "").split()) or book_type.DEFAULT_BOOK
         book = next((b for b in book_type.book_names(conn) if b.casefold() == wanted.casefold()), None)
         if book is None:
             return jsonify({"error": f"{wanted} is not a book; add it on Lists › Books first. "
@@ -2134,6 +2152,7 @@ def api_accounts_delete(acct_id):
         loan_terms.write(conn, acct_id, None)
         folio_link.take_off(conn, "account", acct_id)
         shared.mark(conn, acct_id, False)
+        interest_book.choose(conn, acct_id, book_type.DEFAULT_BOOK)
         conn.execute("DELETE FROM accounts WHERE id = ?", (acct_id,))
         conn.commit()
     return jsonify({"success": True})

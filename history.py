@@ -432,8 +432,9 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     loan's terms under figures worked out with them (loan_terms.refusal_to_undo),
     or leave a bank account or a card joined to a party unshared
     (shared.joined_unshared).
-    A loan whose terms it puts back has its worked-out interest brought in
-    line in the same undo (loan_interest.derive)."""
+    A loan whose terms, or whose choice of book for its interest, it puts
+    back has its worked-out interest brought in line in the same undo
+    (loan_interest.derive)."""
     r = conn.execute("SELECT * FROM change_entries WHERE id = ?", (entry_id,)).fetchone()
     if r is None or r["open"]:
         raise UndoRefused("no such change")
@@ -468,15 +469,19 @@ def undo(conn: sqlite3.Connection, entry_id: int, undo_entry_id: int) -> dict:
     locked = loan_terms.refusal_to_undo(conn, entry_id)
     if locked:
         raise UndoRefused(locked)
-    loans = loan_terms.loans_in_entry(conn, entry_id)
+    # So does a loan whose choice of book for its interest it puts back
+    # (interest_book.py): rows worked out since, in a later change, follow it.
+    import interest_book
+
+    loans = loan_terms.loans_in_entry(conn, entry_id) | interest_book.loans_in_entry(conn, entry_id)
     try:
         _write_back(conn, entry_id)
     except sqlite3.IntegrityError:
         conn.rollback()
         raise UndoRefused("undoing this change would break a link between rows; nothing was changed") from None
     if loans:
-        # The terms are a loan's first figure: its worked-out interest follows
-        # them back, in this undo. Imported here: loan_interest reads the books.
+        # The terms are a loan's first figure, and the choice its book: its
+        # worked-out interest follows them back, in this undo. Imported here: loan_interest reads the books.
         import loan_interest
 
         for loan in sorted(loans):
