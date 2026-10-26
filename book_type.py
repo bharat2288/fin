@@ -882,6 +882,16 @@ def company_books(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(name for name in book_names(conn) if name != DEFAULT_BOOK)
 
 
+def company_book_named(conn: sqlite3.Connection, name) -> str | None:
+    """The company book a company account's name is, or None: matched as a
+    book's name is held unique, ignoring case and runs of spaces, so an
+    account typed "film" is the Film book's (fin-redesign 23)."""
+    if not isinstance(name, str):
+        return None
+    wanted = " ".join(name.split()).casefold()
+    return next((book for book in company_books(conn) if book.casefold() == wanted), None)
+
+
 def add_book(conn: sqlite3.Connection, data: dict) -> str:
     """Add a book the operator named, with what it holds, and return its name.
     The name is unique ignoring case, letters, digits, spaces, & and -, and

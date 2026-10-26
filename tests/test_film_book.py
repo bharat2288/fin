@@ -155,7 +155,8 @@ def test_rules_that_state_a_flow_take_the_films_rows_out_of_not_ours_and_into_th
     assert after[f"{LENDER_IN[1]} {LENDER_IN[0]}"] == ("movement", None, film["loan"])
     # Hers stays hers; the household's grocer stays the household's.
     assert after[f"{EMI[1]} {EMI[0]}"][0] == "not_ours"
-    assert after[f"{OWN_GROCER[1]} {OWN_GROCER[0]}"][1] in (None, "Household")
+    grocer = after[f"{OWN_GROCER[1]} {OWN_GROCER[0]}"]
+    assert grocer[0] not in ("not_ours", "movement") and grocer[1] != "Film"
 
 
 def test_the_films_costs_leave_household_spending_and_count_in_the_film_book(client, conn, film):
@@ -207,3 +208,25 @@ def test_the_lenders_one_row_can_be_said_by_hand_to_move_money_into_his_loan(cli
 
     assert resp.status_code == 200, resp.get_json()
     assert flows(conn)[f"{LENDER_IN[1]} {LENDER_IN[0]}"] == ("movement", None, film["loan"])
+
+
+@pytest.mark.parametrize("named", ["film", " Film ", "FILM"])
+def test_the_company_account_finds_its_book_whatever_its_letters_case(client, conn, film, named):
+    # Book names are unique ignoring case, so an account typed "film" is the
+    # Film book's company; a silent zero would hide the film's costs.
+    conn.execute("UPDATE accounts SET name = ? WHERE id = ?", (named, film["company"]))
+    conn.commit()
+    state_the_film(client, film)
+
+    shown = client.get("/api/balance-sheet?month=2026-09").get_json()
+    [line] = [l for s in shown["sections"] for l in s["lines"] if l["account_id"] == film["company"]]
+    assert line["made_of"]["paid_for_minor"] == FILM_COSTS
+
+
+def test_chat_adds_a_company_in_the_currency_it_is_given(client):
+    import mcp_tools
+    done = mcp_tools.call("add_company_or_person", {"kind": "company", "name": "Film", "currency": "INR"},
+                          actor="chat:sample-subject")
+    assert done["ok"], done
+    accounts = {a["name"]: a for a in client.get("/api/accounts").get_json()}
+    assert (accounts["Film"]["type"], accounts["Film"]["currency"]) == ("company", "INR")
