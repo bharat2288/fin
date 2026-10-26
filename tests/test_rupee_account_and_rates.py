@@ -74,7 +74,9 @@ def nothing_reaches_outside(monkeypatch):
     """No test here may make a network call or see a password it did not set."""
 
     def refuse(_url):
-        pytest.fail("a test tried to reach the network")
+        # Raised as the network failing would be: an import asks for the
+        # rates of its rows' days, and takes a failure in its stride.
+        raise OSError("a test tried to reach the network")
 
     monkeypatch.setattr(rates, "_http_get", refuse)
     monkeypatch.delenv(parse_hdfc.PASSWORD_VARIABLE, raising=False)

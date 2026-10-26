@@ -61,6 +61,19 @@ def local_dev_app(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(fin_app.app.config, "LOCAL_DEV", True)
 
 
+@pytest.fixture(autouse=True)
+def no_rate_source(monkeypatch: pytest.MonkeyPatch):
+    """No test reaches the public rate source: an import fetches the rates of
+    its rows' days (app._fetch_rates_for_import), and here the source is
+    down. A test that needs it answering sets rates._http_get, or urlopen,
+    itself."""
+    import urllib.request
+
+    def down(*_args, **_kwargs):
+        raise OSError("the rate source is not reached in tests")
+    monkeypatch.setattr(urllib.request, "urlopen", down)
+
+
 @pytest.fixture
 def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "test_fin.db"

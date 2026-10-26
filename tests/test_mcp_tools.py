@@ -41,6 +41,8 @@ READS.append("plan_preview")
 READS.insert(READS.index("expected_back") + 1, "paybacks")
 # fin-redesign 10: the bills, with the server's missed-bill rule.
 READS.insert(READS.index("paybacks") + 1, "bills")
+# fin RUL-026: the rows that have a twin.
+READS.insert(READS.index("bills") + 1, "duplicate_rows")
 WRITES = [
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     "add_rule", "change_rule", "delete_rule", "change_merchant", "merge_merchants",
@@ -49,6 +51,8 @@ WRITES = [
     "create_account",
     # fin redesign ticket 11: a merchant made over the app's own route
     "create_merchant",
+    # chat's brief, 26 Oct 2026: a book made over the app's own route (RUL-021)
+    "add_book",
     # fin-redesign 09: an account joined to a party (a merchant), one change
     "link_party",
     "pair_transfers", "fetch_rate", "set_rate",
@@ -57,6 +61,8 @@ WRITES = [
     # fin-redesign 12: several payments set off against one expectation, one change
     "set_off_payments",
     "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
+    # fin RUL-026: a row with a twin removed, one change
+    "remove_duplicate",
     "undo",
     # chat-plan-apply 02: the previewed batch, applied as one change
     "plan_apply",
@@ -113,9 +119,11 @@ def test_no_tool_reaches_what_the_ruling_keeps_out():
                       "/api/services/bulk-rename", "/api/loan-interest"):
         assert not any(p.startswith(forbidden) and p not in joins_a_party for p in paths), forbidden
     assert joins_a_party <= paths
-    # A row's own route, and the three expect-back routes of its (personal-ledger 44).
+    # A row's own route, and the three expect-back routes of its (personal-ledger 44),
+    # and a twin's removal (fin RUL-026), which refuses a row with no twin.
     reaches_a_row = {"/api/transactions/1", "/api/transactions/1/expectation",
-                     "/api/transactions/1/set-offs", "/api/transactions/1/not-a-payback"}
+                     "/api/transactions/1/set-offs", "/api/transactions/1/not-a-payback",
+                     "/api/transactions/1/remove-duplicate"}
     assert not any(p.startswith("/api/transactions/") and p not in reaches_a_row for p in paths)
 
 

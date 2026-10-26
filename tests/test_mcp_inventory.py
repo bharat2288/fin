@@ -42,6 +42,8 @@ GOLDEN: list[str] = [
     "paybacks",
     # fin-redesign 10: the bills, with the server's missed-bill rule (a read)
     "bills",
+    # fin RUL-026: the rows that have a twin (a read)
+    "duplicate_rows",
     # writes
     "set_label", "set_note", "label_review", "enter_figure", "correct_figure", "delete_figure",
     # fin-surfaces 51: rerun_rules removed, as Re-run every rule is retired
@@ -51,6 +53,8 @@ GOLDEN: list[str] = [
     "create_account",
     # fin redesign ticket 11: a merchant made over the app's own route
     "create_merchant",
+    # chat's brief, 26 Oct 2026: a book made over the app's own route (RUL-021)
+    "add_book",
     # fin-redesign 09: an account joined to a party (a merchant), one change
     "link_party",
     "pair_transfers", "fetch_rate", "set_rate",
@@ -59,6 +63,8 @@ GOLDEN: list[str] = [
     # fin-redesign 12: several payments set off against one expectation, one change
     "set_off_payments",
     "unlink_set_off", "let_go", "undo_let_go", "not_a_payback",
+    # fin RUL-026: a row with a twin removed, one change
+    "remove_duplicate",
     "undo",
     # chat-plan-apply 02: a batch of teaches, previewed (writes nothing) then applied as one change
     "plan_preview", "plan_apply",

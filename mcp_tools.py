@@ -40,7 +40,8 @@ Rulings this module carries:
 - Paybacks over chat (fin-redesign 12; RUL-016, no per-person shares): paybacks
   reads the Queue's payback suggestions as the Money in lane shows them;
   mark_expect_back given a book or type_id labels the row in the same change
-  as the mark (set_label's route, carrying the mark); set_off_payments sets
+  as the mark (set_label's route, carrying the mark), and with flow_type
+  expense says a row waiting for a label was spending; set_off_payments sets
   several payments off against one expectation, all or none, as one change,
   under MANY_ROWS like any write.
 - The Queue (chat-queue-read 02): queue reads the Queue's labelling work
@@ -54,9 +55,15 @@ Rulings this module carries:
   previewed batch as one change entry on that preview's token, refused when
   the book moved since (a replay included). Both stop with the switch off. The
   token stands in for expected_count: a batch over MANY_ROWS rows applies on
-  it and is recorded as asked first.
-- No tool imports a statement, changes or deletes an imported row, changes
-  or deletes an account (adding one is create_account, or
+  it and is recorded as asked first. An item may state its rows' flow
+  (flow_type): a waiting row the operator calls spending becomes spending,
+  which a merchant and type alone leave waiting (ADR-009).
+- Duplicate rows (fin RUL-026): duplicate_rows reads the rows that have a
+  twin (same account, day and amount) and remove_duplicate takes one out, as
+  one change, over the app's own route; a row with no twin, or one a record
+  rests on, is refused. It is the one imported row a tool removes.
+- No tool imports a statement, changes or deletes an imported row (but a
+  twin, above), changes or deletes an account (adding one is create_account, or
   add_company_or_person; joining one to a party is link_party), sends merchants to the type-suggestion service,
   runs a conversion or changes a bill: bills (fin-redesign 10) reads them,
   with the missed-bill rule's verdict from bills.py, the one home the app's
@@ -77,7 +84,8 @@ Rulings this module carries:
   that still holds. The token is not the operator's count: over MANY_ROWS
   rows changed (the preview's changes, refund links too) the call takes
   expected_count as any write, the number the preview shows. create_merchant adds a
-  merchant over the app's own route, which refuses a name fin holds.
+  merchant over the app's own route, which refuses a name fin holds; add_book
+  adds a book as Lists › Books does (RUL-021).
 - Parties (fin-redesign 09; a link, not a new home): a merchant is the party.
   create_merchant and change_merchant give it a role (party.ROLES), and
   link_party joins a person, company, loan, holding or untracked account to
@@ -488,6 +496,20 @@ _READS = [
         False,
         _get("/api/bills", "state"),
     ),
+    # fin RUL-026: the rows that have a twin (a read)
+    Tool(
+        "duplicate_rows",
+        "Rows that have a twin: another row on the same account, the same day and the same amount, "
+        "newest day first. Each set gives the account, day and amount, and each row its id, wording, "
+        "flow, book, type, the statement it came in on (from, to) and refusal (why remove_duplicate "
+        "would refuse it, or null). statements counts the statements the set came in on, and reading "
+        "says what that suggests: one row on each of two statements covering the day is most likely one "
+        "payment an import read twice; one statement printing both may be two real payments. Give "
+        "account_id for one account's, or tx_id for one row's own set.",
+        _schema({"account_id": _I, "tx_id": _I}),
+        False,
+        _get("/api/duplicates", "account_id", "tx_id"),
+    ),
 ]
 
 
@@ -500,7 +522,7 @@ def _mark_request(a: dict) -> tuple[str, str, dict | None]:
     """A mark on its own goes to the mark route; with a book or type it goes
     to the row's own route, carrying the mark, so both are one change."""
     tx_id = int(a["tx_id"])
-    label = _pick(a, "book", "type_id")
+    label = _pick(a, "book", "type_id", "flow_type")
     if not label:
         return "POST", f"/api/transactions/{tx_id}/expectation", _pick(a, *_MARK)
     return "PUT", f"/api/transactions/{tx_id}", {**label, "expectation": _pick(a, *_MARK)}
@@ -680,6 +702,16 @@ _WRITES = [
         lambda a: ("POST", "/api/services", _pick(a, "name", "book", "type_id", "role")),
     ),
     _w(
+        "add_book",
+        "Add a book, as Lists › Books does: a name (letters, digits, spaces, & and -) and description, "
+        "what its costs are (\"costs of the film, whichever account paid them\"). Refused, in fin's words, "
+        "when a book of that name is held already in any case: read books first. Renaming or removing a "
+        "book is not a chat tool.",
+        {"name": _S, "description": _S},
+        ("name",),
+        lambda a: ("POST", "/api/books", _pick(a, "name", "description")),
+    ),
+    _w(
         "link_party",
         "Join an account to a party: a merchant (service_id from merchants), so a person's "
         "accounts, or a company and the merchant its money arrives under, are known as one. "
@@ -726,10 +758,13 @@ _WRITES = [
         "removes it (this is not the undo tool). book and/or type_id (from the types tool) label "
         "the row in the same change, as set_label does (each marked chosen): a group order with "
         "no type yet is labelled and marked at once, and a mark the label makes impossible (a "
-        "company's book) writes neither.",
+        "company's book) writes neither. A row waiting for a label (review) is expected back only as "
+        "spending: send flow_type expense with it, and it is labelled spending in the same change.",
         {"tx_id": _I, "direction": {"type": "string", "enum": ["back", "pay"]}, "all": _B,
          "amount": _S, "names": {"type": "array", "items": _I},
-         "new_names": {"type": "array", "items": _S}, "note": _S, "book": _S, "type_id": _I},
+         "new_names": {"type": "array", "items": _S}, "note": _S, "book": _S, "type_id": _I,
+         "flow_type": {"type": "string", "enum": ["expense"],
+                       "description": "expense, with direction back: label a waiting row spending with the mark."}},
         ("tx_id", "direction"),
         lambda a: _mark_request(a),
     ),
@@ -818,6 +853,17 @@ _WRITES = [
         lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/not-a-payback", {}),
     ),
     _w(
+        "remove_duplicate",
+        "Remove a row that has a twin (another row on the same account, the same day and the same "
+        "amount), as one change the operator can undo in fin. Refused, writing nothing, when the row "
+        "has no twin, or when a record rests on it (an expect-back mark, a set-off, a refund link, a "
+        "set-aside, a folio link or a cross-currency pair): the refusal names a twin to remove instead. "
+        "Read duplicate_rows first, and remove only the twins the operator said are one payment.",
+        {"tx_id": _I},
+        ("tx_id",),
+        lambda a: ("POST", f"/api/transactions/{int(a['tx_id'])}/remove-duplicate", {}),
+    ),
+    _w(
         "undo",
         "Undo one change made from the chat. Refused, naming it, when a later change touched "
         "the same rows: undo that one first. A change made in fin itself is the operator's to undo.",
@@ -854,6 +900,13 @@ _PLAN_ITEM = {
         "move_chosen": {**_B, "description": "With past_rows apply, on the operator's yes: also move the rows "
                                              "the item's flows_chosen lists, kept only because the operator "
                                              "chose their book or type by hand."},
+        "flow_type": {"type": "string", "enum": ["expense"],
+                      "description": "expense, when the operator says the card's waiting (review) rows were "
+                                     "spending: they become spending, which a merchant and type alone do not "
+                                     "do. The rule its wording makes does not state it, so a later row of that "
+                                     "wording still waits unless add_rule or change_rule states flow expense. "
+                                     "Rows labelled already keep their labels. Left out, a waiting row stays "
+                                     "waiting."},
     },
     "required": ["tx_ids"],
     "additionalProperties": False,
@@ -939,6 +992,7 @@ TITLES = {
     "expected_back": "Read what is expected back",
     "paybacks": "Read the payback suggestions",
     "bills": "Read your bills",
+    "duplicate_rows": "Read rows that have a twin",
     "set_label": "Change a row's book or type",
     "set_note": "Change a row's note",
     "label_review": "Say what a row was",
@@ -953,6 +1007,7 @@ TITLES = {
     "add_company_or_person": "Add a company or a person",
     "create_account": "Add an account",
     "create_merchant": "Add a merchant",
+    "add_book": "Add a book",
     "link_party": "Join an account to a party",
     "pair_transfers": "Pair transfers between your accounts",
     "fetch_rate": "Fetch and save an exchange rate",
@@ -965,6 +1020,7 @@ TITLES = {
     "let_go": "Let an expected-back amount go",
     "undo_let_go": "Undo a let-go",
     "not_a_payback": "Say a row is not a payback",
+    "remove_duplicate": "Remove a duplicate row",
     "undo": "Undo a chat change",
     "plan_preview": "Preview a batch of Queue changes",
     "plan_apply": "Apply a batch of Queue changes",
