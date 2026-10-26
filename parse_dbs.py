@@ -440,8 +440,9 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
     - Amount columns are positional
 
     A statement of one account hands over its first "Balance Brought Forward"
-    and last "Balance Carried Forward" as its opening and closing balance, the
-    closing dated by the statement date; the import path checks the rows
+    and last "Balance Carried Forward" (on its last page, the balance of its
+    "Total Balance Carried Forward" line, in SGD) as its opening and closing
+    balance, the closing dated by the statement date; the import path checks the rows
     against them (tie.py). With more than one account number in the file, a
     balance line missing or no statement date, it states no balance.
     """
@@ -491,6 +492,10 @@ def parse_bank_statement(pdf_path: str) -> ParsedStatement:
 
         cf_match = re.search(
             r"Balance Carried Forward(?:\s+SGD)?\s+([\d,]+\.\d{2})", line
+        ) or re.search(
+            # The account's last page carries its balance forward as a total
+            # line: the withdrawals, the deposits, then the balance.
+            r"Total Balance Carried Forward(?: in SGD)?:\s.*?([\d,]+\.\d{2})\s*$", line
         )
         if cf_match:
             closing = money.parse_minor(cf_match.group(1))

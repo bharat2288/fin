@@ -274,6 +274,22 @@ def _matches_known_transfer_rail(description: str, owned_bank_refs: tuple[str, .
     return False
 
 
+# A card credit that moves money between the holder's accounts, e.g. a DBS
+# overpayment moved from one card to another ("INTER ACCOUNT TRANSFER").
+CARD_ACCOUNT_MOVE_MARKERS = ("INTER ACCOUNT TRANSFER", "INTER-ACCOUNT TRANSFER", "BALANCE TRANSFER")
+# How a bank statement prints a row made with the account's debit card.
+DEBIT_CARD_ROW_PREFIXES = ("DEBIT CARD TRANSACTION",)
+
+
+def _is_card_account_move(description: str) -> bool:
+    up = " ".join(description.upper().split())
+    return any(m in up for m in CARD_ACCOUNT_MOVE_MARKERS)
+
+
+def _is_debit_card_row(description: str) -> bool:
+    return " ".join(description.upper().split()).startswith(DEBIT_CARD_ROW_PREFIXES)
+
+
 def _on_household_bank(facts: dict) -> bool:
     return (
         facts.get("account_kind") == "bank"
@@ -483,6 +499,15 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
     # 4. Narrow reviewed transfer rails that are not merchant spend.
     if _matches_known_transfer_rail(description, ctx.owned_bank_refs):
         return "transfer"
+
+    # 4a. Money back on a card is a refund: a card's bill payment is matched
+    #     above, and a card is paid no income. A card credit worded as a move
+    #     between accounts waits. Money back on a bank account's debit card
+    #     (a purchase given back) is a refund too.
+    if amount < 0 and facts.get("account_kind") == "card":
+        return REVIEW if _is_card_account_move(description) else "refund"
+    if amount < 0 and _on_household_bank(facts) and _is_debit_card_row(description):
+        return "refund"
 
     # 4b. A transfer on a household bank account that nothing above knows
     #     waits for the operator, whatever merchant a rule gave it; a row
