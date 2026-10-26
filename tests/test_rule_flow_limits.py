@@ -26,6 +26,7 @@ mcp_tools.call. Every name, wording and figure is invented.
 import pytest
 
 import account_kind
+import book_type
 import app as fin_app
 import db
 import loan_interest
@@ -563,7 +564,7 @@ def test_a_teach_that_moves_a_flow_works_out_the_loans_interest_again(client, ru
 
 # --- an account a rule names is not changed into one the rule cannot name ------------------
 
-COMPANY = account_kind.OWNER_NAMES[1]
+COMPANY = book_type.BOOKS[1][0]  # Moom, an owner
 
 
 @pytest.fixture

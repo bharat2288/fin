@@ -403,7 +403,7 @@ _READS = [
         False,
         lambda a: ("GET", "/api/types/slots" if a.get("filings") else "/api/types", {}),
     ),
-    Tool("books", "The books (Household, Moom, Kalesh).", _schema(), False, _get("/api/books")),
+    Tool("books", "The books, Household first: whose spending a row is. The operator adds books in fin's app.", _schema(), False, _get("/api/books")),
     Tool("flows", "The flows a row can have, with what each means.", _schema(), False, _get("/api/flows")),
     Tool(
         "coverage",
@@ -654,7 +654,7 @@ _WRITES = [
         "from; the last day of the month before the first instalment unless given), method rule-of-78}; amounts as text, e.g. \"150000.00\". "
         "Terms on an account fin holds are the operator's, on Lists › Accounts.",
         {"name": _S, "kind": {"type": "string", "enum": list(account_kind.KIND_NAMES)},
-         "currency": _S, "owner": {"type": "string", "enum": list(account_kind.OWNER_NAMES)},
+         "currency": _S, "owner": {"type": "string", "description": "Household, or a company book: read books"},
          "last_four": {"type": "string", "pattern": "^[0-9]{4}$",
                        "description": "four digits: the account's last four, e.g. 3528"},
          "terms": {"type": "object", "description": "A loan's hire-purchase terms (kind loan only).",

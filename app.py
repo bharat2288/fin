@@ -148,21 +148,21 @@ def _parts_pill(amount_minor: int, expected_minor: int, placed_minor: int, waiti
     return " · ".join(words) or None
 
 
-def _requested_book(args) -> str | None:
+def _requested_book(conn, args) -> str | None:
     """The book the View filter asks for; None means every book."""
     book = (args.get("book") or "").strip()
-    return book if book in book_type.BOOK_NAMES else None
+    return book if book in book_type.book_names(conn) else None
 
 
 class UnknownLabel(ValueError):
     """A writer was handed a book or a type that is not in its vocabulary."""
 
 
-def _checked_book(value) -> str | None:
-    """A book as a writer may store it: one of the declared books, or none."""
+def _checked_book(conn, value) -> str | None:
+    """A book as a writer may store it: one of the book's books, or none."""
     if value is None or value == "":
         return None
-    if value not in book_type.BOOK_NAMES:
+    if value not in book_type.book_names(conn):
         raise UnknownLabel(f"unknown book: {value!r}")
     return value
 
@@ -184,7 +184,7 @@ def _checked_type_id(conn, value) -> int | None:
 def _checked_labels(conn, data: dict, book_key: str = "book", type_key: str = "type_id") -> None:
     """Refuse a request body whose book or type is not in the vocabulary."""
     if book_key in data:
-        _checked_book(data[book_key])
+        _checked_book(conn, data[book_key])
     if type_key in data:
         _checked_type_id(conn, data[type_key])
 
@@ -1521,10 +1521,30 @@ def api_type_slots_move(slot: str):
 
 @app.route("/api/books")
 def api_books():
-    """The books, from their one declaration."""
-    return jsonify([
-        {"name": name, "description": description} for name, description in book_type.BOOKS
-    ])
+    """The books, Household first, from the book (fin RUL-021):
+    {name, description, added_in_fin}."""
+    with get_db() as conn:
+        return jsonify(book_type.books(conn))
+
+
+@app.route("/api/books", methods=["POST"])
+def api_books_create():
+    """Add a book: name and description (whose costs it holds). Refused,
+    writing nothing, with the reason in words. Renaming and removing a book
+    stay code changes."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "send the book as JSON"}), 400
+    with get_db() as conn:
+        try:
+            name = book_type.add_book(conn, data)
+        except book_type.BookRefused as e:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 400
+        _name_change(conn, f"Added the book {name}")
+        conn.commit()
+        book = next(b for b in book_type.books(conn) if b["name"] == name)
+    return jsonify({"book": book}), 201
 
 
 @app.route("/api/flows")
@@ -1537,8 +1557,10 @@ def api_flows():
 
 @app.route("/api/account-kinds")
 def api_account_kinds():
-    """The account kinds, the owners and the anchor sources, each from its
-    one declaration."""
+    """The account kinds and the anchor sources, each from its one
+    declaration, and the owners: Household and the company books."""
+    with get_db() as conn:
+        owners = account_kind.owners(conn)
     return jsonify({
         "kinds": [
             {
@@ -1552,7 +1574,7 @@ def api_account_kinds():
         ],
         "owners": [
             {"name": name, "description": description}
-            for name, description in account_kind.OWNERS
+            for name, description in owners
         ],
         "anchor_sources": [
             {"name": name, "description": description}
@@ -1626,7 +1648,8 @@ def api_accounts_create():
 
     try:
         kind = account_kind.checked_kind(data.get("type", account_kind.DEFAULT_KIND))
-        owner = account_kind.checked_owner(data.get("owner", account_kind.DEFAULT_OWNER))
+        with get_db() as conn:
+            owner = account_kind.checked_owner(conn, data.get("owner", account_kind.DEFAULT_OWNER))
         currency = _checked_currency(data.get("currency", "SGD"))
         terms = _account_terms(str(data["name"]).strip(), kind, currency, data.get("terms"))
     except (account_kind.UnknownAccountValue, CurrencyRefused, loan_terms.TermsRefused) as e:
@@ -1701,7 +1724,8 @@ def api_accounts_update(acct_id):
         if data and "type" in data:
             account_kind.checked_kind(data["type"])
         if data and "owner" in data:
-            account_kind.checked_owner(data["owner"])
+            with get_db() as conn:
+                account_kind.checked_owner(conn, data["owner"])
         if data and "currency" in data:
             _checked_currency(data["currency"])
     except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
@@ -1726,7 +1750,8 @@ def _account_update_with_terms(acct_id: int, data: dict):
         if "type" in fields:
             account_kind.checked_kind(fields["type"])
         if "owner" in fields:
-            account_kind.checked_owner(fields["owner"])
+            with get_db() as conn:
+                account_kind.checked_owner(conn, fields["owner"])
         if "currency" in fields:
             _checked_currency(fields["currency"])
     except (account_kind.UnknownAccountValue, CurrencyRefused) as e:
@@ -2501,7 +2526,7 @@ def api_services_create():
         # given, the book is the one the type proposes.
         try:
             type_id = _checked_type_id(conn, data.get("type_id"))
-            book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
+            book = _book_or_proposed(conn, _checked_book(conn, data.get("book")), type_id)
             role = party.checked_role(data.get("role"))
         except (UnknownLabel, BookNeeded, party.Refused) as e:
             return jsonify({"error": str(e)}), 400
@@ -3073,7 +3098,8 @@ def api_dashboard_stat_cards():
         avg_months.append((ay, am))
     avg_months.reverse()  # chronological order
 
-    book = _requested_book(request.args)
+    with get_db() as conn:
+        book = _requested_book(conn, request.args)
     account_id = request.args.get("account_id")
     exclude_one_off = request.args.get("exclude_one_off") == "true"
 
@@ -3100,7 +3126,8 @@ def api_dashboard_stat_cards():
     # The Household book's is household spending: on accounts the household
     # owns only (ruling 6). A row with no book on a company's own account is
     # not the household's money.
-    books = [(name, name.lower()) for name in book_type.BOOK_NAMES]
+    with get_db() as conn:
+        books = [(name, name.lower()) for name in book_type.book_names(conn)]
     book_sums = "".join(
         f"SUM(CASE WHEN {book_expr('t')} = ?"
         + (" AND a.owner = ?" if name == book_type.DEFAULT_BOOK else "")
@@ -3414,7 +3441,12 @@ def _listed_rows(args) -> tuple[str, list]:
     filters, params = _build_filters(args, hide=hide)
     # Only spending and refund rows carry a book: on the Rows page a book
     # leaves the other flows out, where a bare row would read as Household.
-    if every and _requested_book(args):
+    if every and (args.get("book") or "").strip():
+        with get_db() as conn:
+            booked = _requested_book(conn, args)
+    else:
+        booked = None
+    if booked:
         filters += f" AND COALESCE(t.flow_type, 'expense') IN ({','.join('?' * len(flow.LABELLED))})"
         params.extend(flow.LABELLED)
 
@@ -4033,7 +4065,7 @@ def _teach(conn, data: dict, *, record_choice: bool = True,
             raise TeachRefused({"error": str(e)})
 
     try:
-        book = _checked_book(data.get("book"))
+        book = _checked_book(conn, data.get("book"))
         type_id = _checked_type_id(conn, data.get("type_id"))
     except UnknownLabel as e:
         raise TeachRefused({"error": str(e)})
@@ -4673,7 +4705,10 @@ def _build_filters(args, hide: bool = True) -> tuple[str, list]:
         filters += " AND t.date <= ?"
         params.append(end)
 
-    book = _requested_book(args)
+    book = None
+    if (args.get("book") or "").strip():  # the list is read only when a book is asked for
+        with get_db() as conn:
+            book = _requested_book(conn, args)
     if book:
         filters += f" AND {book_expr('t')} = ?"
         params.append(book)
@@ -6598,7 +6633,7 @@ def api_rules_create():
 
     with get_db() as conn:
         try:
-            book_override = _checked_book(data.get("book_override"))
+            book_override = _checked_book(conn, data.get("book_override"))
             type_override_id = _checked_type_id(conn, data.get("type_override_id"))
             min_minor = _threshold_minor(data, "min_amount")
             max_minor = _threshold_minor(data, "max_amount")
@@ -7026,7 +7061,7 @@ def _label_row(conn, choice, data: dict, tx_id: int) -> dict:
         type_id = _checked_type_id(conn, data.get("type_id"))
         if type_id is None:
             raise review.LabelRefused("type_id is required: spending takes a type")
-        book = _book_or_proposed(conn, _checked_book(data.get("book")), type_id)
+        book = _book_or_proposed(conn, _checked_book(conn, data.get("book")), type_id)
     elif choice.name == "gift":
         # Positive is money out: a gift given. Otherwise one received.
         if tx["amount_minor"] < 0:
@@ -7048,13 +7083,13 @@ def _label_row(conn, choice, data: dict, tx_id: int) -> dict:
                                 (tx["service_id"],)).fetchone() if tx["service_id"] is not None else None
         if given is not None:
             type_id = given
-            book = _book_or_proposed(conn, _checked_book(data.get("book")), given)
+            book = _book_or_proposed(conn, _checked_book(conn, data.get("book")), given)
         elif not spending(tx["type_id"]) and merchant is not None and spending(merchant["type_id"]):
             type_id = merchant["type_id"]
-            book = _checked_book(data.get("book")) or merchant["book"] or book_type.DEFAULT_BOOK
+            book = _checked_book(conn, data.get("book")) or merchant["book"] or book_type.DEFAULT_BOOK
         else:
             type_id = tx["type_id"] if spending(tx["type_id"]) else None
-            given_book = _checked_book(data.get("book"))
+            given_book = _checked_book(conn, data.get("book"))
             book = given_book or tx["book"]
             if type_id is None:
                 # No type worth keeping: the refund waits for its purchase's

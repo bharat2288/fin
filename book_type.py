@@ -15,8 +15,14 @@ a gift received; type-relationships 03), and rename a spending type
 change to a declared type's wording or name here does not reach a book
 already seeded, as `seed_types` never overwrites; such a change goes in as a
 conversion step. Moving a type under another, merging and removing a type,
-every income kind, and every book stay code changes. Other's name and
-settings stay as declared: its meaning is fixed.
+and every income kind stay code changes. Other's name and settings stay as
+declared: its meaning is fixed.
+
+Books are data (fin RUL-021): Household, Moom and Kalesh are seeded once from
+BOOKS into the `books` table, and the operator adds a book in the app
+(`add_book`), one entry in the change history. Every reader takes the list
+from the book (`book_names`), never from BOOKS. Renaming and removing a book
+stay code changes.
 
 Code never finds a type by the name it shows. Each declared type and income
 kind keeps a key, its declared name frozen, in the `type_keys` table, and the
@@ -26,17 +32,18 @@ code reads the types it means through the key helpers below
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 import unicodedata
 
-# (name, description). A new book is a new value here.
+# (name, description). The books a new database starts with (seed_books); a
+# book the operator adds is a row in `books`, never a value here (fin RUL-021).
 BOOKS = (
     ("Household", "spending of the household itself"),
     ("Moom", "costs of the company Moom, whichever account paid them"),
     ("Kalesh", "costs of the company Kalesh, whichever account paid them"),
 )
-
-BOOK_NAMES = tuple(name for name, _ in BOOKS)
 # The book a row with none is read as: spending nobody has placed is the
 # household's until the operator says otherwise.
 DEFAULT_BOOK = "Household"
@@ -235,13 +242,12 @@ LOCKED = PROPOSES_MOOM + ASKS_FOR_BOOK + (LOAN_INTEREST, GIFT_GIVEN, NOT_PLACED)
 # --- a type's settings (type-relationships 02) -------------------------------
 #
 # The kinds are declared here; their values are data, one `type_settings` row
-# per spending type: its usual book, one of USUAL_BOOKS, and whether a new
+# per spending type: its usual book, a book or ask, and whether a new
 # merchant of it starts as Check each row. One-off by default is the type's
 # own `default_one_off`. A change reaches new merchants only (fin RUL-006 Q3).
 
 # The usual book that proposes none: the operator says whose spending it is.
 ASK = "ask"
-USUAL_BOOKS = BOOK_NAMES + (ASK,)
 
 
 def _seeded_usual_book(key: str | None) -> str:
@@ -745,8 +751,8 @@ def change_type(conn: sqlite3.Connection, type_id: int, data: dict) -> dict:
         raise TypeRefused(f"{NOT_PLACED} means not placed yet: its name is fixed")
     if "name" in data:
         now["name"] = _name(conn, data["name"], but=type_id)
-    if "usual_book" in data and data["usual_book"] not in USUAL_BOOKS:
-        raise TypeRefused(f"the usual book is one of {', '.join(BOOK_NAMES)} or {ASK}")
+    if "usual_book" in data and data["usual_book"] not in (*book_names(conn), ASK):
+        raise TypeRefused(f"the usual book is one of {', '.join(book_names(conn))} or {ASK}")
     for field in ("one_off", "check_each_row"):
         if field in data and not isinstance(data[field], bool):
             raise TypeRefused(f"{field} must be true or false")
@@ -779,7 +785,12 @@ def change_type(conn: sqlite3.Connection, type_id: int, data: dict) -> dict:
 
 def refusal_to_undo(conn: sqlite3.Connection, entry_id: int) -> str | None:
     """Why undoing an entry would take out a type something still uses, in
-    words; None when it would not. Read before anything is written back."""
+    words; None when it would not. Read before anything is written back.
+    Covers a book's add too: undoing it would leave whatever is filed under
+    the book naming a book fin no longer keeps."""
+    held = _book_in_use(conn, entry_id) or _book_gone(conn, entry_id)
+    if held is not None:
+        return held
     added = [r[0] for r in conn.execute(
         "SELECT DISTINCT row_id FROM change_rows WHERE entry_id = ? AND tbl = 'types' AND op = 'insert'",
         (entry_id,),
@@ -801,4 +812,142 @@ def refusal_to_undo(conn: sqlite3.Connection, entry_id: int) -> str | None:
                 return f"a merchant or row still uses {shown}; change those first"
         if conn.execute("SELECT 1 FROM types WHERE parent_id = ? LIMIT 1", (type_id,)).fetchone():
             return f"a type still sits under {shown}; undo that one first"
+    return None
+
+
+# --- the books (fin RUL-021) ---------------------------------------------------
+#
+# A book is a row in `books`, read in id order: Household, then the rest as
+# they were added. The companies are the books other than Household (an
+# account's owner is one of them, account_kind.owners).
+
+# Words a book may not take. The stat cards carry each book's figures under
+# its name in lower case, alone and with a suffix or prefix (film, film_out,
+# avg_film, paid_film), beside keys of their own; a book named as the first
+# word of one of those (held, waiting, loan) could read as it
+# (api_stat_cards; a test holds the two together). Ask is the usual book
+# that proposes none.
+RESERVED = (ASK, "total", "avg", "back", "cash", "held", "history", "loan", "month", "out",
+            "paid", "ref", "spend", "tx", "untyped", "unvalued", "waiting")
+
+# Where a book is held, by name: (table, column). An added book's add is not
+# undone while any of these still names it.
+BOOK_USED_BY = (
+    ("transactions", "book"),
+    ("services", "book"),
+    ("subscriptions", "book"),
+    ("merchant_rules", "book_override"),
+    ("type_settings", "usual_book"),
+    ("let_go", "book"),
+    ("accounts", "owner"),
+)
+
+BOOK_FIELDS = ("name", "description")
+BOOK_NAME_MAX = 30
+_BOOK_NAME = re.compile(r"[A-Za-z0-9&\- ]+")
+
+
+class BookRefused(ValueError):
+    """An added book breaks a rule; the message says which, in words."""
+
+
+def seed_books(conn: sqlite3.Connection) -> None:
+    """Give the database each declared book it does not hold yet, in BOOKS
+    order. Insert if missing, never overwriting. Run with no change entry
+    open; no commit."""
+    for name, description in BOOKS:
+        conn.execute(
+            "INSERT INTO books (name, description) SELECT ?, ?"
+            " WHERE NOT EXISTS (SELECT 1 FROM books WHERE name = ?)",
+            (name, description, name),
+        )
+
+
+def books(conn: sqlite3.Connection) -> list[dict]:
+    """Every book, Household first, as {name, description, added_in_fin}."""
+    declared = {name for name, _ in BOOKS}
+    return [
+        {"name": r[0], "description": r[1], "added_in_fin": r[0] not in declared}
+        for r in conn.execute("SELECT name, description FROM books ORDER BY id")
+    ]
+
+
+def book_names(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """The books' names, Household first: the one list every reader takes."""
+    return tuple(r[0] for r in conn.execute("SELECT name FROM books ORDER BY id"))
+
+
+def company_books(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """The books that are companies: every book but Household."""
+    return tuple(name for name in book_names(conn) if name != DEFAULT_BOOK)
+
+
+def add_book(conn: sqlite3.Connection, data: dict) -> str:
+    """Add a book the operator named, with what it holds, and return its name.
+    The name is unique ignoring case, letters, digits, spaces, & and -, and
+    not a word fin keeps (RESERVED). Refused, writing nothing, with the
+    reason in words. No commit: the caller owns it."""
+    unknown = [k for k in data if k not in BOOK_FIELDS]
+    if unknown:
+        raise BookRefused(f"unknown field: {unknown[0]}")
+    raw = data.get("name")
+    name = " ".join(raw.split()) if isinstance(raw, str) else ""
+    if not name:
+        raise BookRefused("a book needs a name")
+    if len(name) > BOOK_NAME_MAX:
+        raise BookRefused(f"a book's name is at most {BOOK_NAME_MAX} characters")
+    if not _BOOK_NAME.fullmatch(name):
+        raise BookRefused("a book's name is letters, digits, spaces, & and -")
+    if name.lower() in RESERVED:
+        raise BookRefused(f"{name.lower()} is a word fin keeps for itself; choose another name")
+    held = conn.execute("SELECT name FROM books WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+    if held is not None:
+        raise BookRefused(f"{held[0]} is already a book")
+    raw = data.get("description")
+    description = " ".join(raw.split()) if isinstance(raw, str) else ""
+    if not description or _controls(description):
+        raise BookRefused("say what the book is for")
+    try:
+        conn.execute("INSERT INTO books (name, description) VALUES (?, ?)", (name, description))
+    except sqlite3.IntegrityError:  # added by another request since the check above
+        raise BookRefused(f"{name} is already a book") from None
+    return name
+
+
+def _book_gone(conn: sqlite3.Connection, entry_id: int) -> str | None:
+    """Why undoing an entry would write a book's name back into a row,
+    merchant, rule, account, type setting or let-go while fin no longer keeps
+    that book (its add was undone since); None when it would not. A book is
+    held by name, so nothing in the schema stops it."""
+    kept = set(book_names(conn))
+    columns = dict(BOOK_USED_BY)
+    for tbl, op, before in conn.execute(
+        "SELECT tbl, op, before FROM change_rows WHERE entry_id = ? AND before IS NOT NULL", (entry_id,)
+    ):
+        if tbl == "books" and op == "delete":
+            kept.add(json.loads(before)["name"])  # the undo puts this book back
+    for tbl, before in conn.execute(
+        "SELECT tbl, before FROM change_rows WHERE entry_id = ? AND op IN ('update', 'delete')", (entry_id,)
+    ):
+        if tbl not in columns or before is None:
+            continue
+        name = json.loads(before).get(columns[tbl])
+        if name is not None and name not in kept:
+            return (f"undoing this would file something under the book {name}, which fin no longer keeps; "
+                    "add it again first")
+    return None
+
+
+def _book_in_use(conn: sqlite3.Connection, entry_id: int) -> str | None:
+    """Why undoing an entry that added a book would leave something filed
+    under a book fin no longer keeps; None when it would not."""
+    for (data,) in conn.execute(
+        "SELECT after FROM change_rows WHERE entry_id = ? AND tbl = 'books' AND op = 'insert'",
+        (entry_id,),
+    ):
+        name = json.loads(data)["name"]
+        for table, column in BOOK_USED_BY:
+            # Both names come from BOOK_USED_BY above, never from a request.
+            if conn.execute(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", (name,)).fetchone():
+                return f"something is filed under the book {name}; change that first"
     return None

@@ -681,7 +681,7 @@ def insert_let_go(conn: sqlite3.Connection, expectation_id: int, became: str, *,
         if became != GIFT:
             raise Refused("only a gift is to someone")
         _checked_people(conn, [to_whom_id])
-    if book not in book_type.BOOK_NAMES:
+    if book not in book_type.book_names(conn):
         raise Refused(f"unknown book: {book!r}")
     if isinstance(type_id, bool) or not isinstance(type_id, int) or not conn.execute(
         "SELECT 1 FROM types WHERE id = ?", (type_id,)

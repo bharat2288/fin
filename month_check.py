@@ -213,7 +213,7 @@ def _crossing(conn: sqlite3.Connection, after: str, upto: str, in_check: set,
         elif kind == "company":
             # Only a company that is a book has rows paid for it, as its line counts them.
             name = names[acct]
-            is_book = name in book_type.BOOK_NAMES and name != book_type.DEFAULT_BOOK
+            is_book = name in book_type.company_books(conn)
             book = name if is_book else None
             paid = ", ".join("?" for _ in balance_sheet.PAID_FOR_FLOWS)
             entering(

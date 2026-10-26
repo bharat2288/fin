@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     flow_type_manual INTEGER DEFAULT 0,  -- 1 = user overrode classifier; preserve on recategorize
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    book TEXT,                     -- whose spending: Household, Moom, Kalesh (declared in book_type.py); NULL reads as Household
+    book TEXT,                     -- whose spending: a book's name (the books table); NULL reads as Household
     type_id INTEGER REFERENCES types(id),  -- what kind of spending, or for income its kind; NULL = not placed
     amount_minor INTEGER,          -- the amount in whole minor units of the account's currency: positive = money out, negative = money in
     other_side_id INTEGER REFERENCES accounts(id),  -- the account a movement, transfer or payment names as its other side; NULL = none named. An existing database gains it through convert_movements.py
@@ -190,8 +190,23 @@ CREATE TABLE IF NOT EXISTS type_keys (
     UNIQUE (kind, key)
 );
 
+-- The books (fin RUL-021): whose spending a row is. A book is data: Household,
+-- Moom and Kalesh are seeded once from book_type.BOOKS, never overwriting, and
+-- the operator adds a book on Lists › Books (book_type.add_book). Every reader,
+-- chat tool and owner rule reads the list from here, in id order, Household
+-- first. A row, merchant, rule, let-go and type setting holds a book by its
+-- name; an account's owner is Household or a book. Renaming and removing a
+-- book stay code changes. Tracked by the change history. A new table, made by
+-- CREATE IF NOT EXISTS on start; no existing row is converted.
+CREATE TABLE IF NOT EXISTS books (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,  -- shown as written; unique ignoring case
+    description TEXT NOT NULL,                 -- plain words: whose costs it holds
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- A spending type's settings (type-relationships 02): its usual book, the
--- one a new merchant of it is proposed (a book book_type.py declares, or
+-- one a new merchant of it is proposed (a book in the books table, or
 -- 'ask': the operator says), and whether a new merchant of it starts as Check
 -- each row. A change reaches new merchants only. Seeded at start for every
 -- declared spending type from what the code said before, never overwriting
@@ -202,7 +217,7 @@ CREATE TABLE IF NOT EXISTS type_keys (
 CREATE TABLE IF NOT EXISTS type_settings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type_id INTEGER NOT NULL UNIQUE REFERENCES types(id),
-    usual_book TEXT NOT NULL,                  -- a book, or 'ask' (book_type.USUAL_BOOKS)
+    usual_book TEXT NOT NULL,                  -- a book's name, or 'ask' (book_type.ASK)
     check_each_row INTEGER NOT NULL DEFAULT 0  -- 1: a new merchant of this type starts as Check each row
 );
 
@@ -960,6 +975,31 @@ BEGIN
     INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
     VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'folio_link', OLD.id, 'delete',
         json_object('id', OLD.id, 'subject', OLD.subject, 'subject_id', OLD.subject_id, 'target', OLD.target, 'folio_id', OLD.folio_id), NULL);
+END;
+-- The books (fin RUL-021): a new table, so a book gains its triggers on its
+-- next start (history.ADDED_ON_START).
+CREATE TRIGGER IF NOT EXISTS history_books_insert AFTER INSERT ON books
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'books', NEW.id, 'insert', NULL,
+        json_object('id', NEW.id, 'name', NEW.name, 'description', NEW.description, 'created_at', NEW.created_at));
+END;
+CREATE TRIGGER IF NOT EXISTS history_books_update AFTER UPDATE ON books
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+    AND json_object('id', OLD.id, 'name', OLD.name, 'description', OLD.description, 'created_at', OLD.created_at) IS NOT json_object('id', NEW.id, 'name', NEW.name, 'description', NEW.description, 'created_at', NEW.created_at)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'books', NEW.id, 'update',
+        json_object('id', OLD.id, 'name', OLD.name, 'description', OLD.description, 'created_at', OLD.created_at),
+        json_object('id', NEW.id, 'name', NEW.name, 'description', NEW.description, 'created_at', NEW.created_at));
+END;
+CREATE TRIGGER IF NOT EXISTS history_books_delete AFTER DELETE ON books
+WHEN EXISTS (SELECT 1 FROM change_entries WHERE open = 1)
+BEGIN
+    INSERT INTO change_rows (entry_id, tbl, row_id, op, before, after)
+    VALUES ((SELECT MAX(id) FROM change_entries WHERE open = 1), 'books', OLD.id, 'delete',
+        json_object('id', OLD.id, 'name', OLD.name, 'description', OLD.description, 'created_at', OLD.created_at), NULL);
 END;
 -- history:end
 

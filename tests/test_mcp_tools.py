@@ -250,12 +250,16 @@ def test_create_account_offers_exactly_the_kinds_and_owners_the_route_takes(clie
     schema = mcp_tools.BY_NAME["create_account"].input_schema["properties"]
 
     assert schema["kind"]["enum"] == [k["name"] for k in listed["kinds"]]
-    assert schema["owner"]["enum"] == [o["name"] for o in listed["owners"]]
+    # The owners are Household and the company books, read from the book (fin
+    # RUL-021): a fixed list in the schema would miss a book added since.
+    assert "enum" not in schema["owner"]
+    assert [o["name"] for o in listed["owners"]] == ["Household", "Moom", "Kalesh"]
 
 
 @pytest.mark.parametrize("args, error", [
     ({"kind": "savings"}, "kind must be one of bank, card, loan, holding, company, person, untracked"),
-    ({"kind": "bank", "owner": "Someone Else"}, "owner must be one of Household, Moom, Kalesh"),
+    ({"kind": "bank", "owner": "Someone Else"},
+     "unknown account owner: 'Someone Else'; owner must be one of Household, Moom, Kalesh"),
     ({"kind": "bank", "currency": "XYZ"}, "unknown currency: 'XYZ'; an account is kept in one of INR, SGD, USD"),
     ({"kind": "card", "last_four": "92"}, "last_four must be four digits: the account's last four, e.g. 3528"),
     ({"kind": "card", "last_four": "96-2"}, "last_four must be four digits: the account's last four, e.g. 3528"),
