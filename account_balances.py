@@ -34,6 +34,7 @@ import account_kind
 import anchors
 import balance_sheet
 import card_balance
+import depreciation
 import shared
 
 START_NOTE = "Balances start on 1 Jan 2026, as on the balance sheet"
@@ -121,6 +122,9 @@ def balances(conn: sqlite3.Connection, account, months: list[str]) -> dict:
         "SELECT 1 FROM anchors WHERE account_id = ?" + (" AND source = ?" if is_shared else "") + " LIMIT 1",
         (whole, *((anchors.SUPPLIED,) if is_shared else ())),
     ).fetchone() is not None
+    # A holding with depreciation terms rests on them, figure or none.
+    anchored = anchored or (charted["type"] == depreciation.HOLDING
+                            and depreciation.held(conn, whole) is not None)
     flows = _in_and_out(conn, members, months, ours_only=is_shared)
     start = balance_sheet.START.isoformat()
 
