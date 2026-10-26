@@ -3489,7 +3489,7 @@ ACT['needs-look'] = el => { S.needsLook = el.dataset.on === '1'; rerender(); };
 /** Nothing moved in the month: no income, spending, currency change or money
  *  moved to accounts left out. */
 function monthStill(mc) {
-    return !mc.income_minor && !mc.spending_minor && !mc.currency_change_minor && !mc.outside_minor;
+    return !mc.income_minor && !mc.spending_minor && !mc.depreciation_minor && !mc.currency_change_minor && !mc.outside_minor;
 }
 /** Why the month check does not add up, or what is still worth a look: one
  *  row per account, its marker under its name, How much holding money only. */

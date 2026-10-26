@@ -474,3 +474,80 @@ def test_a_line_resting_on_terms_says_so_and_is_never_stale():
 
     assert "its depreciation terms from 11 Jun 2025" in said
     assert "stale" not in said
+
+
+# --- the review's guards ------------------------------------------------------------------
+
+
+def test_a_loan_with_hire_purchase_terms_is_not_made_a_holding_by_a_depreciation_save(client):
+    loan = make_account(client, "Sample Car Loan", "loan")
+    hp = {"financed": "100000.00", "months": 48, "flat_rate": "1.5", "first_instalment": "2026-01-15"}
+    assert client.put(f"/api/accounts/{loan}", json={"terms": hp}).status_code == 200
+
+    resp = client.put(f"/api/accounts/{loan}", json={"type": "holding", "depreciation": None})
+
+    assert resp.status_code == 400
+    assert "hire-purchase terms" in resp.get_json()["error"]
+    assert accounts(client)["Sample Car Loan"]["type"] == "loan"
+
+
+def test_a_car_with_terms_is_not_made_a_loan_by_a_hire_purchase_save(client):
+    car = car_with_terms(client)
+
+    resp = client.put(f"/api/accounts/{car}", json={"type": "loan", "terms": None})
+
+    assert resp.status_code == 400
+    assert "depreciation terms" in resp.get_json()["error"]
+    assert accounts(client)[CAR]["type"] == "holding"
+
+
+def test_terms_cleared_and_the_kind_changed_in_one_save_are_taken(client):
+    car = car_with_terms(client)
+
+    resp = client.put(f"/api/accounts/{car}", json={"type": "bank", "depreciation": None})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert (accounts(client)[CAR]["type"], accounts(client)[CAR]["depreciation"]) == ("bank", None)
+
+
+def test_a_car_with_terms_is_not_moved_to_another_currency(client):
+    car = car_with_terms(client)
+
+    resp = client.put(f"/api/accounts/{car}", json={"currency": "INR"})
+
+    assert resp.status_code == 400
+    assert "depreciation terms" in resp.get_json()["error"]
+    assert accounts(client)[CAR]["currency"] == "SGD"
+
+
+def test_terms_left_on_an_account_that_is_no_holding_are_not_read(client, conn):
+    car = car_with_terms(client)
+    # As an undo of an earlier retype could leave them.
+    conn.execute("UPDATE accounts SET type = 'bank' WHERE id = ?", (car,))
+    conn.commit()
+
+    shown = accounts(client)[CAR]
+
+    assert shown["depreciation"] is None and shown["takes_a_figure"] is True
+    assert enter(client, car, "1000.00", "2026-10-31").status_code == 200
+
+
+@needs_node
+def test_a_month_where_only_depreciation_moved_is_not_said_still():
+    code = "\n".join([
+        _function("monthStill"),
+        "console.log(JSON.stringify([monthStill({ depreciation_minor: 201528 }), monthStill({})]));",
+    ])
+
+    assert _node(code) == [False, True]
+
+
+def test_a_loan_with_hire_purchase_terms_sent_no_depreciation_and_no_kind_changes_nothing(client):
+    loan = make_account(client, "Sample Car Loan", "loan")
+    hp = {"financed": "100000.00", "months": 48, "flat_rate": "1.5", "first_instalment": "2026-01-15"}
+    assert client.put(f"/api/accounts/{loan}", json={"terms": hp}).status_code == 200
+
+    resp = client.put(f"/api/accounts/{loan}", json={"name": "Sample Car Loan", "depreciation": None})
+
+    assert resp.status_code == 200, resp.get_json()
+    assert accounts(client)["Sample Car Loan"]["terms"] is not None
