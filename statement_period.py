@@ -27,6 +27,13 @@ closes in it, or a statement's period contains the whole month. So a statement
 printed 1 Jul to 31 Aug holds July and August, and one printed 16 Jul to
 15 Aug holds August alone: a statement missing from a cycle that does not start
 on the 1st is still missing.
+
+The missed-bill rule (bills.py) reads the days themselves: periods gives each
+record's first and last day (end: a printed statement's closing day, a
+calendar-month record's month end, except the account's latest month record,
+which reaches only its latest row), and first_gap and covers say whether they
+hold every day of a span, so a bill due in a month with no statement waits for
+it. Coverage and missing months never read periods: they read held_months.
 """
 
 from __future__ import annotations
@@ -109,3 +116,59 @@ def held_months(conn: sqlite3.Connection, account_id: int, statement_date: str,
     # A month record covers its month; a printed statement closes in its own,
     # whether or not its period contains it whole.
     return [*held, closes_in]
+
+
+def _last_of_month(day: str) -> str:
+    y, m = int(day[:4]), int(day[5:7])
+    following = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+    return (following - timedelta(days=1)).isoformat()
+
+
+def end(statement_date: str, printed) -> str:
+    """The last day a statement record covers: a printed statement's closing
+    day; a calendar-month record's month end, whatever day it is dated."""
+    return statement_date if printed else _last_of_month(statement_date)
+
+
+def periods(conn: sqlite3.Connection, account_id: int) -> list[tuple[str, str]]:
+    """The (first day, last day) of each of the account's statement records,
+    earliest first, as the days a bill's payment could show in (bills.py):
+    from start to end, except that a calendar-month record no later record
+    follows ends at its latest row (the day before its start when it holds
+    none), since its month may not be over or not wholly exported. Which
+    months a record holds (held_months) is not this: a month record holds its
+    month whatever rows it has."""
+    held = conn.execute(
+        "SELECT s.statement_date, s.period_start, s.printed, "
+        "(SELECT MAX(t.date) FROM transactions t WHERE t.statement_id = s.id) AS last_row "
+        "FROM statements s WHERE s.account_id = ?",
+        (account_id,),
+    ).fetchall()
+    latest = max((r[0] for r in held), default=None)
+    out = []
+    for closing, first, printed, last_row in held:
+        since = start(conn, account_id, closing, first, printed)
+        until = end(closing, printed)
+        if not printed and closing == latest:
+            until = min(until, last_row) if last_row else (date.fromisoformat(since) - timedelta(days=1)).isoformat()
+        out.append((since, until))
+    return sorted(out)
+
+
+def first_gap(spans: list[tuple[str, str]], first: str, last: str) -> str | None:
+    """The first day from `first` to `last` that no period of `spans` (as
+    periods gives them) holds, or None when they hold every one."""
+    need = first
+    for since, until in spans:
+        if since > need:
+            break
+        if until >= need:
+            need = day_after(until)
+            if need > last:
+                return None
+    return need if need <= last else None
+
+
+def covers(spans: list[tuple[str, str]], first: str, last: str) -> bool:
+    """Whether the periods `spans` hold every day from `first` to `last`."""
+    return first_gap(spans, first, last) is None

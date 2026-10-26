@@ -26,6 +26,7 @@ import anchors
 import backup
 import balance_sheet
 import book_prefill
+import bills
 import book_type
 import card_balance
 import chat_writes
@@ -712,6 +713,7 @@ _CHANGE_SUMMARIES = {
     "api_subscriptions_update": "Changed a subscription",
     "api_subscriptions_delete": "Deleted a subscription",
     "api_subscriptions_enrich": "Filled in subscriptions",
+    "api_bills_currency": "Put a bill in its paying account's currency",
     "api_history_undo": "Undid a change",
     # Each names its type in its own summary; these are the fallback.
     "api_types_create": "Added a type",
@@ -6908,162 +6910,85 @@ def _fetch_usd_sgd_rate() -> float:
     return rate
 
 
-def _monthly_equivalent(amount: float, frequency: str, periods: int,
-                        currency: str = "SGD", fx_rate: float = 1.0) -> float:
-    """Convert billed amount to monthly SGD equivalent."""
-    periods = periods or 1
-    amount_sgd = amount * fx_rate if currency == "USD" else amount
-    if frequency == "yearly":
-        return amount_sgd / (12 * periods)
-    elif frequency == "half-yearly":
-        return amount_sgd / (6 * periods)
-    elif frequency == "quarterly":
-        return amount_sgd / (3 * periods)
-    elif frequency == "biweekly":
-        return amount_sgd * (52 / 2) / (12 * periods)  # ~2.17x per month
-    elif frequency == "weekly":
-        return amount_sgd * 52 / (12 * periods)  # ~4.33x per month
-    return amount_sgd / periods  # monthly
+def _bill_body(data, conn, held=None):
+    """The checked fields of a bill write (bills.py): its cadence kept as the
+    bill holds it when it means the same, and its currency the paying
+    account's. Raises bills.BillRefused; nothing is written then."""
+    if not isinstance(data, dict):
+        raise bills.BillRefused("No fields to update")
+    body = {k: v for k, v in data.items() if k not in ("every", "frequency", "periods", "currency")}
+    body.update(bills.checked_cadence(
+        data, held["frequency"] if held else None, held["periods"] if held else None))
+    account_id = data["account_id"] if "account_id" in data else (held["account_id"] if held else None)
+    paying = conn.execute("SELECT currency FROM accounts WHERE id = ?", (account_id,)).fetchone() if account_id else None
+    if held is None:
+        given = data.get("currency")
+        if paying is not None and given not in (None, paying["currency"]):
+            raise bills.BillRefused(
+                f"a bill's currency is its paying account's ({paying['currency']}); nothing was added")
+        body["currency"] = paying["currency"] if paying is not None else (given or "SGD")
+    else:
+        current = held["currency"] or "SGD"
+        # A save never changes a bill's currency: that is the previewed fix's
+        # (POST /api/bills/<id>/currency), which shows the amount it becomes.
+        if "currency" in data and data["currency"] != current:
+            raise bills.BillRefused(
+                "a bill's currency changes only through its previewed fix (open the bill, Change it); nothing was saved")
+        # Nor does moving it make it differ from its paying account's.
+        if paying is not None and account_id != held["account_id"] and paying["currency"] != current:
+            raise bills.BillRefused(
+                f"that account is kept in {paying['currency']} and this bill in {current}: "
+                "a bill is in its paying account's currency; nothing was saved")
+    return body
+
+
+def _bills_read() -> list[dict]:
+    with get_db() as conn:
+        return bills.read(conn, _get_usd_sgd_rate(), bills.today())
 
 
 @app.route("/api/subscriptions")
 def api_subscriptions():
-    """List all subscriptions with transaction enrichment. A subscription
-    carries no label of its own: its book and type are its merchant's."""
-    fx_rate = _get_usd_sgd_rate()
+    """Every bill as the Bills screen, the Queue and Home read it (bills.py,
+    the one home of the missed-bill rule): with its cadence, its monthly
+    share, its state (missed, awaiting statement, on track, paused, stopped)
+    and whether its currency is its paying account's."""
+    return jsonify(_bills_read())
 
-    # Compute 90-day cutoff for rolling averages
-    cutoff_90d = (date.today() - timedelta(days=90)).isoformat()
 
-    with get_db() as conn:
-        rows = conn.execute("""
-            SELECT s.*,
-                   """ + book_expr("svc") + """ as merchant_book,
-                   svc.type_id as merchant_type_id,
-                   ty.name as type_name, tp.name as parent_type,
-                   a.short_name as account_short_name, a.name as account_name,
-                   svc.name as service_name
-            FROM subscriptions s
-            LEFT JOIN accounts a ON s.account_id = a.id
-            LEFT JOIN services svc ON s.service_id = svc.id
-            """ + _TYPE_JOINS.format(owner="svc") + """
-            ORDER BY
-                CASE s.status WHEN 'active' THEN 0 ELSE 1 END,
-                s.renewal_date
-        """).fetchall()
-
-        # Batch enrichment: latest tx per subscription (replaces 2 queries per sub)
-        # A subscription only matches transactions in its merchant's book.
-        latest_tx_rows = conn.execute("""
-        WITH matched AS (
-            SELECT s.id as sub_id,
-                   t.id as tx_id, t.date as tx_date, t.amount_minor,
-                   ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY t.date DESC) as rn
-            FROM subscriptions s
-            JOIN transactions t
-                ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
-            LEFT JOIN services svc ON s.service_id = svc.id
-            WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
-              AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
-              AND """ + book_expr("t") + " = " + book_expr("svc") + """
-        )
-        SELECT sub_id, tx_id, tx_date, amount_minor
-        FROM matched WHERE rn = 1
-        """).fetchall()
-        latest_tx = {r["sub_id"]: dict(r) for r in latest_tx_rows}
-
-        # Batch enrichment: monthly sums per subscription for 90-day rolling avg
-        # Same book boundary as latest tx query.
-        monthly_rows = conn.execute("""
-            SELECT s.id as sub_id,
-                   SUBSTR(t.date, 1, 7) as ym,
-                   SUM(t.amount_minor) as month_total
-            FROM subscriptions s
-            JOIN transactions t
-                ON UPPER(t.description) LIKE '%' || UPPER(s.match_pattern) || '%'
-            LEFT JOIN services svc ON s.service_id = svc.id
-            WHERE s.match_pattern IS NOT NULL AND s.match_pattern != ''
-              AND COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')
-              AND t.date >= ?
-              AND """ + book_expr("t") + " = " + book_expr("svc") + """
-            GROUP BY s.id, SUBSTR(t.date, 1, 7)
-            ORDER BY s.id, ym DESC
-        """, (cutoff_90d,)).fetchall()
-
-    # Build lookup: sub_id → [{ym, month_total}, ...] ordered by ym DESC.
-    # A month_total is in whole minor units, and so is every figure worked
-    # out from the rows below until it is put on the payload.
-    monthly_by_sub: dict[int, list[dict]] = {}
-    for r in monthly_rows:
-        monthly_by_sub.setdefault(r["sub_id"], []).append(
-            {"ym": r["ym"], "month_total": r["month_total"]}
-        )
-
-    result = []
-    for r in rows:
-        d = dict(r)
-        # Book and type are the merchant's, never the subscription's own.
-        d["book"] = d.pop("merchant_book")
-        d["type_id"] = d.pop("merchant_type_id")
-        sub_id = d["id"]
-        pat = (d["match_pattern"] or "").upper()
-        monthly_sums = monthly_by_sub.get(sub_id, []) if pat else []
-
-        # Enrich from batch lookups (defaults, then override if matched)
-        d.update(tx_last_paid=None, tx_amount=None, tx_id=None,
-                 tx_avg_90d=None, tx_months_90d=0)
-        if pat:
-            tx = latest_tx.get(sub_id)
-            if tx:
-                d["tx_last_paid"] = tx["tx_date"]
-                d["tx_amount"] = money.from_minor(tx["amount_minor"])
-                d["tx_id"] = tx["tx_id"]
-            d["tx_months_90d"] = len(monthly_sums)
-            if monthly_sums:
-                totals = [m["month_total"] for m in monthly_sums]
-                d["tx_avg_90d"] = money.from_minor(money.mean_minor(sum(totals), len(totals)))
-
-        # Last paid amount: latest month's sum (handles split payments)
-        if pat and d.get("tx_months_90d"):
-            d["tx_amount"] = money.from_minor(monthly_sums[0]["month_total"])
-
-        # Billed = configured amount per cycle (source of truth)
-        amt = d.get("amount") or 0
-        cur = d.get("currency") or "SGD"
-
-        # Monthly equivalent: use 90d avg if variable (>10% variance), else configured
-        d["is_variable"] = False
-        if d["tx_avg_90d"] and d["tx_months_90d"] >= 2:
-            totals = [m["month_total"] for m in monthly_sums]
-            mn, mx = min(totals), max(totals)
-            if mx * 100 > mn * 110:
-                d["is_variable"] = True
-                d["monthly_sgd"] = d["tx_avg_90d"]
-        if not d["is_variable"]:
-            d["monthly_sgd"] = round(_monthly_equivalent(amt, d["frequency"], d["periods"], cur, fx_rate), 2)
-
-        d["display_type"] = format_type_display(d["parent_type"], d["type_name"])
-        d["fx_rate"] = fx_rate
-
-        # Anchor-based renewal: advance from renewal_date anchor until future
-        effective_last_paid = d.get("tx_last_paid") or d.get("last_paid")
-        d["computed_renewal"] = _advance_renewal(
-            d.get("renewal_date"), effective_last_paid, d["frequency"], d["periods"]
-        )
-
-        result.append(d)
-
-    return jsonify(result)
+@app.route("/api/bills")
+def api_bills():
+    """The bills as the chat reads them (bills.brief), with how many are in
+    each state; ?state= keeps one state's."""
+    shown = _bills_read()
+    wanted = request.args.get("state")
+    if wanted is not None and wanted not in bills.STATES:
+        return jsonify({"error": f"state is one of {', '.join(bills.STATES)}"}), 400
+    return jsonify({
+        "bills": [bills.brief(b) for b in shown if wanted in (None, b["state"])],
+        "counts": bills.counts(shown),
+        "rule": (f"A due day is paid by a payment seen from {bills.EARLY_DAYS} days before it, and late "
+                 f"{bills.GRACE_DAYS} days after. A bill is missed when a late due day its paying account's "
+                 "statements cover (those days) has no payment since, however long ago; when only later due days "
+                 "are late and not yet covered it is awaiting_statement: waiting_due is the oldest such due day "
+                 "and waiting_on the month of the statement that would show it. A bill paid from no account, or from one fin holds no statements for, "
+                 "is judged against today alone (judged_by: today)."),
+    })
 
 
 @app.route("/api/subscriptions", methods=["POST"])
 def api_subscriptions_create():
-    """Add a new subscription. It takes its book and type from its service."""
+    """Add a new bill. It takes its book and type from its merchant and its
+    currency from its paying account."""
     data = request.get_json()
     if not data or not data.get("service_id"):
         return jsonify({"error": "service_id is required"}), 400
 
     with get_db() as conn:
+        try:
+            body = _bill_body({"frequency": "monthly", **data}, conn)
+        except bills.BillRefused as e:
+            return jsonify({"error": str(e)}), 400
         # Derive match_pattern from service name if not provided
         match_pattern = data.get("match_pattern")
         if not match_pattern:
@@ -7080,9 +7005,9 @@ def api_subscriptions_create():
             (
                 data["service_id"],
                 data.get("amount", 0),
-                data.get("currency", "SGD"),
-                data.get("frequency", "monthly"),
-                data.get("periods", 1),
+                body["currency"],
+                body["frequency"],
+                body.get("periods", 1),
                 data.get("account_id"),
                 data.get("last_paid"),
                 data.get("renewal_date"),
@@ -7097,12 +7022,51 @@ def api_subscriptions_create():
 
 @app.route("/api/subscriptions/<int:sub_id>", methods=["PUT"])
 def api_subscriptions_update(sub_id):
-    """Update a subscription."""
-    return _crud_update("subscriptions", sub_id, request.get_json(), [
+    """Update a bill. Its cadence (`every`) keeps the frequency and periods it
+    holds when they mean the same; a frequency fin does not know, or a
+    currency other than the paying account's, is refused."""
+    data = request.get_json()
+    with get_db() as conn:
+        held = conn.execute("SELECT frequency, periods, currency, account_id FROM subscriptions WHERE id = ?",
+                            (sub_id,)).fetchone()
+        if held is None:
+            return jsonify({"error": "No such bill"}), 404
+        try:
+            body = _bill_body(data, conn, held)
+        except bills.BillRefused as e:
+            return jsonify({"error": str(e)}), 400
+    return _crud_update("subscriptions", sub_id, body, [
         "service_id", "amount", "currency", "frequency",
         "periods", "account_id", "last_paid", "renewal_date", "status",
         "link", "notes", "match_pattern",
     ])
+
+
+@app.route("/api/bills/<int:sub_id>/currency", methods=["POST"])
+def api_bills_currency(sub_id):
+    """Put a flagged bill in its paying account's currency (bills.currency_fix).
+    Without the preview's token nothing is written: the answer is the preview
+    (409). With it, and an amount if the operator gave one, the bill changes
+    as one change; a token the bill no longer matches is refused."""
+    data = request.get_json(silent=True) or {}
+    with get_db() as conn:
+        try:
+            preview = bills.currency_fix(conn, sub_id, _get_usd_sgd_rate(),
+                                         *([data["amount"]] if "amount" in data else []))
+        except LookupError:
+            return jsonify({"error": "No such bill"}), 404
+        except bills.BillRefused as e:
+            return jsonify({"error": str(e)}), 400
+        token = data.get("token")
+        if token is None:
+            return jsonify({"preview": preview}), 409
+        if token != preview["token"]:
+            return jsonify({"error": "The bill changed since the preview; nothing was changed. Look again.",
+                            "preview": preview}), 409
+        conn.execute("UPDATE subscriptions SET currency = ?, amount = ? WHERE id = ?",
+                     (preview["after"]["currency"], preview["after"]["amount"], sub_id))
+        conn.commit()
+    return jsonify({"success": True, "bill": preview["after"]})
 
 
 @app.route("/api/subscriptions/<int:sub_id>", methods=["DELETE"])
@@ -7136,7 +7100,7 @@ def api_subscriptions_enrich():
                 ORDER BY t.date DESC LIMIT 1
             """, (s["match_pattern"].upper(),)).fetchone()
             if tx:
-                new_renewal = _advance_renewal(
+                new_renewal = bills.advance_renewal(
                     s["renewal_date"], tx["date"], s["frequency"], s["periods"]
                 )
                 # Update last_paid and renewal only — never overwrite the user's
@@ -7150,64 +7114,6 @@ def api_subscriptions_enrich():
                     renewals_advanced += 1
         conn.commit()
     return jsonify({"success": True, "updated": updated, "renewals_advanced": renewals_advanced})
-
-
-def _advance_renewal(
-    current_renewal: str | None,
-    last_paid: str | None,
-    frequency: str,
-    periods: int,
-) -> str | None:
-    """Anchor-based renewal: advance renewal_date forward by frequency until it's
-    in the future relative to TODAY (not last_paid).
-
-    This prevents payment delays from skewing the renewal calendar.
-    If no renewal anchor exists, seed from last_paid + one cycle.
-    """
-    today = date.today()
-
-    if not current_renewal:
-        if not last_paid:
-            return None
-        # No anchor — seed from last_paid + one cycle
-        renewal = _add_billing_period(date.fromisoformat(last_paid), frequency, periods)
-    else:
-        renewal = date.fromisoformat(current_renewal)
-
-    # Step forward until renewal is in the future
-    while renewal <= today:
-        renewal = _add_billing_period(renewal, frequency, periods)
-
-    return renewal.isoformat()
-
-
-def _add_billing_period(d: date, frequency: str, periods: int) -> date:
-    """Add one billing period to a date."""
-    periods = periods or 1
-    if frequency == "yearly":
-        return d.replace(year=d.year + periods)
-    elif frequency == "half-yearly":
-        month = d.month + (6 * periods)
-        year = d.year + (month - 1) // 12
-        month = (month - 1) % 12 + 1
-        day = min(d.day, 28)
-        return d.replace(year=year, month=month, day=day)
-    elif frequency == "quarterly":
-        month = d.month + (3 * periods)
-        year = d.year + (month - 1) // 12
-        month = (month - 1) % 12 + 1
-        day = min(d.day, 28)
-        return d.replace(year=year, month=month, day=day)
-    elif frequency == "biweekly":
-        return d + timedelta(weeks=2 * periods)
-    elif frequency == "weekly":
-        return d + timedelta(weeks=1 * periods)
-    else:  # monthly
-        month = d.month + periods
-        year = d.year + (month - 1) // 12
-        month = (month - 1) % 12 + 1
-        day = min(d.day, 28)
-        return d.replace(year=year, month=month, day=day)
 
 
 @app.route("/api/fx-rate", methods=["GET", "POST"])
