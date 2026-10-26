@@ -103,9 +103,9 @@ def test_the_inverse_refuses_an_amount_not_in_whole_minor_units(amount):
 
 def test_the_inverse_refuses_a_currency_with_no_declared_minor_unit():
     with pytest.raises(money.UnknownCurrency):
-        money.convert_minor_inverse(9_000, Decimal("0.0155"), "SGD", "USD")
+        money.convert_minor_inverse(9_000, Decimal("0.0155"), "SGD", "EUR")
     with pytest.raises(money.UnknownCurrency):
-        money.convert_minor_inverse(9_000, Decimal("0.0155"), "USD", "INR")
+        money.convert_minor_inverse(9_000, Decimal("0.0155"), "EUR", "INR")
 
 
 # --- case 20: an ended month with no rate of its own -------------------------------
@@ -263,7 +263,7 @@ def test_the_same_currency_needs_no_rate(conn):
     assert placed == {"amount_minor": 9_000, "rate": None}
 
 
-@pytest.mark.parametrize("source, target", [("SGD", "USD"), ("USD", "INR")])
+@pytest.mark.parametrize("source, target", [("SGD", "EUR"), ("EUR", "INR")])
 def test_a_currency_fin_keeps_no_rate_for_is_refused(conn, source, target):
     with pytest.raises(rates.InvalidRate):
         placement_rate.place(conn, 9_000, source, target, "2026-09-22", "2026-10-19")

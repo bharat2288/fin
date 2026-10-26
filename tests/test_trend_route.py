@@ -459,7 +459,7 @@ def test_case_64_missing_and_no_rate_in_one_month(client, conn):
 
 def test_case_62_a_currency_fin_keeps_no_rate_for_is_left_out_of_every_figure(client, conn):
     everyday = tf.account(conn, "Everyday card")
-    usd = tf.account(conn, "Travel card", currency="USD")
+    usd = tf.account(conn, "Travel card", currency="EUR")
     svc = merchant(conn, "Duty Free", "Shopping")
     for m in ("2026-08", "2026-09", "2026-10"):
         tf.row(conn, tf.statement(conn, everyday, m), "DUTY FREE", 1000, service_id=svc,
@@ -467,9 +467,9 @@ def test_case_62_a_currency_fin_keeps_no_rate_for_is_left_out_of_every_figure(cl
     tf.row(conn, tf.statement(conn, usd, "2026-09"), "DUTY FREE", 4000, service_id=svc,
            type_name="Shopping", day="2026-09-07")
     answer = ok(client, subject="merchant", id=svc, span="12M")
-    assert answer["left_out"] == [{"kind": "no_rate_kept", "currency": "USD", "amount_minor": 4000,
+    assert answer["left_out"] == [{"kind": "no_rate_kept", "currency": "EUR", "amount_minor": 4000,
                                    "month": "2026-09",
-                                   "reason": "in USD, a currency fin keeps no rate for"}]
+                                   "reason": "in EUR, a currency fin keeps no rate for"}]
     assert bucket(answer, "2026-09")["by"][HH]["net"] == 1000
     assert bucket(answer, "2026-09")["no_rate"] is False
     assert books(answer)[HH]["net"] == 3000

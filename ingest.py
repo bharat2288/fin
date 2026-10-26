@@ -9,19 +9,31 @@ import re
 import sqlite3
 
 import account_kind
+import money
 import statement_period
 
 
-def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
+def find_account(conn: sqlite3.Connection, card_info: str, currency: str | None = None) -> int | None:
     """The account a card info string names, or None when there is none yet.
 
     Matching priority:
     1. Exact name match
     2. Last-four digit match (extracts trailing 4-digit group from card_info)
     3. Account number substring match (long digit sequences in card_info)
+
+    A name ending in a currency fin keeps ("100-018277-1 USD", an account's
+    section in another currency, parse_dbs) matches by number only an account
+    kept in that currency. Otherwise 2 and 3 take an account kept in the
+    currency given (SGD, with none) first, then any: a statement in the wrong
+    currency for its account is still found, and refused.
     """
     if not card_info:
         card_info = "Unknown Account"
+    suffix = re.search(r"\s([A-Z]{3})$", card_info)
+    only = suffix.group(1) if suffix and suffix.group(1) in money.MINOR_UNIT_DIGITS else None
+    # Unnamed, the household's own currency first (two sections of one DBS
+    # account share its last four).
+    kept_in = [only] if only else [currency, None] if currency else ["SGD", None]
 
     # 1. Exact name match
     existing = conn.execute(
@@ -36,23 +48,33 @@ def find_account(conn: sqlite3.Connection, card_info: str) -> int | None:
     # 2. Match by last_four digits (strip all non-digits, take last 4)
     all_digits = re.sub(r"\D", "", card_info)
     last_four = all_digits[-4:] if len(all_digits) >= 4 else None
-    if last_four:
-        match = conn.execute(
-            f"SELECT id FROM accounts WHERE last_four = ? AND status = 'active' AND type NOT IN ({untracked})",
-            (last_four, *account_kind.UNTRACKED_KINDS),
-        ).fetchone()
-        if match:
-            return match[0]
-
-    # 3. Match by long account number substring (6+ digits)
+    # An account's section in another currency ("… USD") is never taken for
+    # a name that does not say that currency.
+    foreign = [c for c in money.MINOR_UNIT_DIGITS if c != "SGD"]
     long_digits = re.findall(r"\d{6,}", card_info)
-    for num in long_digits:
-        match = conn.execute(
-            f"SELECT id FROM accounts WHERE name LIKE ? AND status = 'active' AND type NOT IN ({untracked})",
-            (f"%{num}%", *account_kind.UNTRACKED_KINDS),
-        ).fetchone()
-        if match:
-            return match[0]
+    for code in kept_in:
+        in_currency = (
+            " AND COALESCE(currency, 'SGD') = ?" if code is not None
+            else "".join(f" AND name NOT LIKE '% {c}'" for c in foreign)
+        )
+        if last_four:
+            match = conn.execute(
+                f"SELECT id FROM accounts WHERE last_four = ? AND status = 'active' AND type NOT IN ({untracked})"
+                f"{in_currency} ORDER BY id",
+                (last_four, *account_kind.UNTRACKED_KINDS, *([code] if code else [])),
+            ).fetchone()
+            if match:
+                return match[0]
+
+        # 3. Match by long account number substring (6+ digits)
+        for num in long_digits:
+            match = conn.execute(
+                f"SELECT id FROM accounts WHERE name LIKE ? AND status = 'active' AND type NOT IN ({untracked})"
+                f"{in_currency} ORDER BY id",
+                (f"%{num}%", *account_kind.UNTRACKED_KINDS, *([code] if code else [])),
+            ).fetchone()
+            if match:
+                return match[0]
 
     return None
 
@@ -66,7 +88,7 @@ def ensure_account(
     if not card_info:
         card_info = "Unknown Account"
 
-    found = find_account(conn, card_info)
+    found = find_account(conn, card_info, currency)
     if found is not None:
         return found
 

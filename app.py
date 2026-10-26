@@ -287,7 +287,7 @@ def _account_currency(conn, account_name: str, stated=None) -> str:
     if stated is not None:
         _checked_currency(stated)
     held = conn.execute(
-        "SELECT currency FROM accounts WHERE id = ?", (find_account(conn, account_name),)
+        "SELECT currency FROM accounts WHERE id = ?", (find_account(conn, account_name, stated),)
     ).fetchone()
     if held is None:
         return stated or "SGD"
@@ -354,27 +354,27 @@ def _statement_results(conn, statement_lines: dict, errors: list, groups: list) 
     states no balance (not checked). Kept on the import (Past imports)."""
     from ingest import find_account
 
-    def account_id(name: str):
+    def account_id(name: str, currency=None):
         try:
-            return find_account(conn, name)
+            return find_account(conn, name, currency)
         except Exception:
             return None
 
     out = []
     for name, lines in statement_lines.items():
         for line in lines:
-            out.append({"account": mask_card_number(name), "account_id": account_id(name),
+            out.append({"account": mask_card_number(name), "account_id": account_id(name, line.get("currency")),
                         "date": line.get("closing_date"), "status": line["status"],
                         "difference_minor": line.get("difference_minor"), "currency": line.get("currency")})
     for e in errors:
         line = e.get("tie")
         if line:
-            out.append({"account": line["account"], "account_id": account_id(line["account"]),
+            out.append({"account": line["account"], "account_id": account_id(line["account"], line.get("currency")),
                         "date": line.get("closing_date"), "status": "off",
                         "difference_minor": line.get("difference_minor"), "currency": line.get("currency")})
     for g in groups:
         if g["tie"] != "ties" and g["total"]:
-            out.append({"account": g["account"], "account_id": account_id(g["account"]),
+            out.append({"account": g["account"], "account_id": account_id(g["account"], g.get("currency")),
                         "date": None, "status": "not_checked", "difference_minor": None,
                         "currency": g.get("currency")})
     return out
@@ -387,7 +387,7 @@ def _record_refused(conn, stmt, line: dict) -> None:
     screens.record_refused(
         conn,
         account_name=mask_card_number(account),
-        account_id=find_account(conn, account),
+        account_id=find_account(conn, account, line["currency"]),
         statement_date=stmt.closing_date or stmt.statement_date,
         currency=line["currency"],
         figures=line,
@@ -494,9 +494,12 @@ def _tidied_wording(held: str, printed: str) -> str | None:
     return printed if any(marker in rest for marker in PAGE_JUNK_MARKERS) else None
 
 
-def _held_for_import(conn, import_counts, elsewhere: set[int] = frozenset()) -> dict:
+def _held_for_import(
+    conn, import_counts, elsewhere: set[int] = frozenset(), printed_keys: set = frozenset(),
+    either_sign: bool = False, others_rows: list = (),
+) -> dict:
     """The rows already held that each of an import's rows is, by key
-    (account, date, description, amount): [{id, printed, description}],
+    (account, date, description, amount): [{id, printed, description, amount}],
     oldest first, as many as the import brings of that key at most.
 
     A row held with the same account, day and amount is the same row when
@@ -510,7 +513,22 @@ def _held_for_import(conn, import_counts, elsewhere: set[int] = frozenset()) -> 
     Last, a row no held row of its own account is may be one held on an
     account in `elsewhere` on a month record (never one filed under a printed
     statement): an older read of a statement printing two accounts filed both
-    accounts' rows on the first."""
+    accounts' rows on the first. With `either_sign` (this account is kept in
+    another currency than the one it was found on) that row may be held with
+    its sign turned: the older read had no balance in that currency to tell
+    money in from money out by.
+
+    Then a row of a printed statement (its key in `printed_keys`) is a row
+    held on a month record of its own account with the same day and amount,
+    whatever the wording, and a row with no statement one held under a
+    printed statement: a bank's CSV export and its PDF statement word one
+    transfer as "TOP-UP TO PAYLAH! : 97863267" and "Funds Transfer TOP-UP TO
+    PAYLAH! : 97863267", a card bill payment as "BILL DBSC-…" and "Advice Bill
+    Payment DBSC-…". Each prints every row of the account's day, so a row the
+    one holds the other prints too. Of two rows alike in day and amount, the
+    one sharing more words is paired first; a held row that a row of another
+    account in the same upload words (`others_rows`: day, size, wording) is
+    left for that account's misfiled pass."""
     found = {key: [] for key in import_counts}
     claimed: set[int] = set()
     candidates = {}
@@ -518,7 +536,7 @@ def _held_for_import(conn, import_counts, elsewhere: set[int] = frozenset()) -> 
         account_id, day, _description, amount = key
         if (account_id, day, amount) not in candidates:
             candidates[(account_id, day, amount)] = conn.execute(
-                """SELECT t.id, t.description, s.printed FROM transactions t
+                """SELECT t.id, t.description, s.printed, t.amount_minor FROM transactions t
                    JOIN statements s ON t.statement_id = s.id
                    WHERE s.account_id = ? AND t.date = ? AND t.amount_minor = ?
                    ORDER BY t.id""",
@@ -527,11 +545,12 @@ def _held_for_import(conn, import_counts, elsewhere: set[int] = frozenset()) -> 
     others = ", ".join("?" for _ in elsewhere)
     misfiled = {
         key: conn.execute(
-            f"""SELECT t.id, t.description, s.printed FROM transactions t
+            f"""SELECT t.id, t.description, s.printed, t.amount_minor FROM transactions t
                 JOIN statements s ON t.statement_id = s.id
-                WHERE s.account_id IN ({others}) AND NOT s.printed AND t.date = ? AND t.amount_minor = ?
-                ORDER BY t.id""",
-            (*elsewhere, key[1], key[3]),
+                WHERE s.account_id IN ({others}) AND NOT s.printed AND t.date = ?
+                  AND t.amount_minor IN (?, ?)
+                ORDER BY t.amount_minor != ?, t.id""",
+            (*elsewhere, key[1], key[3], -key[3] if either_sign else key[3], key[3]),
         ).fetchall() if elsewhere else []
         for key in import_counts
     }
@@ -550,7 +569,7 @@ def _held_for_import(conn, import_counts, elsewhere: set[int] = frozenset()) -> 
     for loose, rows in ((False, None), (True, None), (True, misfiled)):
         keys = list(import_counts)
         if loose:
-            keys.sort(key=lambda key: len(could_be(key, True, rows)))
+            keys.sort(key=lambda key: len(could_be(key, loose, rows)))
         for key in keys:
             for row in could_be(key, loose, rows):
                 if len(found[key]) >= import_counts[key]:
@@ -558,8 +577,33 @@ def _held_for_import(conn, import_counts, elsewhere: set[int] = frozenset()) -> 
                 if row["id"] in claimed:
                     continue
                 claimed.add(row["id"])
-                found[key].append((row["id"], row["printed"], row["description"]))
-    return {key: [{"id": i, "printed": p, "description": d} for i, p, d in sorted(rows)]
+                found[key].append((row["id"], row["printed"], row["description"], row["amount_minor"]))
+
+    # The other kind of export: every pairing by day and amount, the ones
+    # sharing the most words first, so a row is paired with its own wording
+    # when two of a day are alike in amount.
+    def words(text: str) -> set:
+        return set(re.findall(r"[A-Z0-9]+", (text or "").upper()))
+
+    def anothers(key, row) -> bool:
+        theirs = _wording_key(row["description"])
+        return any(
+            day == key[1] and size == abs(key[3]) and (_begins_with(theirs, mine) or _begins_with(mine, theirs))
+            for day, size, mine in others_rows
+        )
+
+    pairs = sorted(
+        (-len(words(key[2]) & words(row["description"])), row["id"], n, key, row)
+        for n, key in enumerate(import_counts)
+        for row in candidates[(key[0], key[1], key[3])]
+        if bool(row["printed"]) != (key in printed_keys) and not anothers(key, row)
+    )
+    for *_, key, row in pairs:
+        if row["id"] in claimed or len(found[key]) >= import_counts[key]:
+            continue
+        claimed.add(row["id"])
+        found[key].append((row["id"], row["printed"], row["description"], row["amount_minor"]))
+    return {key: [{"id": i, "printed": p, "description": d, "amount": a} for i, p, d, a in sorted(rows)]
             for key, rows in found.items()}
 
 
@@ -568,8 +612,9 @@ def _kind_from_account_name(account_name: str) -> str:
     name = account_name.lower()
     if "bank" in name or "one account" in name or "home" in name:
         return "bank"
-    # A DBS or POSB account number, as its statement prints it: 272-814529-7.
-    if re.fullmatch(r"\d{3}-\d{5,6}-\d", name):
+    # A DBS or POSB account number, as its statement prints it:
+    # 272-814529-7, or its section in another currency: "100-018277-1 usd".
+    if re.fullmatch(r"\d{3}-\d{5,6}-\d( [a-z]{3})?", name):
         return "bank"
     return "card"  # default; could detect from account name
 
@@ -5306,7 +5351,7 @@ def api_import_upload():
                 if account not in account_facts:
                     held = conn.execute(
                         "SELECT id, type, owner FROM accounts WHERE id = ?",
-                        (find_account(conn, account),),
+                        (find_account(conn, account, stmt.currency),),
                     ).fetchone()
                     account_facts[account] = {
                         "account_id": held["id"] if held else None,
@@ -5735,7 +5780,28 @@ def api_import_confirm():
                     find_account(conn, name)
                     for line in statement_lines for name in line.get("siblings") or []
                 } - {None, account_id}
-                held_by_key = _held_for_import(conn, import_counts, siblings)
+                printed_keys = {
+                    key for key, rows in import_by_key.items() if rows[0].get("statement") is not None
+                }
+                # The rows of the other accounts the same file printed, by day
+                # and size: a row an older read filed here that one of them
+                # words is that account's to claim, never this one's by day
+                # and amount.
+                files = {line.get("file") for line in statement_lines} - {None}
+                others_rows = [
+                    (tx["date"], abs(minor_of[id(tx)]), _wording_key(tx["description"]))
+                    for other in groups if other is not group
+                    and files & {line.get("file") for line in other.get("statements") or []}
+                    for tx in other["transactions"]
+                ]
+                # A section in another currency than its siblings' (DBS Home's
+                # USD) was read by older reads without a balance to sign by.
+                either_sign = any(
+                    (conn.execute("SELECT currency FROM accounts WHERE id = ?", (i,)).fetchone()["currency"] or "SGD")
+                    != currency_of[id(group)]
+                    for i in siblings
+                )
+                held_by_key = _held_for_import(conn, import_counts, siblings, printed_keys, either_sign, others_rows)
                 # The page junk an older read left is a DBS bank statement's.
                 account_kinds = {
                     i: conn.execute("SELECT type FROM accounts WHERE id = ?", (i,)).fetchone()["type"]
@@ -5758,16 +5824,31 @@ def api_import_confirm():
                     # from a source with no balance, or before rows were filed
                     # by statement) that this statement printed is filed
                     # under it now.
-                    on_month_records = [r["id"] for r in held_rows if not r["printed"]]
+                    on_month_records = [r for r in held_rows if not r["printed"]]
                     printed_again = [
                         tx for tx in import_by_key[key][to_insert:] if tx.get("statement") is not None
                     ]
-                    for held_id, tx in zip(on_month_records, printed_again):
+                    for held, tx in zip(on_month_records, printed_again):
                         conn.execute(
                             "UPDATE transactions SET statement_id = ? WHERE id = ?",
-                            (statement_of(tx), held_id),
+                            (statement_of(tx), held["id"]),
                         )
                         rows_refiled += 1
+                        if held["amount"] != amount_val:
+                            # Held with its sign turned: it takes the
+                            # statement's, and what it was is read again on
+                            # the account it is on now; its labels were for
+                            # money going the other way.
+                            worked_out = _classify_flow_for_tx(
+                                conn, desc_val, amount_val, tx_id=held["id"],
+                                rule_facts=_label_for(conn, desc_val or "", amount_val)["rule_facts"],
+                            )
+                            conn.execute(
+                                "UPDATE transactions SET amount_minor = ?, flow_type = ?, other_side_id = ?, "
+                                "flow_type_manual = 0, book = NULL, type_id = NULL, book_source = NULL, "
+                                "type_source = NULL WHERE id = ?",
+                                (amount_val, *worked_out, held["id"]),
+                            )
 
                     # A held row an older read gave the page's junk after its
                     # own wording takes the wording printed.
@@ -6074,7 +6155,7 @@ def api_import_history():
             # An account the import itself created was not there at upload.
             if entry.get("account_id") is None and entry.get("account"):
                 if entry["account"] not in found:
-                    found[entry["account"]] = find_account(conn, entry["account"])
+                    found[entry["account"]] = find_account(conn, entry["account"], entry.get("currency"))
                 return {**entry, "account_id": found[entry["account"]]}
             return entry
 

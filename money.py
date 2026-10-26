@@ -11,12 +11,12 @@ import re
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 
 # How many decimal places the minor unit of each currency an account may be
-# kept in has: cents for SGD, paise for INR. A currency not listed here is not
+# kept in has: cents for SGD and USD, paise for INR. A currency not listed here is not
 # converted by guessing.
-MINOR_UNIT_DIGITS = {"SGD": 2, "INR": 2}
+MINOR_UNIT_DIGITS = {"SGD": 2, "INR": 2, "USD": 2}
 
 # What the minor unit of each is called, where a refusal has to name it.
-MINOR_UNIT_NAMES = {"SGD": "cents", "INR": "paise"}
+MINOR_UNIT_NAMES = {"SGD": "cents", "INR": "paise", "USD": "cents"}
 
 # A float this far from a whole minor unit carries a real fraction of one, and
 # is not just the noise float arithmetic leaves behind.

@@ -142,12 +142,12 @@ def test_a_currency_fin_keeps_no_rate_for_is_left_out(conn, monkeypatch, not_bef
     _no_fetch(monkeypatch)
     tf.seed_rate(conn, PAIR, "2026-09-30", "0.0155")
 
-    shown = balance_sheet.valued(conn, 4_000, "USD", "2026-09-30", not_before)
+    shown = balance_sheet.valued(conn, 4_000, "EUR", "2026-09-30", not_before)
 
     assert shown == {
         "value_minor": None,
         "rate": None,
-        "left_out": "in USD, a currency fin keeps no rate for",
+        "left_out": "in EUR, a currency fin keeps no rate for",
     }
 
 
