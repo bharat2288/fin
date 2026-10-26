@@ -680,6 +680,11 @@ li.empty { list-style: none; margin-top: 8px; }
 .sheet-body > .ex-shell { flex-shrink: 0; }
 /* a teach's rows the examples leave out, one line each (polish) */
 .ex-more { margin: 0; padding-left: 18px; flex-shrink: 0; overflow-wrap: anywhere; }
+/* the rows kept only because you chose them, their own group with the box that moves them too (ADR-008) */
+.pv-hand { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; padding: 10px 12px; border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl); }
+.pv-hand .sub { margin: 0; }
+.pv-hand .ex-more li + li { margin-top: 2px; }
 .prev-mark { display: inline-block; padding: 1px 6px; border: 1px dashed var(--border-emphasis); border-radius: var(--radius-md);
     font-size: var(--t-cap); font-weight: var(--font-semibold); color: var(--text-secondary); white-space: nowrap; }
 .sheet-body > .link { align-self: flex-start; }

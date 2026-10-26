@@ -63,6 +63,9 @@ import refund_links
 # The answers to "this changes N past rows".
 APPLY, ONLY_NEW = "apply", "only_new"
 ANSWERS = (APPLY, ONLY_NEW)
+# The opt-in an Apply may carry: the rows kept only because their book or
+# type was chosen by hand (Plan.by_hand) move too (with_chosen).
+MOVE_CHOSEN = "move_chosen"
 
 # How many examples the preview carries.
 EXAMPLES = 3
@@ -112,6 +115,11 @@ class Kept:
     would: dict                        # the flow and other side it would have had
     why: str                           # the record, in a hand label's refusal's words; or the choice
     said: str | None = None            # the clause after "because", where it is not because(why)
+    # Kept only because its book or type was chosen (ADR-008): an Apply sent
+    # with MOVE_CHOSEN moves it as any other row, writing `moved` (the
+    # plan's row for it, where the plan writes it: with_chosen).
+    by_hand: bool = False
+    moved: "Planned | None" = None
 
 
 # Why a row whose book or type the operator chose keeps its flow (ADR-008):
@@ -146,6 +154,51 @@ class Plan:
     @property
     def count(self) -> int:
         return len(self.rows)
+
+    @property
+    def by_hand(self) -> list[Kept]:
+        """The rows kept only because their book or type was chosen: an
+        Apply sent with MOVE_CHOSEN moves them."""
+        return [k for k in self.kept if k.by_hand]
+
+    @property
+    def count_with_chosen(self) -> int:
+        """The past rows Apply changes when sent with MOVE_CHOSEN."""
+        if not self.by_hand:
+            return self.count
+        rows = {p.held["id"] for p in self.rows}
+        return self.count + len({k.held["id"] for k in self.by_hand} - rows)
+
+
+def checked_move_chosen(value, answer: str | None) -> bool:
+    """MOVE_CHOSEN as a route takes it: true or false (left out, false), and
+    true only with Apply, the one answer that moves a flow."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise Refused(f"{MOVE_CHOSEN} must be true or false")
+    if value and answer != APPLY:
+        raise Refused(f"{MOVE_CHOSEN} goes with {APPLY}: only Apply moves a row's flow")
+    return value
+
+
+def with_chosen(plan: Plan) -> Plan:
+    """The plan as an Apply sent with MOVE_CHOSEN writes it: each row kept
+    only because its book or type was chosen (Plan.by_hand) is written as
+    its `moved` row, in the place of the plan's row for it where it has one,
+    and is no longer kept. The plan unchanged where it keeps none so."""
+    moving = [k for k in plan.by_hand if k.moved is not None]
+    if not moving:
+        return plan
+    moved = {k.held["id"]: k.moved for k in moving}
+    shown = Plan(subject=plan.subject, change=dict(plan.change), chosen=plan.chosen, token=plan.token,
+                 called=plan.called, doing=plan.doing, words=plan.words, others=list(plan.others),
+                 extra=dict(plan.extra), wording=plan.wording, moves_to=plan.moves_to, names=dict(plan.names),
+                 kept=[k for k in plan.kept if k.held["id"] not in moved])
+    rows = {p.held["id"]: p for p in plan.rows}
+    rows.update(moved)
+    shown.rows = sorted(rows.values(), key=lambda p: (p.held["date"] or "", p.held["id"]), reverse=True)
+    return shown
 
 
 def checked_answer(value, key: str = "past") -> str | None:
@@ -729,9 +782,10 @@ def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: 
     other side's kind the row would have): that row is kept, in the
     refusal's own words. Nor the flow of a row whose book or type the
     operator chose (ADR-008: a chosen label says the row is spending, as a
-    flow set by hand says what it is, ADR-009): kept too, saying so, unless
-    the write is the operator's own on that row (`keep_chosen` False: the
-    row a teach is taught for). `account` is the kind and owner of the
+    flow set by hand says what it is, ADR-009): kept too, saying so
+    (Kept.by_hand, which an Apply sent with MOVE_CHOSEN moves), unless the
+    write is the operator's own on that row (`keep_chosen` False: the row a
+    teach is taught for). `account` is the kind and owner of the
     account the row is on (held_account, by default)."""
     if held["flow_type_manual"]:
         return {}, None
@@ -742,16 +796,18 @@ def flow_writes(conn: sqlite3.Connection, held, sets: dict, before, after, ctx: 
     writes = {k: v for k, v in zip(("flow_type", "other_side_id"), worked_out) if held[k] != v}
     if not writes or not fins_own(held, before, account, ctx):
         return {}, None
-    chosen = tuple(f for f, column in label_source.FIELDS.items() if held[column] == label_source.CHOSEN)
-    if keep_chosen and chosen:
-        why, said = _CHOSEN_WHY[chosen]
-        return {}, Kept(held, writes, why, said)
     flow_name, other_side = worked_out
     other_kind = (conn.execute("SELECT type FROM accounts WHERE id = ?", (other_side,)).fetchone()
                   or [None])[0] if other_side is not None else None
     why = move_refusal(conn, held, flow_name, sets.get("book", held["book"]), other_kind)
     if why is not None:
         return {}, Kept(held, writes, why)
+    # Kept only because of the choice (by_hand): a record that would refuse
+    # the move keeps the row whatever the operator answers, so it is named.
+    chosen = tuple(f for f, column in label_source.FIELDS.items() if held[column] == label_source.CHOSEN)
+    if keep_chosen and chosen:
+        why, said = _CHOSEN_WHY[chosen]
+        return {}, Kept(held, writes, why, said, by_hand=True)
     return writes, None
 
 
@@ -807,7 +863,8 @@ def _stamp_flows(plan: Plan) -> list:
     """What a plan's token stamps of its flows: each row's writes and each
     row kept, so a preview's list is what its Apply writes."""
     return [[(p.held["id"], tuple(sorted(p.apply.items()))) for p in plan.rows],
-            [(k.held["id"], k.why) for k in plan.kept]]
+            [(k.held["id"], k.why, tuple(sorted(k.would.items())),
+              tuple(sorted(k.moved.apply.items())) if k.moved is not None else None) for k in plan.kept]]
 
 
 def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | None) -> Plan:
@@ -930,6 +987,12 @@ def rule_change(conn: sqlite3.Connection, rule_id: int | None, proposed: dict | 
         flows, kept = flow_writes(conn, held, writes, before, after, ctx) if writes or restates else ({}, None)
         if kept is not None:
             plan.kept.append(kept)
+            if kept.by_hand:
+                # Moved as any other row on MOVE_CHOSEN: the flow the rule
+                # gives, the label write fitted to it.
+                kept.moved = Planned(held, label_source.fitted(held, {**writes, **kept.would}),
+                                     label_source.fitted(held, only_new),
+                                     checked=any(sources[f] == label_source.CHECKED for f in marked))
         # A row the change moves into spending from a flow that carries no
         # label takes the label the rule gives it, as a relabelled row does.
         if not relabels and flow.carries_label(flows.get("flow_type", held["flow_type"])) \
@@ -1094,6 +1157,8 @@ def drift(conn: sqlite3.Connection) -> Plan:
         flows, kept = flow_writes(conn, held, writes, rule, rule, ctx)
         if kept is not None:
             plan.kept.append(kept)
+            if kept.by_hand:
+                kept.moved = Planned(held, label_source.fitted(held, {**writes, **kept.would}), {})
         apply = label_source.fitted(held, {**writes, **flows})
         if apply:
             plan.rows.append(Planned(held, apply, {}))
@@ -1104,9 +1169,13 @@ def drift(conn: sqlite3.Connection) -> Plan:
 
 def drift_asked(plan: Plan) -> str:
     """The refusal the drift's Apply answers with when it was not answered."""
+    by_hand = len(plan.by_hand)
+    chosen = (f" {by_hand} more would move but {'is' if by_hand == 1 else 'are'} kept, the operator having chosen "
+              f"{'its' if by_hand == 1 else 'their'} book or type by hand (flows_chosen); {MOVE_CHOSEN}: true "
+              "with the answer moves them too, on the operator's yes.") if by_hand else ""
     return (f"Nothing was relabelled yet: {plan.count} row{'' if plan.count == 1 else 's'} "
             f"differ from what their rule says now. Send past: {APPLY} to relabel them; "
-            "leaving them as they are writes nothing.")
+            f"leaving them as they are writes nothing.{chosen}")
 
 
 def slot_change(conn: sqlite3.Connection, slot: str, type_id: int) -> Plan:
@@ -1434,6 +1503,25 @@ def kept_lines(conn: sqlite3.Connection, kept: list[Kept]) -> list[dict]:
     return _flow_lines(conn, entries)
 
 
+def chosen_lines(conn: sqlite3.Connection, kept: list[Kept]) -> list[dict]:
+    """The rows kept only because their book or type was chosen
+    (Kept.by_hand), as their own list beside flows_kept: each by date,
+    amount and wording, its flow now, what it would be on MOVE_CHOSEN, the
+    book and type that move would empty (label_cleared, or None), and why it
+    is kept, in the refusal's words and the drawer's clause."""
+    by_hand = [k for k in kept if k.by_hand]
+    if not by_hand:
+        return []
+    names, types = _account_names(conn), _type_names(conn)
+    entries = []
+    for k in by_hand:
+        moved = _moved(names, k.held, k.would, types)
+        entries.append((k.held["id"], {"now": moved["now"], "would": moved["after"],
+                                       "label_cleared": moved["label_cleared"], "why": k.why,
+                                       "because": k.said or because(k.why)}))
+    return _flow_lines(conn, entries)
+
+
 def because(why: str) -> str:
     """A kept row's refusal (flow_writes) as the clause a plain sentence ends
     with after "because": the refusal's own facts, said of "it", and its fix
@@ -1482,6 +1570,9 @@ def summary(conn: sqlite3.Connection, plan: Plan) -> dict:
         "others": list(plan.others),
         "flows": _flows(conn, plan),
         "flows_kept": flows_kept(conn, plan),
+        # Apart from the rest: the rows MOVE_CHOSEN moves, and the count then.
+        "flows_chosen": chosen_lines(conn, plan.kept),
+        "count_with_chosen": plan.count_with_chosen,
         **plan.extra,
         "token": plan.token,
     }
@@ -1511,6 +1602,13 @@ def asked(plan: Plan, answer_key: str = "past") -> str:
         said += (f"; {len(plan.kept)} row{' keeps its' if len(plan.kept) == 1 else 's keep their'} flow, "
                  "a record of expect back resting on it or its book or type chosen by hand "
                  "(listed in flows_kept, each with why)")
+    by_hand = len(plan.by_hand)
+    if by_hand:
+        said += (f"; {by_hand} of {'it' if len(plan.kept) == 1 else 'them'} only because the operator chose "
+                 f"{'its' if by_hand == 1 else 'their'} book or type by hand (listed apart in flows_chosen): "
+                 f"{APPLY} with {MOVE_CHOSEN}: true moves {'it' if by_hand == 1 else 'them'} too, "
+                 f"{plan.count_with_chosen} past row{'' if plan.count_with_chosen == 1 else 's'} in all; "
+                 "ask the operator, and send it only on their yes")
     return (f"Nothing was saved yet: {said}. "
             f"Say whether they change too ({answer_key}: {APPLY}) or only new rows take it "
             f"({answer_key}: {ONLY_NEW}).")

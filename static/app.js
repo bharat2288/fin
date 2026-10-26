@@ -4842,11 +4842,11 @@ function previewParts(p, { taught = null } = {}) {
     const moreHTML = more.length || rest ? `<ul class="sub ex-more">${more.map(f => `<li>${esc([day(f.date), money(f.amount_minor, f.currency), f.description].join(' · '))}</li>`).join('')}${rest ? `<li>and ${plural(rest, 'more row')}</li>` : ''}</ul>` : '';
     // The rows whose flow Apply moves or keeps, on every preview that carries them.
     const body = `${lines ? `<ul class="diff">${lines}</ul>` : ''}
-        <p class="q">This changes ${plural(p.count, 'past row')}</p>
+        <p class="q" id="pv-count" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}">This changes ${plural(p.count, 'past row')}</p>
         ${warns}${facts}${leftOut}${ruleLines}${flowsLine(p, { others })}${kept ? `<p class="sub">${kept}</p>` : ''}
         <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>
         ${moreHTML}${ownRows ? `<button type="button" class="link" data-act="preview-all" data-id="${esc(p.subject.id)}">See all ${plural(p.count, 'row')} ›</button>` : ''}`;
-    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'past row')}</button>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><span class="sp"></span><button type="button" class="btn" data-act="preview-answer" data-past="only_new">Only new rows</button><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="past row">Apply to ${plural(p.count, 'past row')}</button>`;
     return { eyebrow, title, body, foot };
 }
 /** The drift's drawer (fin-surfaces 51, mocked as 21's screen 6): the rows
@@ -4857,7 +4857,7 @@ function driftParts(p) {
     const rows = p.examples.map(x => `<tr><td class="num">${esc(day(x.date))}</td><td class="r num">${esc(money(x.amount_minor, x.currency))}</td><td>${exampleCell(x)}</td></tr>`);
     const body = `<p class="sub">Rows labelled by a rule or a merchant whose label is not what the rules give now. Rows you checked or chose are not counted.</p>${flowsLine(p)}
         <div class="tshell ex-shell">${bandedTable({ caption: 'Examples, newest first', cls: 'ex', columns: [{ label: 'Date' }, { label: 'Amount', cls: 'r' }, { label: 'Now → after' }], rows })}</div>`;
-    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" data-act="preview-answer" data-past="apply">Apply to ${plural(p.count, 'row')}</button>`;
+    const foot = `<button type="button" class="btn ghost" data-act="close-sheet">Leave them</button><span class="sp"></span><button type="button" class="btn primary" id="pv-apply" data-act="preview-answer" data-past="apply" data-count="${p.count}" data-with="${p.count_with_chosen ?? p.count}" data-unit="row">Apply to ${plural(p.count, 'row')}</button>`;
     return { eyebrow: 'Rules', title: `${plural(p.count, 'row')} ${one ? 'differs' : 'differ'} from ${one ? 'its' : 'their'} rule`, body, foot };
 }
 /** One example's Now → after, as two parts: on a phone the after takes its
@@ -4874,13 +4874,23 @@ function exampleCell(x, mark = '') {
  *  are now and after: "2 spending → a movement · the loan", and where the
  *  move empties their book and type (label_cleared), "with no book or
  *  type"; then each row it keeps, in its own sentence. `others`: a teach
- *  whose own row is not among them, so they are the other rows. */
+ *  whose own row is not among them, so they are the other rows. Last, the
+ *  rows kept only because the operator chose their book or type
+ *  (p.flows_chosen, ADR-008), in their own group: each by date, amount and
+ *  wording and what it would become, and the box that moves them too,
+ *  unticked (tickMoveChosen; Apply sends it, sendPreviewed). */
 function flowsLine(p, { others = false } = {}) {
     const pairs = {};
     (p.flows || []).forEach(f => { const k = `${f.now} → ${f.after}${f.label_cleared ? ', with no book or type' : ''}`; pairs[k] = (pairs[k] || 0) + 1; });
     const said = Object.entries(pairs).map(([k, n]) => `${n} ${esc(k)}`).join('; ');
+    const hand = p.flows_chosen || [];
+    const one = hand.length === 1;
+    const group = hand.length ? `<div class="pv-hand"><p class="cap">You chose these by hand</p>
+        <p class="sub">A rule leaves the ${one ? 'row' : 'rows'} whose book or type you chose as ${one ? 'it is' : 'they are'}. ${one ? 'That choice' : 'Those choices'} may be out of date.</p>
+        <ul class="sub ex-more">${hand.map(k => `<li>${esc([day(k.date), money(k.amount_minor, k.currency), k.description].join(' · '))}: ${esc(k.now)} → <b>${esc(k.would)}</b>${k.label_cleared ? ', with no book or type' : ''}</li>`).join('')}</ul>
+        <label class="check"><input type="checkbox" id="pv-move-chosen" data-change="preview-move-chosen"> Also move ${one ? 'this row' : `these ${hand.length} rows`} you chose by hand</label></div>` : '';
     return (said ? `<p class="sub">What the ${others ? 'other ' : ''}rows are: ${said}.</p>` : '')
-        + keptWords(p).map(k => `<p class="sub">${esc(k)}</p>`).join('');
+        + keptWords(p).map(k => `<p class="sub">${esc(k)}</p>`).join('') + group;
 }
 /** The rows whose flow is kept, a record of expect back resting on each:
  *  each named by date, amount and wording, and why, in one plain sentence
@@ -4888,19 +4898,39 @@ function flowsLine(p, { others = false } = {}) {
  *  S$ 5 of it is expected back (undo that mark to move it)."). Only the
  *  drawer says them; a toast counts them (flowCounts). */
 function keptWords(p) {
-    return (p.flows_kept || []).map(k => {
+    // The rows kept only because you chose them are flowsLine's own group.
+    const hand = new Set((p.flows_chosen || []).map(k => k.id));
+    return (p.flows_kept || []).filter(k => !hand.has(k.id)).map(k => {
         const row = [day(k.date), money(k.amount_minor, k.currency), k.description].join(' · ');
         return k.because ? `${row} stays ${k.now}, because ${k.because}.` : `${row} stays ${k.now}. ${k.why}`;
     });
 }
-/** Ask the preview: 'apply', 'only_new', or null when it is closed. */
+/** Ask the preview: 'apply', 'only_new', or null when it is closed. Whether
+ *  the box "Also move these rows you chose by hand" was ticked when Apply
+ *  was pressed is kept on the preview, p.moveChosen: the answer sends
+ *  move_chosen with it (sendPreviewed, the drift's Apply). */
 function askPreview(p, parts = previewParts(p)) {
+    previewShown = p;
+    p.moveChosen = false;
     return new Promise(done => {
         openSheet(parts.title, parts.body, { eyebrow: parts.eyebrow, center: true, foot: parts.foot, focusSheet: true });
         pastAnswer = done;
     });
 }
-ACT['preview-answer'] = el => ACT['past-answer'](el);
+let previewShown = null;
+ACT['preview-answer'] = el => {
+    if (previewShown) previewShown.moveChosen = el.dataset.past === 'apply' && !!$('#pv-move-chosen')?.checked;
+    ACT['past-answer'](el);
+};
+/** The box ticked or not: the drawer's count and its Apply say the rows Apply then changes. */
+function tickMoveChosen(el) {
+    const apply = $('#pv-apply'), count = $('#pv-count');
+    const n = d => Number(el.checked ? d.with : d.count);
+    if (apply) apply.textContent = `Apply to ${plural(n(apply.dataset), apply.dataset.unit || 'past row')}`;
+    if (count) count.textContent = `This changes ${plural(n(count.dataset), 'past row')}`;
+}
+ACT['preview-move-chosen'] = tickMoveChosen;
+
 // See all: the merchant's own page lists every one of its rows, newest first.
 ACT['preview-all'] = el => { closeSheet(); location.hash = `#/books/merchant/${el.dataset.id}`; };
 /** A write that may reach past rows: sent once; when the server answers with
@@ -4913,9 +4943,16 @@ async function sendPreviewed(method, url, body, { key = 'past', parts = null, ta
     if (r.status !== 409 || !r.data.preview) return r;
     const answer = await askPreview(r.data.preview, parts ? parts(r.data.preview) : taught != null ? previewParts(r.data.preview, { taught }) : undefined);
     if (!answer) return { ok: false, cancelled: true, status: 409, data: { error: 'Nothing was saved.' }, change: null };
-    const answered = await send(method, url, { ...body, [key]: answer, token: r.data.preview.token });
-    // The drawer's flows go with the answer: Apply writes exactly those, and the toast counts them.
-    return { ...answered, answered: { past: answer, count: r.data.preview.count, flows: r.data.preview.flows || [] } };
+    const p = r.data.preview;
+    // Apply pressed with the box ticked over rows the preview kept because you chose them.
+    const move = answer === 'apply' && !!p.moveChosen && (p.flows_chosen || []).length > 0;
+    const sent = { ...body, [key]: answer, token: p.token, ...(move ? { move_chosen: true } : {}) };
+    const answered = await send(method, url, sent);
+    // The drawer's flows go with the answer: Apply writes exactly those, and the toast counts them;
+    // with the box ticked, the rows you chose by hand too.
+    const moved = sent.move_chosen ? (p.flows_chosen || []).map(k => ({ ...k, after: k.would })) : [];
+    return { ...answered, answered: { past: answer, count: sent.move_chosen ? p.count_with_chosen : p.count,
+        flows: [...(p.flows || []), ...moved] } };
 }
 /** What a previewed write did, in words, for its toast. */
 function previewedWords(r, done) {
@@ -5294,9 +5331,10 @@ function driftLine(d) {
 ACT['rule-drift'] = async () => {
     const p = await get('/api/rules/drift', { fresh: true }).catch(() => null);
     if (!p) { toast('fin could not count the rows just now; nothing was changed', { bad: true }); return; }
-    if (!p.count) { toast('No row differs from its rule now.'); rerender(); return; }
+    if (!p.count && !(p.flows_chosen || []).length) { toast('No row differs from its rule now.'); rerender(); return; }
     if (await askPreview(p) !== 'apply') return;
-    const r = await send('POST', '/api/rules/drift', { past: 'apply', token: p.token });
+    const move = !!p.moveChosen && (p.flows_chosen || []).length > 0;
+    const r = await send('POST', '/api/rules/drift', { past: 'apply', token: p.token, ...(move ? { move_chosen: true } : {}) });
     closeSheet();
     if (!r.ok) { toast(r.data.error || 'That did not work; nothing was changed', { bad: true }); rerender(); return; }
     toast(`${plural(r.data.recategorized, 'row')} relabelled. One change in Changes, with Undo.`, { undo: r.change });

@@ -175,6 +175,20 @@ _PAST_SAID = (
     "rows take it, unless they already said; then call again with past and the preview's token. "
     "A token from a preview that no longer holds is refused: look again."
 )
+# The opt-in an Apply may carry (ADR-008): rows a rule would move but keeps
+# only because the operator chose their book or type by hand move too. One
+# name on every path that changes a rule, the plan's items among them.
+_MOVE_CHOSEN_SAID = (
+    "move_chosen: true moves too the rows the preview lists apart in flows_chosen, kept only because the "
+    "operator chose their book or type by hand (a choice that may be stale): each takes the flow the rule "
+    "gives, losing its book and type where that is not spending. Send it only with past apply, the preview's "
+    "token and the operator's yes to those rows by name (count_with_chosen is the past rows then); left out, "
+    "they stay as they are. "
+)
+_MOVE_CHOSEN = {
+    "move_chosen": {**_B, "description": "With past apply and the preview's token, on the operator's yes: "
+                                         "also move the rows listed in flows_chosen."},
+}
 # What a rule may say its rows are (ADR-009; fin-redesign 07).
 _RULE_FLOW = {
     "flow": {"type": "string", "description": "What the rule's rows are: expense, income, refund, transfer, "
@@ -572,30 +586,32 @@ _WRITES = [
     _w(
         "add_rule",
         "Add a merchant rule: rows whose description matches the pattern take the merchant "
-        "(service_id) and its book and type, or the rule's own overrides. " + _RULE_FLOW_SAID + _PAST_SAID,
+        "(service_id) and its book and type, or the rule's own overrides. " + _RULE_FLOW_SAID
+        + _MOVE_CHOSEN_SAID + _PAST_SAID,
         {"pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST},
+         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST, **_MOVE_CHOSEN},
         ("pattern", "service_id"),
         lambda a: ("POST", "/api/rules", _pick(a, "pattern", "service_id", "match_type",
                                               "book_override", "type_override_id", "priority",
-                                              *_RULE_FLOW, *_PAST)),
+                                              *_RULE_FLOW, *_PAST, *_MOVE_CHOSEN)),
     ),
     _w(
         "change_rule",
-        "Change a merchant rule. " + _RULE_FLOW_SAID + "flow \"\" makes it state none again. " + _PAST_SAID,
+        "Change a merchant rule. " + _RULE_FLOW_SAID + "flow \"\" makes it state none again. "
+        + _MOVE_CHOSEN_SAID + _PAST_SAID,
         {"rule_id": _I, "pattern": _S, "service_id": _I, "match_type": _S, "book_override": _S,
-         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST},
+         "type_override_id": _I, "priority": _I, **_RULE_FLOW, **_PAST, **_MOVE_CHOSEN},
         ("rule_id",),
         lambda a: ("PUT", f"/api/rules/{int(a['rule_id'])}",
                    _pick(a, "pattern", "service_id", "match_type", "book_override",
-                         "type_override_id", "priority", *_RULE_FLOW, *_PAST)),
+                         "type_override_id", "priority", *_RULE_FLOW, *_PAST, *_MOVE_CHOSEN)),
     ),
     _w(
         "delete_rule",
-        "Delete a merchant rule. " + _PAST_SAID,
-        {"rule_id": _I, **_PAST},
+        "Delete a merchant rule. " + _MOVE_CHOSEN_SAID + _PAST_SAID,
+        {"rule_id": _I, **_PAST, **_MOVE_CHOSEN},
         ("rule_id",),
-        lambda a: ("DELETE", f"/api/rules/{int(a['rule_id'])}", _pick(a, *_PAST)),
+        lambda a: ("DELETE", f"/api/rules/{int(a['rule_id'])}", _pick(a, *_PAST, *_MOVE_CHOSEN)),
     ),
     _w(
         "change_merchant",
@@ -833,6 +849,9 @@ _PLAN_ITEM = {
                       "description": "The operator's answer for rows another merchant holds that a wording "
                                      "reaches (the preview's overlaps): apply moves them too; unanswered, "
                                      "only new rows take it."},
+        "move_chosen": {**_B, "description": "With past_rows apply, on the operator's yes: also move the rows "
+                                             "the item's flows_chosen lists, kept only because the operator "
+                                             "chose their book or type by hand."},
     },
     "required": ["tx_ids"],
     "additionalProperties": False,
@@ -851,7 +870,9 @@ _PLANS = [
         "label it holds now, which the batch overwrites: tell the operator), the rows of "
         "another merchant a wording would reach (overlaps: ask whether they move too, past_rows), "
         "every row whose flow or other side it would move, a row labelled for itself among them "
-        "(flows: tell the operator), any refusal by merchant, the batch's merchants and rows labelled, "
+        "(flows: tell the operator), the rows it would move but keeps only because the operator chose their "
+        "book or type by hand (flows_chosen: name them; an item's move_chosen true, with past_rows apply, "
+        "moves them too, on the operator's yes, and is previewed again as part of the items), any refusal by merchant, the batch's merchants and rows labelled, "
         "the rows only checked (rows_checked), and a token (none while "
         "anything is refused). Show the operator those numbers; call plan_apply only on their yes.",
         _schema({"items": _PLAN_ITEMS}, ("items",)),

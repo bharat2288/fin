@@ -2134,9 +2134,14 @@ def _taken_flows(conn, plan, service_id: int | None, tx_id: int, rules: tuple) -
         writes, keeps = _fill_flow(conn, p.held, {"service_id": merchant, **label}, *rules)
         # Each answer's write fitted to the flow it leaves the row
         # (label_source.fitted): Apply's with the flow it moves.
+        labelled = p.apply
         p.apply = label_source.fitted(p.held, {**p.apply, **writes})
         p.only_new = label_source.fitted(p.held, p.only_new)
         if keeps is not None:
+            if keeps.by_hand:
+                # Its write on move_chosen: the flow it would take, fitted as Apply's is.
+                keeps.moved = relabel_preview.Planned(p.held, label_source.fitted(p.held, {**labelled, **keeps.would}),
+                                                      p.only_new, checked=p.checked)
             plan.kept.append(keeps)
     plan.token = relabel_preview._stamp(plan.token, relabel_preview._stamp_flows(plan))
 
@@ -2327,15 +2332,19 @@ def api_services_create():
         )
 
 
-def _previewed_answer(conn, plan, answer: str | None, token, answer_key: str = "past"):
+def _previewed_answer(conn, plan, answer: str | None, token, answer_key: str = "past",
+                      move_chosen: bool = False):
     """The preview's gate on a change that may reach past rows (fin-surfaces
     21): the response a route returns instead of writing, or None to go on.
     A token from an earlier preview that no longer holds is refused whatever
-    is left to change (case 20); with rows to change and no answer, the
-    preview itself (409, the body the drawer and chat read)."""
+    is left to change (case 20); with rows to change, or rows it keeps only
+    because their book or type was chosen by hand (Plan.by_hand, which the
+    operator may move), and no answer, the preview itself (409, the body the
+    drawer and chat read). `move_chosen` moves those rows only on the token
+    of a preview that listed them: sent without one, the preview."""
     if token is not None and token != plan.token:
         return jsonify({"error": relabel_preview.stale(plan), "stale": True}), 409
-    if plan.count and answer is None:
+    if (plan.count or plan.by_hand) and (answer is None or (move_chosen and token is None)):
         return jsonify({
             "error": relabel_preview.asked(plan, answer_key),
             "preview": relabel_preview.summary(conn, plan),
@@ -2347,8 +2356,13 @@ def _kept_said(conn, plan) -> dict:
     """What a rule route says, once written, of the rows whose flow the rule
     would move but keeps, a record of expect back resting on each: none
     where there are none. A change that moves no other row asks nothing, so
-    this is where they are named (relabel_preview.flow_writes)."""
-    return {"flows_kept": relabel_preview.flows_kept(conn, plan)} if plan.kept else {}
+    this is where they are named (relabel_preview.flow_writes); those kept
+    only because their book or type was chosen by hand also apart
+    (flows_chosen), as the preview lists them."""
+    if not plan.kept:
+        return {}
+    by_hand = relabel_preview.chosen_lines(conn, plan.kept)
+    return {"flows_kept": relabel_preview.flows_kept(conn, plan), **({"flows_chosen": by_hand} if by_hand else {})}
 
 
 def _write_plan(conn, plan, answer: str | None) -> tuple[int, int]:
@@ -3650,14 +3664,17 @@ class TeachRefused(Exception):
         self.body, self.status = body, status
 
 
-def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "relabel_preview.Plan | None"]:
+def _teach(conn, data: dict, *, record_choice: bool = True,
+           plan_token: bool = False) -> tuple[dict, "relabel_preview.Plan | None"]:
     """The resolve route's teach (its body, `data`) on `conn`, not committed:
     the caller commits, so a plan can run many teaches in one change
     (chat-plan-apply 01). Returns what the route answers and the preview's
     plan the teach was asked about (None where nothing asked). Raises
     TeachRefused, whatever it wrote then the caller's to roll back.
     `record_choice` False leaves the suggestion's record of the operator's
-    choice alone: a plan's teach is not one, and Undo would not take it back."""
+    choice alone: a plan's teach is not one, and Undo would not take it back.
+    `plan_token` True: a plan's item, whose move_chosen stands on the plan's
+    own token (its items stamped), not on a teach's preview token."""
     tx_id = data.get("tx_id")
     service_name = (data.get("service_name") or "").strip()
     service_id = data.get("service_id")
@@ -3681,6 +3698,7 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         raise TeachRefused({"error": f"past goes with check_each_row true, as one of {', '.join(CHECK_EACH_ROW_PAST)}"})
     try:
         past_rows = relabel_preview.checked_answer(data.get("past_rows"), "past_rows")
+        move_chosen = relabel_preview.checked_move_chosen(data.get(relabel_preview.MOVE_CHOSEN), past_rows)
     except relabel_preview.Refused as e:
         raise TeachRefused({"error": str(e)})
     pattern_error = _rule_pattern_error(pattern)
@@ -3786,7 +3804,10 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
         # The row taught as it is before the teach writes anything: its flow
         # is worked out again only where it is still fin's (step 3).
         target_held = conn.execute(f"SELECT {_LABEL_HELD} FROM transactions t WHERE t.id = ?", (tx_id,)).fetchone()
-        if plan is None and fill_flows:
+        # A backfilled row kept only because its book or type was chosen by
+        # hand is asked about too: the operator may move it (move_chosen).
+        fill_by_hand = [k for k in fill_kept if k.by_hand]
+        if plan is None and (fill_flows or fill_by_hand):
             name = conn.execute("SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()[0] \
                 if svc else service_name
             # Its rows are the merchant's to be: shown as moving to it, as a
@@ -3805,7 +3826,7 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             # teach's own, waiting as the row taught is, never counted
             # (case 29), but for one whose flow it would move: the preview
             # lists every such row (flows), and those it keeps (flows_kept).
-            if (plan.count or fill_flows) and taught_words:
+            if (plan.count or fill_flows or fill_by_hand) and taught_words:
                 fills = {}
                 for wording in taught_words:
                     for held, sets in _teach_fills(conn, service_id, tx_id, wording, match_type, book, type_id,
@@ -3817,9 +3838,20 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
                                                         and _would_change(held, label_source.fitted(held, sets))):
                             fills[held["id"]] = sets
                 plan = relabel_preview.with_fills(conn, plan, fills, fill_flows, fill_kept)
-            refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows")
+            refused = _previewed_answer(conn, plan, past_rows, data.get("token"), "past_rows",
+                                        move_chosen and not plan_token)
             if refused is not None:
                 raise TeachRefused(refused[0].get_json(), refused[1])
+        if move_chosen:
+            # Answered with move_chosen on the preview's token: the rows kept
+            # only because their book or type was chosen move as the others
+            # do, the backfill's with the flow it would have written, the
+            # rows a wording takes as their moved write (_taken_flows).
+            for k in fill_by_hand:
+                fill_flows[k.held["id"]] = k.would
+            fill_kept = [k for k in fill_kept if not k.by_hand]
+            if taken_plan is not None:
+                taken_plan = relabel_preview.with_chosen(taken_plan)
         if merchant_plan is not None:
             conn.execute(
                 "UPDATE services SET book = ?, type_id = ? WHERE id = ?",
@@ -3979,6 +4011,7 @@ def _teach(conn, data: dict, *, record_choice: bool = True) -> tuple[dict, "rela
             "backfilled_ids": backfilled_ids,
             "flows": relabel_preview.moved_lines(conn, moved_lines),
             **({"flows_kept": relabel_preview.kept_lines(conn, kept)} if kept else {}),
+            **({"flows_chosen": relabel_preview.chosen_lines(conn, kept)} if any(k.by_hand for k in kept) else {}),
         }, plan
     except TeachRefused:
         raise
@@ -3999,7 +4032,7 @@ MAX_PLAN_ITEMS = 20
 # What an item takes: resolve's body for a card, its rows in place of its row.
 _PLAN_ITEM_KEYS = frozenset({
     "tx_ids", "service_name", "service_id", "pattern", "wordings", "match_type",
-    "type_id", "book", "check_each_row", "past", "past_rows",
+    "type_id", "book", "check_each_row", "past", "past_rows", relabel_preview.MOVE_CHOSEN,
 })
 _PLAN_ITEM_TEXT = ("service_name", "pattern", "match_type", "book", "past", "past_rows")
 PLAN_STALE = "the book changed since the preview: preview again"
@@ -4065,15 +4098,17 @@ def _plan_item_name(conn, item: dict) -> str:
     return found[0] if found else "a merchant"
 
 
-def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None"]:
+def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None", list]:
     """One item's teach, as a Queue card's save makes it (static/app.js
     saveResolve): resolve on its first row with the wording and the other
     wordings; each of its other rows the rules did not reach, this row only;
     taught as Check each row, its rows then checked with their book. Rows
     another merchant holds that a wording reaches change only on past_rows
     apply; left unanswered, only new rows take it. A wording that matches no
-    row is refused, as the card refuses it. Returns the merchant and the
-    preview's plan. Not committed; raises TeachRefused."""
+    row is refused, as the card refuses it. Returns the merchant, the
+    preview's plan, and the rows its teach kept only because their book or
+    type was chosen by hand (flows_chosen; move_chosen with past_rows apply
+    moves them). Not committed; raises TeachRefused."""
     tx_ids = item["tx_ids"]
     marks = ",".join("?" * len(tx_ids))
     held = {r[0] for r in conn.execute(f"SELECT id FROM transactions WHERE id IN ({marks})", tx_ids)}
@@ -4091,7 +4126,7 @@ def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None"]:
             if isinstance(wording, str) and wording.strip() and not relabel_preview.wording_reach(
                     conn, wording, item.get("match_type") or "contains").count:
                 raise TeachRefused({"error": f"The wording {wording.strip()} matches no row"})
-    taught, plan = _teach(conn, body, record_choice=False)
+    taught, plan = _teach(conn, body, record_choice=False, plan_token=True)
     service_id, label = taught["service_id"], {"book": taught["book"], "type_id": taught["type_id"]}
     for tx in tx_ids[1:]:
         if conn.execute("SELECT type_id FROM transactions WHERE id = ?", (tx,)).fetchone()[0] is None:
@@ -4111,7 +4146,7 @@ def _teach_item(conn, item: dict) -> tuple[int, "relabel_preview.Plan | None"]:
             if why:
                 raise TeachRefused({"error": why})
         _label_lines(conn, lines, chosen=False)
-    return service_id, plan
+    return service_id, plan, taught.get("flows_chosen", [])
 
 
 def _stable(data: str | None) -> tuple | None:
@@ -4149,7 +4184,7 @@ def _run_plan(conn, items: list[dict]) -> dict:
         mark = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_rows").fetchone()[0]
         conn.execute("SAVEPOINT plan_item")
         try:
-            service_id, plan = _teach_item(conn, item)
+            service_id, plan, by_hand = _teach_item(conn, item)
         except TeachRefused as e:
             conn.execute("ROLLBACK TO plan_item")
             refusals.append({"item": n, "merchant": name, "error": e.body.get("error") or "refused"})
@@ -4208,6 +4243,9 @@ def _run_plan(conn, items: list[dict]) -> dict:
             "flows": relabel_preview.moved_lines(conn, [
                 (f, f["writes"]) for f in flows.values()
                 if "writes" in f and any(f[k] != f["writes"][k] for k in _FLOW_COLUMNS)]),
+            # The rows it keeps only because their book or type was chosen by
+            # hand: move_chosen (with past_rows apply) moves them too.
+            "flows_chosen": by_hand,
         })
     token = None if refusals else relabel_preview._stamp(
         "plan", json.dumps(items, sort_keys=True), stamped)
@@ -6166,6 +6204,7 @@ def api_rules_create():
             max_minor = _threshold_minor(data, "max_amount")
             rule_flow, other_side = _checked_rule_flow(conn, data.get("flow"), data.get("other_side_id"))
             past = relabel_preview.checked_answer(data.get("past"))
+            move_chosen = relabel_preview.checked_move_chosen(data.get(relabel_preview.MOVE_CHOSEN), past)
         except (UnknownLabel, BadAmount, relabel_preview.Refused) as e:
             return jsonify({"error": str(e)}), 400
         proposed = {
@@ -6184,9 +6223,11 @@ def api_rules_create():
             plan = relabel_preview.rule_change(conn, None, proposed)
         except relabel_preview.Gone as e:
             return jsonify({"error": str(e)}), 400
-        refused = _previewed_answer(conn, plan, past, data.get("token"))
+        refused = _previewed_answer(conn, plan, past, data.get("token"), move_chosen=move_chosen)
         if refused is not None:
             return refused
+        if move_chosen:
+            plan = relabel_preview.with_chosen(plan)
         try:
             new_id = conn.execute(
                 "INSERT INTO merchant_rules (pattern, service_id, book_override, type_override_id, "
@@ -6233,7 +6274,11 @@ def api_rules_update(rule_id):
     `past: apply` relabels them (from fin takes the new winner's source,
     checked stays checked, a chosen field keeps its own); `past: only_new`
     saves the rule and marks their fields checked. `token` is refused once
-    the rules or those rows changed since the preview. A new `flow` or
+    the rules or those rows changed since the preview. The rows whose flow
+    Apply keeps only because their book or type was chosen by hand are
+    listed apart (flows_chosen, ADR-008); `move_chosen: true`, with `past:
+    apply` and the preview's token, moves them too in the same change
+    (relabel_preview.with_chosen). A new `flow` or
     `other_side_id` is checked with the other as the rule would then hold it
     (_checked_rule_flow); a flow changed without its other side keeps the
     one held only where the new flow allows it (_held_side_kept), so a flow
@@ -6251,6 +6296,7 @@ def api_rules_update(rule_id):
                 proposed[column] = (_threshold_minor(data, field) if field in _THRESHOLD_COLUMNS
                                     else data[field])
         past = relabel_preview.checked_answer(data.get("past"))
+        move_chosen = relabel_preview.checked_move_chosen(data.get(relabel_preview.MOVE_CHOSEN), past)
     except (BadAmount, relabel_preview.Refused) as e:
         return jsonify({"error": str(e)}), 400
     if not proposed:
@@ -6287,9 +6333,11 @@ def api_rules_update(rule_id):
             plan = relabel_preview.rule_change(conn, rule_id, proposed)
         except relabel_preview.Gone as e:
             return jsonify({"error": str(e)}), 400
-        refused = _previewed_answer(conn, plan, past, data.get("token"))
+        refused = _previewed_answer(conn, plan, past, data.get("token"), move_chosen=move_chosen)
         if refused is not None:
             return refused
+        if move_chosen:
+            plan = relabel_preview.with_chosen(plan)
         try:
             conn.execute(
                 f"UPDATE merchant_rules SET {', '.join(f'{c} = ?' for c in proposed)} WHERE id = ?",
@@ -6314,6 +6362,7 @@ def api_rules_delete(rule_id):
     data = request.get_json(silent=True) or {}
     try:
         past = relabel_preview.checked_answer(data.get("past"))
+        move_chosen = relabel_preview.checked_move_chosen(data.get(relabel_preview.MOVE_CHOSEN), past)
     except relabel_preview.Refused as e:
         return jsonify({"error": str(e)}), 400
     with get_db() as conn:
@@ -6321,9 +6370,11 @@ def api_rules_delete(rule_id):
         if gone is not None:
             return gone
         plan = relabel_preview.rule_change(conn, rule_id, None)
-        refused = _previewed_answer(conn, plan, past, data.get("token"))
+        refused = _previewed_answer(conn, plan, past, data.get("token"), move_chosen=move_chosen)
         if refused is not None:
             return refused
+        if move_chosen:
+            plan = relabel_preview.with_chosen(plan)
         try:
             conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
             recategorized, checked = _write_plan(conn, plan, past)
@@ -6356,23 +6407,30 @@ def api_rules_drift_apply():
     token}. Each takes what the rules give now, in one change; its flow is
     worked out again where it is still the one fin worked out
     (relabel_preview.flow_writes: a flow set by hand keeps its own, and so
-    does a row a record of expect back rests on). Without `past` the
-    preview comes back (409) and nothing is written; there is no other
-    answer (Leave them writes nothing, so it is never sent). `token` is
-    refused once the rules or those rows changed since the preview. Returns
-    {success, recategorized}."""
+    does a row a record of expect back rests on, and one whose book or type
+    was chosen by hand, but with `move_chosen: true`, on the preview's
+    token). Without `past` the preview comes back (409) and nothing is
+    written; there is no other answer (Leave them writes nothing, so it is
+    never sent). `token` is refused once the rules or those rows changed
+    since the preview. Returns {success, recategorized}."""
     data = request.get_json(silent=True) or {}
     past = data.get("past")
     if past is not None and past != relabel_preview.APPLY:
         return jsonify({"error": f"past must be {relabel_preview.APPLY}: leaving the rows as they are "
                                  "writes nothing, so there is nothing to send"}), 400
+    try:
+        move_chosen = relabel_preview.checked_move_chosen(data.get(relabel_preview.MOVE_CHOSEN), past)
+    except relabel_preview.Refused as e:
+        return jsonify({"error": str(e)}), 400
     with get_db() as conn:
         plan = relabel_preview.drift(conn)
         if data.get("token") is not None and data["token"] != plan.token:
             return jsonify({"error": relabel_preview.stale(plan), "stale": True}), 409
-        if plan.count and past is None:
+        if (plan.count or plan.by_hand) and (past is None or (move_chosen and data.get("token") is None)):
             return jsonify({"error": relabel_preview.drift_asked(plan),
                             "preview": relabel_preview.summary(conn, plan)}), 409
+        if move_chosen:
+            plan = relabel_preview.with_chosen(plan)
         recategorized, _ = _write_plan(conn, plan, past)
         conn.commit()
     return jsonify({"success": True, "recategorized": recategorized})
