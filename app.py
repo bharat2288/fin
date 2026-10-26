@@ -35,6 +35,7 @@ import db
 import expect_back
 import flow
 import history
+import interest_book
 import label_source
 import loan_interest
 import loan_terms
@@ -881,6 +882,7 @@ _CHANGE_SUMMARIES = {
     "api_accounts_party": "Changed an account's party",
     # Named by the route: marked shared, or not (shared.MARKED, shared.UNMARKED).
     "api_accounts_shared": "Changed whether an account is shared",
+    "api_accounts_interest_book": "Chose the book a loan's interest goes to",
     "api_accounts_delete": "Deleted an account",
     "api_anchors_create": "Entered a figure",
     "api_anchors_replace": "Corrected a figure",
@@ -1602,7 +1604,9 @@ def api_accounts():
     merchant it is joined to as its party (party.py), or null; `terms` is a
     loan's hire-purchase terms (loan_terms.shown), or null, and
     `terms_locked` why they cannot change now, or null; `shared` whether it
-    is marked shared (shared.py)."""
+    is marked shared (shared.py); `interest_book` the book a loan's
+    worked-out interest goes to (interest_book.py), or null on any other
+    account."""
     with get_db() as conn:
         terms = loan_terms.all_held(conn)
         rows = conn.execute(
@@ -1618,6 +1622,7 @@ def api_accounts():
             (anchors.SUPPLIED,),
         ).fetchall())
         shared_ids = shared.ids(conn)
+        interest_books = interest_book.held(conn)
         latest = {
             r["account_id"]: {"date": r["date"], "amount_minor": r["amount"], "source": r["source"]}
             for r in conn.execute(
@@ -1640,6 +1645,9 @@ def api_accounts():
         d["terms"] = loan_terms.shown(terms.get(d["id"]))
         # Marked shared (shared.py): its rows are not ours unless a rule says so.
         d["shared"] = d["id"] in shared_ids
+        # A loan's interest goes to Household or the book chosen for it (interest_book.py).
+        d["interest_book"] = (interest_books.get(d["id"], book_type.DEFAULT_BOOK)
+                              if d["type"] == loan_interest.LOAN else None)
         result.append(d)
     with get_db() as conn:
         # Why a loan's terms cannot change now (loan_terms.lock_refusal), or null.
@@ -1893,6 +1901,40 @@ def api_accounts_shared(acct_id):
         _name_change(conn, shared.MARKED if data["shared"] else shared.UNMARKED)
         conn.commit()
     return jsonify({"success": True, "shared": data["shared"], "moved": moved, "kept": kept, "chosen": chosen})
+
+
+@app.route("/api/accounts/<int:acct_id>/interest-book", methods=["PUT"])
+def api_accounts_interest_book(acct_id):
+    """Choose the book a loan's worked-out interest goes to (interest_book.py,
+    fin-redesign 26). Body: {"book": a book's name, or null for Household}.
+    In the same change the loan's interest rows move to it
+    (loan_interest.derive); one change, undone whole, and a refusal writes
+    nothing. Answers the book and whether anything changed (`changed`)."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "book" not in data or not (data["book"] is None or isinstance(data["book"], str)):
+        return jsonify({"error": "send book: a book's name, or null for Household; nothing was changed"}), 400
+    with get_db() as conn:
+        held = conn.execute("SELECT type, owner FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+        if held is None:
+            return jsonify({"error": "This account is no longer in fin; nothing was changed"}), 404
+        if held["type"] != loan_interest.LOAN:
+            return jsonify({"error": f"only a loan has interest worked out; this is a {held['type']} account. "
+                                     "Nothing was changed"}), 400
+        if held["owner"] != account_kind.HOUSEHOLD:
+            return jsonify({"error": "only the household's own loans have interest worked out. "
+                                     "Nothing was changed"}), 400
+        # A book's name is held unique ignoring case: the stored name is the one filed.
+        wanted = book_type.DEFAULT_BOOK if data["book"] is None else " ".join(data["book"].split())
+        book = next((b for b in book_type.book_names(conn) if b.casefold() == wanted.casefold()), None)
+        if book is None:
+            return jsonify({"error": f"{wanted} is not a book; add it on Lists › Books first. "
+                                     "Nothing was changed"}), 400
+        changed = interest_book.choose(conn, acct_id, book)
+        if changed:
+            loan_interest.derive(conn, acct_id)
+            _name_change(conn, interest_book.CHOSE)
+            conn.commit()
+    return jsonify({"success": True, "book": book, "changed": changed})
 
 
 def _reflow_shared(conn, acct_id: int, before: "flow.ClassifierContext",

@@ -53,6 +53,8 @@ WRITES = [
     "add_book",
     # fin-redesign 09: an account joined to a party (a merchant), one change
     "link_party",
+    # fin-redesign 26: the book a loan's worked-out interest goes to, one change
+    "set_interest_book",
     "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off",
@@ -109,8 +111,9 @@ def test_no_tool_reaches_what_the_ruling_keeps_out():
             args["kind"] = "company"
         paths.add(tool.request(args)[1])
     # An account's own route changes its name, kind, owner or status: never the
-    # chat's. Joining it to a party (fin-redesign 09) is its own route.
-    joins_a_party = {"/api/accounts/1/party"}
+    # chat's. Joining it to a party (fin-redesign 09) is its own route, and so
+    # is the book a loan's interest goes to (fin-redesign 26).
+    joins_a_party = {"/api/accounts/1/party", "/api/accounts/1/interest-book"}
     for forbidden in ("/api/import", "/api/subscriptions", "/api/suggestions", "/api/accounts/1",
                       "/api/services/bulk-rename", "/api/loan-interest"):
         assert not any(p.startswith(forbidden) and p not in joins_a_party for p in paths), forbidden

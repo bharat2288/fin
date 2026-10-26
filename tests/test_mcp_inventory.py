@@ -55,6 +55,8 @@ GOLDEN: list[str] = [
     "add_book",
     # fin-redesign 09: an account joined to a party (a merchant), one change
     "link_party",
+    # fin-redesign 26: the book a loan's worked-out interest goes to, one change
+    "set_interest_book",
     "pair_transfers", "fetch_rate", "set_rate",
     # personal-ledger 44: expect back (spec 23 E8)
     "mark_expect_back", "undo_mark", "set_off",
