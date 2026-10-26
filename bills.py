@@ -316,8 +316,10 @@ def state(bill: dict, on: date, spans: list[tuple[str, str]] | None) -> dict:
 # A bank words one payment differently in its CSV and its PDF, so the wording
 # alone loses the payments a statement prints another way. The merchant counts
 # only for a bill naming its paying account and holding that merchant and
-# account alone among the bills that run, and only spending that is no one-off:
-# a refund or a one-off under the merchant is no payment of the bill, and two
+# account alone among the bills that run (a running bill naming no account
+# holds every account), and only spending that is no one-off and holds no
+# other bill's wording: a refund, a one-off or another bill's payment (a
+# stopped one's too) under the merchant is no payment of this bill, and two
 # bills on one merchant and account are told apart by their wording.
 # Over subscriptions s and transactions t.
 _MATCHED_ROWS = """
@@ -331,7 +333,11 @@ _MATCHED_ROWS = """
             AND (SELECT st.account_id FROM statements st WHERE st.id = t.statement_id) = s.account_id
             AND NOT EXISTS (SELECT 1 FROM subscriptions o
                             WHERE o.id != s.id AND o.service_id = s.service_id
-                              AND o.account_id = s.account_id AND o.status IN ('active', 'paused')))
+                              AND (o.account_id = s.account_id OR o.account_id IS NULL)
+                              AND o.status IN ('active', 'paused'))
+            AND NOT EXISTS (SELECT 1 FROM subscriptions o
+                            WHERE o.id != s.id AND COALESCE(o.match_pattern, '') != ''
+                              AND UPPER(t.description) LIKE '%' || UPPER(o.match_pattern) || '%'))
     LEFT JOIN services svc ON s.service_id = svc.id
     {joins}
     WHERE COALESCE(t.flow_type, 'expense') IN ('expense', 'refund')

@@ -931,7 +931,7 @@ def test_a_bill_naming_no_paying_account_reads_its_wording_alone(client, conn, c
     assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-03-25"
 
 
-def test_refresh_from_rows_never_takes_a_last_payment_back(client, conn, club_paid_by_giro):
+def test_refresh_from_rows_holds_what_the_rows_say_after_a_row_leaves_the_bill(client, conn, club_paid_by_giro):
     client.post("/api/subscriptions/enrich", json={})
     # September's row moves to another book: it is no longer the bill's.
     conn.execute("INSERT OR IGNORE INTO books (name) VALUES ('Sample Firm')")
@@ -939,5 +939,27 @@ def test_refresh_from_rows_never_takes_a_last_payment_back(client, conn, club_pa
     conn.commit()
     client.post("/api/subscriptions/enrich", json={})
 
-    assert held(conn, club_paid_by_giro["club"])["last_paid"] == "2026-09-25"
+    assert held(conn, club_paid_by_giro["club"])["last_paid"] == "2026-08-25"
     assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-08-25"
+
+
+def _sibling(conn, club, account_id, pattern, status="active") -> None:
+    conn.execute("INSERT INTO subscriptions (service_id, account_id, amount, currency, frequency, periods, "
+                 "renewal_date, status, match_pattern) VALUES (?, ?, 40, 'SGD', 'monthly', 1, '2026-03-10', ?, ?)",
+                 (club["service_id"], account_id, status, pattern))
+    conn.commit()
+
+
+def test_a_running_bill_on_the_merchant_naming_no_account_holds_every_account(client, conn, club_paid_by_giro):
+    _sibling(conn, club_paid_by_giro, None, "SAMPLE CLUB LOCKER")
+
+    assert shown(client, club_paid_by_giro["club"])["tx_last_paid"] == "2026-03-25"
+
+
+def test_a_stopped_bills_payments_under_the_merchant_are_not_its_replacements(client, conn, club_paid_by_giro):
+    _sibling(conn, club_paid_by_giro, club_paid_by_giro["bank"], "SAMPLE CLUB OLD PLAN", status="cancelled")
+    labelled(conn, club_paid_by_giro["stmt"]["2026-09"], "2026-09-05", "SAMPLE CLUB OLD PLAN", 3000,
+             club_paid_by_giro["service_id"])
+
+    got = shown(client, club_paid_by_giro["club"])
+    assert (got["tx_last_paid"], got["tx_avg_90d"]) == ("2026-09-25", 428.25)
