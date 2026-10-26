@@ -5567,9 +5567,10 @@ function stmtSum(s, cur) {
         ${result}</tbody></table>`;
 }
 /** A loan statement's figure as a sum. With the loan's hire-purchase terms
- *  the statement's figure is the total of its remaining instalments: less the
- *  interest not yet earned (Rule of 78), it is the principal owed, which is
- *  what the import writes (loan_terms.py). */
+ *  the statement's figure is the total of its remaining instalments: plus an
+ *  instalment it took off ahead of its day, less the interest not yet earned
+ *  (Rule of 78), it is the principal owed, which is what the import writes
+ *  (loan_terms.py). */
 function loanFigureSum(f) {
     const m = v => esc(money(v, f.currency));
     const held = f.held ? ' <span class="muted">(already held)</span>' : '';
@@ -5579,6 +5580,7 @@ function loanFigureSum(f) {
     const schedule = f.left_by_schedule !== f.instalments_left ? `; the terms' dates leave ${f.left_by_schedule}` : '';
     return `<table class="sum small"><tbody>
         <tr><td class="op"></td><td>remaining instalments, as printed</td><td class="r">${m(f.printed_minor)}</td></tr>
+        ${f.ahead_minor ? `<tr><td class="op">+</td><td>the next instalment, taken off before it is due<div class="small muted">still owed on this day</div></td><td class="r">${m(f.ahead_minor)}</td></tr>` : ''}
         <tr><td class="op">−</td><td>interest not yet earned<div class="small muted">Rule of 78: ${f.instalments_left} of ${f.months} instalments left${schedule}</div></td><td class="r">${m(f.unearned_minor)}</td></tr>
         <tr class="eq"><td class="op">=</td><td>principal owed${held}</td><td class="r">${m(f.owed_minor)}</td></tr></tbody></table>`;
 }

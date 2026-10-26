@@ -364,7 +364,7 @@ def test_with_terms_the_preview_says_the_printed_total_and_the_principal_owed(cl
         "account": LOAN, "kind": "loan", "date": "2026-01-31", "currency": "SGD",
         "new_account": False, "held": False,
         "printed_minor": remaining(1), "instalments_left": 47, "months": 48,
-        "left_by_schedule": 47, "unearned_minor": unearned(47), "method": "rule-of-78",
+        "left_by_schedule": 47, "ahead_minor": 0, "unearned_minor": unearned(47), "method": "rule-of-78",
         "owed_minor": remaining(1) - unearned(47),
     }
 
@@ -416,14 +416,33 @@ def test_the_instalments_left_are_the_nearest_whole_number(client, summary, prin
     assert figure["unearned_minor"] == unearned(left)
 
 
-def test_a_statement_ahead_of_the_schedule_says_both_counts(client, summary):
-    # Dated before the 15th's instalment, but the lender has taken it off.
+# The level instalment, half up: 106,000.00 / 48 = 2,208.33.
+LEVEL = 220_833
+
+
+def test_a_statement_that_took_off_the_next_instalment_early_adds_it_back(client, summary):
+    # Dated before the 15th's instalment, but the lender has taken it off: it
+    # is still owed on the 10th, so the principal owed is the schedule's after
+    # the one instalment paid by then.
     loan_with_terms(client)
     summary("10 Feb 2026", remaining(2))
 
     [figure] = upload(client, "2026-02.pdf")["figures"]
 
-    assert (figure["instalments_left"], figure["left_by_schedule"]) == (46, 47)
+    assert (figure["instalments_left"], figure["left_by_schedule"]) == (47, 47)
+    assert figure["ahead_minor"] == LEVEL
+    assert figure["unearned_minor"] == unearned(47)
+    assert figure["owed_minor"] == remaining(2) + LEVEL - unearned(47)
+
+
+def test_a_statement_two_instalments_ahead_is_read_as_printed(client, summary):
+    loan_with_terms(client)
+    summary("10 Feb 2026", remaining(3))
+
+    [figure] = upload(client, "2026-02.pdf")["figures"]
+
+    assert (figure["instalments_left"], figure["left_by_schedule"], figure["ahead_minor"]) == (45, 47, 0)
+    assert figure["owed_minor"] == remaining(3) - unearned(45)
 
 
 def test_the_same_statement_again_is_held_under_the_terms(client, locked, summary):
@@ -586,13 +605,76 @@ def test_statements_before_the_instalments_name_the_loan_are_refused(client, sum
 
 
 def test_a_figure_one_instalment_out_is_named(client, conn, summary):
+    # Two instalments due by the statement's day, one of them not labelled.
     loan = loan_with_terms(client)
-    pay(conn, client, loan, 2)
+    pay(conn, client, loan, 1)
+
+    error = refused_import(client, summary, month_end(2), remaining(2))
+
+    assert error.startswith("DBS auto loan's figure of ")
+    assert "with 1 instalment naming it by then" in error
+
+
+def test_a_statement_ahead_with_an_instalment_not_labelled_is_still_named(client, conn, summary):
+    loan = loan_with_terms(client)
+    pay(conn, client, loan, 1)
 
     error = refused_import(client, summary, month_end(2), remaining(3))
 
-    assert error.startswith("DBS auto loan's figure of ")
-    assert "with 2 instalments naming it by then" in error
+    assert "with 1 instalment naming it by then" in error
+    assert anchors_of(client) == []
+
+
+# --- a lender whose month-end statement takes off next month's instalment ------------
+#
+# The DBS car-loan shape: dated the month's end, it already leaves out the
+# instalment due on the 15th of the month after. Each month-end statement
+# after k instalments prints remaining(k + 1).
+
+
+def test_month_end_statements_one_ahead_import_as_principal_after_the_instalments_paid(client, conn, summary):
+    loan = loan_with_terms(client)
+    pay(conn, client, loan, 4)
+
+    import_statement(client, summary, month_end(4), remaining(5))
+
+    assert [a["amount_minor"] for a in anchors_of(client)] == [
+        -(remaining(5) + LEVEL - unearned(44)),
+    ]
+    assert loan_interest.misfit(conn, loan, LOAN, "SGD") is None
+
+
+# Up to 46: the statement after 47 has taken off the last, smaller instalment,
+# so that period carries the lender's 32.00 difference from a full one.
+@pytest.mark.parametrize("k", [2, 13, 46])
+def test_month_end_statements_one_ahead_reconcile_to_the_rule_of_78(client, conn, summary, k):
+    loan = loan_with_terms(client)
+    pay(conn, client, loan, k - 1)
+    import_statement(client, summary, month_end(k - 1), remaining(k))
+    pay(conn, client, loan, k, start=k)
+
+    import_statement(client, summary, month_end(k), remaining(k + 1))
+
+    period = loan_interest.periods(conn, loan)[-1]
+    assert period["to"] == month_end(k)
+    assert period["interest_minor"] == interest_of(k)
+    assert period["fell_minor"] == INSTALMENT - interest_of(k)
+
+
+def test_the_first_statement_one_ahead_works_interest_out_from_the_terms(client, conn, summary):
+    # From the amount financed on 31 Dec 2025 to 31 Mar 2026: three instalments
+    # paid, their Rule of 78 interest, less the 300.00 benefit off the first,
+    # less the 0.67 by which the lender's 2,209.00 instalment taken off ahead
+    # is more than the level 2,208.33 added back.
+    loan = loan_with_terms(client)
+    instalment_row(conn, client, loan, due(1), INSTALMENT - 30_000)
+    pay(conn, client, loan, 3, start=2)
+
+    import_statement(client, summary, month_end(3), remaining(4))
+
+    [period] = loan_interest.periods(conn, loan)
+    assert (period["from"], period["to"]) == ("2025-12-31", "2026-03-31")
+    assert period["interest_minor"] == interest_of(1) + interest_of(2) + interest_of(3) - 30_000 - 67
 
 
 # --- a start makes the table; a book from before it reads as having no terms ----------
@@ -717,6 +799,17 @@ def test_the_preview_shows_the_printed_total_less_the_unearned_interest():
     assert "principal owed" in html and f"S$ {units(remaining(1) - unearned(47))}" in html
     assert "47 of 48 instalments left" in html
     assert "Import 1 figure" in html
+
+
+@needs_node
+def test_the_preview_adds_back_an_instalment_taken_off_ahead():
+    ahead = {**FIGURE, "printed_minor": remaining(2), "ahead_minor": LEVEL,
+             "owed_minor": remaining(2) + LEVEL - unearned(47)}
+    html = preview_html({"groups": [], "errors": [], "figures": [ahead]})
+
+    assert "the next instalment, taken off before it is due" in html and f"S$ {units(LEVEL)}" in html
+    assert f"S$ {units(remaining(2) + LEVEL - unearned(47))}" in html
+    assert "taken off before it is due" not in preview_html({"groups": [], "errors": [], "figures": [FIGURE]})
 
 
 @needs_node
