@@ -3392,33 +3392,29 @@ def api_dashboard_types():
 # Transactions API
 # ---------------------------------------------------------------------------
 
-@app.route("/api/transactions")
-def api_transactions():
-    """Paginated transaction list with filters.
-
-    Query params: start, end, book, exclude_one_off, types, account_id, month,
-                  page, per_page, search, flow, include_hidden
-
-    include_hidden=true lists the rows of merchants hidden from expense views
-    too (default: they stay out).
-
-    flow=review is the review list: the transfers waiting for a label. It
-    hides no merchant, so it lists every row the waiting count counts.
-    """
+def _listed_rows(args) -> tuple[str, list]:
+    """The WHERE fragments and parameters of a list of rows, from its filters
+    (/api/transactions and the Rows page's summary read the same). Raises
+    flow.UnknownFlow for a flow that is not declared."""
     # A row asked for by id, or by its merchant, is shown whatever its
-    # merchant's hiding says.
-    hide = (request.args.get("flow") != flow.REVIEW and request.args.get("tx_id") is None
-            and request.args.get("service_id") is None
-            and request.args.get("include_hidden") != "true")
-    filters, params = _build_filters(request.args, hide=hide)
+    # merchant's hiding says. every=true is the Rows page (ticket 19): every
+    # row whatever its merchant's hiding, and a flow is the rows of that flow,
+    # review included.
+    every = args.get("every") == "true"
+    hide = (not every and args.get("flow") != flow.REVIEW and args.get("tx_id") is None
+            and args.get("service_id") is None
+            and args.get("include_hidden") != "true")
+    filters, params = _build_filters(args, hide=hide)
+    # Only spending and refund rows carry a book: on the Rows page a book
+    # leaves the other flows out, where a bare row would read as Household.
+    if every and _requested_book(args):
+        filters += f" AND COALESCE(t.flow_type, 'expense') IN ({','.join('?' * len(flow.LABELLED))})"
+        params.extend(flow.LABELLED)
 
-    flow_filter = request.args.get("flow")
+    flow_filter = args.get("flow")
     if flow_filter:
-        try:
-            flow.checked_flow(flow_filter)
-        except flow.UnknownFlow as e:
-            return jsonify({"error": str(e)}), 400
-        if flow_filter == flow.REVIEW:
+        flow.checked_flow(flow_filter)
+        if flow_filter == flow.REVIEW and not every:
             # The review list lists exactly what the waiting count counts.
             rows_waiting, waiting_params = _waiting_rows()
             filters += f" AND {rows_waiting}"
@@ -3428,27 +3424,36 @@ def api_transactions():
             params.append(flow_filter)
 
     # tx_id: one row, as a row's own sheet reads it.
-    tx_id = request.args.get("tx_id", type=int)
+    tx_id = args.get("tx_id", type=int)
     if tx_id is not None:
         filters += " AND t.id = ?"
         params.append(tx_id)
 
     # look=each: the rows waiting in the Queue's Check each row step (not
     # checked yet). look=mixed is its name from before the words changed.
-    if request.args.get("look") in ("each", "mixed"):
+    if args.get("look") in ("each", "mixed"):
         filters += f" AND {_not_checked_rows()}"
 
     # service_id: one merchant's rows, as its page reads them.
-    service_id = request.args.get("service_id", type=int)
+    service_id = args.get("service_id", type=int)
     if service_id is not None:
         filters += " AND t.service_id = ?"
         params.append(service_id)
+
+    # party_id: a party's rows. Its merchant's own rows, and the rows on an
+    # account linked to it or naming one as their other side (party.py).
+    party_id = args.get("party_id", type=int)
+    if party_id is not None:
+        filters += (" AND (t.service_id = ?"
+                    " OR s.account_id IN (SELECT id FROM accounts WHERE party_id = ?)"
+                    " OR t.other_side_id IN (SELECT id FROM accounts WHERE party_id = ?))")
+        params.extend([party_id] * 3)
 
     # Type filter (from chart selection or multi-select dropdown): type names,
     # a parent taking its sub-types with it. __untyped__ is the list of rows
     # with no type, which holds spending and refund rows only: a transfer, a
     # payment or income carries no type and is not waiting for one.
-    types_str = request.args.get("types")
+    types_str = args.get("types")
     if types_str:
         type_list = [t.strip() for t in types_str.split(",") if t.strip()]
         conds = []
@@ -3465,11 +3470,11 @@ def api_transactions():
             filters += f" AND ({' OR '.join(conds)})"
 
     # Chart-driven date narrowing (adds to dashboard date filter)
-    chart_start = request.args.get("chart_start")
+    chart_start = args.get("chart_start")
     if chart_start:
         filters += " AND t.date >= ?"
         params.append(chart_start)
-    chart_end = request.args.get("chart_end")
+    chart_end = args.get("chart_end")
     if chart_end:
         filters += " AND t.date <= ?"
         params.append(chart_end)
@@ -3477,19 +3482,41 @@ def api_transactions():
     # expense_only: the spending and refund rows. A row all of whose amount
     # is expected back stays in it, reading S$ 0 with its pill (case 2): what
     # the list's sums add is each row's counted_minor, never the bare amount.
-    if request.args.get("expense_only") == "true":
+    if args.get("expense_only") == "true":
         filters += " AND t.flow_type IN ('expense', 'refund')"
 
-    month = request.args.get("month")
+    month = args.get("month")
     if month:
         filters += " AND strftime('%Y-%m', t.date) = ?"
         params.append(month)
 
-    search = request.args.get("search")
+    search = args.get("search")
     if search:
         filters += " AND (t.description LIKE ? OR svc.name LIKE ? OR ty.name LIKE ? OR tp.name LIKE ?)"
         search_param = f"%{search}%"
         params.extend([search_param] * 4)
+
+    return filters, params
+
+
+@app.route("/api/transactions")
+def api_transactions():
+    """Paginated transaction list with filters.
+
+    Query params: start, end, book, exclude_one_off, types, account_id, month,
+                  page, per_page, search, flow, include_hidden
+
+    include_hidden=true lists the rows of merchants hidden from expense views
+    too (default: they stay out).
+
+    flow=review is the review list: the transfers waiting for a label. It
+    hides no merchant, so it lists every row the waiting count counts.
+    """
+    try:
+        filters, params = _listed_rows(request.args)
+    except flow.UnknownFlow as e:
+        return jsonify({"error": str(e)}), 400
+    tx_id = request.args.get("tx_id", type=int)
 
     page = int(request.args.get("page", 1))
     per_page = int(request.args.get("per_page", 50))
@@ -3555,6 +3582,8 @@ def api_transactions():
                 CASE WHEN {_not_checked_rows()} THEN 1 ELSE 0 END as not_checked,
                 rp.expected_minor, rp.placed_minor, rp.own_minor,
                 sgd_value(rp.own_minor, a.currency, t.date) AS counted_sgd_minor,
+                sgd_value(t.amount_minor, a.currency, t.date) AS sgd_minor,
+                COALESCE(svc.exclude_from_expense_views, 0) AS hidden,
                 (SELECT COALESCE(SUM(so.amount_minor), 0) FROM set_off so
                  WHERE so.payment_row_id = t.id AND so.expectation_id IS NULL) as waiting_minor
             FROM transactions t
@@ -3588,6 +3617,8 @@ def api_transactions():
                                         tx.pop("waiting_minor"), tx["currency"])
         tx["display_type"] = format_type_display(r["parent_type"], r["type"])
         tx["not_checked"] = bool(tx["not_checked"])
+        # Its merchant is hidden from spending: the Rows page lists it, and says so.
+        tx["hidden"] = bool(tx["hidden"])
         # Where each field came from, as the marks show it (fin-surfaces 52).
         tx["sources"] = label_source.shown_sources({**tx, "book": tx.pop("own_book")})
         if tx.get("account_name"):
@@ -3609,6 +3640,77 @@ def api_transactions():
         "page": page,
         "per_page": per_page,
         "pages": (count_row["cnt"] + per_page - 1) // per_page,
+    })
+
+
+@app.route("/api/rows/summary")
+def api_rows_summary():
+    """What the Rows page's filters hold (ticket 19), read with the list's own
+    filters (`_listed_rows`, every=true): the rows of each flow under the other
+    filters (the flow chips), and for the flow picked the rows, money in and
+    money out in S$ on the one path (never a spending figure: a transfer counts
+    on both sides), the rows in another currency with no rate (left out of the
+    S$ figures, never guessed) and the rows waiting for a label. Also the months
+    the book holds, newest first, and the parties there are to pick."""
+    args = request.args.copy()
+    args["every"] = "true"
+    picked = args.pop("flow", None)
+    try:
+        if picked:
+            flow.checked_flow(picked)
+        others, other_params = _listed_rows(args)
+    except flow.UnknownFlow as e:
+        return jsonify({"error": str(e)}), 400
+    filters, params = others, list(other_params)
+    if picked:
+        filters += " AND COALESCE(t.flow_type, 'expense') = ?"
+        params.append(picked)
+
+    type_joins = _TYPE_JOINS.format(owner="t")
+    rows_from = f"""FROM transactions t
+            {type_joins}
+            LEFT JOIN services svc ON t.service_id = svc.id
+            JOIN statements s ON t.statement_id = s.id
+            JOIN accounts a ON s.account_id = a.id"""
+    with get_db() as conn:
+        flows = {r["flow"]: r["n"] for r in conn.execute(
+            f"SELECT COALESCE(t.flow_type, 'expense') AS flow, COUNT(*) AS n {rows_from} "
+            f"WHERE 1=1 {others} GROUP BY 1", other_params)}
+        figures = conn.execute(f"""
+            SELECT COUNT(*) AS n,
+                   COALESCE(SUM(CASE WHEN v < 0 THEN -v ELSE 0 END), 0) AS in_minor,
+                   COALESCE(SUM(CASE WHEN v > 0 THEN v ELSE 0 END), 0) AS out_minor,
+                   SUM(CASE WHEN v IS NULL THEN 1 ELSE 0 END) AS unvalued,
+                   SUM(CASE WHEN flow = ? THEN 1 ELSE 0 END) AS waiting
+            FROM (SELECT sgd_value(t.amount_minor, a.currency, t.date) AS v,
+                         COALESCE(t.flow_type, 'expense') AS flow
+                  {rows_from} WHERE 1=1 {filters})""", [flow.REVIEW] + params).fetchone()
+        months = [r[0] for r in conn.execute(
+            "SELECT DISTINCT strftime('%Y-%m', date) FROM transactions ORDER BY 1 DESC")]
+        # A party: the merchant of a row, or the party of the account a row is
+        # on or names, among the rows the other filters hold (any party).
+        party_args = args.copy()
+        party_args.pop("party_id", None)
+        pool, pool_params = _listed_rows(party_args)
+        parties = [dict(r) for r in conn.execute(f"""
+            SELECT p.id, p.name, COUNT(DISTINCT x.id) AS rows FROM (
+                SELECT t.id, t.service_id AS pid {rows_from} WHERE 1=1 {pool}
+                UNION ALL SELECT t.id, a.party_id {rows_from} WHERE 1=1 {pool}
+                UNION ALL SELECT t.id, oa.party_id {rows_from}
+                    JOIN accounts oa ON oa.id = t.other_side_id WHERE 1=1 {pool}) x
+            JOIN services p ON p.id = x.pid
+            GROUP BY p.id ORDER BY p.name COLLATE NOCASE""", pool_params * 3)]
+
+    return jsonify({
+        "flows": flows,
+        "rows": figures["n"],
+        "in_sgd_minor": figures["in_minor"],
+        "out_sgd_minor": figures["out_minor"],
+        "unvalued": figures["unvalued"] or 0,
+        "waiting": figures["waiting"] or 0,
+        "months": months,
+        "latest_month": months[0] if months else None,
+        "parties": parties,
     })
 
 
