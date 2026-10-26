@@ -334,6 +334,8 @@ def _tie_line(conn, stmt, figures: dict) -> dict:
         "currency": currency,
         "opening_date": stmt.opening_date,
         "closing_date": stmt.closing_date,
+        # The other accounts its printed statement carried (parse_dbs.by_account).
+        "siblings": list(getattr(stmt, "siblings", [])),
         "status": "ties" if figures["difference_minor"] == 0 else "off",
         **figures,
         "opening": anchors.format_amount(figures["opening_minor"], currency),
@@ -473,10 +475,29 @@ def _begins_with(longer: str, shorter: str) -> bool:
         len(longer) == len(shorter) or longer[len(shorter)] == " ")
 
 
-def _held_for_import(conn, import_counts) -> dict:
+# What an older DBS bank read added to an account's last row: the page
+# footer, the next account's heading, the bank's messages.
+PAGE_JUNK_MARKERS = (
+    "TRANSACTION DETAILS AS OF", "ACCOUNT NO.", "MESSAGES FOR YOU", "BALANCE CARRIED FORWARD",
+    "SUPPLEMENTARY RETIREMENT SCHEME", ".ON GER ZIB BSOP",
+)
+
+
+def _tidied_wording(held: str, printed: str) -> str | None:
+    """The wording a held row takes from the statement printing it again: the
+    printed wording, when the held one is it with an older read's page junk
+    after it; else None (the held wording stands)."""
+    mine, theirs = _wording_key(printed), _wording_key(held)
+    if mine == theirs or not _begins_with(theirs, mine):
+        return None
+    rest = theirs[len(mine):]
+    return printed if any(marker in rest for marker in PAGE_JUNK_MARKERS) else None
+
+
+def _held_for_import(conn, import_counts, elsewhere: set[int] = frozenset()) -> dict:
     """The rows already held that each of an import's rows is, by key
-    (account, date, description, amount): [(id, printed)], oldest first, as
-    many as the import brings of that key at most.
+    (account, date, description, amount): [{id, printed, description}],
+    oldest first, as many as the import brings of that key at most.
 
     A row held with the same account, day and amount is the same row when
     its wording is the same, or when one wording begins with the other: a
@@ -484,7 +505,12 @@ def _held_for_import(conn, import_counts) -> dict:
     "SHOPEE SINGAPORE MP SINGAPORE SG" and "SHOPEE SINGAPORE MP" ("SHOP" is
     not "SHOPEE"). Rows the same in wording are claimed first, and of the
     rest the row with fewest held rows it could be goes first, so a held row
-    is never two rows' and a row that could only be one is not left out."""
+    is never two rows' and a row that could only be one is not left out.
+
+    Last, a row no held row of its own account is may be one held on an
+    account in `elsewhere` on a month record (never one filed under a printed
+    statement): an older read of a statement printing two accounts filed both
+    accounts' rows on the first."""
     found = {key: [] for key in import_counts}
     claimed: set[int] = set()
     candidates = {}
@@ -498,36 +524,52 @@ def _held_for_import(conn, import_counts) -> dict:
                    ORDER BY t.id""",
                 (account_id, day, amount),
             ).fetchall()
+    others = ", ".join("?" for _ in elsewhere)
+    misfiled = {
+        key: conn.execute(
+            f"""SELECT t.id, t.description, s.printed FROM transactions t
+                JOIN statements s ON t.statement_id = s.id
+                WHERE s.account_id IN ({others}) AND NOT s.printed AND t.date = ? AND t.amount_minor = ?
+                ORDER BY t.id""",
+            (*elsewhere, key[1], key[3]),
+        ).fetchall() if elsewhere else []
+        for key in import_counts
+    }
+
     def same(mine: str, theirs: str, loose: bool) -> bool:
         if not loose:
             return theirs == mine
         return _begins_with(theirs, mine) or _begins_with(mine, theirs)
 
-    def could_be(key, loose: bool) -> list:
+    def could_be(key, loose: bool, rows=None) -> list:
         account_id, day, description, amount = key
         mine = _wording_key(description)
-        return [row for row in candidates[(account_id, day, amount)]
+        return [row for row in (candidates[(account_id, day, amount)] if rows is None else rows[key])
                 if same(mine, _wording_key(row["description"]), loose)]
 
-    for loose in (False, True):
+    for loose, rows in ((False, None), (True, None), (True, misfiled)):
         keys = list(import_counts)
         if loose:
-            keys.sort(key=lambda key: len(could_be(key, True)))
+            keys.sort(key=lambda key: len(could_be(key, True, rows)))
         for key in keys:
-            for row in could_be(key, loose):
+            for row in could_be(key, loose, rows):
                 if len(found[key]) >= import_counts[key]:
                     break
                 if row["id"] in claimed:
                     continue
                 claimed.add(row["id"])
-                found[key].append((row["id"], row["printed"]))
-    return {key: [{"id": i, "printed": p} for i, p in sorted(rows)] for key, rows in found.items()}
+                found[key].append((row["id"], row["printed"], row["description"]))
+    return {key: [{"id": i, "printed": p, "description": d} for i, p, d in sorted(rows)]
+            for key, rows in found.items()}
 
 
 def _kind_from_account_name(account_name: str) -> str:
     """The kind an import gives an account it has to create, from its name."""
     name = account_name.lower()
     if "bank" in name or "one account" in name or "home" in name:
+        return "bank"
+    # A DBS or POSB account number, as its statement prints it: 272-814529-7.
+    if re.fullmatch(r"\d{3}-\d{5,6}-\d", name):
         return "bank"
     return "card"  # default; could detect from account name
 
@@ -5598,6 +5640,7 @@ def api_import_confirm():
     anchors_written = 0
     figures_written = 0
     rows_refiled = 0
+    wordings_tidied = 0
 
     with get_db() as conn:
         try:
@@ -5612,7 +5655,7 @@ def api_import_confirm():
                     continue
 
                 # Ensure account exists
-                from ingest import ensure_account, ensure_named_account, ensure_statement
+                from ingest import ensure_account, ensure_named_account, ensure_statement, find_account
                 stmt_type = _kind_from_account_name(account_name)
 
                 account_id = ensure_account(conn, account_name, stmt_type, currency_of[id(group)])
@@ -5685,7 +5728,14 @@ def api_import_confirm():
                     import_by_key.setdefault(key, []).append(tx)
 
                 duplicates_skipped = 0
-                held_by_key = _held_for_import(conn, import_counts)
+                # The other accounts the same printed statement carried (a BS
+                # statement: the Multiplier and Home Reno), where an older
+                # read may have filed this account's rows.
+                siblings = {
+                    find_account(conn, name)
+                    for line in statement_lines for name in line.get("siblings") or []
+                } - {None, account_id}
+                held_by_key = _held_for_import(conn, import_counts, siblings)
                 for key, import_count in import_counts.items():
                     row_account_id, date_val, desc_val, amount_val = key
 
@@ -5713,6 +5763,16 @@ def api_import_confirm():
                             (statement_of(tx), held_id),
                         )
                         rows_refiled += 1
+
+                    # A held row an older read gave the page's junk after its
+                    # own wording takes the wording printed.
+                    for held in held_rows:
+                        tidied = _tidied_wording(held["description"], desc_val)
+                        if tidied is not None:
+                            conn.execute(
+                                "UPDATE transactions SET description = ? WHERE id = ?", (tidied, held["id"])
+                            )
+                            wordings_tidied += 1
 
                     # Link each transaction to its statement record
                     for tx in import_by_key[key][:to_insert]:
@@ -5939,6 +5999,7 @@ def api_import_confirm():
                 "rules_skipped_generic": rules_skipped_generic,
                 "anchors_written": anchors_written,
                 "rows_refiled": rows_refiled,
+                "wordings_tidied": wordings_tidied,
             }
             if figures:
                 result_summary["figures_written"] = figures_written
@@ -5971,6 +6032,7 @@ def api_import_confirm():
                 "anchors_written": anchors_written,
                 "figures_written": figures_written,
                 "rows_refiled": rows_refiled,
+                "wordings_tidied": wordings_tidied,
             })
 
         except AnchorRefused as e:
