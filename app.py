@@ -528,7 +528,10 @@ def _held_for_import(
     one holds the other prints too. Of two rows alike in day and amount, the
     one sharing more words is paired first; a held row that a row of another
     account in the same upload words (`others_rows`: day, size, wording) is
-    left for that account's misfiled pass."""
+    left for that account's misfiled pass. Before that, a printed row of a
+    bank account is one held under another printed statement of it when the
+    day, the amount and the letters of the wording are the same: two layouts
+    of one bank's statement differ in digits and spacing only."""
     found = {key: [] for key in import_counts}
     claimed: set[int] = set()
     candidates = {}
@@ -578,6 +581,38 @@ def _held_for_import(
                     continue
                 claimed.add(row["id"])
                 found[key].append((row["id"], row["printed"], row["description"], row["amount_minor"]))
+
+    # Two printed statements of one bank account over the same days, in
+    # different layouts (a month's statement and a range statement), word a
+    # row alike but for its digits, spacing and punctuation: "NETBANK, 573573
+    # MUM" and "NETBANK,MUM". A printed row is one held under a printed
+    # statement of its own bank account with the same day, amount and
+    # letters. Each prints every row of the day, so a held row of the day is
+    # one of the rows. A card statement does not: a row posted late prints
+    # on the next statement under its own earlier day.
+    def letters(text: str) -> str:
+        return re.sub(r"[^A-Z]", "", (text or "").upper())
+
+    ids = {key[0] for key in import_counts}
+    banks = {
+        row["id"] for row in conn.execute(
+            f"SELECT id FROM accounts WHERE type = 'bank' AND id IN ({', '.join('?' for _ in ids)})", tuple(ids))
+    } if ids else set()
+
+    def printed_alike(key) -> list:
+        mine = letters(key[2])
+        return [row for row in candidates[(key[0], key[1], key[3])]
+                if mine and row["printed"] and letters(row["description"]) == mine]
+
+    for key in sorted((key for key in import_counts if key in printed_keys and key[0] in banks),
+                      key=lambda k: len(printed_alike(k))):
+        for row in printed_alike(key):
+            if len(found[key]) >= import_counts[key]:
+                break
+            if row["id"] in claimed:
+                continue
+            claimed.add(row["id"])
+            found[key].append((row["id"], row["printed"], row["description"], row["amount_minor"]))
 
     # The other kind of export: every pairing by day and amount, the ones
     # sharing the most words first, so a row is paired with its own wording
@@ -5214,6 +5249,9 @@ def _confirmed_figures(conn, import_id) -> list[dict]:
     return figures
 
 
+ROWS_FROM_NOT_A_DAY = "Rows from must be a day written as YYYY-MM-DD; nothing was read."
+
+
 @app.route("/api/import/upload", methods=["POST"])
 def api_import_upload():
     """Accept statement files, parse, label with book and type, return preview.
@@ -5231,6 +5269,11 @@ def api_import_upload():
     A loan statement (the DBS car-loan summary) has no rows: what it states
     is owed goes in `figures` (_loan_figure), and the confirm writes it on
     the loan as a statement's figure.
+    With `rows_from` (a day, YYYY-MM-DD) every row before that day is left
+    out, after the statement's own check: a statement over the day comes in
+    from it, its opening the balance on the day before (tie.from_day), and
+    one that ends before it comes in not at all. `rows_from` in the reply
+    counts what was left out.
     Refused (403) from the chat's side (the upload command) while the
     "Claude may write" switch is off; the operator's own import still works.
     """
@@ -5243,6 +5286,15 @@ def api_import_upload():
     files = request.files.getlist("files")
     if not files:
         return jsonify({"error": "No files uploaded"}), 400
+    # Rows from a day: every row before it is left out (tie.from_day).
+    rows_from = (request.form.get("rows_from") or "").strip() or None
+    if rows_from is not None:
+        try:
+            if date.fromisoformat(rows_from).isoformat() != rows_from:
+                raise ValueError
+        except ValueError:
+            return jsonify({"error": ROWS_FROM_NOT_A_DAY}), 400
+    left_out = {"rows": 0, "statements": 0}
 
     all_groups = {}  # account_name -> list of transaction dicts
     figures = []  # what each loan statement states is owed (_loan_figure)
@@ -5297,6 +5349,12 @@ def api_import_upload():
                 except ValueError as e:
                     errors.append({"file": filename, "error": str(e)})
                 else:
+                    if rows_from is not None:
+                        stmt, dropped = tie.from_day(stmt, rows_from)
+                        left_out["rows"] += dropped
+                        if stmt is None:
+                            left_out["statements"] += 1
+                            continue
                     parsed_statements.append(stmt)
 
         # Handle Vantage MK/BS split if both exports present
@@ -5504,6 +5562,8 @@ def api_import_upload():
         "errors": errors,
         "filenames": filenames,
         "services": services_list,
+        # What a "rows from" day left out: rows, and statements wholly before it.
+        "rows_from": {"day": rows_from, **left_out} if rows_from is not None else None,
     })
 
 
