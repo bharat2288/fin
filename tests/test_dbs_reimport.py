@@ -153,6 +153,30 @@ def test_two_purchases_alike_held_once_bring_in_the_second(client, conn, stand_i
     assert (body["transactions_saved"], body["duplicates_skipped"]) == (1, 1)
 
 
+def test_a_wording_that_runs_on_into_a_longer_word_is_another_row(client, conn, stand_in):
+    stand_in([("2026-08-03", "SAMPLE SHOP", 14000)], account=CARD, kind="credit_card")
+    confirm(client, upload(client))
+    stand_in([("2026-08-03", "SAMPLE SHOPEE", 14000)], account=CARD, kind="credit_card")
+
+    body = confirm(client, upload(client)).get_json()
+
+    assert (body["transactions_saved"], body["duplicates_skipped"]) == (1, 0)
+
+
+def test_a_row_that_could_be_only_one_held_row_is_matched_first(client, conn, stand_in):
+    # "SAMPLE GROCER" could be either held row; "SAMPLE GROCER PTE" only the first.
+    held = [("2026-08-03", "SAMPLE GROCER PTE 0001", 14000), ("2026-08-03", "SAMPLE GROCER 0002", 14000)]
+    stand_in(held, account=CARD, kind="credit_card")
+    confirm(client, upload(client))
+    stand_in([("2026-08-03", "SAMPLE GROCER", 14000), ("2026-08-03", "SAMPLE GROCER PTE", 14000)],
+             account=CARD, kind="credit_card")
+
+    body = confirm(client, upload(client)).get_json()
+
+    assert (body["transactions_saved"], body["duplicates_skipped"]) == (0, 2)
+    assert stored_rows(conn) == held
+
+
 def test_a_row_held_on_another_account_is_not_this_ones(client, conn, stand_in):
     stand_in(CSV_ROWS[:1], account="SAMPLE VISA CARD 0008", kind="credit_card")
     confirm(client, upload(client))
@@ -178,6 +202,14 @@ def test_money_back_on_a_card_is_a_refund(description):
 def test_a_card_bill_payment_is_still_a_payment():
     facts = {"description": "BILL PAYMENT - DBS INTERNET/WIRELESS", "amount_minor": -50000, **ON_CARD}
     assert classify_flow(facts, CTX) == "payment"
+
+
+@pytest.mark.parametrize("description", [
+    "PAYMENT-ATM/INTERNET", "PAYMENT - THANK YOU", "PAYMENT RECEIVED - THANK YOU", "GIRO PAYMENT"])
+def test_a_card_bill_paid_in_other_wording_is_not_a_refund(description):
+    # As before money back on a card was a refund: no rule knows the wording.
+    facts = {"description": description, "amount_minor": -50000, **ON_CARD}
+    assert classify_flow(facts, CTX) == "income"
 
 
 def test_a_card_credit_moved_from_another_card_waits():

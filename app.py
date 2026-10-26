@@ -467,6 +467,12 @@ def _wording_key(description: str) -> str:
     return " ".join((description or "").upper().split())
 
 
+def _begins_with(longer: str, shorter: str) -> bool:
+    """One wording is the other with more words after it."""
+    return bool(shorter) and longer.startswith(shorter) and (
+        len(longer) == len(shorter) or longer[len(shorter)] == " ")
+
+
 def _held_for_import(conn, import_counts) -> dict:
     """The rows already held that each of an import's rows is, by key
     (account, date, description, amount): [(id, printed)], oldest first, as
@@ -475,8 +481,10 @@ def _held_for_import(conn, import_counts) -> dict:
     A row held with the same account, day and amount is the same row when
     its wording is the same, or when one wording begins with the other: a
     bank's CSV export and its PDF statement print one card purchase as
-    "SHOPEE SINGAPORE MP SINGAPORE SG" and "SHOPEE SINGAPORE MP". Rows the
-    same in wording are claimed first, so a held row is never two rows'."""
+    "SHOPEE SINGAPORE MP SINGAPORE SG" and "SHOPEE SINGAPORE MP" ("SHOP" is
+    not "SHOPEE"). Rows the same in wording are claimed first, and of the
+    rest the row with fewest held rows it could be goes first, so a held row
+    is never two rows' and a row that could only be one is not left out."""
     found = {key: [] for key in import_counts}
     claimed: set[int] = set()
     candidates = {}
@@ -490,21 +498,29 @@ def _held_for_import(conn, import_counts) -> dict:
                    ORDER BY t.id""",
                 (account_id, day, amount),
             ).fetchall()
+    def same(mine: str, theirs: str, loose: bool) -> bool:
+        if not loose:
+            return theirs == mine
+        return _begins_with(theirs, mine) or _begins_with(mine, theirs)
+
+    def could_be(key, loose: bool) -> list:
+        account_id, day, description, amount = key
+        mine = _wording_key(description)
+        return [row for row in candidates[(account_id, day, amount)]
+                if same(mine, _wording_key(row["description"]), loose)]
+
     for loose in (False, True):
-        for key, count in import_counts.items():
-            account_id, day, description, amount = key
-            mine = _wording_key(description)
-            for row in candidates[(account_id, day, amount)]:
-                if len(found[key]) >= count:
+        keys = list(import_counts)
+        if loose:
+            keys.sort(key=lambda key: len(could_be(key, True)))
+        for key in keys:
+            for row in could_be(key, loose):
+                if len(found[key]) >= import_counts[key]:
                     break
                 if row["id"] in claimed:
                     continue
-                theirs = _wording_key(row["description"])
-                same = theirs == mine if not loose else (
-                    bool(mine) and bool(theirs) and (theirs.startswith(mine) or mine.startswith(theirs)))
-                if same:
-                    claimed.add(row["id"])
-                    found[key].append((row["id"], row["printed"]))
+                claimed.add(row["id"])
+                found[key].append((row["id"], row["printed"]))
     return {key: [{"id": i, "printed": p} for i, p in sorted(rows)] for key, rows in found.items()}
 
 
