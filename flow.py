@@ -502,10 +502,14 @@ def classify_flow(facts: dict, ctx: ClassifierContext) -> str:
 
     # 4a. Money back on a card is a refund: a card's bill payment is matched
     #     above, and a card is paid no income. A card credit worded as a move
-    #     between accounts waits. Money back on a bank account's debit card
-    #     (a purchase given back) is a refund too.
+    #     between accounts waits; one worded as a bank transfer is left to the
+    #     rules below. Money back on a bank account's debit card (a purchase
+    #     given back) is a refund too.
     if amount < 0 and facts.get("account_kind") == "card":
-        return REVIEW if _is_card_account_move(description) else "refund"
+        if _is_card_account_move(description):
+            return REVIEW
+        if not _has_transfer_shape(description):
+            return "refund"
     if amount < 0 and _on_household_bank(facts) and _is_debit_card_row(description):
         return "refund"
 
