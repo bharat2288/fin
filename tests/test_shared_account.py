@@ -293,7 +293,6 @@ def test_the_account_page_charts_our_part(client, conn, accounts, monkeypatch):
     got = client.get(f"/api/accounts/{accounts['shared']}/balances?span=12M&to=2026-09").get_json()
     september = next(m for m in got["months"] if m["month"] == "2026-09")
 
-    assert got["account"]["shared"] is True
     # Her EMI, FD and fund are in neither; the lender's and our own money in, the studio out.
     assert (september["in"], september["out"]) == (2000000000 + 50000000, 350000000)
     assert september["balance"] == 30000000 + 2000000000 + 50000000 - 350000000

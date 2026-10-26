@@ -17,7 +17,7 @@ BANK = "Sample Bank 0002"
 CARD = "Sample Card 0001"
 MONTH = "2026-08"
 
-FLOWS = ["expense", "income", "transfer", "payment", "refund", "movement", "review"]
+FLOWS = ["expense", "income", "transfer", "payment", "refund", "movement", "review", "not_ours"]
 
 
 # --- helpers --------------------------------------------------------------------
