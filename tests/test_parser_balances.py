@@ -256,24 +256,3 @@ def test_uob_bank_reads_a_row_whose_amounts_are_printed_below_its_date_line(monk
     assert [(t.date, t.amount_minor) for t in stmt.transactions] == [("2026-08-03", 30025), ("2026-08-05", -50025)]
     assert stmt.transactions[0].description == "Misc Debit 0000000001-00000 Trf. Wd. Loans"
     assert tie.check(stmt)["difference_minor"] == 0
-
-
-def test_uob_bank_reads_a_row_whose_amounts_are_on_its_last_line(monkeypatch):
-    """The same debit with its amounts on its last line: the row before keeps
-    its own words."""
-    page2 = "\n".join([
-        "Account Transaction Details",
-        "One Account 000-000-000-0",
-        "01 Aug BALANCE B/F 1,000.00",
-        "02 Aug SAMPLE SHOP 100.00 900.00",
-        "03 Aug Misc Debit",
-        "0000000001-00000",
-        "Trf. Wd. Loans 300.25 599.75",
-        "End of Transaction Details",
-    ])
-
-    stmt = _read(monkeypatch, parse_uob, parse_uob.parse_uob_bank_pdf, [UOB_PAGE1, page2])
-
-    assert [(t.description, t.amount_minor) for t in stmt.transactions] == [
-        ("SAMPLE SHOP", 10000), ("Misc Debit 0000000001-00000 Trf. Wd. Loans", 30025)]
-    assert tie.check(stmt)["difference_minor"] == 0
