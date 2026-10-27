@@ -5161,12 +5161,10 @@ def _build_filters(args, hide: bool = True) -> tuple[str, list]:
     if hide:
         filters += f" AND {_expense_visibility_filter('svc')}"
 
-    account_id = args.get("account_id")
-    if account_id:
-        try:
-            account_id = int(account_id)
-        except (ValueError, TypeError):
-            account_id = None
+    try:
+        account_id = int(args.get("account_id") or "")
+    except (ValueError, TypeError):
+        account_id = None  # none given, or not a number: no account filter, as ever
     if account_id is not None and args.get("balance") == "1":
         # balance=1: the rows the account's balance moves by, wherever they
         # are (an account's page; balance_sheet.balance_rows). An account no

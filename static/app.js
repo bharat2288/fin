@@ -3815,13 +3815,16 @@ async function viewAccount(id) {
         const upto = oldestFirst.find(x => x.date >= row.date);
         return upto && daysBetween(row.date, upto.date) <= 31 ? { key: upto.date, t: upto, loose: true } : { key: 'none' };
     };
+    // A bank's or card's own rows group under its tie lines. An account moved by rows on
+    // other accounts (a company, a loan, a bank holding no statement) lists them unheaded:
+    // its figures' tie lines count no row of its own.
+    const ownRows = (acct.type === 'bank' || acct.type === 'card') && !rows.transactions.some(row => row.account_id != null && row.account_id !== id);
     // Sorted, the rows are one list: a tie line's heading groups only rows in date order.
     let lastKey = null;
     const rowList = rows.transactions.map(row => {
         const g = groupOf(row);
         let headRow = '';
-        // With no tie lines (a company, a loan with no figure) the rows stand alone, unheaded.
-        if (!order && ties.ties.length && g.key !== lastKey) {
+        if (!order && ownRows && ties.ties.length && g.key !== lastKey) {
             lastKey = g.key;
             let words;
             if (g.key === 'since') words = `Since the ${g.since.status === 'your figure' ? 'figure' : 'statement'} of ${esc(day(g.since.date))}`;
@@ -3847,7 +3850,7 @@ async function viewAccount(id) {
     <div class="acct-top${tieCard ? '' : ' acct-top--one'}">${hero}${tieCard}</div>
     ${refusedHTML ? `<section class="card"><div class="section-header"><h2>Refused at upload</h2><span class="section-header__aside">a statement that does not tie is kept out whole</span></div>${refusedHTML}</section>` : ''}
     ${figures ? `<section class="card"><div class="section-header"><h2>Your figures</h2><span class="section-header__aside">${plural(supplied.length, 'figure')} · each the fact</span></div><ul class="fig-list">${figures}</ul></section>` : ''}
-    <section class="card"><div class="section-header"><h2>Rows</h2><span class="section-header__aside">${plural(rows.total, 'row')} · tap a row for its note, one-off and history · <a class="link" href="#/books/rows?account=${id}&month=all">Open in Rows</a></span></div>
+    <section class="card"><div class="section-header"><h2>Rows</h2><span class="section-header__aside">${plural(rows.total, 'row')} · tap a row for its note, one-off and history${ownRows ? ` · <a class="link" href="#/books/rows?account=${id}&month=all">Open in Rows</a>` : ''}</span></div>
         ${sortPicker('acct-rows', ACCT_ROW_SORT, { own: 'Newest first' })}<div class="table-shell"><table class="t rows acct-rows"><thead><tr>${Object.keys(ACCT_ROW_SORT).map(k =>
             `<th${ACCT_ROW_SORT[k].kind === 'money' ? ' class="r"' : ''}>${sortHead('acct-rows', k, ACCT_ROW_SORT)}</th>`).join('')}</tr></thead><tbody>${rowList || '<tr><td colspan="5" class="empty">No rows.</td></tr>'}</tbody></table></div>
         ${pager(rows, 'account-page', !!order)}</section>`;

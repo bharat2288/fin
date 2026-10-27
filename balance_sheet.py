@@ -354,10 +354,16 @@ def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: s
 
 def balance_rows(conn: sqlite3.Connection, account) -> tuple[str, list]:
     """The rows an account's balance moves by, as SQL over the row `t` and
-    its statement `s`, with its parameters: whatever their dates, the same
-    rows _moved and _counterparty_line count (an account's page lists them,
-    and charts their money in and out). `account` is its row (id, name,
-    type, currency).
+    its statement `s`, with its parameters, whatever their dates: the rows
+    _moved and _counterparty_line count for an account moved by rows on
+    other accounts (an account's page lists them, and charts their money in
+    and out). `account` is its row (id, name, type, currency).
+
+    A bank or card holding statements is its own rows only, as its page has
+    always listed them: not a split card's other parts, and on a shared
+    account the rows not ours too (the account page's chart reads those
+    from card_balance and shared itself). A holding with depreciation terms
+    is moved by no row; the rows naming it are still listed.
 
     A bank or card holding statements moves by its own rows; a bank holding
     none by the transfers and movements naming it on the household's accounts

@@ -159,13 +159,16 @@ def balances(conn: sqlite3.Connection, account, months: list[str]) -> dict:
         "SELECT 1 FROM anchors WHERE account_id = ?" + (" AND source = ?" if is_shared else "") + " LIMIT 1",
         (whole, *((anchors.SUPPLIED,) if is_shared else ())),
     ).fetchone() is not None
-    # A holding with depreciation terms rests on them, figure or none.
-    anchored = anchored or (charted["type"] == depreciation.HOLDING
-                            and depreciation.held(conn, whole) is not None)
+    # A holding with depreciation terms rests on them, figure or none, and
+    # no row moves it: it has no money in or out.
+    depreciating = (charted["type"] == depreciation.HOLDING
+                    and depreciation.held(conn, whole) is not None)
+    anchored = anchored or depreciating
     # A company needs no figure: counted from the start without one.
     company = charted["type"] in balance_sheet.COUNTERPARTIES[2]
     anchored = anchored or company
-    flows = (_in_and_out(conn, members, months, ours_only=is_shared) if own_rows(conn, charted)
+    flows = ({} if depreciating
+             else _in_and_out(conn, members, months, ours_only=is_shared) if own_rows(conn, charted)
              else _in_and_out_of(conn, charted, months))
     start = balance_sheet.START.isoformat()
 

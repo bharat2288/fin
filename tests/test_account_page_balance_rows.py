@@ -187,6 +187,30 @@ def test_an_account_no_longer_in_fin_lists_no_rows(client, conn):
     assert listed(client, 99_999) == []
 
 
+# --- review findings -------------------------------------------------------------
+
+
+def test_an_empty_account_id_filters_nothing(client, conn):
+    card = statement(conn, account(conn, "Sample Card 0008", type="card", last_four="0008"), "2026-09")
+    row(conn, card, "SAMPLE GROCER", 5_000, type_name="Groceries", day="2026-09-05")
+
+    assert len(client.get("/api/transactions?account_id=").get_json()["transactions"]) == 1
+
+
+def test_a_car_under_depreciation_terms_has_no_money_in_or_out(client, conn):
+    from test_depreciation import car_with_terms
+
+    car = car_with_terms(client)
+    bank = statement(conn, account(conn, "Sample Bank 0010", type="bank", last_four="0010"), "2026-09")
+    naming(conn, row(conn, bank, "SAMPLE CAR DEALER", 8_000_000, day="2026-09-08"), car)
+
+    september = chart(client, car)["2026-09"]
+
+    # Its value is its terms'; the payment naming it moves nothing.
+    assert (september["in"], september["out"]) == (0, 0)
+    assert september["balance"] < chart(client, car)["2026-08"]["balance"]
+
+
 # --- the page ---------------------------------------------------------------------
 
 
