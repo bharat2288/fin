@@ -19,6 +19,13 @@
                rows of every cardholder's account. The answer says so.
     shared     (shared.py) the household's part: the balance rests on a figure
                supplied, and in and out leave out the rows that are not ours.
+    no rows    an account whose balance moves by rows on other accounts (a
+    of its own company, a loan, a holding, a bank holding no statement): in
+               and out are the rows its balance moves by
+               (balance_sheet.balance_rows), each from the account's side, so
+               a row on another account that is money out of it is money in
+               here. A company needs no figure: its balance is its line's at
+               each month end (balance_sheet.company_balance_on).
 
 The month-end value in S$ (S2), missing months and estimates (S3), and the
 month under way are not decided here: the /balances route composes them.
@@ -78,6 +85,36 @@ def _in_and_out(conn: sqlite3.Connection, members: list[int], months: list[str],
     return {month: (money_in, money_out) for month, money_in, money_out in rows}
 
 
+def _in_and_out_of(conn: sqlite3.Connection, account, months: list[str]) -> dict:
+    """{month: (in, out)} over the rows the account's balance moves by
+    (balance_sheet.balance_rows), each signed from its side: a row of its own
+    as it stands, a row on another account the other way round."""
+    if not months:
+        return {}
+    where, params = balance_sheet.balance_rows(conn, account)
+    rows = conn.execute(
+        "SELECT substr(day, 1, 7), "
+        "COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0), "
+        "COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) "
+        f"FROM (SELECT {balance_sheet.ROW_DAY} AS day, "
+        "CASE WHEN s.account_id = ? THEN t.amount_minor ELSE -t.amount_minor END AS amount "
+        f"FROM transactions t JOIN statements s ON t.statement_id = s.id WHERE {where}) "
+        "WHERE day > ? AND day <= ? GROUP BY 1",
+        (account["id"], *params, _day_before(min(months)), _month_end(max(months))),
+    ).fetchall()
+    return {month: (money_in, money_out) for month, money_in, money_out in rows}
+
+
+def own_rows(conn: sqlite3.Connection, account) -> bool:
+    """Whether the account's balance moves by its own statements' rows (and
+    on a split card its parts'), as balance_sheet._moved reads it: a card,
+    or a bank holding a statement."""
+    return account["type"] in balance_sheet.OWN_ROW_KINDS and (
+        account["type"] != "bank" or conn.execute(
+            "SELECT 1 FROM statements WHERE account_id = ? LIMIT 1", (account["id"],)
+        ).fetchone() is not None)
+
+
 def _card(conn: sqlite3.Connection, members: list[int]) -> dict | None:
     """What a split card's chart says it is: its parts, named by their last
     four (or by name when an account holds none)."""
@@ -112,8 +149,8 @@ def balances(conn: sqlite3.Connection, account, months: list[str]) -> dict:
     account's currency.
     """
     whole = card_balance.part_of_ids(conn).get(account["id"], account["id"])
-    charted = account if whole == account["id"] else conn.execute(
-        "SELECT id, type, currency FROM accounts WHERE id = ?", (whole,)
+    charted = conn.execute(
+        "SELECT id, name, type, currency FROM accounts WHERE id = ?", (whole,)
     ).fetchone()
     members = card_balance.members(conn, whole)
     is_shared = shared.is_shared(conn, whole)
@@ -122,10 +159,17 @@ def balances(conn: sqlite3.Connection, account, months: list[str]) -> dict:
         "SELECT 1 FROM anchors WHERE account_id = ?" + (" AND source = ?" if is_shared else "") + " LIMIT 1",
         (whole, *((anchors.SUPPLIED,) if is_shared else ())),
     ).fetchone() is not None
-    # A holding with depreciation terms rests on them, figure or none.
-    anchored = anchored or (charted["type"] == depreciation.HOLDING
-                            and depreciation.held(conn, whole) is not None)
-    flows = _in_and_out(conn, members, months, ours_only=is_shared)
+    # A holding with depreciation terms rests on them, figure or none, and
+    # no row moves it: it has no money in or out.
+    depreciating = (charted["type"] == depreciation.HOLDING
+                    and depreciation.held(conn, whole) is not None)
+    anchored = anchored or depreciating
+    # A company needs no figure: counted from the start without one.
+    company = charted["type"] in balance_sheet.COUNTERPARTIES[2]
+    anchored = anchored or company
+    flows = ({} if depreciating
+             else _in_and_out(conn, members, months, ours_only=is_shared) if own_rows(conn, charted)
+             else _in_and_out_of(conn, charted, months))
     start = balance_sheet.START.isoformat()
 
     series = []
@@ -137,6 +181,7 @@ def balances(conn: sqlite3.Connection, account, months: list[str]) -> dict:
             "month": month,
             "end": end,
             "balance": None if before_start
+            else balance_sheet.company_balance_on(conn, charted, end) if company
             else balance_sheet.balance_on(conn, charted, end),
             "in": money_in,
             "out": money_out,

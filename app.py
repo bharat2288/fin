@@ -3956,6 +3956,9 @@ def api_transactions():
     sort_col = request.args.get("sort", "date")
     sort_dir = request.args.get("sort_dir", "desc").upper()
     own = expect_back.own_sql("t")  # by what each row counts: its own part once switched
+    page_account = request.args.get("account_id", type=int)
+    side = (f"(CASE WHEN s.account_id = {page_account} THEN 1 ELSE -1 END) * "
+            if page_account is not None and request.args.get("balance") == "1" else "")
     valid_sorts = {
         "date": (None, "t.date"),
         "description": (None, "t.description COLLATE NOCASE"),
@@ -3965,8 +3968,10 @@ def api_transactions():
         "amount": (None, own),
         # An account page's two money columns: a row on the other side is the
         # empty cell, so last; money in is a negative amount, read as its size.
-        "amount_in": ("t.amount_minor >= 0", f"-{own}"),
-        "amount_out": ("t.amount_minor < 0", own),
+        # With balance=1 a row on another account is money in or out from the
+        # page's side, the other way round.
+        "amount_in": (f"{side}t.amount_minor >= 0", f"-{side}{own}"),
+        "amount_out": (f"{side}t.amount_minor < 0", f"{side}{own}"),
     }
     if sort_col not in valid_sorts:
         sort_col = "date"
@@ -5156,13 +5161,25 @@ def _build_filters(args, hide: bool = True) -> tuple[str, list]:
     if hide:
         filters += f" AND {_expense_visibility_filter('svc')}"
 
-    account_id = args.get("account_id")
-    if account_id:
-        try:
-            filters += " AND s.account_id = ?"
-            params.append(int(account_id))
-        except (ValueError, TypeError):
-            pass
+    try:
+        account_id = int(args.get("account_id") or "")
+    except (ValueError, TypeError):
+        account_id = None  # none given, or not a number: no account filter, as ever
+    if account_id is not None and args.get("balance") == "1":
+        # balance=1: the rows the account's balance moves by, wherever they
+        # are (an account's page; balance_sheet.balance_rows). An account no
+        # longer in fin has none.
+        with get_db() as conn:
+            account = conn.execute(
+                "SELECT id, name, type, currency FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+            where, more = (balance_sheet.balance_rows(conn, account) if account is not None
+                           else ("0", []))
+        filters += f" AND {where}"
+        params.extend(more)
+    elif account_id is not None:
+        filters += " AND s.account_id = ?"
+        params.append(account_id)
 
     return filters, params
 

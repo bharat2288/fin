@@ -85,13 +85,18 @@ def _rate(shown: dict | None) -> dict | None:
             "text": shown["rate"]}
 
 
-def _first_month(conn, members: list[int]) -> str | None:
-    """The month of the first row of the accounts charted: where All starts."""
-    held = ", ".join("?" for _ in members)
+def _first_month(conn, whole) -> str | None:
+    """The month of the first row the charted account's balance moves by (its
+    own, and a split card's parts'): where All starts."""
+    if account_balances.own_rows(conn, whole):
+        members = card_balance.members(conn, whole["id"])
+        where, params = f"s.account_id IN ({', '.join('?' for _ in members)})", members
+    else:
+        where, params = balance_sheet.balance_rows(conn, whole)
     first = conn.execute(
         "SELECT MIN(t.date) FROM transactions t JOIN statements s ON s.id = t.statement_id "
-        f"WHERE s.account_id IN ({held})",
-        members,
+        f"WHERE {where}",
+        params,
     ).fetchone()[0]
     return first[:7] if first else None
 
@@ -127,10 +132,12 @@ def read(conn, account_id: int, *, span: str | None, to: str | None,
     if account is None:
         raise _Refused(GONE, 404)
     currency = account["currency"] or TOTAL
-    whole = card_balance.part_of_ids(conn).get(account_id, account_id)
+    whole = conn.execute(
+        "SELECT id, name, type, currency FROM accounts WHERE id = ?",
+        (card_balance.part_of_ids(conn).get(account_id, account_id),),
+    ).fetchone()
     try:
-        plan = trend_span.resolve(span, to, today=on,
-                                  first_month=_first_month(conn, card_balance.members(conn, whole)))
+        plan = trend_span.resolve(span, to, today=on, first_month=_first_month(conn, whole))
     except trend_span.SpanError as refused:
         raise _Refused(str(refused), refused.status) from None
     shown_in = _cur(cur, currency)
