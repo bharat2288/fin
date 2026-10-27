@@ -352,6 +352,52 @@ def _moved(conn: sqlite3.Connection, account_id: int, kind: str, anchor, upto: s
     return anchor["amount"] + total, count, since
 
 
+def balance_rows(conn: sqlite3.Connection, account) -> tuple[str, list]:
+    """The rows an account's balance moves by, as SQL over the row `t` and
+    its statement `s`, with its parameters: whatever their dates, the same
+    rows _moved and _counterparty_line count (an account's page lists them,
+    and charts their money in and out). `account` is its row (id, name,
+    type, currency).
+
+    A bank or card holding statements moves by its own rows; a bank holding
+    none by the transfers and movements naming it on the household's accounts
+    in its currency; a company by the rows paid for it and the movements
+    naming it, on the household's accounts in its currency; a loan, holding
+    or other kind by its own rows (a loan's interest worked out) and the
+    movements naming it."""
+    acct = account["id"]
+    kind = account["type"]
+    currency = account["currency"] or TOTAL_CURRENCY
+    household_in_currency = (
+        "s.account_id IN (SELECT id FROM accounts WHERE owner = ? AND COALESCE(currency, ?) = ?)"
+    )
+    in_currency_params = [account_kind.HOUSEHOLD, TOTAL_CURRENCY, currency]
+    if kind in COUNTERPARTIES[2]:
+        naming = "(t.flow_type = ? AND t.other_side_id = ?)"
+        params = [flow.MOVEMENT, acct]
+        book = book_type.company_book_of(conn, account)
+        if book is not None:
+            flows = ", ".join("?" for _ in PAID_FOR_FLOWS)
+            naming = f"({naming} OR (t.flow_type IN ({flows}) AND t.book = ?))"
+            params += [*PAID_FOR_FLOWS, book]
+        return f"({household_in_currency} AND {naming})", [*in_currency_params, *params]
+    if kind == "bank" and not _holds_statements(conn, acct):
+        flows = ", ".join("?" for _ in INTO_UNSTATED_FLOWS)
+        return (f"({household_in_currency} AND s.account_id != ? AND t.other_side_id = ? "
+                f"AND t.flow_type IN ({flows}))",
+                [*in_currency_params, acct, acct, *INTO_UNSTATED_FLOWS])
+    if kind in OWN_ROW_KINDS:
+        return "s.account_id = ?", [acct]
+    return "(s.account_id = ? OR (t.other_side_id = ? AND t.flow_type = ?))", [acct, acct, flow.MOVEMENT]
+
+
+def company_balance_on(conn: sqlite3.Connection, account, on: str) -> int:
+    """A company's balance on a day, as its line on the sheet counts it: it
+    needs no figure (_counterparty_line). `account` is its row, with name."""
+    as_at = date.fromisoformat(on)
+    return _counterparty_line(conn, account, as_at, on[:7], lambda name: name)["balance_minor"]
+
+
 def balance_on(conn: sqlite3.Connection, account, on: str) -> int | None:
     """An account's balance on a day, in whole minor units of its currency,
     or None when it has no anchor on or before the day. A holding with
@@ -730,8 +776,7 @@ def _currency_change(conn: sqlite3.Connection, accounts: list, as_at: date, name
         if account["type"] in COUNTERPARTIES[2]:
             # A company's balance is its line's (_counterparty_line), which
             # needs no figure.
-            opening = _counterparty_line(conn, account, date.fromisoformat(start), start[:7],
-                                         name_of)["balance_minor"]
+            opening = company_balance_on(conn, account, start)
         else:
             opening = balance_on(conn, account, start)
         if opening is None:

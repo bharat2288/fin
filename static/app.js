@@ -3379,12 +3379,14 @@ function madeOfSum(line) {
     if (m.capital_minor) parts.push(['+', 'capital', m.capital_minor]);
     if (m.paid_back_minor) parts.push(['−', 'paid back', m.paid_back_minor]);
     if (!parts.length) return 'no money moved yet';
+    // In the company's own currency: a company kept in rupees sums in ₹.
+    const cur = line.currency;
     if (parts.length === 1 && parts[0][0] === '') {
-        return `opening ${money(m.opening_minor)}, nothing moved since`;
+        return `opening ${money(m.opening_minor, cur)}, nothing moved since`;
     }
     const onlyPaidFor = parts.filter(p => p[1] !== 'opening').length === 1 && m.paid_for_minor;
-    const text = parts.map(([op, label, minor], i) => `${i || op ? op + ' ' : ''}${label} ${money(minor)}${onlyPaidFor && op === '+' && line.rows_since ? ` (${plural(line.rows_since, 'row')})` : ''}`).join(' ');
-    return `${text} = ${money(line.balance_minor)}`;
+    const text = parts.map(([op, label, minor], i) => `${i || op ? op + ' ' : ''}${label} ${money(minor, cur)}${onlyPaidFor && op === '+' && line.rows_since ? ` (${plural(line.rows_since, 'row')})` : ''}`).join(' ');
+    return `${text} = ${money(line.balance_minor, cur)}`;
 }
 
 const CHECK_ORDER = { off: 0, not_checked: 1, none: 2, ties: 3 };
@@ -3645,16 +3647,20 @@ function acctRowLabel(row) {
     const flowWord = { review: tag('nofig', 'waiting'), transfer: '<span class="muted">transfer</span>', payment: '<span class="muted">card payment</span>', movement: `<span class="muted">movement${row.other_side_name ? ' · ' + esc(row.other_side_name) : ''}</span>`, income: '<span class="muted">income</span>', not_ours: '<span class="muted">not ours</span>' }[row.flow_type];
     return flowWord || (row.display_type ? esc(row.display_type) : tag('nofig', 'no type'));
 }
-/** One of an account's rows: money in and money out in two plain columns. */
-function acctRowTr(row) {
-    const minor = toMinor(row.amount_sgd, row.currency);
+/** One of an account's rows: money in and money out in two plain columns,
+ *  from the page's side. A row on another account (a company's capital paid
+ *  from a bank, a loan's instalment) is the other way round, and says where it is. */
+function acctRowTr(row, pageId = row.account_id) {
+    const elsewhere = row.account_id != null && row.account_id !== pageId;
+    const own = toMinor(row.amount_sgd, row.currency);
+    const minor = own !== null && elsewhere ? -own : own;
     const cur = row.currency || 'SGD';
     const struck = row.counted_minor != null && row.counted_minor !== row.amount_minor;
     const inCell = minor !== null && minor < 0 ? (struck ? struckAmount(row) : esc(money(-minor, cur))) : '';
     const outCell = minor !== null && minor >= 0 ? (struck ? struckAmount(row) : esc(money(minor, cur))) : '';
     return `<tr class="clickable" data-act="row" data-tx="${row.id}">
         <td class="num row-date">${esc(day(row.date, { year: false }))}</td>
-        <td class="row-desc">${esc(row.description)}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${row.book && row.book !== 'Household' ? ` <span class="small muted">· ${esc(row.book)}</span>` : ''}</td>
+        <td class="row-desc">${esc(row.description)}${elsewhere ? ` <span class="small muted">· on ${esc(row.account_name || '')}</span>` : ''}${rowMark(row.id)}${window.expectRowPill?.(row) || ''}${row.notes ? ` <span class="muted small">· ${esc(row.notes)}</span>` : ''}${row.is_one_off ? ' <span class="tag yours">one-off</span>' : ''}${row.book && row.book !== 'Household' ? ` <span class="small muted">· ${esc(row.book)}</span>` : ''}</td>
         <td class="row-label">${acctRowLabel(row)}</td>
         <td class="r num row-in">${inCell}</td><td class="r num row-out">${outCell}</td></tr>`;
 }
@@ -3704,7 +3710,8 @@ async function viewAccount(id) {
     const order = sortOf('acct-rows').key ? `&${new URLSearchParams(sortServer('acct-rows', ACCT_ROW_SORT))}` : '';
     const [r, sheet, ties, anchorsList, refused, rows] = await Promise.all([
         refs(), sheetFor(S.month), get(`/api/accounts/${id}/ties`), get(`/api/anchors?account_id=${id}`), get(`/api/statements/refused?account_id=${id}`),
-        get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}${accountPage.month ? `&month=${accountPage.month}` : ''}${order}`),
+        // balance=1: the rows its balance moves by, a company's or a loan's on other accounts too.
+        get(`/api/transactions?account_id=${id}&per_page=50&page=${accountPage.page}${accountPage.month ? `&month=${accountPage.month}` : ''}${order}&balance=1`),
     ]);
     const acct = r.accountById.get(id);
     if (!acct) throw new Error('No such account');
@@ -3813,7 +3820,8 @@ async function viewAccount(id) {
     const rowList = rows.transactions.map(row => {
         const g = groupOf(row);
         let headRow = '';
-        if (!order && g.key !== lastKey) {
+        // With no tie lines (a company, a loan with no figure) the rows stand alone, unheaded.
+        if (!order && ties.ties.length && g.key !== lastKey) {
             lastKey = g.key;
             let words;
             if (g.key === 'since') words = `Since the ${g.since.status === 'your figure' ? 'figure' : 'statement'} of ${esc(day(g.since.date))}`;
@@ -3827,7 +3835,7 @@ async function viewAccount(id) {
             }
             headRow = `<tr class="section"><td colspan="5">${words}</td></tr>`;
         }
-        return headRow + acctRowTr(row);
+        return headRow + acctRowTr(row, id);
     }).join('');
     ACT.__rows = new Map(rows.transactions.map(x => [x.id, x]));
     afterRender(() => window.mountAccountTrend?.());
